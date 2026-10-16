@@ -1,0 +1,13 @@
+[Unit]
+Description=Disable IPv6 (msb host has no IPv6 route)
+DefaultDependencies=no
+Before=network-pre.target sshd.service
+Wants=network-pre.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/sysctl -w net.ipv6.conf.all.disable_ipv6=1 net.ipv6.conf.default.disable_ipv6=1
+RemainAfterExit=yes
+
+[Install]
+WantedBy=sysinit.target

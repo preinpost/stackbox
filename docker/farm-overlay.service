@@ -1,0 +1,14 @@
+[Unit]
+Description=Farm VXLAN overlay (vx0)
+After=network-online.target disable-ipv6.service
+Wants=network-online.target
+ConditionPathExists=/etc/farm/overlay.conf
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/farm-overlay up
+ExecStop=/usr/local/sbin/farm-overlay down
+
+[Install]
+WantedBy=multi-user.target
