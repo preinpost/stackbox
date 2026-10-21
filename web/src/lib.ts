@@ -1,0 +1,113 @@
+import type { Farm, Phase } from "./api/client";
+export const phases: { id: Phase; label: string; description: string }[] = [
+  {
+    id: "prepare",
+    label: "Prepare",
+    description: "단일 VM과 컨테이너 실행 환경 준비",
+  },
+  {
+    id: "install",
+    label: "Install",
+    description: "Kolla와 OpenStack CLI 설치",
+  },
+  {
+    id: "configure",
+    label: "Configure",
+    description: "서비스 설정과 inventory 작성",
+  },
+  {
+    id: "bootstrap",
+    label: "Bootstrap",
+    description: "컨테이너 호스트 초기화",
+  },
+  { id: "prechecks", label: "Prechecks", description: "배포 전 사전 검사" },
+  { id: "deploy", label: "Deploy", description: "OpenStack 서비스 배포" },
+  {
+    id: "post-deploy",
+    label: "Post-deploy",
+    description: "인증정보와 마무리 설정",
+  },
+  { id: "verify", label: "Verify", description: "Token과 이미지 API 검증" },
+];
+export const memory = (mib: number) => `${Number((mib / 1024).toFixed(1))} GiB`;
+const osLabels: Record<string, string> = { macos: "macOS", linux: "Linux" };
+export const platform = (os: string, arch: string) =>
+  `${osLabels[os] ?? os} / ${arch}`;
+export const farmMemory = (farm: Farm) =>
+  farm.plan?.memory_mib ?? farm.nodes.reduce((sum, n) => sum + n.memory_mib, 0);
+/** Recorded roles are preserved for legacy farms; only new all-in-one farms support deployment. */
+export const isAllInOneFarm = (farm: Farm) => {
+  const roles = farm.plan?.nodes ?? farm.nodes;
+  return roles.length === 1 && String(roles[0].role) === "all-in-one";
+};
+export const farmNodeCount = (farm: Farm) =>
+  farm.plan?.nodes.length ?? farm.nodes.length;
+export const dateTime = (timestamp: number) =>
+  new Intl.DateTimeFormat("ko-KR", {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).format(timestamp * 1000);
+export function relativeTime(timestamp: number) {
+  const seconds = Math.max(0, Math.floor(Date.now() / 1000 - timestamp));
+  if (seconds < 60) return "방금 전";
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}분 전`;
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)}시간 전`;
+  return `${Math.floor(seconds / 86400)}일 전`;
+}
+export const componentInfo: Record<
+  string,
+  { label: string; description: string }
+> = {
+  keystone: {
+    label: "Keystone",
+    description: "Identity · 인증과 서비스 카탈로그",
+  },
+  glance: { label: "Glance", description: "Image · VM 이미지 저장소" },
+  placement: { label: "Placement", description: "자원 인벤토리와 할당 추적" },
+  horizon: { label: "Horizon", description: "웹 대시보드" },
+  neutron: {
+    label: "Neutron",
+    description: "Network · 가상 네트워크와 라우터",
+  },
+  nova: {
+    label: "Nova",
+    description: "Compute · KVM이 없으면 TCG로 작은 인스턴스",
+  },
+};
+export const componentLabel = (id: string) => componentInfo[id]?.label ?? id;
+// Mirrors `model::COMPONENTS` public ports: each service is published at port_base + offset.
+export const publicServices: Record<
+  string,
+  { offset: number; path: string; type: string }
+> = {
+  keystone: { offset: 0, path: "/v3", type: "Identity API · v3" },
+  glance: { offset: 1, path: "", type: "Image API" },
+  placement: { offset: 2, path: "", type: "Placement API" },
+  horizon: { offset: 3, path: "/", type: "Dashboard" },
+  neutron: { offset: 4, path: "", type: "Network API" },
+  nova: { offset: 5, path: "/v2.1", type: "Compute API" },
+};
+/** Farms without a recorded plan run the original Keystone and Glance pair. */
+export const farmComponents = (farm: Farm) =>
+  farm.plan?.components ?? ["keystone", "glance"];
+/** Required components, the selection and all their dependencies, in catalog order. */
+export function resolveComponents(
+  catalog: { id: string; required: boolean; depends_on: string[] }[],
+  selected: string[],
+): string[] {
+  const wanted = new Set<string>();
+  const queue = [
+    ...catalog.filter((c) => c.required).map((c) => c.id),
+    ...selected,
+  ];
+  while (queue.length) {
+    const id = queue.pop()!;
+    if (wanted.has(id)) continue;
+    wanted.add(id);
+    queue.push(...(catalog.find((c) => c.id === id)?.depends_on ?? []));
+  }
+  return catalog.map((c) => c.id).filter((id) => wanted.has(id));
+}
