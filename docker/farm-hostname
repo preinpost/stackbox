@@ -1,0 +1,27 @@
+#!/bin/bash
+# msb recreates /etc/hosts at boot. RabbitMQ must resolve our hostname to eth0.
+set -euo pipefail
+address=""
+for _ in $(seq 60); do
+  address=$(ip -4 -o addr show dev eth0 scope global | awk 'NR==1 { split($4, a, "/"); print a[1] }')
+  [ -n "$address" ] && break
+  sleep 1
+done
+[ -n "$address" ] || { echo 'eth0 has no IPv4 address' >&2; exit 1; }
+name=$(hostname)
+work=$(mktemp)
+trap 'rm -f "$work"' EXIT
+awk -v name="$name" '
+  $0 == "# BEGIN FARM HOSTNAME" { managed=1; next }
+  $0 == "# END FARM HOSTNAME" { managed=0; next }
+  managed { next }
+  /^[[:space:]]*#/ || NF == 0 { print; next }
+  {
+    line=$1
+    for (i=2; i<=NF; i++) if ($i != name) line=line "\t" $i
+    print line
+  }
+' /etc/hosts > "$work"
+printf '\n# BEGIN FARM HOSTNAME\n%s %s\n# END FARM HOSTNAME\n' "$address" "$name" >> "$work"
+# /etc/hosts can be a bind mount; retain its inode rather than renaming over it.
+cat "$work" > /etc/hosts

@@ -1,0 +1,14 @@
+[Unit]
+Description=Farm Neutron external network
+Wants=network-online.target
+After=network-online.target farm-hostname.service
+Before=docker.service
+ConditionPathExists=/etc/farm/external.conf
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/farm-external
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

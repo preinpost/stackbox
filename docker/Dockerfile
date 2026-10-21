@@ -16,13 +16,14 @@ RUN dnf install -y \
 COPY disable-ipv6.service /etc/systemd/system/disable-ipv6.service
 RUN systemctl enable disable-ipv6
 
-# msb는 VM 간 트래픽을 중계하지 않음 → farm 노드는 호스트의 published UDP 포트로 VXLAN mesh(vx0)를 구성
-# 설정(/etc/farm/overlay.conf)은 farm 생성 시 주입되고, 없으면 유닛이 실행되지 않음
-COPY --chmod=755 farm-overlay /usr/local/sbin/farm-overlay
-COPY farm-overlay.service /etc/systemd/system/farm-overlay.service
-RUN mkdir -p /etc/farm && systemctl enable farm-overlay
+# Restore msb's generated hostname mapping before Docker/RabbitMQ start.
+COPY --chmod=755 farm-hostname /usr/local/sbin/farm-hostname
+COPY farm-hostname.service /etc/systemd/system/farm-hostname.service
+COPY --chmod=755 farm-external /usr/local/sbin/farm-external
+COPY farm-external.service /etc/systemd/system/farm-external.service
+RUN mkdir -p /etc/farm && systemctl enable farm-hostname farm-external
 
-# 호스트에서 접속할 SSH 공개키 (farm 내부 배포용 키는 farm 생성 시 주입)
+# Optional host SSH public key; all-in-one Kolla runs locally without peer SSH.
 COPY authorized_keys /root/.ssh/authorized_keys
 RUN chmod 600 /root/.ssh/authorized_keys
 
