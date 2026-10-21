@@ -5,8 +5,8 @@ use std::collections::BTreeMap;
 
 use anyhow::{Result, bail};
 use futures::future::try_join_all;
+use microsandbox::Sandbox;
 use microsandbox::sandbox::SandboxHandle;
-use microsandbox::{Sandbox, SandboxListBuilder};
 
 use node::{FARM_LABEL, create_node, describe_node, destroy_node, label};
 pub use node::{FarmNode, connect, wait_until_booted};
@@ -82,7 +82,7 @@ pub async fn delete_farm(farm_id: &str) -> Result<usize> {
 
 pub async fn list_farms() -> Result<BTreeMap<String, usize>> {
     let mut farms = BTreeMap::new();
-    for handle in all_handles(|list| list).await? {
+    for handle in all_handles().await? {
         if let Some(farm_id) = label(&handle, FARM_LABEL) {
             *farms.entry(farm_id).or_default() += 1;
         }
@@ -92,7 +92,7 @@ pub async fn list_farms() -> Result<BTreeMap<String, usize>> {
 
 pub async fn scan_farms() -> Result<BTreeMap<String, Vec<FarmNode>>> {
     let mut farms: BTreeMap<String, Vec<FarmNode>> = BTreeMap::new();
-    for handle in all_handles(|list| list).await? {
+    for handle in all_handles().await? {
         if let Some(id) = label(&handle, FARM_LABEL) {
             farms.entry(id).or_default().push(describe_node(&handle));
         }
@@ -103,18 +103,23 @@ pub async fn scan_farms() -> Result<BTreeMap<String, Vec<FarmNode>>> {
     Ok(farms)
 }
 
+/// Filters the same unfiltered listing that `scan_farms` observes. msb's label-filtered
+/// listing has returned nothing for a farm whose VM was still listed, so a delete
+/// "succeeded" without destroying it.
 async fn farm_handles(farm_id: &str) -> Result<Vec<SandboxHandle>> {
-    all_handles(|list| list.label(FARM_LABEL, farm_id)).await
+    Ok(all_handles()
+        .await?
+        .into_iter()
+        .filter(|handle| label(handle, FARM_LABEL).as_deref() == Some(farm_id))
+        .collect())
 }
 
-async fn all_handles(
-    filter: impl Fn(SandboxListBuilder) -> SandboxListBuilder,
-) -> Result<Vec<SandboxHandle>> {
+async fn all_handles() -> Result<Vec<SandboxHandle>> {
     let mut handles = Vec::new();
     let mut cursor: Option<String> = None;
     loop {
         let page = Sandbox::list_with(|list| {
-            let list = filter(list.limit(100));
+            let list = list.limit(100);
             match cursor.clone() {
                 Some(c) => list.cursor(c),
                 None => list,
