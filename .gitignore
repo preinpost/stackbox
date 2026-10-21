@@ -1,1 +1,11 @@
 /target
+/dist/
+/web/node_modules/
+/web/dist/
+/web/.env
+/web/.env.*.local
+/web/.env.local
+/web/*.tsbuildinfo
+
+__pycache__/
+*.pyc

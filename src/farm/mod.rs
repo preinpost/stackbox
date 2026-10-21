@@ -1,43 +1,52 @@
 mod node;
-mod overlay;
 mod template;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use anyhow::{Result, bail};
-use futures::future::{join_all, try_join_all};
+use futures::future::try_join_all;
 use microsandbox::sandbox::SandboxHandle;
 use microsandbox::{Sandbox, SandboxListBuilder};
 
-use node::{FARM_LABEL, OVERLAY_PORT_LABEL, create_node, describe_node, destroy_node, label};
+use node::{FARM_LABEL, create_node, describe_node, destroy_node, label};
 pub use node::{FarmNode, connect, wait_until_booted};
-pub use template::{DEFAULT_TEMPLATE, NodeSpec, Role};
+pub use template::BASE_IMAGE;
+pub use template::{ALL_IN_ONE, NodeSpec, Role};
 
-/// Create the farm's VMs, then confirm every node reaches every other over the overlay.
-/// A failed overlay check leaves the VMs in place for debugging.
+/// Create the farm's single all-in-one VM and confirm it boots.
 pub async fn create_farm(farm_id: &str, template: &[NodeSpec]) -> Result<Vec<FarmNode>> {
+    create_farm_with(farm_id, template, None, &[]).await
+}
+
+/// `components` selects which service ports the all-in-one guest publishes.
+pub async fn create_farm_with(
+    farm_id: &str,
+    template: &[NodeSpec],
+    exposure: Option<&crate::model::Exposure>,
+    components: &[String],
+) -> Result<Vec<FarmNode>> {
+    let spec = single_node(template)?;
+    let ports: Vec<(u16, u16)> = crate::model::COMPONENTS
+        .iter()
+        .filter(|c| components.iter().any(|id| id == c.id))
+        .filter_map(|c| c.public.as_ref().map(|p| (p.offset, p.guest_port)))
+        .collect();
     if !farm_handles(farm_id).await?.is_empty() {
         bail!("farm '{farm_id}' already exists");
     }
-    let mesh = overlay::plan(template.len(), &used_overlay_ports().await?);
-    let results = join_all(template.iter().zip(&mesh).map(|(spec, endpoint)| {
-        create_node(farm_id, *spec, endpoint, overlay::conf(endpoint, &mesh))
-    }))
-    .await;
-    let (nodes, errors): (Vec<_>, Vec<_>) = results.into_iter().partition(Result::is_ok);
-    if !errors.is_empty() {
-        delete_farm(farm_id).await?;
-        let causes: Vec<String> = errors
-            .into_iter()
-            .map(|e| format!("  - {:#}", e.unwrap_err()))
-            .collect();
-        bail!("farm '{farm_id}' creation failed\n{}", causes.join("\n"));
-    }
-    let nodes: Vec<FarmNode> = nodes.into_iter().map(Result::unwrap).collect();
-    if let Err(error) = overlay::check(&nodes).await {
-        bail!("{error:#}\nthe VMs are left running; remove them with `farm delete {farm_id}`");
-    }
-    Ok(nodes)
+    let node = create_node(farm_id, spec, exposure, &ports).await?;
+    Ok(vec![node])
+}
+
+fn single_node(template: &[NodeSpec]) -> Result<NodeSpec> {
+    let [spec] = template else {
+        bail!("new farms require exactly one all-in-one VM");
+    };
+    anyhow::ensure!(
+        spec.role == Role::AllInOne,
+        "legacy multi-VM layouts cannot be created; create a new all-in-one farm"
+    );
+    Ok(*spec)
 }
 
 pub async fn get_farm(farm_id: &str) -> Result<Vec<FarmNode>> {
@@ -51,7 +60,24 @@ pub async fn get_farm(farm_id: &str) -> Result<Vec<FarmNode>> {
 pub async fn delete_farm(farm_id: &str) -> Result<usize> {
     let handles = farm_handles(farm_id).await?;
     try_join_all(handles.iter().map(destroy_node)).await?;
-    Ok(handles.len())
+    // A destroyed VM has been seen to linger in msb's list as `crashed`; only report success once it is gone.
+    for _ in 0..10 {
+        let left = farm_handles(farm_id).await?;
+        if left.is_empty() {
+            return Ok(handles.len());
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        try_join_all(left.iter().map(destroy_node)).await?;
+    }
+    let left: Vec<_> = farm_handles(farm_id)
+        .await?
+        .iter()
+        .map(|h| h.name().to_owned())
+        .collect();
+    if left.is_empty() {
+        return Ok(handles.len());
+    }
+    bail!("VMs still listed after deletion: {}", left.join(", "))
 }
 
 pub async fn list_farms() -> Result<BTreeMap<String, usize>> {
@@ -64,12 +90,17 @@ pub async fn list_farms() -> Result<BTreeMap<String, usize>> {
     Ok(farms)
 }
 
-async fn used_overlay_ports() -> Result<BTreeSet<u16>> {
-    Ok(all_handles(|list| list)
-        .await?
-        .iter()
-        .filter_map(|handle| label(handle, OVERLAY_PORT_LABEL)?.parse().ok())
-        .collect())
+pub async fn scan_farms() -> Result<BTreeMap<String, Vec<FarmNode>>> {
+    let mut farms: BTreeMap<String, Vec<FarmNode>> = BTreeMap::new();
+    for handle in all_handles(|list| list).await? {
+        if let Some(id) = label(&handle, FARM_LABEL) {
+            farms.entry(id).or_default().push(describe_node(&handle));
+        }
+    }
+    for nodes in farms.values_mut() {
+        nodes.sort_by(|a, b| a.name.cmp(&b.name));
+    }
+    Ok(farms)
 }
 
 async fn farm_handles(farm_id: &str) -> Result<Vec<SandboxHandle>> {
@@ -95,5 +126,28 @@ async fn all_handles(
             Some(next) => cursor = Some(next),
             None => return Ok(handles),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn create_rejects_legacy_or_multi_node_layouts_before_touching_the_runtime() {
+        let all = ALL_IN_ONE;
+        assert_eq!(single_node(&[all]).unwrap().role, Role::AllInOne);
+        assert!(single_node(&[]).is_err());
+        assert!(single_node(&[all, all]).is_err());
+        let legacy = NodeSpec {
+            role: Role::Deployer,
+            ..all
+        };
+        assert!(
+            single_node(&[legacy])
+                .unwrap_err()
+                .to_string()
+                .contains("legacy")
+        );
     }
 }

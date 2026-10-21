@@ -1,5 +1,6 @@
 use std::io::Write;
 
+use crate::kolla::{DeployEvent, EventSink};
 use anyhow::{Result, bail};
 use microsandbox::{ExecEvent, Sandbox};
 
@@ -17,17 +18,20 @@ pub async fn run(sandbox: &Sandbox, script: &str) -> Result<String> {
     Ok(out.stdout()?)
 }
 
-/// Run a bash script, streaming its output to stdout and appending it to `log` in the guest.
-pub async fn stream(sandbox: &Sandbox, script: &str, log: &str) -> Result<()> {
+/// Run a bash script, streaming its output to stderr and appending it to `log` in the guest.
+pub async fn stream(sandbox: &Sandbox, script: &str, log: &str, sink: &EventSink) -> Result<()> {
     let wrapped =
         format!("mkdir -p \"$(dirname {log})\"; set -o pipefail; ( {script} ) 2>&1 | tee -a {log}");
     let mut handle = sandbox
         .exec_stream("bash", ["-c", wrapped.as_str()])
         .await?;
-    let mut stdout = std::io::stdout();
+    let mut stdout = std::io::stderr();
     while let Some(event) = handle.recv().await {
         match event {
             ExecEvent::Stdout(bytes) | ExecEvent::Stderr(bytes) => {
+                sink(DeployEvent::Output(
+                    String::from_utf8_lossy(&bytes).into_owned(),
+                ))?;
                 stdout.write_all(&bytes)?;
                 stdout.flush()?;
             }
