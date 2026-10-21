@@ -1,0 +1,2104 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "farm",
+    "description": "",
+    "license": {
+      "name": ""
+    },
+    "version": "0.1.0"
+  },
+  "paths": {
+    "/api/v1/catalog": {
+      "get": {
+        "tags": [],
+        "operationId": "catalog_handler",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Catalog"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/farms": {
+      "get": {
+        "tags": [],
+        "operationId": "list",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/FarmRecord"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [],
+        "operationId": "create",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Job"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/farms/{id}": {
+      "get": {
+        "tags": [],
+        "operationId": "detail",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FarmRecord"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [],
+        "operationId": "delete",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Job"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/farms/{id}/deploy": {
+      "post": {
+        "tags": [],
+        "operationId": "deploy",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeployRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Job"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/farms/{id}/endpoints": {
+      "get": {
+        "tags": [],
+        "operationId": "endpoints",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Endpoints"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/farms/{id}/logs": {
+      "get": {
+        "tags": [],
+        "operationId": "logs",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "after",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "limit",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/LogEntry"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/farms/{id}/logs/stream": {
+      "get": {
+        "tags": [],
+        "operationId": "log_stream",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "after",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "limit",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "SSE: log events with JSON LogEntry data, gap events on expired cursors, error events on read failures",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/host": {
+      "get": {
+        "tags": [],
+        "operationId": "host",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostInfo"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/host-jobs": {
+      "get": {
+        "tags": [],
+        "operationId": "host_jobs",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/HostJob"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/host-jobs/{id}": {
+      "get": {
+        "tags": [],
+        "operationId": "host_job",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostJob"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/hosts": {
+      "get": {
+        "tags": [],
+        "operationId": "remote_hosts",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/RemoteHost"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [],
+        "operationId": "register_host",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RegisterHost"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RemoteHost"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/hosts/fingerprint": {
+      "post": {
+        "tags": [],
+        "operationId": "host_fingerprint",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SshTarget"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostKey"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/hosts/test-connection": {
+      "post": {
+        "tags": [],
+        "operationId": "test_connection",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConnectionTestRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectionTest"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/hosts/{id}": {
+      "get": {
+        "tags": [],
+        "operationId": "remote_host",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RemoteHost"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [],
+        "operationId": "update_host_credentials",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RegisterHost"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RemoteHost"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [],
+        "operationId": "unregister_host",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RemovedHost"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/hosts/{id}/agent": {
+      "post": {
+        "tags": [],
+        "operationId": "install_agent",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostJob"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/hosts/{id}/check": {
+      "post": {
+        "tags": [],
+        "operationId": "check_host",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostJob"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/hosts/{id}/prepare": {
+      "post": {
+        "tags": [],
+        "operationId": "prepare_host",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostJob"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/jobs": {
+      "get": {
+        "tags": [],
+        "operationId": "jobs",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Job"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/jobs/{id}": {
+      "get": {
+        "tags": [],
+        "operationId": "job",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Job"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/plans": {
+      "post": {
+        "tags": [],
+        "operationId": "plan_handler",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PlanRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Plan"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "AgentArtifactInfo": {
+        "type": "object",
+        "required": [
+          "sha256",
+          "arch",
+          "protocol"
+        ],
+        "properties": {
+          "arch": {
+            "type": "string"
+          },
+          "protocol": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "sha256": {
+            "type": "string"
+          },
+          "supports_single_vm": {
+            "type": "boolean",
+            "description": "Old installed agents remain usable for legacy inventory and deletion."
+          }
+        }
+      },
+      "AuthMethod": {
+        "type": "string",
+        "enum": [
+          "password",
+          "private_key"
+        ]
+      },
+      "Catalog": {
+        "type": "object",
+        "required": [
+          "components",
+          "constraints"
+        ],
+        "properties": {
+          "components": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Component"
+            }
+          },
+          "constraints": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "Component": {
+        "type": "object",
+        "required": [
+          "id",
+          "required",
+          "depends_on",
+          "requires_data_plane",
+          "available"
+        ],
+        "properties": {
+          "available": {
+            "type": "boolean",
+            "description": "False while the service is listed for planning but cannot be deployed yet."
+          },
+          "depends_on": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "id": {
+            "type": "string"
+          },
+          "required": {
+            "type": "boolean"
+          },
+          "requires_data_plane": {
+            "type": "boolean"
+          }
+        }
+      },
+      "ConnectionTest": {
+        "type": "object",
+        "required": [
+          "identity"
+        ],
+        "properties": {
+          "identity": {
+            "type": "string",
+            "description": "`uname -srm` from the remote host. No credential material."
+          }
+        }
+      },
+      "ConnectionTestRequest": {
+        "type": "object",
+        "description": "One authenticated SSH check. Credentials are not stored.",
+        "required": [
+          "address",
+          "username",
+          "fingerprint",
+          "credentials"
+        ],
+        "properties": {
+          "address": {
+            "type": "string"
+          },
+          "credentials": {
+            "$ref": "#/components/schemas/Credentials"
+          },
+          "fingerprint": {
+            "type": "string"
+          },
+          "port": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "username": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "CreateRequest": {
+        "type": "object",
+        "required": [
+          "id"
+        ],
+        "properties": {
+          "components": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "expires_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "UTC Unix seconds. Metadata only in this version; no automatic deletion.",
+            "minimum": 0
+          },
+          "external_host": {
+            "type": "string"
+          },
+          "host_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Registered remote host. Omit for the local coordinator."
+          },
+          "id": {
+            "type": "string"
+          },
+          "owner": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "Credentials": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "password",
+              "method"
+            ],
+            "properties": {
+              "method": {
+                "type": "string",
+                "enum": [
+                  "password"
+                ]
+              },
+              "password": {
+                "type": "string",
+                "writeOnly": true
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "private_key",
+              "method"
+            ],
+            "properties": {
+              "method": {
+                "type": "string",
+                "enum": [
+                  "private_key"
+                ]
+              },
+              "passphrase": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "writeOnly": true
+              },
+              "private_key": {
+                "type": "string",
+                "writeOnly": true
+              }
+            }
+          }
+        ],
+        "description": "Write-only input. Never include this type in a host/job response or derive Debug."
+      },
+      "DeployRequest": {
+        "type": "object",
+        "properties": {
+          "from": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Phase"
+              }
+            ],
+            "default": "prepare"
+          }
+        },
+        "additionalProperties": false
+      },
+      "Endpoints": {
+        "type": "object",
+        "required": [
+          "services",
+          "credentials"
+        ],
+        "properties": {
+          "credentials": {
+            "type": "object",
+            "description": "Admin credentials; returned only by the explicit endpoints call, never persisted.",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "services": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "ErrorBody": {
+        "type": "object",
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "type": "string"
+          }
+        }
+      },
+      "Exposure": {
+        "type": "object",
+        "required": [
+          "host",
+          "bind",
+          "port_base"
+        ],
+        "properties": {
+          "bind": {
+            "type": "string"
+          },
+          "host": {
+            "type": "string"
+          },
+          "port_base": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          }
+        }
+      },
+      "FarmNode": {
+        "type": "object",
+        "required": [
+          "name",
+          "status",
+          "memory_mib"
+        ],
+        "properties": {
+          "ip": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Live eth0 IPv4 for new all-in-one guests; legacy nodes may retain an overlay address."
+          },
+          "memory_mib": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "name": {
+            "type": "string"
+          },
+          "role": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Role"
+              }
+            ]
+          },
+          "status": {
+            "type": "string"
+          }
+        }
+      },
+      "FarmRecord": {
+        "type": "object",
+        "required": [
+          "id",
+          "status",
+          "nodes",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "active_job": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "agent_sha256": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "created_at": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "expires_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
+          "exposure": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Exposure"
+              }
+            ]
+          },
+          "host_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "last_seen_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
+          "nodes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FarmNode"
+            }
+          },
+          "observation_error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "owner": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "phase": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Phase"
+              }
+            ]
+          },
+          "plan": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Plan"
+              }
+            ]
+          },
+          "remote_generation": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "status": {
+            "$ref": "#/components/schemas/FarmStatus"
+          },
+          "updated_at": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "FarmStatus": {
+        "type": "string",
+        "enum": [
+          "creating",
+          "created",
+          "deploying",
+          "ready",
+          "failed",
+          "broken",
+          "deleting",
+          "deleted"
+        ]
+      },
+      "HostCapacity": {
+        "type": "object",
+        "required": [
+          "memory_budget_mib",
+          "memory_reserved_mib"
+        ],
+        "properties": {
+          "memory_budget_mib": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "memory_reserved_mib": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "HostInfo": {
+        "type": "object",
+        "required": [
+          "os",
+          "arch",
+          "hypervisor",
+          "hypervisor_available",
+          "msb_available",
+          "golden_image",
+          "golden_image_available",
+          "memory_total_mib",
+          "memory_available_mib",
+          "memory_budget_mib",
+          "memory_reserved_mib",
+          "state_dir"
+        ],
+        "properties": {
+          "agent_artifact": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/AgentArtifactInfo"
+              }
+            ]
+          },
+          "agent_artifacts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AgentArtifactInfo"
+            }
+          },
+          "arch": {
+            "type": "string"
+          },
+          "disk_available_mib": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
+          "golden_image": {
+            "type": "string"
+          },
+          "golden_image_available": {
+            "type": "boolean"
+          },
+          "hypervisor": {
+            "type": "string"
+          },
+          "hypervisor_available": {
+            "type": "boolean"
+          },
+          "memory_available_mib": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "memory_budget_mib": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "memory_reserved_mib": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "memory_total_mib": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "msb_available": {
+            "type": "boolean"
+          },
+          "os": {
+            "type": "string"
+          },
+          "state_dir": {
+            "type": "string"
+          }
+        }
+      },
+      "HostInspection": {
+        "type": "object",
+        "required": [
+          "os",
+          "arch",
+          "compatible",
+          "kvm_available",
+          "sudo_available",
+          "memory_total_mib",
+          "memory_available_mib",
+          "disk_available_mib",
+          "msb_compatible",
+          "docker_available",
+          "golden_image_available",
+          "vm_boot_verified",
+          "checked_at"
+        ],
+        "properties": {
+          "arch": {
+            "type": "string"
+          },
+          "checked_at": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "compatible": {
+            "type": "boolean"
+          },
+          "disk_available_mib": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "docker_available": {
+            "type": "boolean"
+          },
+          "golden_image_available": {
+            "type": "boolean"
+          },
+          "kvm_available": {
+            "type": "boolean"
+          },
+          "memory_available_mib": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "memory_total_mib": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "msb_compatible": {
+            "type": "boolean"
+          },
+          "msb_version": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "os": {
+            "type": "string"
+          },
+          "sudo_available": {
+            "type": "boolean"
+          },
+          "vm_boot_verified": {
+            "type": "boolean"
+          }
+        }
+      },
+      "HostJob": {
+        "type": "object",
+        "required": [
+          "id",
+          "host_id",
+          "kind",
+          "status",
+          "events",
+          "created_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/HostJobEvent"
+            }
+          },
+          "finished_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
+          "host_id": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/HostJobKind"
+          },
+          "status": {
+            "$ref": "#/components/schemas/JobStatus"
+          }
+        }
+      },
+      "HostJobEvent": {
+        "type": "object",
+        "required": [
+          "at",
+          "message"
+        ],
+        "properties": {
+          "at": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "message": {
+            "type": "string"
+          }
+        }
+      },
+      "HostJobKind": {
+        "type": "string",
+        "enum": [
+          "check",
+          "prepare",
+          "install_agent"
+        ]
+      },
+      "HostKey": {
+        "type": "object",
+        "required": [
+          "fingerprint",
+          "algorithm"
+        ],
+        "properties": {
+          "algorithm": {
+            "type": "string"
+          },
+          "fingerprint": {
+            "type": "string"
+          }
+        }
+      },
+      "HostStatus": {
+        "type": "string",
+        "enum": [
+          "registered",
+          "checking",
+          "preparing",
+          "needs_setup",
+          "runtime_ready",
+          "ready",
+          "failed"
+        ]
+      },
+      "InstalledAgent": {
+        "type": "object",
+        "required": [
+          "artifact",
+          "verified_at"
+        ],
+        "properties": {
+          "artifact": {
+            "$ref": "#/components/schemas/AgentArtifactInfo"
+          },
+          "verified_at": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "Job": {
+        "type": "object",
+        "required": [
+          "id",
+          "farm_id",
+          "kind",
+          "status",
+          "created_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "farm_id": {
+            "type": "string"
+          },
+          "finished_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/JobKind"
+          },
+          "phase": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Phase"
+              }
+            ]
+          },
+          "started_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
+          "status": {
+            "$ref": "#/components/schemas/JobStatus"
+          }
+        }
+      },
+      "JobKind": {
+        "type": "string",
+        "enum": [
+          "create",
+          "deploy",
+          "delete"
+        ]
+      },
+      "JobStatus": {
+        "type": "string",
+        "enum": [
+          "queued",
+          "running",
+          "succeeded",
+          "failed",
+          "interrupted"
+        ]
+      },
+      "LogEntry": {
+        "type": "object",
+        "required": [
+          "id",
+          "timestamp",
+          "job_id",
+          "message"
+        ],
+        "properties": {
+          "id": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "job_id": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "phase": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Phase"
+              }
+            ]
+          },
+          "timestamp": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "NodeSpec": {
+        "type": "object",
+        "required": [
+          "role",
+          "cpus",
+          "memory_mib",
+          "disk_mib"
+        ],
+        "properties": {
+          "container_disk_mib": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Size of each ext4 disk backing Docker and containerd; `None` for nodes without containers.",
+            "minimum": 0
+          },
+          "cpus": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "disk_mib": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "memory_mib": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "role": {
+            "$ref": "#/components/schemas/Role"
+          }
+        }
+      },
+      "Phase": {
+        "type": "string",
+        "enum": [
+          "prepare",
+          "install",
+          "configure",
+          "bootstrap",
+          "prechecks",
+          "deploy",
+          "post-deploy",
+          "verify"
+        ]
+      },
+      "Plan": {
+        "type": "object",
+        "required": [
+          "components",
+          "nodes",
+          "memory_mib",
+          "disk_mib",
+          "warnings"
+        ],
+        "properties": {
+          "components": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "disk_mib": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Includes both container disks for each container host. Sparse disks consume less initially.",
+            "minimum": 0
+          },
+          "memory_mib": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "nodes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NodeSpec"
+            }
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "PlanRequest": {
+        "type": "object",
+        "properties": {
+          "components": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "default": []
+          }
+        },
+        "additionalProperties": false
+      },
+      "RegisterHost": {
+        "type": "object",
+        "required": [
+          "id",
+          "address",
+          "username",
+          "fingerprint",
+          "credentials"
+        ],
+        "properties": {
+          "address": {
+            "type": "string"
+          },
+          "credentials": {
+            "$ref": "#/components/schemas/Credentials"
+          },
+          "fingerprint": {
+            "type": "string",
+            "description": "SHA256 fingerprint verified by the operator using an independent trusted source."
+          },
+          "id": {
+            "type": "string"
+          },
+          "port": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "username": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "RemoteHost": {
+        "type": "object",
+        "required": [
+          "id",
+          "address",
+          "port",
+          "username",
+          "fingerprint",
+          "auth_method",
+          "status",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "active_job": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "address": {
+            "type": "string"
+          },
+          "agent": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/InstalledAgent"
+              }
+            ]
+          },
+          "auth_method": {
+            "$ref": "#/components/schemas/AuthMethod"
+          },
+          "capacity": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/HostCapacity",
+                "description": "Derived from coordinator reservations, not a live hypervisor limit."
+              }
+            ]
+          },
+          "created_at": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "fingerprint": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "inspection": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/HostInspection"
+              }
+            ]
+          },
+          "port": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "status": {
+            "$ref": "#/components/schemas/HostStatus"
+          },
+          "updated_at": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "username": {
+            "type": "string"
+          }
+        }
+      },
+      "RemovedHost": {
+        "type": "object",
+        "required": [
+          "id"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          }
+        }
+      },
+      "Role": {
+        "type": "string",
+        "enum": [
+          "all-in-one",
+          "deployer",
+          "lb",
+          "infra",
+          "keystone",
+          "glance",
+          "control",
+          "compute"
+        ]
+      },
+      "SshTarget": {
+        "type": "object",
+        "required": [
+          "address"
+        ],
+        "properties": {
+          "address": {
+            "type": "string"
+          },
+          "port": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "securitySchemes": {
+      "bearer": {
+        "type": "http",
+        "scheme": "bearer"
+      }
+    }
+  },
+  "security": [
+    {
+      "bearer": []
+    },
+    {}
+  ]
+}

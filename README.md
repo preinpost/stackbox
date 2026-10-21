@@ -1,26 +1,264 @@
 # farm
 
-microsandbox VM으로 OpenStack farm을 만드는 도구.
+Farm마다 microsandbox VM **1대**를 만들고 Kolla all-in-one으로 OpenStack을 설치하는 Rust CLI와 REST API 데몬입니다.
+선택한 모든 서비스와 Ansible 실행기가 같은 VM에서 동작합니다.
+웹포탈 backend는 `farm serve`의 API를 호출해 farm 생성·배포·삭제 작업과 로그를 추적할 수 있습니다.
+
+항상 **Keystone + Glance**를 배포하고, 선택 서비스로 **Placement**, **Horizon**, **Neutron**,
+**Nova**를 추가할 수 있습니다. 선택한 서비스의 의존성은 자동으로 포함됩니다.
+Nova는 게스트에 `/dev/kvm`이 없어 qemu TCG로 작은 인스턴스만 실행합니다.
+
+## 시작
+
+`msb`와 `libkrunfw`가 `~/.microsandbox`에 설치되어 있어야 합니다
+(`MSB_PATH`, `MSB_LIBKRUNFW_PATH`로 지정 가능). macOS에서는 호스트에서 직접 실행하고,
+Linux에서는 접근 가능한 `/dev/kvm`이 필요합니다.
 
 ```bash
-task docker-build              # ubuntu:24-golden 이미지 빌드 후 msb 캐시에 로드
+task docker-build               # farm-golden:rocky10 빌드 후 msb 캐시에 로드
 cargo build --release
 
-./target/release/farm create demo   # deployer / infra / keystone / glance VM 생성
-./target/release/farm status demo
-./target/release/farm list
-./target/release/farm delete demo
+./target/release/farm catalog --json
+./target/release/farm plan --components horizon --json
+./target/release/farm serve      # http://127.0.0.1:8080
 ```
 
-## 구조
+포탈 없이 CLI만으로도 같은 관리 로직을 사용할 수 있습니다.
+CLI는 작업이 끝날 때까지 기다립니다.
 
-| 파일 | 역할 |
-|---|---|
-| `src/farm/template.rs` | 베이스 이미지, role 목록, role별 CPU·메모리·디스크 |
-| `src/farm/node.rs` | VM 하나 생성·조회·삭제 (microsandbox SDK) |
-| `src/farm/mod.rs` | farm 단위 생성·조회·삭제·목록 |
-| `src/main.rs` | CLI 진입점 |
+```bash
+farm create demo                # 1 VM / 3 GiB (Keystone·Glance)
+farm create web --components horizon   # 선택 서비스만큼 메모리 증가
+farm deploy demo
+farm deploy demo --from prechecks
+farm status demo --json
+farm list --json
+farm endpoints demo --json      # 배포 성공 후 명시적으로만 admin 인증정보 조회
+farm logs demo
+farm delete demo
+```
 
-VM 이름은 `<farm>-<role>`이고, `farm`·`farm.role` 라벨로 farm에 묶입니다.
+데몬과 CLI는 같은 상태 디렉터리에 대해 배타 잠금을 사용합니다.
+**데몬 실행 중에는 포탈/API로 작업하고, 직접 CLI를 사용하려면 데몬을 먼저 종료**합니다.
+`catalog`, `plan`, `openapi`는 잠금 없이 실행됩니다.
 
-실행하려면 `msb`와 `libkrunfw`가 `~/.microsandbox`에 설치되어 있어야 합니다 (`MSB_PATH`, `MSB_LIBKRUNFW_PATH`로 지정 가능).
+## 웹포탈
+
+Tailwind CSS·Base UI와 TanStack Router/Query/Table로 구성한 웹포탈은 `web/`에 있습니다.
+Farm 목록·생성·배포/재개·삭제, VM 토폴로지, 실시간 로그, 작업 내역, 호스트 상태를 제공합니다.
+메뉴는 `Hosts → Farms → Jobs` 순서입니다. `Hosts`에는 로컬 호스트(Coordinator)가 항상 맨 위에 있고,
+원격 서버의 SSH 정보 등록·점검·msb/이미지 준비 작업도 여기서 실행합니다. 준비된 호스트의
+**이 호스트에 Farm 만들기**를 누르거나 Farm 생성 시 실행 호스트를 선택하면
+VM 1대의 생성·조회·Kolla 배포·삭제를 해당 호스트에서 실행합니다. Farm 안의 컴포넌트는 같은 VM을 공유합니다.
+
+```bash
+# 터미널 1: 프로젝트 루트
+cargo run -- serve
+
+# 터미널 2
+cd web
+npm ci
+npm run dev                     # http://127.0.0.1:5180
+```
+
+운영 실행은 `web/`에서 `npm run build && npm start`입니다 (기본 `127.0.0.1:3000`).
+API 주소와 token은 `web/.env`의 `FARM_API_URL`, `FARM_API_TOKEN`으로 설정합니다.
+개발·운영 서버가 API를 프록시하고 token과 관리자 인증정보를 브라우저에서 제외합니다.
+자세한 실행 방법과 서버 구성은 [web/README.md](web/README.md)를 참고하세요.
+원격 실행을 사용하려면 Coordinator와 같은 CPU 아키텍처의 Linux 실행기를 한 번 빌드하세요.
+
+```bash
+sh scripts/build-agent.sh       # Docker/BuildKit 필요; dist/agent/<arch>/farm-agent
+FARM_AGENT_PATH="$PWD/dist/agent/aarch64/farm-agent" cargo run -- serve
+# x86_64 호스트는 aarch64 대신 x86_64 경로 사용
+```
+
+Hosts에서 환경 준비를 완료하면 실행기도 설치합니다. 이미 준비한 호스트는 `Farm 실행기 설치`를 누르세요.
+그다음 Farm 생성 화면의 `실행 호스트`에서 선택합니다. CLI는
+`farm create remote-demo --host-id worker-01 --external-host worker-01.example` 형태입니다.
+원격 호스트의 설치 조건·지문 검증·암호화 키 보관은 [docs/remote-hosts.md](docs/remote-hosts.md)를 참고하세요.
+
+## API
+
+```bash
+# VM 생성은 바로 job을 반환하고, OpenStack 배포는 별도로 요청합니다.
+curl -sS -X POST http://127.0.0.1:8080/api/v1/farms \
+  -H 'Content-Type: application/json' \
+  -d '{"id":"demo","external_host":"localhost","owner":"portal"}'
+
+curl -sS http://127.0.0.1:8080/api/v1/jobs/<job-id>
+# create job이 succeeded가 된 뒤:
+curl -sS -X POST http://127.0.0.1:8080/api/v1/farms/demo/deploy \
+  -H 'Content-Type: application/json' -d '{}'
+curl -N http://127.0.0.1:8080/api/v1/farms/demo/logs/stream
+```
+
+| Method | Path (`/api/v1` 기준) | 반환 |
+|---|---|---|
+| GET | `/host` | msb·golden image·HVF/KVM 확인, 메모리·디스크 상태 |
+| GET / POST | `/hosts` | 원격 호스트 목록 / SSH 정보 등록 (201) |
+| POST | `/hosts/fingerprint` | 인증 전에 서버 SHA256 지문 조회 |
+| GET / PUT / DELETE | `/hosts/{id}` | 호스트 상세 / 인증 정보 변경 / 등록 해제 |
+| POST | `/hosts/{id}/check`, `/hosts/{id}/prepare`, `/hosts/{id}/agent` | 점검 / 환경 준비 / 실행기 설치 job |
+| GET | `/host-jobs`, `/host-jobs/{id}` | 원격 호스트 작업과 단계 기록 |
+| GET | `/catalog` | 실제 지원 컴포넌트·프로필·제약 |
+| POST | `/plans` | 노드·게스트 메모리·디스크·경고 계산 |
+| GET / POST | `/farms` | 목록 / 생성 job |
+| GET / DELETE | `/farms/{id}` | farm 상태 / 삭제 job |
+| POST | `/farms/{id}/deploy` | 배포 job (`{"from":"prechecks"}`로 재개) |
+| GET | `/farms/{id}/endpoints` | public 서비스 URL과 admin 인증정보 |
+| GET | `/farms/{id}/logs?after=0&limit=1000` | 최근 로그 |
+| GET | `/farms/{id}/logs/stream` | 로그 SSE (`Last-Event-ID`로 재연결) |
+| GET | `/jobs`, `/jobs/{id}` | 작업 상태·phase·오류 |
+| GET | `/openapi.json` | 생성된 OpenAPI 스키마 |
+
+Farm 작업 생성은 `202 Accepted`와 `Location: /api/v1/jobs/{id}`를 반환합니다.
+원격 호스트 작업의 Location은 `/api/v1/host-jobs/{id}`입니다.
+포탈 연동 상세는 [docs/portal-api.md](docs/portal-api.md), 정적 스키마는
+[docs/openapi.json](docs/openapi.json)을 참고하세요. `farm openapi`로 다시 생성할 수 있습니다.
+
+## 상태와 작업
+
+- 상태 파일: `$XDG_DATA_HOME/farm/state.json` 또는 `~/.local/share/farm/state.json`.
+  `--state-dir`로 변경할 수 있지만, **한 호스트의 운영 인스턴스는 같은 디렉터리를 사용**해야 합니다.
+- 파일 잠금·임시 파일·fsync·rename으로 단일 writer와 atomic write를 보장합니다.
+- 시작 시와 30초마다 msb의 `farm`·`farm.role` 라벨을 조회합니다. 기존 VM도 가져오고,
+  사라지거나 정지된 VM이 있으면 `broken`으로 표시합니다. 조회 실패를 VM 삭제로 취급하지 않습니다.
+- VM 생성과 배포는 각각 1개씩 실행합니다. 서로 다른 farm의
+  생성과 배포는 병행할 수 있습니다. 같은 farm의 중복 작업은 `409 Conflict`입니다.
+- 기본 메모리 예약 한도는 호스트 RAM의 80%입니다. `--memory-budget-mib`로 조절합니다.
+  생성 요청을 받는 시점에 전체 게스트 메모리를 예약하고, 삭제 성공 후 반환합니다.
+  가져온 기존 farm도 VM 설정의 메모리를 계산합니다.
+- 데몬이 갑자기 종료되면 진행 중/대기 중 job은 다음 시작 시 `interrupted`가 됩니다.
+  자동 재실행하지 않습니다. 배포는 저장된 phase를 확인하고 `from`을 지정해 재개합니다.
+  일부 VM만 생성된 farm은 삭제한 뒤 다시 만듭니다.
+- SIGINT/SIGTERM은 새 작업 접수를 멈추고 큐를 비운 뒤 종료합니다.
+  두 번째 신호는 즉시 종료합니다. VM은 데몬 종료 후에도 유지됩니다.
+- `owner`, `expires_at`은 metadata입니다. TTL 자동 삭제는 아직 수행하지 않습니다.
+- 호스트 로그는 `logs/<farm>.jsonl`에 보관하며, API는 최근 1,000개 이벤트를 제공합니다.
+  재연결 시 보관 범위를 벗어난 cursor는 SSE `gap` 이벤트로 알립니다. 로그 회전은 아직 없습니다.
+  Kolla의 guest 로그는 기존처럼 `/var/log/farm/<phase>.log`에도 남습니다.
+
+## 외부 접속
+
+관리 API와 OpenStack 서비스는 모두 기본 `127.0.0.1`에 바인딩됩니다.
+원격 포탈 backend에서 접근하려면 API token과 서비스 바인딩을 지정합니다.
+
+```bash
+export FARM_API_TOKEN='<운영용-token>'
+farm serve --bind 0.0.0.0:8080 --public-bind 0.0.0.0
+# POST /farms에서 external_host를 이 호스트의 DNS 이름/IPv4로 지정
+# 이후 API 호출에 Authorization: Bearer <운영용-token> 헤더 추가
+```
+
+loopback 이외의 관리 API 바인딩에는 token이 필수입니다. TLS는 사설망의 reverse proxy에서
+종료하도록 구성하세요. 포탈 backend가 farmd와 OpenStack API를 호출하고, 브라우저에 admin
+인증정보를 전달하지 않는 구조를 전제로 합니다. CORS는 활성화하지 않습니다.
+
+farm별 public TCP block은 `15000 + 10 × n`으로 예약하고, 선택한 서비스만 all-in-one VM에 직접 전달합니다. HAProxy·keepalived·ProxySQL은 사용하지 않습니다.
+
+| offset | 서비스 | VM 포트 |
+|---:|---|---:|
+| 0 | Keystone (`/v3`) | 5000 |
+| 1 | Glance | 9292 |
+| 2 | Placement | 8780 |
+| 3 | Horizon (`/`) | 80 |
+| 4 | Neutron | 9696 |
+| 5 | Nova (`/v2.1`) | 8774 |
+
+서비스 카탈로그의 public URL에는
+`external_host`와 호스트 포트를 기록하고, 내부 통신은 VM의 eth0 주소와 기존 서비스 포트를 사용합니다.
+외부 호스트 변경이나 포트 재할당은 현재 지원하지 않습니다.
+
+관리 계층 추가 전에 생성된 VM은 원래 포트 설정으로 가져오므로 `exposure: null`입니다.
+기존 다중 VM Farm은 조회·인증정보 조회·삭제를 유지하지만 새 배포 엔진으로 재배포할 수 없습니다.
+자동 변환·자동 삭제하지 않으므로 필요한 데이터를 보관한 뒤 새 Farm을 만드세요.
+
+## 메모리
+
+| 구성 | 메모리 (MiB) |
+|---|---:|
+| Keystone·Glance 기본 | 3072 |
+| Placement 추가 | +256 |
+| Horizon 추가 | +512 |
+| Neutron 추가 | +2304 |
+| Nova 추가 | +2048 |
+| 현재 지원 서비스 전부 | 8192 |
+
+모든 컴포넌트가 VM 1대(2 vCPU)의 메모리를 공유하며, 선택한 서비스만큼 메모리가 증가합니다.
+메모리 값은 예약 계획이며 실제 사용량은 서비스·캐시에 따라 달라집니다. root disk는 20 GiB,
+Docker와 containerd용 owned ext4 disk는 각각 32 GiB입니다(합계 84 GiB, sparse).
+MariaDB 버퍼풀은 512 MiB로 고정하고 API/RPC worker는 1개씩 사용합니다.
+배포도 VM 안에서 로컬 Ansible로 실행하므로 별도 deployer·SSH 키 배포·VXLAN mesh가 없습니다.
+
+### Neutron과 게스트 커널
+
+msb 게스트 커널에는 모듈 로딩이 없고 openvswitch datapath, `xt_connmark`, `physdev`가 없습니다.
+그래서 Neutron은 다음처럼 구성합니다.
+
+- Open vSwitch는 userspace(`netdev`) datapath로 실행합니다. 커널 datapath보다 느립니다.
+  Kolla의 openvswitch 모듈 로드 task와 vswitchd 이미지의 `modprobe`는 건너뛰고,
+  `br-ex`도 `datapath_type=netdev`로 생성하도록 kolla-ansible을 패치합니다.
+  Nova가 요구하는 `br_netfilter` 모듈 로드도 건너뜁니다. bridge netfilter는 커널에 내장되어 있습니다.
+- Nova compute는 `/dev/kvm`이 없어 `virt_type=qemu`(TCG)와 `cpu_mode=none`으로 실행합니다.
+  콘솔 프록시는 켜지 않습니다. 인스턴스 부팅은 KVM보다 느립니다.
+- 보안 그룹은 hybrid iptables 대신 `openvswitch` firewall driver를 사용합니다.
+- L3 agent는 address scope용 CONNMARK 규칙만 빼고 실행합니다(`src/kolla/neutron_sitecustomize.py`).
+  farm은 address scope를 설정하지 않습니다.
+- 외부망 `public`(172.24.4.0/24, flat `physnet1`)은 VM의 veth `farm-ext`/`farm-extgw`
+  뒤에 있습니다. 해당 VM이 172.24.4.1로 응답하고 eth0으로 masquerade합니다.
+  `farm-external.service`가 재부팅 때마다 다시 구성합니다.
+
+게스트는 남는 램을 페이지 캐시로 채우므로 실제 사용량은 할당량의 합까지 늘어날 수 있습니다.
+디스크 계획에는 root disk와
+Docker/containerd용 ext4 디스크 두 개가 포함됩니다. sparse disk의 현재 사용량과는 다릅니다.
+
+## 코드와 검증
+
+`src/lib.rs`가 라이브러리 진입점입니다. `FarmManager`가 계획·상태·예약·작업을 관리하고,
+`src/manager/backend.rs`가 microsandbox VM 로직을 연결합니다. `src/api.rs`와 `src/main.rs`는
+같은 manager를 사용합니다. 새 VM 이름은 `<farm>-all-in-one`입니다.
+
+```bash
+cargo fmt --check
+cargo test
+cargo clippy --all-targets -- -D warnings
+```
+
+관리/API 테스트는 fake backend로 작업 실패·재개·배포 동시성·재시작 복구·메모리 예약·
+파일 잠금·저장 실패·인증·SSE를 검증하며 VM을 띄우지 않습니다.
+
+실제 OpenStack 설치는 별도의 로컬 Farm으로 확인합니다. 기본 구성은 VM 1대에
+3 GiB를 할당하며, 최초 실행에는 패키지와 컨테이너 이미지 다운로드가 필요합니다.
+기존 daemon과 다른 상태 디렉터리를 사용하세요.
+
+```bash
+task docker-build
+cargo build --bin farm
+state_dir=$(mktemp -d /tmp/farm-openstack.XXXXXX)
+target/debug/farm --state-dir "$state_dir" create e2e
+# 선택 서비스까지 확인하려면: create e2e --components placement,horizon
+target/debug/farm --state-dir "$state_dir" deploy e2e
+python3 scripts/verify-openstack.py e2e --state-dir "$state_dir"
+# 로컬 VM 1대를 재시작하고 토큰·업로드한 이미지의 영속성까지 확인하려면:
+python3 scripts/verify-openstack.py e2e --state-dir "$state_dir" --restart-local-vms
+target/debug/farm --state-dir "$state_dir" delete e2e
+```
+
+배포의 `verify` 단계는 VM 내부에서 토큰 발급과 Glance 이미지 업로드·다운로드 내용
+비교·삭제를 검사합니다. Placement는 인증된 resource provider 조회, Horizon은 브라우저와 같은
+CSRF 로그인과 로그인 후 대시보드 응답까지 확인합니다. Nova가 없는 farm의 Horizon은 로그인 후
+Compute 개요(403) 대신 이미지 목록으로 이동하도록 설정합니다. Neutron은 4개 agent 상태를 확인하고,
+임시 tenant network·subnet·router를 만들어 동일 VM에서 라우터 게이트웨이를, 라우터
+namespace에서 DHCP 포트를 ping한 뒤 지웁니다. `scripts/verify-openstack.py`는 호스트에서 공개 포트로 접속해
+인증·서비스 카탈로그·프로젝트 조회·인증 없는 요청 거부·1 MiB 이미지 왕복과 삭제 후
+404 응답을 검사합니다. 인증정보는 CLI에서 메모리로만 받아 사용하며 출력하거나 파일에
+저장하지 않습니다. 실패 시 배포 로그를 확인한 뒤 `deploy e2e --from <phase>`로 재개할 수 있습니다.
+
+Kolla의 기본 Ansible 출력에는 서비스 비밀값이 포함될 수 있어 Farm은 작업명과
+호스트별 결과만 전달하는 callback을 사용합니다. 실패 상세는 all-in-one VM의
+`/var/log/farm/ansible-failures.jsonl`에 root 전용 권한(`0600`)으로 남기며,
+Ansible의 `no_log` 작업은 이 파일에서도 내용을 숨깁니다.
+
+단일 VM 전환의 구조와 호환성은 [docs/single-vm.md](docs/single-vm.md), 이전 다중 VM 실배포 기록은
+[docs/local-validation.md](docs/local-validation.md)에 있습니다.

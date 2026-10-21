@@ -1,0 +1,196 @@
+# 원격 호스트 등록과 준비
+
+등록한 단일 원격 호스트에서 Farm 생성·조회·Kolla 배포·삭제를 실행할 수 있다.
+Farm마다 VM 1대를 실행하고 모든 선택 서비스를 같은 VM에 설치한다.
+현재 배치 단위는 [Farm 전체](remote-farms.md)이며 역할별 호스트 배치는 사용하지 않는다.
+
+## 포탈 사용
+
+1. farmd와 웹포탈을 실행하고 **Hosts → 호스트 등록**으로 이동한다.
+2. 서버 IP/호스트명과 SSH port를 입력해 서버 지문을 조회한다. 이 단계는 인증하지 않는다.
+3. 서버 콘솔 등 독립적인 신뢰 경로에서 확인한 SHA256 지문과 비교한다.
+   예를 들어 서버 콘솔에서 `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub`로 확인할 수 있다.
+   조회 결과만 보고 신원을 신뢰하지 않는다. 일치 확인 체크 후 등록한다.
+4. 호스트 ID, SSH 사용자, 비밀번호 또는 SSH 개인 키와 필요 시 키 암호를 입력한다.
+   **접속 테스트**는 인증 정보를 저장하지 않고 SSH 로그인과 `uname`만 확인한다.
+   등록 후 SSH 접속과 OS·아키텍처·KVM·메모리·디스크·sudo·msb·Docker·이미지를 점검한다.
+5. **환경 준비**에서 실제 설치 작업을 시작한다. 진행 단계와 오류는 Hosts/Jobs에서 확인한다.
+6. **Farm 실행기 설치** 후 호스트 상세의 **이 호스트에 Farm 만들기**로 Farm을 생성한다.
+   준비가 끝나지 않았거나 마지막 SSH 점검이 5분을 넘은 호스트는 선택할 수 없다.
+
+접속할 때마다 등록한 SHA256 지문을 대조하며 불일치 시 인증 정보를 보내기 전에 중단한다.
+지문 변경을 자동으로 수락하지 않는다. 신뢰 경로에서 변경을 확인한 뒤 `인증 변경`에서 지문과 인증 정보를 교체한다.
+호스트 ID·주소·port·사용자는 유지하며, 작업 실행 중에는 교체를 거절한다. 이 기능은 Farm이 있는 호스트도 등록 해제 없이 인증 정보를 복구할 수 있게 한다.
+현재 SSH 인증은 password 또는 개인 키 방식이다. SSH agent forwarding, bastion/ProxyJump,
+keyboard-interactive/MFA, 호스트 인증서/CA, sudo 비밀번호 입력은 지원하지 않는다.
+
+## 타겟 조건과 준비 작업
+
+- Linux x86_64 또는 aarch64. Coordinator와 다른 아키텍처여도 된다. 실행기는 대상 아키텍처용 바이너리를 따로 둔다.
+- SSH 사용자가 `/dev/kvm`을 읽고 쓸 수 있어야 한다. 클라우드 VM이면 nested virtualization이 필요할 수 있다.
+  설치 작업으로 KVM을 활성화하거나 접근 권한을 임의 변경하지 않는다.
+- 비대화형 SSH exec, Bash, GNU `timeout`, `awk`, `grep`, `df`, `flock`, `tar`, `install`, `sha256sum`, `curl`이 필요하다.
+- 시험 VM 준비에는 가용 메모리 768 MiB와 홈 디렉터리 볼륨의 여유 디스크 8 GiB 이상을 요구한다.
+  실제 Farm은 별도로 기본 3 GiB에 선택 서비스 메모리를 더한 게스트 메모리를 예약하며, 원격 호스트별 한도는 전체 메모리의 80%다.
+- golden image가 없으면 해당 사용자로 동작하는 Docker/BuildKit이 필요하다. Docker와 OS 패키지,
+  sudo 정책은 자동 설치·변경하지 않는다. 기존 golden image가 있으면 Docker 없이 재사용할 수 있다.
+- 타겟에서 GitHub 릴리스와 Docker/패키지 레지스트리로 나갈 수 있어야 한다.
+
+준비 작업은 다음 순서다.
+
+1. 등록한 지문으로 SSH 인증 후 조건을 다시 점검한다.
+2. msb가 없으면 공식 `v0.7.8` Linux 릴리스 번들과 `checksums.sha256`을 HTTPS로 내려받고,
+   정확한 번들 항목의 SHA256을 확인한 후 msb와 libkrunfw를 사용자 홈의 `~/.microsandbox/bin`,
+   `~/.microsandbox/lib`에 설치한다. 이후 명령은 해당 bin 경로를 사용한다.
+   이미 0.7.8이면 재사용하며 다른 버전은 자동 업그레이드/덮어쓰기 없이 실패한다.
+3. `farm-golden:rocky10` 캐시가 없으면 바이너리에 포함한 `docker/` 빌드 파일로 이미지를 만들고
+   `docker save` → `msb load`로 로드한다. 작업 디렉터리는 종료 시 제거한다.
+   개발자의 `docker/authorized_keys`는 전송하지 않고 빈 파일을 사용한다.
+4. UUID를 포함한 `farm-check-*` 시험 VM을 512 MiB로 부팅하고 `msb exec ... /bin/true`를 실행한 뒤 삭제한다.
+   외부 네트워크는 비활성화하고 최대 실행 시간을 120초로 제한한다.
+5. 최종 점검과 시험 VM 성공 후에만 호스트를 `ready`로 표시한다. `FARM_AGENT_PATH`가 설정되어 있으면 실행기 업로드·체크섬·프로토콜 검증도 수행한다.
+
+`runtime_ready`는 Linux/KVM/msb 조건을 확인한 상태다. `ready`는 이미지와 시험 VM 검증까지 통과한 상태다.
+읽기 전용 점검은 같은 runtime에서 앞서 성공한 시험 VM 검증 결과를 유지한다.
+준비 작업을 다시 실행하면 새 시험 VM 검증이 필요하다. 런타임·이미지는 이미 준비된 경우 재사용한다.
+호스트별로 작업 하나만 허용하며 중앙에서 최대 두 호스트 작업을 동시에 실행한다.
+설치/이미지 작업은 사용자 홈의 `~/.local/share/farm/bootstrap.lock`도 사용한다.
+
+설치에는 10분, 이미지 빌드에는 20분, VM 검증에는 3분의 원격 실행 제한을 둔다.
+실패 시 현재 단계와 조건을 확인한 후 명시적으로 재실행한다. 롤백은 하지 않는다.
+데몬은 정상 종료 시 작업을 기다린다. 강제 종료 후에는 진행 중 작업을 `interrupted`로 바꾸고 자동 재실행하지 않는다.
+원격 명령은 제한 시간까지 남을 수 있으므로 호스트 작업/잠금과 `farm-check-*` VM을 확인한 뒤 재시도한다.
+시험 VM 삭제가 실패하면 작업도 실패하며 원격 호스트에서 해당 VM을 확인한다.
+
+## 인증 정보 보관과 복구
+
+`state.json`에는 호스트 메타데이터, 임의 `credential_ref`, XChaCha20-Poly1305 nonce/ciphertext만 기록한다.
+호스트 ID·주소·port·사용자·지문과 credential_ref를 추가 인증 데이터로 묶어 다른 호스트로 ciphertext를 옮겨도 복호화되지 않는다.
+인증 정보 원문, SSH/명령 stdout/stderr는 작업 기록에 저장하지 않는다. 원격 출력은 제한된 버퍼에서 점검 필드만 파싱한다.
+비밀번호·개인 키를 CLI 인자나 개인 키 임시 파일로 전달하지 않고 Rust SSH 클라이언트로 인증한다.
+
+마스터 키는 상태 디렉터리의 `credentials.key`에 32 raw bytes로 한 번 생성하며 파일 권한은 0600이다.
+상태 디렉터리는 0700이다. key는 API로 노출하지 않는다. **백업에는 원래 `credentials.key`와 `state.json`이 모두 필요하다.**
+호스트 기록이 있는데 key가 없거나 맞지 않으면 시작을 거절한다. 임의로 새 key를 생성해 기존 인증 정보를 대체하지 않는다.
+key를 가진 동일 OS 사용자는 복호화할 수 있다. 이 저장소는 OS 계정 접근 제어나 외부 KMS를 대신하지 않는다.
+
+브라우저의 등록 요청은 Query/Mutation cache와 local/session storage에 인증 정보를 저장하지 않는다.
+요청 완료/실패 시 비밀번호·키·키 암호 입력을 비우며 호스트 GET 응답에는 `auth_method`만 포함한다.
+포탈과 API는 신뢰한 운영자용이다. 원격에서 포탈을 사용할 때는 기존 지침대로 TLS와 인증을 제공하는 reverse proxy 뒤에 둔다.
+
+등록 해제는 중앙 호스트·작업 기록과 암호화된 인증 정보만 제거한다. msb, 이미지, Docker 캐시, 원격 VM은 남는다.
+원격 설치 제거는 후속 작업이다. 인증 변경은 같은 SSH endpoint에서 비밀번호/키/passphrase와 검증한 서버 지문을 교체한다.
+Farm이 남아 있는 호스트의 등록 해제는 거절한다. 먼저 해당 Farm들을 삭제해야 한다.
+
+## API
+
+모든 경로는 `/api/v1` 아래이며 기존 bearer 인증 정책을 따른다. OpenAPI와 포탈 타입도 함께 생성한다.
+
+| Method | Path | 결과 |
+|---|---|---|
+| POST | `/hosts/fingerprint` | `{address, port}` → `{fingerprint, algorithm}`; 인증 전 조회 |
+| GET / POST | `/hosts` | 목록 / `RegisterHost` 저장, 201 + Location |
+| GET / PUT / DELETE | `/hosts/{id}` | 상세 / 인증 변경 / 등록 해제; 작업 실행 중이면 409 |
+| POST | `/hosts/{id}/agent` | 실행기 업로드·SHA256·프로토콜 확인; 202 + HostJob |
+| POST | `/hosts/{id}/check` | 읽기 전용 SSH 점검; 202 + HostJob |
+| POST | `/hosts/{id}/prepare` | 조건 점검·설치·이미지·시험 VM; 202 + HostJob |
+| GET | `/host-jobs`, `/host-jobs/{id}` | 상태·단계·실패 이유 |
+
+호스트 작업의 Location은 `/api/v1/host-jobs/{id}`다. 같은 호스트의 중복 작업은 409로 거절한다.
+비밀 입력은 `credentials: {method: "password", password: ...}` 또는
+`{method: "private_key", private_key: ..., passphrase: ...}` 형태다. 조회용 타입과 분리되어 있다.
+공용 임의 명령 실행 API는 제공하지 않는다.
+
+## 검증 범위
+
+- 자동 테스트: loopback SSH 서버와 실제 SSH 프로토콜로 password·암호화 키 인증, 무인증 지문 조회,
+  지문 불일치 시 인증 전 차단, 준비 단계 연결/재실행/실패, 작업 충돌, 암호화 저장/무결성/다른 key 거절,
+  재시작 복구, HTTP 상태·Location·입력 검증, 조회 응답의 비밀 비노출을 확인한다.
+  이 서버는 설치 명령의 결과를 모의하므로 실제 KVM 부팅 검증을 대체하지 않는다.
+- 포탈 테스트: 지문 확인 전 등록 차단, 주소 변경 시 지문 확인 초기화, 오류 후 비밀 입력 삭제,
+  Query cache 비밀 비저장, 프록시 경로·요청 전달과 기존 SSE/정적 서버 동작을 확인한다.
+- 2026-10-20 수동 확인: 임시 Rocky Linux aarch64 VM의 실제 OpenSSH 서버에 password/키로 접속,
+  OS/자원 점검, 실제 서버 지문 변경 차단, 공식 msb 0.7.8 번들의 체크섬·설치·재실행,
+  데스크톱/390px 포탈 등록·작업 표시·KVM 미지원 사전 차단을 확인했다.
+  시험 VM 내부에 `/dev/kvm`이 없어 **원격 golden image 빌드부터 KVM 시험 VM 부팅까지 전체 성공은 미검증**이다.
+  실제 KVM 호스트를 제공하면 이 경로를 추가 확인해야 한다.
+
+참고: [microsandbox Quickstart](https://docs.microsandbox.dev/getting-started/quickstart),
+[공식 v0.7.8 릴리스](https://github.com/superradcompany/microsandbox/releases/tag/v0.7.8),
+[russh](https://github.com/warp-tech/russh).
+
+
+## 단일 원격 Farm 실행
+
+Coordinator는 `dist/agent/aarch64/farm-agent`와 `dist/agent/x86_64/farm-agent`를 자동으로 읽는다. `FARM_AGENT_PATH`로 파일을 하나 더 지정할 수 있다. macOS에서 빌드한 native binary는 업로드할 수 없다.
+다음 스크립트는 공식 Rust 1.99.1 Bookworm 이미지와 잠금 파일을 사용해 Linux 실행기만 출력한다.
+첫 빌드에는 Docker/BuildKit과 인터넷이 필요하며 타겟은 glibc 2.36+ 환경을 사용한다 (Ubuntu 24.04/Rocky 10 등).
+
+```bash
+sh scripts/build-agent.sh          # 현재 아키텍처; aarch64/x86_64 인자로 명시 가능
+FARM_AGENT_PATH="$PWD/dist/agent/aarch64/farm-agent" cargo run -- serve
+```
+
+`FARM_AGENT_PATH`는 daemon 시작 시 로드하며 ELF 형식·아키텍처·크기를 검사한다. 변경 시 daemon을 재시작한다.
+`GET /host`의 `agent_artifact`는 설정된 파일의 SHA256·아키텍처·프로토콜·`supports_single_vm` 기능 정보를 반환한다. 경로와 binary는 노출하지 않는다.
+Hosts의 `환경 준비`는 설정된 실행기가 있으면 함께 설치하며, `Farm 실행기 설치` 버튼으로 따로 설치할 수도 있다.
+실행기 설치 자체는 KVM이 없어도 버전 확인까지 가능하지만 Farm 생성에는 KVM·이미지·시험 VM 준비 성공이 필요하다.
+
+실행기는 SSH로 `~/.local/share/farm/agents/<sha256>/farm-agent`에 전송한다.
+임시 파일의 checksum을 확인한 뒤 0700으로 atomic rename하며 같은 digest는 checksum 확인 후 재사용한다.
+실행마다 SSH host key와 인증을 확인하고, JSON 요청을 stdin으로 보내고 JSON line의 phase/output/result를 받는다.
+포트를 열거나 상주 프로세스를 설치하지 않는다. 실행기는 SSH 비밀번호·개인 키를 받거나 보관하지 않는다.
+
+Farm 생성 요청에 `host_id`를 추가한다. 생략하면 기존 Coordinator 로컬 실행이다.
+
+```json
+{"id":"remote-demo","host_id":"worker-01","external_host":"worker-01.example"}
+```
+
+포탈에서도 실행 호스트를 고르면 주소를 공개 URL 기본값에 채운다. 사용자에게 접근 가능한 IPv4/DNS로 조정할 수 있다.
+`external_host=localhost`는 원격 서비스에 맞지 않으므로 명시적으로 설정한다.
+생성하려는 타겟은 `ready`, 설치된 agent, 최근 5분 이내 점검 결과가 있어야 한다.
+VM 1대와 선택한 모든 서비스는 같은 원격 서버에서 실행하며 VM 간 overlay는 필요하지 않다.
+원격 public 서비스는 0.0.0.0의 `15000 + 10n` block 중 선택한 서비스 offset(Keystone 0, Glance 1, Placement 2, Horizon 3, Neutron 4)을 사용한다. 방화벽과 외부 주소의 경로는 운영자가 설정한다.
+동일 port block을 다른 물리 호스트에서 재사용할 수 있으며 실제 타겟에서 사용 중인 포트도 생성 직전에 확인한다.
+
+기존 deploy/delete/endpoints/logs API와 CLI는 Farm의 `host_id`에 따라 원격으로 전달한다.
+배포 단계·출력은 중앙의 기존 log/SSE를 통해 전달한다. OpenStack credentials는 명시적 endpoints 요청에서만 반환하고 저장/로그에 쓰지 않는다.
+포탈 프록시는 기존처럼 credentials를 제거한다.
+
+중앙 `state.json`에는 안정적인 `coordinator_id` UUID를 추가하고 기존 로컬 Farm은 `host_id: null`로 읽는다.
+각 원격 Farm은 `remote_generation` UUID와 설치된 `agent_sha256`을 고정한다.
+호스트의 실행기를 갱신해도 기존 Farm이 사용 중인 digest 디렉터리는 지우지 않는다.
+상태 파일·암호화 key와 이 Coordinator UUID를 함께 복구해야 이전 원격 Farm을 계속 관리할 수 있다.
+
+타겟은 `~/.local/share/farm/worker-v1/registry.json`에 소유 Coordinator·generation·계획·예약·공개 포트를 기록한다.
+VM 생성 전에 atomic 저장하고 host/farm 작업 파일 잠금으로 다른 worker와 충돌을 막는다.
+worker도 전체 예약과 물리 가용 메모리·KVM을 확인한다. 같은 generation의 완료된 create는 기존 VM을 반환하며,
+불완전한 create는 자동 재생하지 않는다. 삭제한 generation의 오래된 create는 재생할 수 없다.
+다른 Coordinator/generation의 VM과 registry에 없는 외부 VM은 임의로 채택하거나 삭제하지 않는다.
+소유권 충돌이나 registry 손실은 운영자가 원격 상태를 확인해 복구해야 한다.
+
+원격 조회는 해당 Coordinator의 Farm만 반환한다. SSH/agent 조회 실패 시 Farm 상태·VM 목록·예약을 유지하고
+`observation_error`와 `last_seen_at`으로 마지막 관측임을 표시한다. 실패를 빈 inventory로 취급해 예약을 풀지 않는다.
+연결이 회복되면 다시 관측한다. 배포/생성은 중앙에서 각각 하나씩, 타겟에서도 충돌을 검사한다.
+강제 종료한 작업은 interrupted가 되며 자동 재실행하지 않는다. SSH 연결이 끊겨도 원격 작업은 timeout까지 남을 수 있다.
+실행기는 create 10분, deploy 2시간, delete 3분으로 제한하며 agent의 파일 잠금과 registry를 확인한 뒤 재시도한다.
+
+## 단일 원격 실행 검증 기록
+
+2026-10-20 추가 검증:
+
+- Rust 자동 테스트는 loopback SSH를 통해 원격 생성·배포·로그·endpoints·삭제 경로를 확인했다.
+  로컬/원격의 메모리·포트 분리, 연결 실패 시 inventory/예약 보존, credential 교체와 호스트 등록 해제 거절을 검증했다.
+- worker는 VM backend를 모의해 소유권·generation·create 재생·삭제 재생 방지·메모리 초과·실패 예약·잠금·외부 VM 보호를 검증했다.
+- 실제 Linux aarch64 바이너리를 Docker로 빌드하고 임시 Rocky Linux OpenSSH 서버에 업로드했다.
+  체크섬·프로토콜 handshake, 같은 digest 재사용, 실제 SDK의 빈 inventory 조회와 없는 Farm 삭제를 확인했다.
+- 시험 Linux VM에 KVM이 없어 원격 KVM에서 실제 Farm 생성부터 OpenStack 배포 성공까지는 미검증이다.
+  이 경로의 상태/로그 연결은 모의 backend 테스트이며 실제 KVM 검증으로 간주하지 않는다.
+
+## 단일 VM 실행기로 업그레이드
+
+새 Coordinator는 `supports_single_vm: true`인 실행기에서만 신규 Farm 생성을 허용한다.
+이 필드가 없는 구형 실행기는 기존 Farm의 inventory·삭제 경로를 위해 유지하며 새 생성에는 사용하지 않는다.
+실행기를 다시 빌드하고 `FARM_AGENT_PATH`를 지정해 Coordinator를 재시작한 뒤 Hosts의 실행기 업데이트를 실행한다.
+기존 Farm의 고정 digest와 registry는 변경하지 않으며 다중 VM Farm의 재배포는 거절한다.

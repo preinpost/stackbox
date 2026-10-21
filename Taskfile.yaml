@@ -1,11 +1,15 @@
 version: '3'
 
 tasks:
+  agent-build:
+    desc: Build a Linux farm-agent binary for the host architecture
+    cmds:
+      - sh scripts/build-agent.sh
   docker-build:
     desc: Build farm-golden:rocky10 image
     cmds:
       - docker build -t farm-golden:rocky10 ./docker
-      - docker save farm-golden:rocky10 | msb load
+      - docker save farm-golden:rocky10 | msb load --tag farm-golden:rocky10
   run-vm:
     desc: Run farm-golden:rocky10 image as a VM
     deps: [docker-build]
@@ -29,3 +33,19 @@ tasks:
     desc: Destroy the VM
     cmds:
       - msb stop devbox && msb rm devbox
+  portal-install:
+    desc: Install web portal dependencies
+    cmds:
+      - npm --prefix web ci
+  portal-dev:
+    desc: Run the local web portal (start farm serve separately)
+    cmds:
+      - npm --prefix web run dev
+  portal-build:
+    desc: Type-check and build the web portal
+    cmds:
+      - npm --prefix web run build
+  portal-serve:
+    desc: Run the built web portal on 127.0.0.1:3000
+    cmds:
+      - npm --prefix web start

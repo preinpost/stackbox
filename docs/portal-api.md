@@ -1,0 +1,76 @@
+# 포탈 backend 연동
+
+이 저장소의 웹포탈은 [web/README.md](../web/README.md)를 참고하세요.
+포탈은 Horizon 카드에 admin 로그인(사용자, 비밀번호, 도메인)을 표시하기 위해
+`OS_USERNAME`, `OS_PASSWORD`, `OS_USER_DOMAIN_NAME`, `OS_PROJECT_NAME`,
+`OS_PROJECT_DOMAIN_NAME`만 브라우저로 전달합니다. 그 외 필드는 제거합니다.
+원격 호스트 등록·SSH 점검·환경 준비와 `/host-jobs` 계약은
+[원격 호스트 운영](remote-hosts.md)에 정리했습니다. `POST /farms`에 `host_id`를 지정하면 해당 원격 호스트에서 실행합니다.
+
+API prefix는 `/api/v1`입니다. token이 설정된 경우 모든 경로에
+`Authorization: Bearer ...`를 전달합니다. 성공·오류 응답은 JSON이며, SSE는 예외입니다.
+작업 접수는 `202 Accepted`, 잘못된 입력은 `400`/`422`, 존재하지 않는 farm/job은 `404`,
+중복 작업·메모리 부족·잘못된 상태 전이는 `409`입니다. 내부 오류는 `500`이며 상세는 데몬 로그에 남습니다.
+
+## 생성과 배포
+
+1. `GET /host`, `GET /catalog`로 준비 상태와 지원 범위를 확인합니다.
+2. `POST /plans`에 `{"components":["horizon"]}`처럼 추가할 서비스를 전달합니다.
+   필수 컴포넌트(Keystone·Glance)와 선택 서비스의 `depends_on`은 자동으로 포함되며, 응답의
+   `components`는 catalog 순서로 정리된 최종 목록입니다. 모르는 컴포넌트나 `available: false`인
+   컴포넌트는 `400`으로 거절합니다. 새 계획의 `nodes`는 항상 `role: "all-in-one"` 한 개입니다.
+   Placement·Horizon·Neutron은 같은 VM에 설치하며 선택한 서비스만큼 메모리가 증가합니다. 이 단계는 포트·메모리를 예약하지 않는 순수 계산입니다.
+3. `POST /farms`에 `id`, `components`, `external_host`, `owner`, `expires_at`을 전달합니다.
+   `host_id`를 생략하면 로컬, 지정하면 준비된 원격 호스트에서 실행합니다. 원격 요청에는 타겟의 접근 가능한 IPv4/DNS `external_host`를 지정하세요.
+   필수 값은 `id`뿐입니다. `expires_at`은 UTC Unix seconds이며 현재 metadata로만 저장합니다.
+   `id`는 1~48자의 소문자·숫자·하이픈이며 양끝에 하이픈을 쓸 수 없습니다.
+4. 응답의 `id` 또는 `Location`으로 `GET /jobs/{id}`를 polling합니다.
+   job 상태는 `queued → running → succeeded/failed`입니다. 데몬 강제 종료 시 `interrupted`가 될 수 있습니다.
+5. create 성공 후 `POST /farms/{id}/deploy`에 `{}`를 전달합니다.
+   배포 job이 성공하면 farm 상태가 `ready`가 됩니다. 기존 다중 VM Farm의 재배포는 `409`로 거절하며 자동 변환하지 않습니다.
+6. 실패하면 job의 `phase`와 `error`를 표시합니다. 재개 요청 예:
+   `POST /farms/{id}/deploy`, body `{"from":"prechecks"}`.
+7. 삭제는 `DELETE /farms/{id}`로 요청하고 동일하게 job 완료를 기다립니다.
+   삭제 성공 후에도 개별 farm 조회에는 `deleted` tombstone이 남지만 목록에서 제외됩니다.
+
+farm 상태는 `creating`, `created`, `deploying`, `ready`, `failed`, `broken`, `deleting`, `deleted`입니다.
+`creating`/`deploying`은 job이 큐에서 대기하는 시간도 포함하므로 job 상태를 같이 표시하세요.
+VM 관측 결과는 시작 시와 30초 주기로 갱신되며, 실행 중인 job의 farm은 reconcile에서 건너뜁니다.
+`ready`는 마지막 배포가 성공하고 예상 VM이 실행 중이라는 뜻이며 OpenStack API의 상시 health check는 아닙니다.
+
+## 로그
+
+`GET /farms/{id}/logs?after=<event-id>&limit=1000`으로 최근 로그를 읽습니다.
+`GET /farms/{id}/logs/stream`의 SSE는 `event: log`, 증가하는 `id`, JSON `LogEntry`를 전달합니다.
+`job_id`로 여러 작업의 로그를 구분할 수 있습니다. `message`는 출력 chunk이므로 항상 한 줄은 아닙니다.
+
+SSE 재연결 시 `Last-Event-ID` 또는 `after` query를 전달하면 이후 이벤트부터 받습니다.
+재생 가능한 범위는 최근 1,000개 이벤트이며, 오래된 cursor에는 `event: gap`을 보낸 뒤
+보관 중인 tail을 재생합니다. 15초마다 keepalive comment를 보냅니다.
+`event: error`는 로그 읽기 실패를 의미합니다. 연결이 종료되면 재연결하세요.
+서비스 종료 시 stream은 닫힙니다. `limit`은 JSON 로그 조회에만 적용됩니다.
+
+## 인증정보
+
+`GET /farms/{id}/endpoints`는 **ready 상태일 때만** admin 인증정보를 반환합니다.
+`services`는 서비스 ID별 public URL이며 `credentials`는 `OS_*` 환경 변수 mapping입니다.
+새 관리 farm에서는 `OS_AUTH_URL`이 public Keystone URL, `OS_INTERFACE`가 `public`으로 반환됩니다.
+비밀번호는 guest의 admin-openrc에서 매번 읽고 host 상태 파일에는 저장하지 않습니다.
+
+응답에는 `Cache-Control: no-store`를 설정합니다. 로컬 테스트 포털은 Horizon 카드에 admin 로그인을 표시합니다.
+외부에 공개된 포털이라면 이 표시를 끄세요. 로그에도 민감한 배포 정보가 있을 수 있으므로 API token을 설정하고
+포탈 사용자의 접근 권한을 backend에서 확인하세요.
+
+## 현재 제약
+
+- 배포 가능한 서비스는 Keystone·Glance(필수)와 Placement·Horizon·Neutron(선택)입니다.
+  Nova는 qemu TCG로 동작합니다. Neutron은 OVS userspace datapath로 동작합니다. `endpoints`의 `services`에는
+  farm 계획에 포함된 서비스의 public URL만 들어갑니다.
+- Coordinator는 VM 생성과 배포를 각각 한 작업씩 실행합니다. 예약은 실행 호스트별이며, agent도 해당 호스트의 생성/배포 작업과 자원을 검사합니다.
+- 원격 조회 실패 시 `observation_error`를 표시하고 마지막 `nodes`와 메모리·포트 예약을 유지합니다. `host_id`, `remote_generation`, `agent_sha256`은 생성 이후 유지됩니다.
+- job 취소·요청 idempotency key·TTL 삭제·로그 회전·farm별 사용자 권한은 아직 없습니다.
+  POST 응답을 잃어버렸다면 목록/상태를 먼저 조회하세요. 동일 ID의 생성 재요청은 충돌로 처리됩니다.
+- `GET /host`의 `hypervisor_available`은 Linux에서는 `/dev/kvm` 접근 여부,
+  macOS에서는 플랫폼 지원 여부입니다. 실제 VM 부팅 성공을 보장하는 검사는 아닙니다.
+- 기존 CLI로 만든 farm은 `plan`과 `exposure`가 `null`일 수 있습니다. 기존 역할 값은 읽기·삭제 호환성을 위해 유지합니다. VM 메모리는 별도로 관측해 예약에 포함합니다.
+- state 디렉터리를 별도로 지정해 운영 데몬 여러 개를 같은 msb 호스트에 실행하지 마세요.
