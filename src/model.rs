@@ -139,7 +139,7 @@ pub const COMPONENTS: &[ComponentDef] = &[
         depends_on: &["keystone", "glance", "placement", "neutron"],
         requires_data_plane: true,
         available: true,
-        // nova-api, scheduler, conductor, compute and libvirt, plus a small TCG guest.
+        // nova-api, scheduler, conductor, compute and libvirt, plus a small guest.
         footprint_mib: 2048,
         public: Some(PublicPort {
             offset: 5,
@@ -166,7 +166,7 @@ pub fn catalog() -> Catalog {
         constraints: vec![
             "Each farm runs all selected OpenStack services in one all-in-one VM.".into(),
             "Open vSwitch uses the userspace datapath, so tenant traffic is slower than on a kernel datapath.".into(),
-            "Nova uses qemu TCG because the guest has no /dev/kvm. Instances boot slowly.".into(),
+            "Nova uses KVM when microsandbox exposes nested /dev/kvm in the guest, otherwise qemu TCG with slow instance boots.".into(),
         ],
     }
 }

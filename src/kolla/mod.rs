@@ -216,7 +216,7 @@ async fn prepare(sandbox: &Sandbox, components: &[String]) -> Result<()> {
         .await?;
     run(sandbox, "chmod 755 /usr/local/sbin/farm-hostname /usr/local/sbin/farm-external; systemctl daemon-reload; systemctl enable farm-hostname.service farm-external.service; systemctl restart farm-hostname.service").await?;
     // Kolla toolbox bind-mounts /run with shared propagation, and nova_libvirt runs QEMU
-    // as gid 42427 without systemd-udevd in the guest. Apply both now and on every Docker start.
+    // as uid/gid 42427 without systemd-udevd in the guest. Apply both now and on every Docker start.
     run(
         sandbox,
         r#"set -euo pipefail
@@ -228,10 +228,10 @@ After=farm-hostname.service farm-external.service
 
 [Service]
 ExecStartPre=/usr/bin/mount --make-shared /run
-ExecStartPre=/usr/bin/sh -c 'if [ -c /dev/kvm ]; then chown root:42427 /dev/kvm && chmod 0660 /dev/kvm; fi'
+ExecStartPre=/usr/bin/sh -c 'if [ -c /dev/kvm ]; then chown root:42427 /dev/kvm && chmod 0666 /dev/kvm; fi'
 EOF
 mount --make-shared /run
-if [ -c /dev/kvm ]; then chown root:42427 /dev/kvm && chmod 0660 /dev/kvm; fi
+if [ -c /dev/kvm ]; then chown root:42427 /dev/kvm && chmod 0666 /dev/kvm; fi
 systemctl daemon-reload"#,
     )
     .await?;
@@ -379,7 +379,8 @@ async fn configure(
     } else {
         run(deployer, &format!("rm -f {horizon_settings}")).await?;
     }
-    // Kolla's default hybrid iptables firewall needs physdev, which the guest kernel lacks.\n    // The OVS firewall uses the userspace datapath's own conntrack instead.
+    // Kolla's default hybrid iptables firewall needs physdev, which the guest kernel lacks.
+    // The OVS firewall uses the userspace datapath's own conntrack instead.
     let ovs_agent = format!("{CONFIG_DIR}/config/neutron/openvswitch_agent.ini");
     if components.iter().any(|c| c == "neutron") {
         run(deployer, &format!("mkdir -p {CONFIG_DIR}/config/neutron")).await?;

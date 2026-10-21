@@ -64,3 +64,8 @@ Kolla-Ansible `23.0.0.0rc3.dev5`, Kolla `2026.2-rocky-10-aarch64` 이미지를 �
 테스트용 `single-e2e`와 `single-base-e2e`는 검증 뒤 삭제했다. 기존 `n1`의 7개 VM은 보존했다.
 원격 Linux/KVM 호스트의 전체 배포는 이번 검증 범위에 포함하지 않는다.
 Nova는 이후 `nova-e2e`(8192 MiB)에서 확인했다. qemu TCG로 Cirros aarch64 인스턴스를 부팅하고, 라우터 namespace에서 고정 IP ping이 통과했다. 공개 Nova API의 서버 목록 조회도 통과했다.
+
+2026-10-21에는 nested virtualization을 넣은 msb 0.7.8(Apple M5 Pro, macOS 26.6.2)로 포털 API에서
+`nova-kvm`(Nova·Horizon, 8192 MiB)을 생성·배포했다. 게스트 `/dev/kvm`을 감지해 `virt_type=kvm`,
+`cpu_mode=host-passthrough`로 구성됐고 verify의 Cirros 부팅·ping이 통과했다. 별도 인스턴스는
+생성 5초 만에 ACTIVE가 됐고 libvirt 도메인이 `type='kvm'`임을 확인했다. 검증 뒤 farm은 삭제했다.

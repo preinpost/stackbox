@@ -6,7 +6,8 @@ Farm마다 microsandbox VM **1대**를 만들고 Kolla all-in-one으로 OpenStac
 
 항상 **Keystone + Glance**를 배포하고, 선택 서비스로 **Placement**, **Horizon**, **Neutron**,
 **Nova**를 추가할 수 있습니다. 선택한 서비스의 의존성은 자동으로 포함됩니다.
-Nova는 게스트에 `/dev/kvm`이 없어 qemu TCG로 작은 인스턴스만 실행합니다.
+Nova는 microsandbox nested virtualization으로 게스트에 `/dev/kvm`이 있으면 KVM으로,
+없으면 qemu TCG로 작은 인스턴스만 실행합니다.
 
 ## 시작
 
@@ -200,8 +201,10 @@ msb 게스트 커널에는 모듈 로딩이 없고 openvswitch datapath, `xt_con
   Kolla의 openvswitch 모듈 로드 task와 vswitchd 이미지의 `modprobe`는 건너뛰고,
   `br-ex`도 `datapath_type=netdev`로 생성하도록 kolla-ansible을 패치합니다.
   Nova가 요구하는 `br_netfilter` 모듈 로드도 건너뜁니다. bridge netfilter는 커널에 내장되어 있습니다.
-- Nova compute는 `/dev/kvm`이 없어 `virt_type=qemu`(TCG)와 `cpu_mode=none`으로 실행합니다.
-  콘솔 프록시는 켜지 않습니다. 인스턴스 부팅은 KVM보다 느립니다.
+- Nova compute는 게스트에 `/dev/kvm`이 있으면 `virt_type=kvm`과 `cpu_mode=host-passthrough`로,
+  없으면 `virt_type=qemu`(TCG)와 `cpu_mode=none`으로 실행합니다. TCG 인스턴스 부팅은 KVM보다 느립니다.
+  `/dev/kvm`은 msb 0.7.8 nested 빌드(`nested_virt_auto` 기본 켜짐)에서 노출됩니다.
+  콘솔 프록시는 켜지 않습니다.
 - 보안 그룹은 hybrid iptables 대신 `openvswitch` firewall driver를 사용합니다.
 - L3 agent는 address scope용 CONNMARK 규칙만 빼고 실행합니다(`src/kolla/neutron_sitecustomize.py`).
   farm은 address scope를 설정하지 않습니다.

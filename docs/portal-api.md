@@ -64,7 +64,7 @@ SSE 재연결 시 `Last-Event-ID` 또는 `after` query를 전달하면 이후 �
 ## 현재 제약
 
 - 배포 가능한 서비스는 Keystone·Glance(필수)와 Placement·Horizon·Neutron(선택)입니다.
-  Nova는 qemu TCG로 동작합니다. Neutron은 OVS userspace datapath로 동작합니다. `endpoints`의 `services`에는
+  Nova는 게스트에 nested `/dev/kvm`이 있으면 KVM, 없으면 qemu TCG로 동작합니다. Neutron은 OVS userspace datapath로 동작합니다. `endpoints`의 `services`에는
   farm 계획에 포함된 서비스의 public URL만 들어갑니다.
 - Coordinator는 VM 생성과 배포를 각각 한 작업씩 실행합니다. 예약은 실행 호스트별이며, agent도 해당 호스트의 생성/배포 작업과 자원을 검사합니다.
 - 원격 조회 실패 시 `observation_error`를 표시하고 마지막 `nodes`와 메모리·포트 예약을 유지합니다. `host_id`, `remote_generation`, `agent_sha256`은 생성 이후 유지됩니다.
