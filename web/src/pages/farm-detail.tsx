@@ -133,7 +133,11 @@ export function FarmDetailPage({ id }: { id: string }) {
             <p>
               {farm.owner || "담당자 미지정"}
               <span>·</span>
-              {farm.host_id ? `원격 · ${farm.host_id}` : "로컬 · Coordinator"}
+              {!farm.host_id
+                ? "호스트 없음"
+                : host?.kind === "local"
+                  ? `로컬 · ${farm.host_id}`
+                  : `원격 · ${farm.host_id}`}
               <span>·</span>
               {dateTime(farm.created_at)} 생성
               {farm.snapshot_id && (
@@ -152,7 +156,7 @@ export function FarmDetailPage({ id }: { id: string }) {
             <>
               <DeployFarmDialog farm={farm} lastJob={latestDeployment} />
               <CheckServicesButton farm={farm} deployed={deployed} />
-              {!farm.host_id && <FreezeFarmDialog farm={farm} />}
+              {host?.kind === "local" && <FreezeFarmDialog farm={farm} />}
               <DeleteFarmDialog farm={farm} />
             </>
           )}

@@ -20,6 +20,7 @@ export type HostCapacity = Schema["HostCapacity"];
 export type HostJob = Schema["HostJob"];
 export type HostKey = Schema["HostKey"];
 export type RegisterHost = Schema["RegisterHost"];
+export type AgentHostToken = Schema["AgentHostToken"];
 export type Snapshot = Schema["SnapshotRecord"];
 export type SnapshotRequest = Schema["SnapshotRequest"];
 export type ImportRequest = Schema["ImportRequest"];
@@ -167,6 +168,18 @@ export const api = {
     request<RemoteHost>("/hosts", {
       method: "POST",
       body: JSON.stringify(body),
+    }),
+  /** Register the machine the coordinator runs on; its agent is the coordinator itself. */
+  registerLocalHost: (id = "local") =>
+    request<RemoteHost>("/local-host", {
+      method: "POST",
+      body: JSON.stringify({ id }),
+    }),
+  /** Register a host whose agent dials in; the token is returned only here. */
+  registerAgentHost: (id: string) =>
+    request<AgentHostToken>("/agent-hosts", {
+      method: "POST",
+      body: JSON.stringify({ id }),
     }),
   checkHost: (id: string) =>
     request<HostJob>(`/hosts/${encode(id)}/check`, { method: "POST" }),

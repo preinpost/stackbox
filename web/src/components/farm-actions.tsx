@@ -2,7 +2,7 @@ import { Dialog } from "@base-ui/react/dialog";
 import { Input } from "@base-ui/react/input";
 import { Checkbox } from "@base-ui/react/checkbox";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useNavigate } from "@tanstack/react-router";
+import { Link, useNavigate } from "@tanstack/react-router";
 import {
   ArrowRight,
   Boxes,
@@ -25,14 +25,16 @@ import {
   hostsQuery,
   keys,
   type Farm,
-  type Host,
   type Job,
   type Phase,
   type RemoteHost,
 } from "../api/client";
 import {
-  agentBuildMismatch,
   componentInfo,
+  hostLabel,
+  hostNotice,
+  hostReady,
+  remoteAgentNeedsUpdate,
   componentLabel,
   farmComponents,
   isAllInOneFarm,
@@ -57,38 +59,19 @@ async function refresh(client: ReturnType<typeof useQueryClient>) {
     client.invalidateQueries({ queryKey: keys.hosts }),
   ]);
 }
-export function localHostReady(host: Host) {
-  return (
-    host.msb_available &&
-    host.golden_image_available &&
-    host.hypervisor_available
-  );
-}
-export const remoteAgentNeedsUpdate = (host: RemoteHost) =>
-  Boolean(host.agent && !host.agent.artifact?.supports_single_vm);
-// Creation requires an updated agent plus a fresh inspection and an idle host.
-export function remoteHostReady(host: RemoteHost, coordinatorBuildId?: string) {
-  return (
-    host.status === "ready" &&
-    host.agent?.artifact?.supports_single_vm === true &&
-    !agentBuildMismatch(host.agent?.artifact, coordinatorBuildId) &&
-    !host.active_job &&
-    Date.now() / 1000 - (host.inspection?.checked_at ?? 0) <= 300
-  );
-}
-function publicHostName(target: string, hosts: RemoteHost[] = []) {
-  if (target === "local") return "localhost";
-  const chosen = hosts.find((h) => `remote:${h.id}` === target);
+function publicHostName(hostId: string, hosts: RemoteHost[] = []) {
+  const chosen = hosts.find((h) => h.id === hostId);
+  if (chosen?.kind === "local") return "localhost";
   return chosen && /^[a-z0-9.-]+$/i.test(chosen.address) ? chosen.address : "";
 }
 export function CreateFarmDialog({
   prominent = false,
-  target,
+  hostId,
   label = "Farm 만들기",
   disabled,
 }: {
   prominent?: boolean;
-  target?: string;
+  hostId?: string;
   label?: string;
   disabled?: boolean;
 }) {
@@ -114,7 +97,7 @@ export function CreateFarmDialog({
         <CreateFarmForm
           close={() => setOpen(false)}
           onPending={setPending}
-          initialTarget={target}
+          initialHost={hostId}
         />
       )}
     </Dialog.Root>
@@ -123,26 +106,29 @@ export function CreateFarmDialog({
 export function CreateFarmForm({
   close,
   onPending,
-  initialTarget = "local",
+  initialHost,
 }: {
   close: () => void;
   onPending: (pending: boolean) => void;
-  initialTarget?: string;
+  initialHost?: string;
 }) {
   const client = useQueryClient();
   const navigate = useNavigate();
   const catalog = useQuery(catalogQuery());
-  const host = useQuery(hostQuery());
-  const remoteHosts = useQuery(hostsQuery());
+  const coordinator = useQuery(hostQuery());
+  const hosts = useQuery(hostsQuery());
+  const buildId = coordinator.data?.build_id;
   const [name, setName] = useState("");
   const [owner, setOwner] = useState("");
   const [selected, setSelected] = useState<string[]>([]);
-  const [target, setTarget] = useState(initialTarget);
-  const [hostName, setHostName] = useState(() =>
-    publicHostName(initialTarget, remoteHosts.data),
-  );
-  const hostId = target.startsWith("remote:") ? target.slice(7) : undefined;
-  const remote = remoteHosts.data?.find((h) => h.id === hostId);
+  // Until the user picks one, default to the given host, else the first ready one.
+  const [picked, setPicked] = useState(initialHost);
+  const hostId =
+    picked ??
+    (hosts.data?.find((h) => hostReady(h, buildId)) ?? hosts.data?.[0])?.id;
+  const [editedHostName, setHostName] = useState<string>();
+  const hostName = editedHostName ?? publicHostName(hostId ?? "", hosts.data);
+  const target = hosts.data?.find((h) => h.id === hostId);
   const farms = useQuery(farmsQuery());
   const components = resolveComponents(
     catalog.data?.components ?? [],
@@ -165,16 +151,15 @@ export function CreateFarmForm({
     },
   });
   const duplicate = farms.data?.some((f) => f.id === name);
-  const capacity = hostId ? remote?.capacity : host.data;
+  const capacity = target?.capacity;
   const remaining = capacity
     ? capacity.memory_budget_mib - capacity.memory_reserved_mib
     : null;
   const overBudget =
     remaining !== null && plan.data && plan.data.memory_mib > remaining;
-  const targetError = hostId ? remoteHosts.error : host.error;
-  const hostUnavailable = hostId
-    ? !remote || !remoteHostReady(remote, host.data?.build_id)
-    : host.data && !localHostReady(host.data);
+  const targetError = hosts.error || coordinator.error;
+  const noHosts = hosts.isSuccess && !hosts.data.length;
+  const hostUnavailable = !target || !hostReady(target, buildId);
   return (
     <Modal
       title="새 farm 만들기"
@@ -190,7 +175,7 @@ export function CreateFarmForm({
             id: name,
             components,
             external_host: hostName,
-            ...(hostId ? { host_id: hostId } : {}),
+            host_id: hostId,
             ...(owner.trim() ? { owner: owner.trim() } : {}),
           });
         }}
@@ -198,34 +183,43 @@ export function CreateFarmForm({
         <div className="modal-body space-y-6">
           <div>
             <span className="field-label">실행 호스트</span>
-            <SelectInput
-              value={target}
-              onChange={(value) => {
-                setTarget(value);
-                setHostName(publicHostName(value, remoteHosts.data));
-              }}
-              disabled={mutation.isPending}
-              label="실행 호스트"
-              items={[
-                { value: "local", label: "로컬 · Coordinator" },
-                ...(remoteHosts.data ?? []).map((h) => {
-                  const ready = remoteHostReady(h, host.data?.build_id);
-                  return {
-                    value: `remote:${h.id}`,
-                    label: `${h.id} · ${ready ? "원격 실행" : remoteAgentNeedsUpdate(h) ? "실행기 업데이트 필요" : "준비 필요"}`,
-                    // Keep the current choice selectable so a preselected host that went stale still renders.
-                    disabled: !ready && `remote:${h.id}` !== target,
-                  };
-                }),
-              ]}
-            />
-            <p className="field-hint mt-2">
-              {hostId
-                ? "VM 한 대가 선택한 서버에서 실행됩니다. 서비스 포트는 해당 서버의 모든 IPv4 인터페이스에 바인딩됩니다."
-                : "Coordinator의 로컬 microsandbox에서 VM 한 대를 실행합니다."}
-              {remaining !== null &&
-                ` · 추가 예약 가능 ${memory(Math.max(0, remaining))}`}
-            </p>
+            {noHosts ? (
+              <div className="warning-notice">
+                등록된 호스트가 없습니다.{" "}
+                <Link to="/hosts" className="text-link" onClick={close}>
+                  Hosts
+                </Link>
+                에서 로컬 호스트나 원격 서버를 등록하고 환경 준비를 마치세요.
+              </div>
+            ) : (
+              <>
+                <SelectInput
+                  value={hostId ?? ""}
+                  onChange={(value) => {
+                    setPicked(value);
+                    setHostName(undefined);
+                  }}
+                  disabled={mutation.isPending || !hosts.data}
+                  label="실행 호스트"
+                  items={(hosts.data ?? []).map((h) => {
+                    const ready = hostReady(h, buildId);
+                    return {
+                      value: h.id,
+                      label: `${hostLabel(h)}${ready ? "" : remoteAgentNeedsUpdate(h) ? " · 실행기 업데이트 필요" : " · 준비 필요"}`,
+                      // Keep the current choice selectable so a preselected host that went stale still renders.
+                      disabled: !ready && h.id !== hostId,
+                    };
+                  })}
+                />
+                <p className="field-hint mt-2">
+                  {target?.kind === "local"
+                    ? "coordinator(farmd)가 실행 중인 머신의 microsandbox에서 VM 한 대를 실행합니다."
+                    : "VM 한 대가 선택한 서버에서 실행됩니다. 서비스 포트는 해당 서버의 모든 IPv4 인터페이스에 바인딩됩니다."}
+                  {remaining !== null &&
+                    ` · 추가 예약 가능 ${memory(Math.max(0, remaining))}`}
+                </p>
+              </>
+            )}
           </div>
           <div className="grid gap-4 sm:grid-cols-2">
             <label className="field">
@@ -377,8 +371,8 @@ export function CreateFarmForm({
               retry={() => {
                 void catalog.refetch();
                 void plan.refetch();
-                void host.refetch();
-                void remoteHosts.refetch();
+                void coordinator.refetch();
+                void hosts.refetch();
               }}
             />
           )}
@@ -389,20 +383,8 @@ export function CreateFarmForm({
               호스트의 예약 한도를 조절하세요.
             </div>
           )}
-          {hostUnavailable && (
-            <div className="warning-notice">
-              {hostId
-                ? remote &&
-                  agentBuildMismatch(
-                    remote.agent?.artifact,
-                    host.data?.build_id,
-                  )
-                  ? "설치된 Farm 실행기가 이 coordinator와 다른 소스에서 빌드되었습니다. `task agent-build`로 다시 빌드한 뒤 Hosts에서 실행기를 재설치하세요."
-                  : remote && remoteAgentNeedsUpdate(remote)
-                    ? "설치된 Farm 실행기는 단일 VM 생성을 지원하지 않습니다. Hosts에서 최신 Farm 실행기를 설치하세요. 기존 Farm의 조회와 삭제는 계속 사용할 수 있습니다."
-                    : "Hosts에서 환경 준비와 단일 VM용 Farm 실행기 설치를 완료하세요. 마지막 SSH 점검이 5분을 지났다면 점검을 갱신하세요."
-                : "Hosts의 로컬 호스트에서 msb·가상화·golden image 상태를 확인하세요."}
-            </div>
+          {target && hostUnavailable && (
+            <div className="warning-notice">{hostNotice(target, buildId)}</div>
           )}
           {mutation.error && <ErrorNotice error={mutation.error} />}
         </div>

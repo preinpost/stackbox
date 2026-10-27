@@ -13,8 +13,14 @@ import {
   Terminal,
 } from "lucide-react";
 import { Fragment, useEffect, useState } from "react";
-import { hostQuery, jobsQuery, hostJobsQuery, activeJob } from "../api/client";
-import { memory } from "../lib";
+import {
+  hostQuery,
+  hostsQuery,
+  jobsQuery,
+  hostJobsQuery,
+  activeJob,
+} from "../api/client";
+import { hostReady } from "../lib";
 
 type Crumb = {
   label: string;
@@ -24,8 +30,6 @@ type Crumb = {
 // The last crumb is the current page and stays plain text.
 function breadcrumb(pathname: string): Crumb[] {
   if (pathname.startsWith("/hosts")) return [{ label: "Hosts" }];
-  if (pathname === "/host")
-    return [{ label: "Hosts", to: "/hosts" }, { label: "로컬" }];
   if (pathname.startsWith("/jobs")) return [{ label: "Jobs" }];
   if (pathname.startsWith("/snapshots")) return [{ label: "Snapshots" }];
   const farm = pathname.match(/^\/farms\/([^/]+)/);
@@ -48,18 +52,16 @@ export function Shell() {
     return () => window.removeEventListener("keydown", close);
   }, [menuOpen]);
   const pathname = useRouterState({ select: (s) => s.location.pathname });
-  const host = useQuery(hostQuery());
+  const coordinator = useQuery(hostQuery());
+  const hosts = useQuery(hostsQuery());
   const jobs = useQuery(jobsQuery());
   const hostJobs = useQuery(hostJobsQuery());
   const running =
     (jobs.data?.filter(activeJob).length ?? 0) +
     (hostJobs.data?.filter((j) => ["queued", "running"].includes(j.status))
       .length ?? 0);
-  const hostReady =
-    !host.isError &&
-    host.data?.msb_available &&
-    host.data.hypervisor_available &&
-    host.data.golden_image_available;
+  const readyHosts =
+    hosts.data?.filter((h) => hostReady(h, coordinator.data?.build_id)) ?? [];
   const navigation = [
     // Hosts come first: a farm is always created on one of them.
     { to: "/hosts" as const, label: "Hosts", icon: Server },
@@ -68,8 +70,7 @@ export function Shell() {
     { to: "/jobs" as const, label: "Jobs", icon: Activity },
   ];
   const sectionActive = (to: string) =>
-    (to === "/" && pathname.startsWith("/farms/")) ||
-    (to === "/hosts" && pathname === "/host");
+    to === "/" && pathname.startsWith("/farms/");
   return (
     <div className="app-layout">
       {menuOpen && (
@@ -125,29 +126,33 @@ export function Shell() {
           <div className="host-mini">
             <div className="host-mini-head">
               <span
-                className={`status-dot ${hostReady ? "text-emerald-500" : "text-amber-500"}`}
+                className={`status-dot ${readyHosts.length ? "text-emerald-500" : "text-amber-500"}`}
               />
               <strong>
-                {host.isError
+                {hosts.isError
                   ? "연결 확인 필요"
-                  : hostReady
-                    ? "Host connected"
-                    : host.isPending
-                      ? "Host 연결 중"
-                      : "Host 설정 확인"}
+                  : hosts.isPending
+                    ? "호스트 확인 중"
+                    : !hosts.data?.length
+                      ? "호스트 등록 필요"
+                      : `호스트 ${readyHosts.length} / ${hosts.data.length} 준비됨`}
               </strong>
             </div>
-            {host.data ? (
+            {hosts.data?.length ? (
               <ul className="host-mini-specs">
-                <li>{host.data.arch}</li>
-                <li>{host.data.hypervisor.toUpperCase()}</li>
-                <li>{memory(host.data.memory_total_mib)}</li>
+                {hosts.data.slice(0, 3).map((h) => (
+                  <li key={h.id}>{h.id}</li>
+                ))}
               </ul>
             ) : (
-              <p>farmd 연결 상태를 확인합니다</p>
+              <p>
+                {hosts.isError
+                  ? "farmd 연결 상태를 확인합니다"
+                  : "로컬 호스트나 원격 서버를 등록하세요"}
+              </p>
             )}
             <Link to="/hosts" onClick={() => setMenuOpen(false)}>
-              <span>호스트 상태 보기</span>
+              <span>호스트 관리</span>
               <ArrowUpRight size={13} />
             </Link>
           </div>

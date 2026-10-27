@@ -8,6 +8,7 @@ use crate::{
     farm::Role,
     kolla::{DeployEvent, EventSink},
     model::*,
+    remote::HostKind,
 };
 use anyhow::{Context, Result, anyhow, bail};
 pub use backend::{Backend, MicrosandboxBackend};
@@ -54,7 +55,10 @@ pub struct FarmManager(Arc<Inner>);
 struct Inner {
     store: Mutex<Store>,
     logs: Mutex<logs::Logs>,
-    backend: Arc<dyn Backend>,
+    /// This machine's farm-agent, for a host registered as local.
+    local_link: Arc<dyn crate::remote::link::AgentLink>,
+    /// Sockets of hosts whose agents dial in.
+    hub: Arc<crate::remote::hub::Hub>,
     options: ManagerOptions,
     create_gate: Semaphore,
     deploy_gate: Semaphore,
@@ -98,9 +102,28 @@ fn bad_request(message: impl Into<String>) -> anyhow::Error {
 
 impl FarmManager {
     pub async fn open(options: ManagerOptions) -> Result<Self> {
-        Self::with_backend(options, backend::real()).await
+        Self::with_link(
+            options,
+            Arc::new(crate::remote::link::ProcessLink::current()?),
+        )
+        .await
     }
+    /// Runs the local host's agent in-process on `backend`, so tests need no VMs.
     pub async fn with_backend(options: ManagerOptions, backend: Arc<dyn Backend>) -> Result<Self> {
+        let agent =
+            crate::remote::agent::Agent::in_process(options.state_dir.join("agent"), backend);
+        Self::with_link(
+            options,
+            Arc::new(crate::remote::link::InProcessLink {
+                agent: Arc::new(agent),
+            }),
+        )
+        .await
+    }
+    async fn with_link(
+        options: ManagerOptions,
+        local_link: Arc<dyn crate::remote::link::AgentLink>,
+    ) -> Result<Self> {
         let mut agent_paths = Vec::new();
         if let Some(path) = &options.agent_binary {
             agent_paths.push(path.clone());
@@ -125,16 +148,22 @@ impl FarmManager {
             .map(|(arch, artifact)| (arch, Arc::new(artifact)))
             .collect();
         let store = Store::open(&options.state_dir)?;
-        let vault = crate::remote::Vault::open(&options.state_dir, !store.state.hosts.is_empty())?;
+        let vault = crate::remote::Vault::open(
+            &options.state_dir,
+            store.state.hosts.values().any(|h| h.credentials.is_some()),
+        )?;
         for host in store.state.hosts.values() {
             // A missing/wrong key must never silently discard or replace existing credentials.
-            vault.unseal(&host.credentials, &host.aad())?;
+            if let Some(credentials) = &host.credentials {
+                vault.unseal(credentials, &host.aad())?;
+            }
         }
         let logs = logs::Logs::new(&options.state_dir)?;
         let manager = Self(Arc::new(Inner {
             store: Mutex::new(store),
             logs: Mutex::new(logs),
-            backend,
+            local_link,
+            hub: Arc::default(),
             options,
             create_gate: Semaphore::new(1),
             deploy_gate: Semaphore::new(1),
@@ -285,33 +314,31 @@ impl FarmManager {
         io: crate::farm::TerminalIo,
     ) -> Result<()> {
         let farm = self.check_terminal(id)?;
-        let backend = match &farm.host_id {
-            None => self.0.backend.clone(),
-            // A shell needs only the host's reservation, not the agent the farm was built
-            // with, so it uses the host's current agent once that matches this coordinator.
-            Some(host_id) => {
-                let current = self
-                    .0
-                    .store
-                    .lock()
-                    .map_err(|_| anyhow!("state mutex poisoned"))?
-                    .state
-                    .hosts
-                    .get(host_id)
-                    .and_then(|stored| stored.host.agent.as_ref())
-                    .filter(|agent| agent.artifact.build_id == crate::BUILD_ID)
-                    .map(|agent| agent.artifact.sha256.clone());
-                let digest = current
-                    .or(farm.agent_sha256.clone())
-                    .context("remote farm has no pinned agent")?;
-                self.remote_backend(
-                    host_id,
-                    &digest,
-                    farm.remote_generation
-                        .as_deref()
-                        .context("remote farm has no generation")?,
-                )?
-            }
+        // A shell needs only the host's reservation, not the agent the farm was built
+        // with, so a remote farm uses the host's current agent once that matches this coordinator.
+        let current = farm.host_id.as_ref().and_then(|host_id| {
+            self.0
+                .store
+                .lock()
+                .ok()?
+                .state
+                .hosts
+                .get(host_id)?
+                .host
+                .agent
+                .as_ref()
+                .filter(|agent| agent.artifact.build_id == crate::BUILD_ID)
+                .map(|agent| agent.artifact.sha256.clone())
+        });
+        let backend = match current {
+            Some(digest) => self.agent_backend(
+                farm.host_id.as_deref().context("farm has no host")?,
+                Some(&digest),
+                farm.remote_generation
+                    .as_deref()
+                    .context("farm has no generation")?,
+            )?,
+            None => self.backend_for(&farm)?,
         };
         backend.terminal(id.into(), size, io).await
     }
@@ -339,23 +366,23 @@ impl FarmManager {
         })
     }
     fn backend_for(&self, farm: &FarmRecord) -> Result<Arc<dyn Backend>> {
-        match &farm.host_id {
-            None => Ok(self.0.backend.clone()),
-            Some(host_id) => self.remote_backend(
-                host_id,
-                farm.agent_sha256
-                    .as_deref()
-                    .context("remote farm has no pinned agent")?,
-                farm.remote_generation
-                    .as_deref()
-                    .context("remote farm has no generation")?,
-            ),
-        }
+        let host_id = farm.host_id.as_deref().ok_or_else(|| {
+            conflict("this farm predates host registration; it has no host to run on")
+        })?;
+        self.agent_backend(
+            host_id,
+            farm.agent_sha256.as_deref(),
+            farm.remote_generation
+                .as_deref()
+                .context("farm has no generation")?,
+        )
     }
-    fn remote_backend(
+    /// The host's farm-agent, acting for one farm generation. A remote host runs the agent
+    /// artifact `digest`; the local host runs this coordinator's own binary.
+    fn agent_backend(
         &self,
         host_id: &str,
-        sha256: &str,
+        digest: Option<&str>,
         generation: &str,
     ) -> Result<Arc<dyn Backend>> {
         let store = self
@@ -368,15 +395,47 @@ impl FarmManager {
             .hosts
             .get(host_id)
             .ok_or_else(|| NotFound(format!("host '{host_id}'")))?;
-        Ok(Arc::new(crate::remote::backend::RemoteBackend {
-            host: stored.host.clone(),
-            credentials: self.0.vault.unseal(&stored.credentials, &stored.aad())?,
-            sha256: sha256.into(),
+        let link: Arc<dyn crate::remote::link::AgentLink> = match stored.host.kind {
+            HostKind::Local => self.0.local_link.clone(),
+            HostKind::Agent => Arc::new(crate::remote::hub::HubLink {
+                hub: self.0.hub.clone(),
+                host: host_id.into(),
+            }),
+            HostKind::Ssh => Arc::new(crate::remote::link::SshLink {
+                host: stored.host.clone(),
+                credentials: self.0.vault.unseal(
+                    stored
+                        .credentials
+                        .as_ref()
+                        .context("remote host has no credentials")?,
+                    &stored.aad(),
+                )?,
+                digest: digest.context("remote farm has no pinned agent")?.into(),
+            }),
+        };
+        Ok(Arc::new(crate::remote::backend::AgentBackend {
+            link,
             coordinator_id: store.state.coordinator_id.clone(),
             generation: generation.into(),
         }))
     }
-
+    /// This machine's agent, which keeps the snapshots. Requires a registered local host.
+    fn local_backend(&self) -> Result<Arc<dyn Backend>> {
+        let local = self
+            .0
+            .store
+            .lock()
+            .map_err(|_| anyhow!("state mutex poisoned"))?
+            .state
+            .hosts
+            .values()
+            .find(|stored| stored.host.kind == HostKind::Local)
+            .map(|stored| stored.host.id.clone())
+            .ok_or_else(|| {
+                conflict("register the local host under Hosts to keep snapshots on it")
+            })?;
+        self.agent_backend(&local, None, "")
+    }
     pub fn create(&self, request: CreateRequest) -> Result<Job> {
         let mut plan = request.validate()?;
         let id = request.id.clone();
@@ -392,43 +451,64 @@ impl FarmManager {
             if let Some(snapshot_id) = &request.snapshot_id {
                 plan = snapshots::restorable(state, snapshot_id)?.plan.clone();
             }
+            let host_id = request.host_id.clone().ok_or_else(|| {
+                bad_request("choose a host for the farm; register the local host or a server under Hosts first")
+            })?;
+            let host = &state
+                .hosts
+                .get(&host_id)
+                .ok_or_else(|| NotFound(format!("host '{host_id}'")))?
+                .host;
+            if !matches!(host.status, crate::remote::HostStatus::Ready) || host.active_job.is_some() {
+                return Err(conflict("the host must finish preparation before creating farms"));
+            }
+            if request.snapshot_id.is_some() && host.kind != HostKind::Local {
+                return Err(conflict("snapshots restore on the local host only"));
+            }
+            let inspection = host.inspection.as_ref().context("ready host has no inspection")?;
+            let (budget, agent_sha256, bind) = match host.kind {
+                HostKind::Local => (self.0.options.memory_budget_mib, None, self.0.options.public_bind),
+                HostKind::Agent => {
+                    if !self.0.hub.connected(&host_id) {
+                        return Err(conflict(format!("the agent of host '{host_id}' is not connected; run `farm agent connect` there")));
+                    }
+                    (inspection.memory_total_mib * 80 / 100, None, IpAddr::V4(Ipv4Addr::UNSPECIFIED))
+                }
+                HostKind::Ssh => {
+                    if now().saturating_sub(inspection.checked_at) > 300 { return Err(conflict("remote inspection is older than 5 minutes; check the host again before creating a farm")); }
+                    let agent = host.agent.as_ref().ok_or_else(|| conflict("install the Farm execution agent on this host first"))?;
+                    if !agent.artifact.supports_single_vm { return Err(conflict("install the updated Farm execution agent to create single-VM farms")); }
+                    if agent.artifact.build_id != crate::BUILD_ID {
+                        return Err(conflict(format!(
+                            "the agent installed on this host was built from {} but this coordinator is {}; rebuild it with `task agent-build` and install the agent again",
+                            agent.artifact.build_id, crate::BUILD_ID
+                        )));
+                    }
+                    (inspection.memory_total_mib * 80 / 100, Some(agent.artifact.sha256.clone()), IpAddr::V4(Ipv4Addr::UNSPECIFIED))
+                }
+            };
+            let local = host.kind == HostKind::Local;
             let reserved: u64 = state
                 .farms
                 .values()
-                .filter(|f| f.status != FarmStatus::Deleted && f.host_id == request.host_id)
+                .filter(|f| f.status != FarmStatus::Deleted && f.host_id.as_deref() == Some(host_id.as_str()))
                 .map(FarmRecord::memory_mib)
                 .sum();
-            let (budget, agent_sha256, remote_generation) = if let Some(host_id) = &request.host_id {
-                let host = &state.hosts.get(host_id).ok_or_else(|| NotFound(format!("host '{host_id}'")))?.host;
-                if !matches!(host.status, crate::remote::HostStatus::Ready) || host.active_job.is_some() { return Err(conflict("remote host must finish environment preparation before creating farms")); }
-                let inspection = host.inspection.as_ref().context("ready host has no inspection")?;
-                if now().saturating_sub(inspection.checked_at) > 300 { return Err(conflict("remote inspection is older than 5 minutes; check the host again before creating a farm")); }
-                let agent = host.agent.as_ref().ok_or_else(|| conflict("install the Farm execution agent on this host first"))?;
-                if !agent.artifact.supports_single_vm { return Err(conflict("install the updated Farm execution agent to create single-VM farms")); }
-                if agent.artifact.build_id != crate::BUILD_ID {
-                    return Err(conflict(format!(
-                        "the agent installed on this host was built from {} but this coordinator is {};
-rebuild it with `task agent-build` and install the agent again",
-                        agent.artifact.build_id, crate::BUILD_ID
-                    )));
-                }
-                (inspection.memory_total_mib * 80 / 100, Some(agent.artifact.sha256.clone()), Some(uuid::Uuid::new_v4().to_string()))
-            } else { (self.0.options.memory_budget_mib, None, None) };
             if reserved.saturating_add(plan.memory_mib) > budget {
                 return Err(conflict(format!(
                     "memory budget exceeded: {reserved} MiB reserved + {} MiB requested > {} MiB",
                     plan.memory_mib, budget
                 )));
             }
-            let exposure =
-                allocate_ports(state, request.external_host, if request.host_id.is_some() { IpAddr::V4(Ipv4Addr::UNSPECIFIED) } else { self.0.options.public_bind }, request.host_id.as_deref())?;
+            let exposure = allocate_ports(state, request.external_host, bind, &host_id, local)?;
+            let remote_generation = Some(uuid::Uuid::new_v4().to_string());
             let mut job = new_job(&id, if request.snapshot_id.is_some() { JobKind::Restore } else { JobKind::Create });
             job.snapshot_id = request.snapshot_id.clone();
             state.farms.insert(
                 id.clone(),
                 FarmRecord {
                     id: id.clone(),
-                    host_id: request.host_id,
+                    host_id: Some(host_id),
                     agent_sha256,
                     remote_generation,
                     observation_error: None,
@@ -720,6 +800,14 @@ rebuild it with `task agent-build` and install the agent again",
                     )
                     .await?;
             }
+            // A farm from before host registration has no agent to remove its VM; drop the record.
+            JobKind::Delete if farm.host_id.is_none() => self.log(
+                &farm.id,
+                &job.id,
+                None,
+                "this farm has no host; removing its record only (delete any leftover VM with msb)\n"
+                    .into(),
+            )?,
             JobKind::Delete => self.backend_for(&farm)?.delete(farm.id).await?,
             JobKind::Settle => {
                 let components = farm_components(&farm);
@@ -856,28 +944,27 @@ rebuild it with `task agent-build` and install the agent again",
                 .store
                 .lock()
                 .map_err(|_| anyhow!("state mutex poisoned"))?;
-            let targets: std::collections::BTreeMap<_, _> = store
+            // Each host is scanned through its own agent, with a farm's pinned agent on remote hosts.
+            let targets: std::collections::BTreeMap<String, Option<String>> = store
                 .state
                 .farms
                 .values()
                 .filter(|f| f.status != FarmStatus::Deleted)
-                .filter_map(|f| Some((f.host_id.clone()?, f.agent_sha256.clone()?)))
+                .filter_map(|f| Some((f.host_id.clone()?, f.agent_sha256.clone())))
                 .collect();
             (store.revision, targets)
         };
-        let local = self.0.backend.scan().await;
-        let remote = futures::stream::iter(targets.into_iter().map(|(id, digest)| async move {
-            let result = match self.remote_backend(&id, &digest, "") {
-                Ok(backend) => backend.scan().await,
-                Err(error) => Err(error),
-            };
-            (Some(id), result)
-        }))
-        .buffer_unordered(4)
-        .collect::<Vec<_>>()
-        .await;
-        let mut observations = vec![(None, local)];
-        observations.extend(remote);
+        let observations =
+            futures::stream::iter(targets.into_iter().map(|(id, digest)| async move {
+                let result = match self.agent_backend(&id, digest.as_deref(), "") {
+                    Ok(backend) => backend.scan().await,
+                    Err(error) => Err(error),
+                };
+                (id, result)
+            }))
+            .buffer_unordered(4)
+            .collect::<Vec<_>>()
+            .await;
         let mut store = self
             .0
             .store
@@ -889,10 +976,10 @@ rebuild it with `task agent-build` and install the agent again",
         store.update(|state| {
             for (host_id, observation) in observations {
                 match observation {
-                    Ok(observed) => apply_inventory(state, observed, host_id.as_deref())?,
+                    Ok(observed) => apply_inventory(state, observed, &host_id),
                     Err(error) => {
                         for farm in state.farms.values_mut().filter(|f| {
-                            f.host_id == host_id
+                            f.host_id.as_deref() == Some(host_id.as_str())
                                 && f.status != FarmStatus::Deleted
                                 && f.active_job.is_none()
                         }) {
@@ -906,15 +993,16 @@ rebuild it with `task agent-build` and install the agent again",
         })
     }
 }
+/// A host's agent reports only the farms this coordinator reserved there.
 fn apply_inventory(
     state: &mut State,
     mut observed: std::collections::BTreeMap<String, Vec<crate::farm::FarmNode>>,
-    host_id: Option<&str>,
-) -> Result<()> {
+    host_id: &str,
+) {
     for farm in state
         .farms
         .values_mut()
-        .filter(|f| f.host_id.as_deref() == host_id)
+        .filter(|f| f.host_id.as_deref() == Some(host_id))
     {
         if farm.active_job.is_some() {
             observed.remove(&farm.id);
@@ -966,65 +1054,6 @@ fn apply_inventory(
         farm.nodes = nodes;
         farm.updated_at = now();
     }
-    if host_id.is_some() {
-        return Ok(());
-    }
-    for (id, nodes) in observed {
-        // Foreign labels are not valid local paths and cannot be safely managed.
-        if validate_id(&id).is_err() || state.farms.contains_key(&id) {
-            continue;
-        }
-        let single = nodes.len() == 1
-            && nodes[0].role == Some(Role::AllInOne)
-            && crate::farm::is_node_name(&id, Role::AllInOne, &nodes[0].name);
-        let legacy = (5..=7).contains(&nodes.len())
-            && [
-                Role::Deployer,
-                Role::Lb,
-                Role::Infra,
-                Role::Keystone,
-                Role::Glance,
-            ]
-            .iter()
-            .all(|r| {
-                nodes
-                    .iter()
-                    .any(|n| n.role == Some(*r) && n.status == "running")
-            })
-            && nodes
-                .iter()
-                .all(|node| node.role.is_some_and(|role| role != Role::AllInOne));
-        let intact = (single || legacy) && nodes.iter().all(|node| node.status == "running");
-        state.farms.insert(
-            id.clone(),
-            FarmRecord {
-                id,
-                host_id: None,
-                remote_generation: None,
-                agent_sha256: None,
-                observation_error: None,
-                last_seen_at: Some(now()),
-                status: if intact {
-                    FarmStatus::Created
-                } else {
-                    FarmStatus::Broken
-                },
-                plan: None,
-                exposure: None,
-                owner: None,
-                expires_at: None,
-                nodes,
-                phase: None,
-                step: None,
-                error: None,
-                active_job: None,
-                created_at: now(),
-                updated_at: now(),
-                snapshot_id: None,
-            },
-        );
-    }
-    Ok(())
 }
 
 fn ensure_idle(farm: &FarmRecord) -> Result<()> {
@@ -1064,18 +1093,20 @@ fn blocks_overlap(a: u16, b: u16, block: u16) -> bool {
     a.abs_diff(b) < block
 }
 
+/// `probe` checks the block against this machine's sockets too, for farms published here.
 fn allocate_ports(
     state: &State,
     host: String,
     bind: IpAddr,
-    host_id: Option<&str>,
+    host_id: &str,
+    probe: bool,
 ) -> Result<Exposure> {
     let block = PUBLIC_PORT_BLOCK;
     for base in (15000u16..24000).step_by(usize::from(block)) {
         // Compare blocks, not just bases, so a widened block cannot overlap an older farm's ports.
         if state.farms.values().any(|f| {
             f.status != FarmStatus::Deleted
-                && f.host_id.as_deref() == host_id
+                && f.host_id.as_deref() == Some(host_id)
                 && f.exposure
                     .as_ref()
                     .is_some_and(|e| blocks_overlap(e.port_base, base, block))
@@ -1083,14 +1114,7 @@ fn allocate_ports(
             continue;
         }
         // Check host sockets as well as durable reservations; actual binding remains the SDK's job.
-        let listeners: std::io::Result<Vec<_>> = (base..if host_id.is_some() {
-            base
-        } else {
-            base + block
-        })
-            .map(|p| TcpListener::bind((bind, p)))
-            .collect();
-        if host_id.is_some() || listeners.is_ok() {
+        if !probe || (base..base + block).all(|p| TcpListener::bind((bind, p)).is_ok()) {
             return Ok(Exposure {
                 host,
                 bind,

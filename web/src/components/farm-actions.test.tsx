@@ -9,13 +9,16 @@ import { CreateFarmForm, DeployFarmDialog } from "./farm-actions";
 const { navigate } = vi.hoisted(() => ({
   navigate: vi.fn().mockResolvedValue(undefined),
 }));
-vi.mock("@tanstack/react-router", () => ({ useNavigate: () => navigate }));
+vi.mock("@tanstack/react-router", () => ({
+  useNavigate: () => navigate,
+  Link: ({ children }: { children: React.ReactNode }) => <a>{children}</a>,
+}));
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
 });
 
-test("uses the selected remote host's capacity and sends its ID and public hostname", async () => {
+test("defaults to a ready host and sends its ID and public hostname", async () => {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
@@ -37,7 +40,15 @@ test("uses the selected remote host's capacity and sends its ID and public hostn
       if (path.endsWith("/hosts"))
         return Response.json([
           {
+            id: "local",
+            kind: "local",
+            address: "localhost",
+            status: "needs_setup",
+            capacity: { memory_budget_mib: 8000, memory_reserved_mib: 0 },
+          },
+          {
             id: "target",
+            kind: "ssh",
             address: "10.0.0.21",
             status: "ready",
             agent: { artifact: { supports_single_vm: true } },
@@ -65,17 +76,15 @@ test("uses the selected remote host's capacity and sends its ID and public hostn
   );
   const user = userEvent.setup();
   await user.type(screen.getByPlaceholderText("dev-openstack"), "remote-test");
-  await screen.findByText(
-    "Hosts의 로컬 호스트에서 msb·가상화·golden image 상태를 확인하세요.",
-  );
+  const select = screen.getByRole("combobox", { name: "실행 호스트" });
+  await waitFor(() => expect(select.textContent).toContain("target · 원격"));
+  await user.click(select);
   expect(
-    (screen.getByRole("button", { name: "Farm 만들기" }) as HTMLButtonElement)
-      .disabled,
-  ).toBe(true);
-  await user.click(screen.getByRole("combobox", { name: "실행 호스트" }));
-  await user.click(
-    await screen.findByRole("option", { name: "target · 원격 실행" }),
-  );
+    (
+      await screen.findByRole("option", { name: "local · 로컬 · 준비 필요" })
+    ).getAttribute("aria-disabled"),
+  ).toBe("true");
+  await user.keyboard("{Escape}");
   await waitFor(() =>
     expect(
       (screen.getByRole("button", { name: "Farm 만들기" }) as HTMLButtonElement)
@@ -100,7 +109,15 @@ test("opens on the host it was launched from and refuses hosts that are not read
   const checked = { checked_at: Date.now() / 1000 };
   const hosts = [
     {
+      id: "local",
+      kind: "local",
+      address: "localhost",
+      status: "ready",
+      capacity: { memory_budget_mib: 8000, memory_reserved_mib: 0 },
+    },
+    {
       id: "target",
+      kind: "ssh",
       address: "10.0.0.21",
       status: "ready",
       agent: { artifact: { supports_single_vm: true } },
@@ -109,6 +126,7 @@ test("opens on the host it was launched from and refuses hosts that are not read
     },
     {
       id: "old-agent",
+      kind: "ssh",
       address: "10.0.0.23",
       status: "ready",
       agent: { artifact: {} },
@@ -117,6 +135,7 @@ test("opens on the host it was launched from and refuses hosts that are not read
     },
     {
       id: "pending",
+      kind: "ssh",
       address: "10.0.0.22",
       status: "needs_setup",
       inspection: checked,
@@ -159,24 +178,24 @@ test("opens on the host it was launched from and refuses hosts that are not read
         <CreateFarmForm
           close={vi.fn()}
           onPending={vi.fn()}
-          initialTarget="remote:target"
+          initialHost="target"
         />
       </Dialog.Root>
     </QueryClientProvider>,
   );
   const user = userEvent.setup();
   const select = screen.getByRole("combobox", { name: "실행 호스트" });
-  expect(select.textContent).toContain("target · 원격 실행");
+  expect(select.textContent).toContain("target · 원격");
   await user.click(select);
   expect(
     (
-      await screen.findByRole("option", { name: "pending · 준비 필요" })
+      await screen.findByRole("option", { name: "pending · 원격 · 준비 필요" })
     ).getAttribute("aria-disabled"),
   ).toBe("true");
   expect(
     (
       await screen.findByRole("option", {
-        name: "old-agent · 실행기 업데이트 필요",
+        name: "old-agent · 원격 · 실행기 업데이트 필요",
       })
     ).getAttribute("aria-disabled"),
   ).toBe("true");
@@ -247,6 +266,16 @@ test("adds optional services with their dependencies and keeps unavailable ones 
           memory_budget_mib: 16000,
           memory_reserved_mib: 0,
         });
+      if (path.endsWith("/hosts"))
+        return Response.json([
+          {
+            id: "local",
+            kind: "local",
+            address: "localhost",
+            status: "ready",
+            capacity: { memory_budget_mib: 16000, memory_reserved_mib: 0 },
+          },
+        ]);
       if (options?.method === "POST") {
         submitted = JSON.parse(String(options.body));
         return Response.json({ id: "job", farm_id: "dash" });
@@ -288,6 +317,37 @@ test("adds optional services with their dependencies and keeps unavailable ones 
   await waitFor(() =>
     expect(submitted?.components).toEqual(["keystone", "glance", "horizon"]),
   );
+  client.clear();
+});
+
+test("asks to register a host when there is none", async () => {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+  });
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (path: string) => {
+      if (path.endsWith("/catalog"))
+        return Response.json({ components: [{ id: "keystone" }] });
+      if (path.endsWith("/plans")) return Response.json(singleVmPlan());
+      if (path.endsWith("/host")) return Response.json({ build_id: "x" });
+      return Response.json([]);
+    }),
+  );
+  render(
+    <QueryClientProvider client={client}>
+      <Dialog.Root open>
+        <CreateFarmForm close={vi.fn()} onPending={vi.fn()} />
+      </Dialog.Root>
+    </QueryClientProvider>,
+  );
+  await screen.findByText(/등록된 호스트가 없습니다/);
+  const user = userEvent.setup();
+  await user.type(screen.getByPlaceholderText("dev-openstack"), "nowhere");
+  expect(
+    (screen.getByRole("button", { name: "Farm 만들기" }) as HTMLButtonElement)
+      .disabled,
+  ).toBe(true);
   client.clear();
 });
 

@@ -211,6 +211,22 @@ test("forwards snapshot routes and keeps others closed", async (t) => {
   }
   assert.equal(seen.length, 5);
 });
+test("forwards local host registration and service checks", async (t) => {
+  const seen = [];
+  const address = await setup(t, (req, res) => {
+    seen.push(`${req.method} ${req.url}`);
+    res.writeHead(202, { "content-type": "application/json" });
+    res.end("{}");
+  });
+  for (const path of ["/api/v1/local-host", "/api/v1/farms/demo/settle"]) {
+    const response = await fetch(address + path, { method: "POST" });
+    assert.equal(response.status, 202, path);
+  }
+  assert.deepEqual(seen, [
+    "POST /api/v1/local-host",
+    "POST /api/v1/farms/demo/settle",
+  ]);
+});
 test("streams SSE and propagates resume cursors without buffering", async (t) => {
   const address = await setup(t, (req, res) => {
     assert.equal(req.headers["last-event-id"], "12");

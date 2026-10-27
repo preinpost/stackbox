@@ -141,7 +141,9 @@ Hosts의 `환경 준비`는 설정된 실행기가 있으면 함께 설치하며
 실행마다 SSH host key와 인증을 확인하고, JSON 요청을 stdin으로 보내고 JSON line의 phase/output/result를 받는다.
 포트를 열거나 상주 프로세스를 설치하지 않는다. 실행기는 SSH 비밀번호·개인 키를 받거나 보관하지 않는다.
 
-Farm 생성 요청에 `host_id`를 추가한다. 생략하면 기존 Coordinator 로컬 실행이다.
+Farm 생성 요청에는 `host_id`가 필요하다. Coordinator가 실행 중인 머신도 `POST /local-host`로 등록한
+`kind: "local"` 호스트이며, 같은 farm-agent 프로토콜을 SSH 대신 하위 프로세스(`farm agent`)로 주고받는다.
+로컬 호스트는 인증정보·실행기 설치가 없고, 환경 준비는 msb·golden image 확인과 시험 VM 부팅만 한다.
 
 ```json
 {"id":"remote-demo","host_id":"worker-01","external_host":"worker-01.example"}
@@ -158,7 +160,8 @@ VM 1대와 선택한 모든 서비스는 같은 원격 서버에서 실행하며
 배포 단계·출력은 중앙의 기존 log/SSE를 통해 전달한다. OpenStack credentials는 명시적 endpoints 요청에서만 반환하고 저장/로그에 쓰지 않는다.
 포탈 프록시는 기존처럼 credentials를 제거한다.
 
-중앙 `state.json`에는 안정적인 `coordinator_id` UUID를 추가하고 기존 로컬 Farm은 `host_id: null`로 읽는다.
+중앙 `state.json`에는 안정적인 `coordinator_id` UUID를 추가한다. 호스트 등록 이전에 만든 `host_id: null` Farm은
+실행할 agent가 없으므로 삭제(기록 제거)만 할 수 있다.
 각 원격 Farm은 `remote_generation` UUID와 설치된 `agent_sha256`을 고정한다.
 호스트의 실행기를 갱신해도 기존 Farm이 사용 중인 digest 디렉터리는 지우지 않는다.
 상태 파일·암호화 key와 이 Coordinator UUID를 함께 복구해야 이전 원격 Farm을 계속 관리할 수 있다.
@@ -218,3 +221,22 @@ host job에 실패 이유가 기록되므로, 원인을 고친 뒤 다시 시도
 farm은 생성할 때 그 호스트의 실행기 digest를 고정합니다. 실행기를 재설치하면 **다음 배포부터**
 farm이 호스트의 현재 실행기로 자동으로 옮겨갑니다(job 로그에 `agent: using the host's current agent …`).
 호스트의 실행기가 이 coordinator와 다른 빌드면 옮기지 않고 `409`로 재설치를 요구합니다.
+
+## 에이전트가 접속해 오는 호스트
+
+SSH 대신 호스트의 agent가 coordinator로 WebSocket을 열어 두는 방식이다(`kind: "agent"`).
+coordinator가 호스트에 접속할 수 없을 때(NAT 뒤의 노트북, 프로세스·SSH를 쓸 수 없는 서버리스 환경에 둔
+coordinator) 사용한다.
+
+1. `POST /api/v1/agent-hosts` `{"id":"edge"}` 또는 포탈의 **에이전트 호스트 등록**. 응답의 `token`은 다시 볼 수 없다.
+   coordinator는 토큰의 SHA-256만 저장한다.
+2. 호스트에서 `FARM_AGENT_TOKEN=<token> farm agent connect https://<coordinator>`를 실행한다
+   (Linux 실행기는 `farm-agent connect <url>`). 끊기면 1초부터 30초까지 늘려 가며 다시 접속한다.
+3. 연결되면 점검·환경 준비를 실행한다. 점검과 시험 VM 부팅은 그 호스트의 agent가 직접 한다.
+   msb 0.7.8과 golden image(`task docker-build`)는 호스트에 직접 준비한다.
+
+요청·진행·결과는 SSH 실행기와 같은 프로토콜을 세션 번호로 나눠 한 소켓에 싣는다. 접속에는 API token이 아니라
+호스트 토큰을 `Authorization: Bearer`로 쓴다. 연결이 끊기면 그 소켓의 진행 중인 작업은 실패로 끝나고,
+agent 쪽에서도 함께 중단된다(SSH가 끊길 때와 같다). 연결되지 않은 호스트에는 Farm을 만들 수 없다.
+public 포트는 원격 호스트처럼 `0.0.0.0`에 바인딩한다.
+

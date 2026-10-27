@@ -28,8 +28,10 @@ cargo build --release
 CLI는 작업이 끝날 때까지 기다립니다.
 
 ```bash
-farm create demo                # 1 VM / 3 GiB (Keystone·Glance)
-farm create web --components horizon   # 선택 서비스만큼 메모리 증가
+farm host local                 # 로컬 호스트로 등록하고 준비 (시험 VM 부팅)
+farm host list
+farm create demo --host-id local                      # 1 VM / 3 GiB (Keystone·Glance)
+farm create web --host-id local --components horizon  # 선택 서비스만큼 메모리 증가
 farm deploy demo
 farm deploy demo --from prechecks
 farm status demo --json
@@ -39,7 +41,7 @@ farm logs demo
 farm delete demo
 
 farm snapshot create demo demo-clean     # VM을 얼려두기 (잠시 정지 후 재시작)
-farm create demo2 --snapshot demo-clean  # 다시 설치하지 않고 불러오기
+farm create demo2 --host-id local --snapshot demo-clean  # 다시 설치하지 않고 불러오기
 farm snapshot export demo-clean -o ~/farm-snapshots/
 farm snapshot import ~/farm-snapshots/demo-clean.msb
 farm settle demo                         # VM 재시작 뒤 배포 없이 서비스 응답만 확인
@@ -55,10 +57,17 @@ farm settle demo                         # VM 재시작 뒤 배포 없이 서비
 
 Tailwind CSS·Base UI와 TanStack Router/Query/Table로 구성한 웹포탈은 `web/`에 있습니다.
 Farm 목록·생성·배포/재개·삭제, VM 토폴로지, 실시간 로그, 작업 내역, 호스트 상태를 제공합니다.
-메뉴는 `Hosts → Farms → Jobs` 순서입니다. `Hosts`에는 로컬 호스트(Coordinator)가 항상 맨 위에 있고,
-원격 서버의 SSH 정보 등록·점검·msb/이미지 준비 작업도 여기서 실행합니다. 준비된 호스트의
-**이 호스트에 Farm 만들기**를 누르거나 Farm 생성 시 실행 호스트를 선택하면
+메뉴는 `Hosts → Farms → Jobs` 순서입니다. Coordinator(`farm serve`)는 API·상태·작업만 맡는
+control plane이고, VM은 **등록하고 준비한 호스트**에서만 실행합니다. coordinator가 도는 머신도 다른 서버와
+같은 호스트(로컬 호스트)로 등록합니다. `Hosts`의 **로컬 호스트 등록**은 SSH 없이 등록한 뒤 점검하고, **원격 호스트 등록**은
+SSH 정보 등록·점검·msb/이미지 준비·실행기 설치를 거칩니다. 어느 쪽이든 Coordinator는 그 호스트의
+farm-agent에게만 VM 작업을 맡깁니다(원격은 SSH, 로컬 호스트는 같은 바이너리를 `farm agent`로 실행).
+준비된 호스트의 **이 호스트에 Farm 만들기**를 누르거나 Farm 생성 시 실행 호스트를 선택하면
 VM 1대의 생성·조회·Kolla 배포·삭제를 해당 호스트에서 실행합니다. Farm 안의 컴포넌트는 같은 VM을 공유합니다.
+로컬 호스트의 환경 준비는 msb 0.7.8과 golden image(`task docker-build`)를 확인하고 시험 VM을 부팅합니다.
+**에이전트 호스트 등록**은 호스트의 agent가 coordinator로 먼저 접속하는 방식입니다. 등록하면 받는 토큰으로
+호스트에서 `FARM_AGENT_TOKEN=<token> farm agent connect https://<coordinator>`(Linux 서버는 `farm-agent connect`)를
+실행해 두면, SSH나 열린 포트 없이 NAT 뒤의 머신이나 외부에 둔 coordinator에서도 같은 방식으로 Farm을 실행합니다.
 
 ```bash
 # 터미널 1: 프로젝트 루트
@@ -107,7 +116,7 @@ curl -N http://127.0.0.1:8080/api/v1/farms/demo/logs/stream
 
 | Method | Path (`/api/v1` 기준) | 반환 |
 |---|---|---|
-| GET | `/host` | msb·golden image·HVF/KVM 확인, 메모리·디스크 상태 |
+| GET | `/host` | Coordinator 정보: 빌드, 실행기 artifact, 상태 디렉터리 (호스트 준비 상태는 `/hosts`) |
 | GET / POST | `/hosts` | 원격 호스트 목록 / SSH 정보 등록 (201) |
 | POST | `/hosts/fingerprint` | 인증 전에 서버 SHA256 지문 조회 |
 | GET / PUT / DELETE | `/hosts/{id}` | 호스트 상세 / 인증 정보 변경 / 등록 해제 |
@@ -115,7 +124,10 @@ curl -N http://127.0.0.1:8080/api/v1/farms/demo/logs/stream
 | GET | `/host-jobs`, `/host-jobs/{id}` | 원격 호스트 작업과 단계 기록 |
 | GET | `/catalog` | 실제 지원 컴포넌트·프로필·제약 |
 | POST | `/plans` | 노드·게스트 메모리·디스크·경고 계산 |
-| GET / POST | `/farms` | 목록 / 생성 job |
+| POST | `/local-host` | 로컬 호스트 등록 (`{"id":"local"}`, SSH 없음) |
+| POST | `/agent-hosts` | 접속해 오는 호스트 등록 (`{"id":"edge"}`) → 1회만 표시되는 agent 토큰 |
+| GET (WebSocket) | `/agent/connect` | 호스트 agent의 접속 (API token 대신 호스트 토큰) |
+| GET / POST | `/farms` | 목록 / 생성 job (`host_id` 필수) |
 | GET / DELETE | `/farms/{id}` | farm 상태 / 삭제 job |
 | POST | `/farms/{id}/deploy` | 배포 job (`{"from":"prechecks"}`로 재개) |
 | POST | `/farms/{id}/settle` | VM 재시작 뒤 서비스 응답 확인 job |

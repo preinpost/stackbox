@@ -1,7 +1,10 @@
 use super::*;
 use crate::remote::{
-    HostInspection, HostJob, HostJobEvent, HostJobKind, HostStatus, RegisterHost, RemoteHost,
-    SealedCredentials, StoredHost, ssh::Session,
+    AgentHostToken, HostInspection, HostJob, HostJobEvent, HostJobKind, HostKind, HostStatus,
+    RegisterAgentHost, RegisterHost, RegisterLocalHost, RemoteHost, StoredHost,
+    link::AgentLink,
+    protocol::{Operation, Reply, Request, VERSION},
+    ssh::Session,
 };
 
 impl FarmManager {
@@ -17,11 +20,15 @@ impl FarmManager {
             .values()
             .map(|s| {
                 let mut host = s.host.clone();
+                let local_budget = self.0.options.memory_budget_mib;
                 host.capacity = host
                     .inspection
                     .as_ref()
                     .map(|i| crate::remote::HostCapacity {
-                        memory_budget_mib: i.memory_total_mib * 80 / 100,
+                        memory_budget_mib: match host.kind {
+                            HostKind::Local => local_budget,
+                            HostKind::Ssh | HostKind::Agent => i.memory_total_mib * 80 / 100,
+                        },
                         memory_reserved_mib: store
                             .state
                             .farms
@@ -33,6 +40,11 @@ impl FarmManager {
                             .map(FarmRecord::memory_mib)
                             .sum(),
                     });
+                host.connected = match host.kind {
+                    HostKind::Local => true,
+                    HostKind::Agent => self.0.hub.connected(&host.id),
+                    HostKind::Ssh => false,
+                };
                 host
             })
             .collect())
@@ -59,28 +71,28 @@ impl FarmManager {
         request.credentials.validate()?;
         let mut stored = StoredHost {
             credential_ref: uuid::Uuid::new_v4().to_string(),
-            credentials: SealedCredentials {
-                nonce: String::new(),
-                ciphertext: String::new(),
-            },
+            credentials: None,
+            token_sha256: None,
             host: RemoteHost {
                 id: request.id,
+                kind: HostKind::Ssh,
                 address: request.address.to_ascii_lowercase(),
                 port: request.port,
                 username: request.username,
                 fingerprint: request.fingerprint,
-                auth_method: request.credentials.method(),
+                auth_method: Some(request.credentials.method()),
                 status: HostStatus::Registered,
                 inspection: None,
                 agent: None,
                 capacity: None,
                 active_job: None,
                 error: None,
+                connected: false,
                 created_at: now(),
                 updated_at: now(),
             },
         };
-        stored.credentials = self.0.vault.seal(&request.credentials, &stored.aad())?;
+        stored.credentials = Some(self.0.vault.seal(&request.credentials, &stored.aad())?);
         self.update(|state| {
             if !self.is_accepting() {
                 return Err(conflict("daemon is draining"));
@@ -99,6 +111,158 @@ impl FarmManager {
             state.hosts.insert(result.id.clone(), stored);
             Ok(result)
         })
+    }
+    /// Register the machine this coordinator runs on. Its agent is this binary, so it needs
+    /// no address, credential or installation; check and prepare it like any other host.
+    pub fn register_local_host(&self, request: RegisterLocalHost) -> Result<RemoteHost> {
+        crate::model::validate_id(&request.id).map_err(|e| bad_request(e.to_string()))?;
+        let host = RemoteHost {
+            id: request.id,
+            kind: HostKind::Local,
+            address: "localhost".into(),
+            port: 0,
+            username: std::env::var("USER").unwrap_or_default(),
+            fingerprint: String::new(),
+            auth_method: None,
+            status: HostStatus::Registered,
+            inspection: None,
+            agent: None,
+            capacity: None,
+            active_job: None,
+            error: None,
+            connected: false,
+            created_at: now(),
+            updated_at: now(),
+        };
+        self.update(|state| {
+            self.ensure_accepting()?;
+            if state.hosts.contains_key(&host.id) {
+                return Err(conflict("host id already exists"));
+            }
+            if state.hosts.values().any(|h| h.host.kind == HostKind::Local) {
+                return Err(conflict("the local host is already registered"));
+            }
+            state.hosts.insert(
+                host.id.clone(),
+                StoredHost {
+                    host: host.clone(),
+                    credential_ref: uuid::Uuid::new_v4().to_string(),
+                    credentials: None,
+                    token_sha256: None,
+                },
+            );
+            Ok(host)
+        })
+    }
+    /// Register a host whose agent will dial in with the returned token
+    /// (`farm agent connect`). No address or credential is stored.
+    pub fn register_agent_host(&self, request: RegisterAgentHost) -> Result<AgentHostToken> {
+        crate::model::validate_id(&request.id).map_err(|e| bad_request(e.to_string()))?;
+        let mut secret = [0u8; 32];
+        getrandom::getrandom(&mut secret).map_err(|e| anyhow!("cannot generate a token: {e}"))?;
+        let token = format!(
+            "farm_{}",
+            base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, secret)
+        );
+        let host = RemoteHost {
+            id: request.id,
+            kind: HostKind::Agent,
+            address: String::new(),
+            port: 0,
+            username: String::new(),
+            fingerprint: String::new(),
+            auth_method: None,
+            status: HostStatus::Registered,
+            inspection: None,
+            agent: None,
+            capacity: None,
+            active_job: None,
+            error: None,
+            connected: false,
+            created_at: now(),
+            updated_at: now(),
+        };
+        self.update(|state| {
+            self.ensure_accepting()?;
+            if state.hosts.contains_key(&host.id) {
+                return Err(conflict("host id already exists"));
+            }
+            state.hosts.insert(
+                host.id.clone(),
+                StoredHost {
+                    host: host.clone(),
+                    credential_ref: uuid::Uuid::new_v4().to_string(),
+                    credentials: None,
+                    token_sha256: Some(token_digest(&token)),
+                },
+            );
+            Ok(())
+        })?;
+        Ok(AgentHostToken { host, token })
+    }
+    /// The dial-in host a token belongs to.
+    pub fn authenticate_agent(&self, token: &str) -> Result<String> {
+        use subtle::ConstantTimeEq;
+        let digest = token_digest(token);
+        self.0
+            .store
+            .lock()
+            .map_err(|_| anyhow!("state mutex poisoned"))?
+            .state
+            .hosts
+            .values()
+            .find(|stored| {
+                stored.host.kind == HostKind::Agent
+                    && stored
+                        .token_sha256
+                        .as_ref()
+                        .is_some_and(|known| bool::from(known.as_bytes().ct_eq(digest.as_bytes())))
+            })
+            .map(|stored| stored.host.id.clone())
+            .ok_or_else(|| NotFound("agent token".into()).into())
+    }
+    /// Hold a dial-in host's socket open for requests until the returned handle drops.
+    pub fn attach_agent(&self, host_id: &str) -> crate::remote::hub::Attached {
+        self.0.hub.attach(host_id)
+    }
+    /// The host's agent: the installed artifact on a remote host, this binary locally,
+    /// or the agent's own connection for a dial-in host.
+    pub(super) fn host_link(&self, stored: &StoredHost) -> Result<Arc<dyn AgentLink>> {
+        Ok(match stored.host.kind {
+            HostKind::Local => self.0.local_link.clone(),
+            HostKind::Agent => Arc::new(crate::remote::hub::HubLink {
+                hub: self.0.hub.clone(),
+                host: stored.host.id.clone(),
+            }),
+            HostKind::Ssh => Arc::new(crate::remote::link::SshLink {
+                host: stored.host.clone(),
+                credentials: self.0.vault.unseal(
+                    stored
+                        .credentials
+                        .as_ref()
+                        .context("remote host has no credentials")?,
+                    &stored.aad(),
+                )?,
+                digest: stored
+                    .host
+                    .agent
+                    .as_ref()
+                    .context("host has no installed agent")?
+                    .artifact
+                    .sha256
+                    .clone(),
+            }),
+        })
+    }
+    fn coordinator_id(&self) -> Result<String> {
+        Ok(self
+            .0
+            .store
+            .lock()
+            .map_err(|_| anyhow!("state mutex poisoned"))?
+            .state
+            .coordinator_id
+            .clone())
     }
     pub fn unregister_host(&self, id: &str) -> Result<()> {
         self.update(|state| {
@@ -146,6 +310,9 @@ impl FarmManager {
             if stored.host.active_job.is_some() {
                 return Err(conflict("host has an active job"));
             }
+            if stored.host.kind != HostKind::Ssh {
+                return Err(conflict("only SSH hosts have credentials"));
+            }
             if stored.host.address != request.address.to_ascii_lowercase()
                 || stored.host.port != request.port
                 || stored.host.username != request.username
@@ -155,9 +322,9 @@ impl FarmManager {
                 ));
             }
             stored.host.fingerprint = request.fingerprint;
-            stored.host.auth_method = request.credentials.method();
+            stored.host.auth_method = Some(request.credentials.method());
             stored.credential_ref = uuid::Uuid::new_v4().to_string();
-            stored.credentials = self.0.vault.seal(&request.credentials, &stored.aad())?;
+            stored.credentials = Some(self.0.vault.seal(&request.credentials, &stored.aad())?);
             stored.host.status = HostStatus::Registered;
             stored.host.error = None;
             stored.host.updated_at = now();
@@ -210,6 +377,11 @@ impl FarmManager {
             if host.active_job.is_some() {
                 return Err(conflict("host already has an active job"));
             }
+            if host.kind != HostKind::Ssh && matches!(kind, HostJobKind::InstallAgent) {
+                return Err(conflict(
+                    "only SSH hosts get an agent installed; this host runs its own",
+                ));
+            }
             let job = HostJob {
                 id: uuid::Uuid::new_v4().to_string(),
                 host_id: id.into(),
@@ -257,13 +429,6 @@ impl FarmManager {
     async fn purge_host(&self, job: &HostJob) -> Result<HostInspection> {
         let host_id = job.host_id.clone();
         let stored = self.stored_host(&host_id)?;
-        self.host_event(
-            job.id.as_str(),
-            "Verifying pinned SSH host key and authenticating",
-        )?;
-        let credentials = self.0.vault.unseal(&stored.credentials, &stored.aad())?;
-        let ssh = Session::connect(&stored.host, credentials).await?;
-
         let farms: Vec<String> = self
             .list()?
             .into_iter()
@@ -288,41 +453,30 @@ impl FarmManager {
             }
         }
 
-        let agent = self
-            .stored_host(&host_id)?
-            .host
-            .agent
-            .ok_or_else(|| anyhow::anyhow!("host has no installed agent to clean up with"))?;
         self.host_event(
             &job.id,
             "Removing VM reservations the agent still holds for this coordinator",
         )?;
-        let coordinator_id = self
-            .0
-            .store
-            .lock()
-            .map_err(|_| anyhow!("state mutex poisoned"))?
-            .state
-            .coordinator_id
-            .clone();
-        let reply = ssh
-            .rpc(
-                &agent.artifact.sha256,
-                &crate::remote::protocol::Request {
-                    version: crate::remote::protocol::VERSION,
-                    coordinator_id,
-                    operation: crate::remote::protocol::Operation::Purge,
+        let link = self
+            .host_link(&self.stored_host(&host_id)?)
+            .context("host has no installed agent to clean up with")?;
+        let reply = link
+            .call(
+                Request {
+                    version: VERSION,
+                    coordinator_id: self.coordinator_id()?,
+                    operation: Operation::Purge,
                 },
                 None,
             )
             .await
             .map_err(|error| {
                 anyhow::anyhow!(
-                    "the agent installed on this host could not run the cleanup ({error:#}); install the current agent from Hosts and remove the host again"
+                    "the host's agent could not run the cleanup ({error:#}); install the current agent from Hosts and remove the host again"
                 )
             })?;
         let purged = match reply {
-            crate::remote::protocol::Reply::Purged { farms } => farms,
+            Reply::Purged { farms } => farms,
             _ => anyhow::bail!("unexpected remote purge response"),
         };
         self.host_event(
@@ -389,8 +543,17 @@ impl FarmManager {
             return self.purge_host(&job).await;
         }
         let stored = self.stored_host(&job.host_id)?;
+        if stored.host.kind != HostKind::Ssh {
+            return self.run_agent_host_job(&job, &stored).await;
+        }
         self.host_event(id, "Verifying pinned SSH host key and authenticating")?;
-        let credentials = self.0.vault.unseal(&stored.credentials, &stored.aad())?;
+        let credentials = self.0.vault.unseal(
+            stored
+                .credentials
+                .as_ref()
+                .context("remote host has no credentials")?,
+            &stored.aad(),
+        )?;
         let ssh = Session::connect(&stored.host, credentials).await?;
         self.host_event(
             id,
@@ -528,6 +691,89 @@ impl FarmManager {
         }
         Ok(inspection)
     }
+    /// Check or prepare a host whose agent needs no installation: this machine, or a host
+    /// that dials in. Its agent inspects the host and boots the test VM. msb and the golden
+    /// image are installed by hand there (`task docker-build`).
+    async fn run_agent_host_job(
+        &self,
+        job: &HostJob,
+        stored: &StoredHost,
+    ) -> Result<HostInspection> {
+        let id = job.id.as_str();
+        let link = self.host_link(stored)?;
+        let coordinator_id = self.coordinator_id()?;
+        let call = |operation| {
+            link.call(
+                Request {
+                    version: VERSION,
+                    coordinator_id: coordinator_id.clone(),
+                    operation,
+                },
+                None,
+            )
+        };
+        self.host_event(id, "Checking the host's farm agent")?;
+        let hello = call(Operation::Hello).await?;
+        anyhow::ensure!(
+            matches!(hello, Reply::Hello { version: VERSION, ref build_id, .. } if build_id == crate::BUILD_ID),
+            "the host's farm agent was built from other sources than this coordinator ({}); update it",
+            crate::BUILD_ID
+        );
+        self.host_event(
+            id,
+            "Inspecting the host: OS, architecture, hypervisor, memory, disk, msb and the golden image",
+        )?;
+        let inspect = || async {
+            match call(Operation::Inspect).await? {
+                Reply::Inspection { inspection } => Ok::<_, anyhow::Error>(inspection),
+                _ => anyhow::bail!("unexpected farm-agent inspection response"),
+            }
+        };
+        let mut inspection = inspect().await?;
+        inspection.vm_boot_verified = !matches!(job.kind, HostJobKind::Prepare)
+            && inspection.runtime_ready()
+            && inspection.golden_image_available
+            && stored
+                .host
+                .inspection
+                .as_ref()
+                .is_some_and(|i| i.vm_boot_verified && i.msb_version == inspection.msb_version);
+        self.host_inspection(&job.host_id, inspection.clone())?;
+        if !matches!(job.kind, HostJobKind::Prepare) {
+            return Ok(inspection);
+        }
+        anyhow::ensure!(
+            inspection.compatible,
+            "the host's OS or architecture is not supported"
+        );
+        anyhow::ensure!(
+            inspection.kvm_available,
+            "the host has no usable hypervisor (/dev/kvm on Linux)"
+        );
+        anyhow::ensure!(
+            inspection.msb_compatible,
+            "install msb 0.7.8 on the host first (found {})",
+            inspection.msb_version.as_deref().unwrap_or("none")
+        );
+        anyhow::ensure!(
+            inspection.golden_image_available,
+            "build {} on the host first with `task docker-build`",
+            crate::farm::BASE_IMAGE
+        );
+        self.host_event(
+            id,
+            "Booting a 512 MiB verification VM, executing a command and removing it",
+        )?;
+        call(Operation::VerifyVm).await?;
+        inspection = inspect().await?;
+        anyhow::ensure!(
+            inspection.runtime_ready() && inspection.golden_image_available,
+            "the host's prerequisites changed during preparation; check it and retry"
+        );
+        inspection.vm_boot_verified = true;
+        self.host_event(id, "VM boot, command execution and cleanup verified")?;
+        Ok(inspection)
+    }
     async fn install_host_agent(&self, ssh: &Session, job: &HostJob) -> Result<()> {
         let arch = self
             .stored_host(&job.host_id)?
@@ -642,4 +888,12 @@ fn check_artifact_build(arch: &str, build_id: &str) -> Result<()> {
 #[cfg(test)]
 pub(crate) fn artifact_built_by_daemon_for_test(arch: &str, build_id: &str) -> Result<()> {
     check_artifact_build(arch, build_id)
+}
+
+fn token_digest(token: &str) -> String {
+    use sha2::Digest;
+    sha2::Sha256::digest(token.as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }

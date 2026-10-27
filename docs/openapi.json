@@ -9,6 +9,54 @@
     "version": "0.1.0"
   },
   "paths": {
+    "/api/v1/agent-hosts": {
+      "post": {
+        "tags": [],
+        "operationId": "register_agent_host",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RegisterAgentHost"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "The host and the token its agent connects with; shown once",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentHostToken"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/catalog": {
       "get": {
         "tags": [],
@@ -1009,6 +1057,54 @@
         }
       }
     },
+    "/api/v1/local-host": {
+      "post": {
+        "tags": [],
+        "operationId": "register_local_host",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RegisterLocalHost"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RemoteHost"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/plans": {
       "post": {
         "tags": [],
@@ -1290,6 +1386,22 @@
           }
         }
       },
+      "AgentHostToken": {
+        "type": "object",
+        "description": "The new host and the token its agent connects with. The token is not shown again.",
+        "required": [
+          "host",
+          "token"
+        ],
+        "properties": {
+          "host": {
+            "$ref": "#/components/schemas/RemoteHost"
+          },
+          "token": {
+            "type": "string"
+          }
+        }
+      },
       "AuthMethod": {
         "type": "string",
         "enum": [
@@ -1420,7 +1532,7 @@
               "string",
               "null"
             ],
-            "description": "Registered remote host. Omit for the local coordinator."
+            "description": "Registered host that runs the farm: this machine's local host or a remote one.\nRequired; it is optional only so the error can say how to register one."
           },
           "id": {
             "type": "string"
@@ -2111,6 +2223,15 @@
           }
         }
       },
+      "HostKind": {
+        "type": "string",
+        "description": "How the coordinator reaches a host's farm-agent.",
+        "enum": [
+          "ssh",
+          "local",
+          "agent"
+        ]
+      },
       "HostStatus": {
         "type": "string",
         "enum": [
@@ -2391,6 +2512,19 @@
         },
         "additionalProperties": false
       },
+      "RegisterAgentHost": {
+        "type": "object",
+        "description": "Register a host whose agent will dial in.",
+        "required": [
+          "id"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
       "RegisterHost": {
         "type": "object",
         "required": [
@@ -2425,6 +2559,16 @@
         },
         "additionalProperties": false
       },
+      "RegisterLocalHost": {
+        "type": "object",
+        "description": "Register the machine the coordinator runs on as a host.",
+        "properties": {
+          "id": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
       "RemoteHost": {
         "type": "object",
         "required": [
@@ -2433,7 +2577,6 @@
           "port",
           "username",
           "fingerprint",
-          "auth_method",
           "status",
           "created_at",
           "updated_at"
@@ -2446,7 +2589,8 @@
             ]
           },
           "address": {
-            "type": "string"
+            "type": "string",
+            "description": "SSH address; `localhost` for the local host."
           },
           "agent": {
             "oneOf": [
@@ -2459,7 +2603,15 @@
             ]
           },
           "auth_method": {
-            "$ref": "#/components/schemas/AuthMethod"
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/AuthMethod",
+                "description": "`None` for the local host, which needs no credential."
+              }
+            ]
           },
           "capacity": {
             "oneOf": [
@@ -2471,6 +2623,10 @@
                 "description": "Derived from coordinator reservations, not a live hypervisor limit."
               }
             ]
+          },
+          "connected": {
+            "type": "boolean",
+            "description": "Whether a dial-in host's agent holds its connection now. Not stored."
           },
           "created_at": {
             "type": "integer",
@@ -2499,9 +2655,13 @@
               }
             ]
           },
+          "kind": {
+            "$ref": "#/components/schemas/HostKind"
+          },
           "port": {
             "type": "integer",
             "format": "int32",
+            "description": "SSH port, user and host key; unused for the local host.",
             "minimum": 0
           },
           "status": {

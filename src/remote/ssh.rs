@@ -155,7 +155,7 @@ impl Session {
         request: &super::protocol::Request,
         sink: Option<crate::kolla::EventSink>,
     ) -> Result<super::protocol::Reply> {
-        use super::protocol::{Frame, MAX_FRAME, Operation};
+        use super::protocol::deliver;
         super::artifact::validate_digest(digest)?;
         let seconds = request.operation.seconds();
         let command = agent_command(digest, seconds);
@@ -185,58 +185,13 @@ impl Session {
                 match event {
                     ChannelMsg::Data { data } => {
                         buffer.extend_from_slice(&data);
-                        while let Some(index) = buffer.iter().position(|b| *b == b'\n') {
-                            ensure!(index <= MAX_FRAME, "farm-agent frame exceeds limit");
-                            let bytes: Vec<u8> = buffer.drain(..=index).collect();
-                            let frame: Frame = serde_json::from_slice(&bytes)
-                                .map_err(|_| anyhow!("invalid farm-agent protocol frame"))?;
+                        for frame in drain_frames(&mut buffer)? {
                             ensure!(
                                 terminal.is_none(),
                                 "farm-agent sent data after a terminal result"
                             );
-                            match frame {
-                                Frame::Result { result } => terminal = Some(Ok(result)),
-                                Frame::Attached | Frame::Terminal { .. } => {
-                                    bail!("unexpected remote terminal event")
-                                }
-                                Frame::Error { message } => {
-                                    terminal = Some(Err(anyhow!("{message}")))
-                                }
-                                Frame::Phase { phase } => {
-                                    ensure!(
-                                        matches!(request.operation, Operation::Deploy { .. }),
-                                        "unexpected remote phase event"
-                                    );
-                                    if let Some(sink) = &sink {
-                                        sink(crate::kolla::DeployEvent::Phase(phase))?;
-                                    }
-                                }
-                                Frame::Step { step } => {
-                                    ensure!(
-                                        matches!(request.operation, Operation::Deploy { .. }),
-                                        "unexpected remote step event"
-                                    );
-                                    if let Some(sink) = &sink {
-                                        sink(crate::kolla::DeployEvent::Step(step))?;
-                                    }
-                                }
-                                Frame::Output { message } => {
-                                    ensure!(
-                                        !matches!(
-                                            request.operation,
-                                            Operation::Endpoints { .. }
-                                                | Operation::Hello
-                                                | Operation::Scan
-                                        ),
-                                        "unexpected remote output event"
-                                    );
-                                    if let Some(sink) = &sink {
-                                        sink(crate::kolla::DeployEvent::Output(message))?;
-                                    }
-                                }
-                            }
+                            terminal = deliver(frame, &request.operation, sink.as_ref())?;
                         }
-                        ensure!(buffer.len() <= MAX_FRAME, "farm-agent frame exceeds limit");
                     }
                     ChannelMsg::ExitStatus { exit_status } => code = Some(exit_status),
                     _ => {}
@@ -349,17 +304,19 @@ impl Session {
     pub async fn test_connection(request: &super::ConnectionTestRequest) -> Result<String> {
         let host = RemoteHost {
             id: "probe".into(),
+            kind: super::HostKind::Ssh,
             address: request.address.clone(),
             port: request.port,
             username: request.username.clone(),
             fingerprint: request.fingerprint.clone(),
-            auth_method: request.credentials.method(),
+            auth_method: Some(request.credentials.method()),
             status: super::HostStatus::Registered,
             inspection: None,
             agent: None,
             capacity: None,
             active_job: None,
             error: None,
+            connected: false,
             created_at: 0,
             updated_at: 0,
         };
@@ -536,14 +493,23 @@ impl Session {
     }
     pub async fn smoke(&self, token: &str) -> Result<()> {
         // Token comes exclusively from a locally generated UUID, never an API field.
-        ensure!(uuid::Uuid::parse_str(token).is_ok(), "invalid smoke token");
-        let script = format!(
-            "{COMMON}\nname=farm-check-{token}\ntrap 'msb remove --force \"$name\" >/dev/null 2>&1' EXIT\nmsb create --name \"$name\" --cpus 1 --memory 512M --root-disk 2G --max-duration 120s --no-net --init /sbin/init farm-golden:rocky10\nmsb exec \"$name\" -- /bin/true\nmsb remove --force \"$name\"\ntrap - EXIT\n"
-        );
-        self.run(&script, 180, "VM boot / exec / cleanup verification")
-            .await?;
+        self.run(
+            &smoke_script(token)?,
+            180,
+            "VM boot / exec / cleanup verification",
+        )
+        .await?;
         Ok(())
     }
+}
+
+/// Boot a small VM from the golden image, run a command in it and remove it.
+pub(crate) fn smoke_script(token: &str) -> Result<String> {
+    // Token comes exclusively from a locally generated UUID, never an API field.
+    ensure!(uuid::Uuid::parse_str(token).is_ok(), "invalid smoke token");
+    Ok(format!(
+        "{COMMON}\nname=farm-check-{token}\ntrap 'msb remove --force \"$name\" >/dev/null 2>&1' EXIT\nmsb create --name \"$name\" --cpus 1 --memory 512M --root-disk 2G --max-duration 120s --no-net --init /sbin/init farm-golden:rocky10\nmsb exec \"$name\" -- /bin/true\nmsb remove --force \"$name\"\ntrap - EXIT\n"
+    ))
 }
 
 const TERMINAL_ATTACH_TIMEOUT: Duration = Duration::from_secs(30);
@@ -676,18 +642,20 @@ mod tests {
     }
     fn host(fixture: &Fixture) -> RemoteHost {
         RemoteHost {
+            kind: crate::remote::HostKind::Ssh,
             id: "test".into(),
             address: "127.0.0.1".into(),
             port: fixture.port,
             username: "operator".into(),
             fingerprint: fixture.fingerprint.clone(),
-            auth_method: AuthMethod::Password,
+            auth_method: Some(AuthMethod::Password),
             status: HostStatus::Registered,
             inspection: None,
             agent: None,
             capacity: None,
             active_job: None,
             error: None,
+            connected: false,
             created_at: 0,
             updated_at: 0,
         }

@@ -1,6 +1,10 @@
 pub mod agent;
 pub mod artifact;
 pub mod backend;
+pub mod dial;
+pub mod host;
+pub mod hub;
+pub mod link;
 pub mod protocol;
 mod secrets;
 pub mod ssh;
@@ -102,6 +106,17 @@ impl Credentials {
 pub enum AuthMethod {
     Password,
     PrivateKey,
+}
+
+/// Register the machine the coordinator runs on as a host.
+#[derive(Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RegisterLocalHost {
+    #[serde(default = "local_host_id")]
+    pub id: String,
+}
+fn local_host_id() -> String {
+    "local".into()
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -228,14 +243,32 @@ impl HostInspection {
     }
 }
 
+/// How the coordinator reaches a host's farm-agent.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum HostKind {
+    /// A registered server, reached over SSH with a pinned host key.
+    #[default]
+    Ssh,
+    /// The machine the coordinator runs on; its agent is the coordinator's own binary.
+    Local,
+    /// A host whose agent dials in to the coordinator (`farm agent connect`).
+    Agent,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
 pub struct RemoteHost {
     pub id: String,
+    #[serde(default)]
+    pub kind: HostKind,
+    /// SSH address; `localhost` for the local host.
     pub address: String,
+    /// SSH port, user and host key; unused for the local host.
     pub port: u16,
     pub username: String,
     pub fingerprint: String,
-    pub auth_method: AuthMethod,
+    /// `None` for the local host, which needs no credential.
+    pub auth_method: Option<AuthMethod>,
     pub status: HostStatus,
     pub inspection: Option<HostInspection>,
     #[serde(default)]
@@ -245,6 +278,9 @@ pub struct RemoteHost {
     pub capacity: Option<HostCapacity>,
     pub active_job: Option<String>,
     pub error: Option<String>,
+    /// Whether a dial-in host's agent holds its connection now. Not stored.
+    #[serde(default)]
+    pub connected: bool,
     pub created_at: u64,
     pub updated_at: u64,
 }
@@ -253,7 +289,24 @@ pub struct RemoteHost {
 pub struct StoredHost {
     pub host: RemoteHost,
     pub credential_ref: String,
-    pub credentials: SealedCredentials,
+    /// `None` for the local host.
+    pub credentials: Option<SealedCredentials>,
+    /// SHA-256 of a dial-in host's agent token; the token itself is shown once.
+    #[serde(default)]
+    pub token_sha256: Option<String>,
+}
+
+/// Register a host whose agent will dial in.
+#[derive(Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct RegisterAgentHost {
+    pub id: String,
+}
+/// The new host and the token its agent connects with. The token is not shown again.
+#[derive(Serialize, ToSchema)]
+pub struct AgentHostToken {
+    pub host: RemoteHost,
+    pub token: String,
 }
 impl StoredHost {
     pub fn aad(&self) -> String {

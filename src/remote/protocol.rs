@@ -1,5 +1,5 @@
 use crate::{
-    farm::{FarmNode, TerminalSize},
+    farm::{FarmNode, FrozenSnapshot, ImportedSnapshot, TerminalSize},
     kolla::Phase,
     model::{Endpoints, Exposure, Plan},
 };
@@ -39,6 +39,42 @@ pub enum Operation {
         farm_id: String,
         generation: String,
     },
+    /// Wait for a deployed farm's services after its VM started from disk, first moving
+    /// the public catalog entries from `rebind.0` to `rebind.1`.
+    Settle {
+        farm_id: String,
+        generation: String,
+        #[serde(default)]
+        rebind: Option<(Exposure, Exposure)>,
+    },
+    /// Stop the farm's VM, capture its disks as `snapshot_id`, and start it again.
+    Freeze {
+        farm_id: String,
+        generation: String,
+        snapshot_id: String,
+        labels: BTreeMap<String, String>,
+    },
+    /// Reserve like `Create`, but boot the farm's VM from a snapshot on this host.
+    Restore {
+        farm_id: String,
+        generation: String,
+        reference: String,
+        plan: Plan,
+        exposure: Exposure,
+    },
+    /// Write a snapshot to an archive file on this host.
+    ExportSnapshot {
+        reference: String,
+        output: String,
+    },
+    /// Load an archive file on this host as a snapshot.
+    ImportSnapshot {
+        archive: String,
+        snapshot_id: String,
+    },
+    RemoveSnapshot {
+        reference: String,
+    },
     /// Interactive shell in the farm's VM. After the request line, the coordinator keeps
     /// stdin open and writes one `TerminalFrame` per line until the session ends.
     Shell {
@@ -46,6 +82,10 @@ pub enum Operation {
         generation: String,
         size: TerminalSize,
     },
+    /// Report this host's OS, hypervisor, msb, golden image and resources.
+    Inspect,
+    /// Boot a small VM from the golden image, run a command in it and remove it.
+    VerifyVm,
     /// Destroy every VM this coordinator reserved on the host, then forget them.
     /// The coordinator runs this only when removing the host.
     Purge,
@@ -75,6 +115,21 @@ impl Operation {
                 farm_id,
                 generation,
                 ..
+            }
+            | Self::Settle {
+                farm_id,
+                generation,
+                ..
+            }
+            | Self::Freeze {
+                farm_id,
+                generation,
+                ..
+            }
+            | Self::Restore {
+                farm_id,
+                generation,
+                ..
             } => Some((farm_id, generation)),
             _ => None,
         }
@@ -87,6 +142,11 @@ impl Operation {
             // A host can hold several farms, each destroyed VM by VM.
             Self::Purge => 1800,
             Self::Shell { .. } => 12 * 3600,
+            Self::Settle { .. } | Self::Freeze { .. } | Self::Restore { .. } => 3600,
+            // Each moves a whole VM disk.
+            Self::ExportSnapshot { .. } | Self::ImportSnapshot { .. } => 7200,
+            Self::RemoveSnapshot { .. } => 300,
+            Self::VerifyVm => 300,
             _ => 60,
         }
     }
@@ -138,11 +198,59 @@ pub enum Reply {
     Endpoints {
         endpoints: Endpoints,
     },
+    Frozen {
+        snapshot: FrozenSnapshot,
+    },
+    Inspection {
+        inspection: super::HostInspection,
+    },
+    Imported {
+        snapshot: ImportedSnapshot,
+    },
     Done,
     Purged {
         /// Farms whose VMs were destroyed, including ones already deleted from the registry.
         farms: usize,
     },
+}
+
+impl Operation {
+    /// Whether the agent reports phases and steps while running this operation.
+    fn reports_progress(&self) -> bool {
+        matches!(self, Self::Deploy { .. } | Self::Settle { .. })
+    }
+    /// Whether the agent may stream command output while running this operation.
+    fn reports_output(&self) -> bool {
+        !matches!(
+            self,
+            Self::Endpoints { .. } | Self::Hello | Self::Scan | Self::Inspect
+        )
+    }
+}
+
+/// Hand a progress frame of a one-shot request to `sink`. Returns the outcome once the
+/// agent reports one; a frame the operation cannot produce is a protocol error.
+pub fn deliver(
+    frame: Frame,
+    operation: &Operation,
+    sink: Option<&crate::kolla::EventSink>,
+) -> anyhow::Result<Option<anyhow::Result<Reply>>> {
+    use crate::kolla::DeployEvent;
+    let event = match frame {
+        Frame::Result { result } => return Ok(Some(Ok(result))),
+        Frame::Error { message } => return Ok(Some(Err(anyhow::anyhow!("{message}")))),
+        Frame::Attached | Frame::Terminal { .. } => {
+            anyhow::bail!("unexpected farm-agent terminal event")
+        }
+        Frame::Phase { phase } if operation.reports_progress() => DeployEvent::Phase(phase),
+        Frame::Step { step } if operation.reports_progress() => DeployEvent::Step(step),
+        Frame::Output { message } if operation.reports_output() => DeployEvent::Output(message),
+        _ => anyhow::bail!("unexpected farm-agent progress event"),
+    };
+    if let Some(sink) = sink {
+        sink(event)?;
+    }
+    Ok(None)
 }
 
 /// Coordinator-to-agent input of a shell session, one JSON object per line.

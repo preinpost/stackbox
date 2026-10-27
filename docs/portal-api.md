@@ -5,7 +5,9 @@
 `OS_USERNAME`, `OS_PASSWORD`, `OS_USER_DOMAIN_NAME`, `OS_PROJECT_NAME`,
 `OS_PROJECT_DOMAIN_NAME`만 브라우저로 전달합니다. 그 외 필드는 제거합니다.
 원격 호스트 등록·SSH 점검·환경 준비와 `/host-jobs` 계약은
-[원격 호스트 운영](remote-hosts.md)에 정리했습니다. `POST /farms`에 `host_id`를 지정하면 해당 원격 호스트에서 실행합니다.
+[원격 호스트 운영](remote-hosts.md)에 정리했습니다. 모든 Farm은 등록된 호스트에서 실행하므로
+`POST /farms`에는 `host_id`가 필요합니다. coordinator가 도는 머신은 `POST /local-host`로 로컬 호스트로 등록한 뒤 다른 호스트처럼
+`POST /hosts/{id}/check`, `POST /hosts/{id}/prepare`로 점검·준비합니다.
 
 API prefix는 `/api/v1`입니다. token이 설정된 경우 모든 경로에
 `Authorization: Bearer ...`를 전달합니다. 성공·오류 응답은 JSON이며, SSE는 예외입니다.
@@ -14,15 +16,16 @@ API prefix는 `/api/v1`입니다. token이 설정된 경우 모든 경로에
 
 ## 생성과 배포
 
-1. `GET /host`, `GET /catalog`로 준비 상태와 지원 범위를 확인합니다.
+1. `GET /hosts`, `GET /catalog`로 실행할 호스트의 준비 상태와 지원 범위를 확인합니다.
 2. `POST /plans`에 `{"components":["horizon"]}`처럼 추가할 서비스를 전달합니다.
    필수 컴포넌트(Keystone·Glance)와 선택 서비스의 `depends_on`은 자동으로 포함되며, 응답의
    `components`는 catalog 순서로 정리된 최종 목록입니다. 모르는 컴포넌트나 `available: false`인
    컴포넌트는 `400`으로 거절합니다. 새 계획의 `nodes`는 항상 `role: "all-in-one"` 한 개입니다.
    Placement·Horizon·Neutron은 같은 VM에 설치하며 선택한 서비스만큼 메모리가 증가합니다. 이 단계는 포트·메모리를 예약하지 않는 순수 계산입니다.
 3. `POST /farms`에 `id`, `components`, `external_host`, `owner`, `expires_at`을 전달합니다.
-   `host_id`를 생략하면 로컬, 지정하면 준비된 원격 호스트에서 실행합니다. 원격 요청에는 타겟의 접근 가능한 IPv4/DNS `external_host`를 지정하세요.
-   필수 값은 `id`뿐입니다. `expires_at`은 UTC Unix seconds이며 현재 metadata로만 저장합니다.
+   `host_id`는 `ready`인 호스트여야 하며, 없으면 `400`, 모르는 호스트는 `404`입니다.
+   원격 호스트에는 타겟의 접근 가능한 IPv4/DNS `external_host`를 지정하세요.
+   필수 값은 `id`와 `host_id`입니다. `expires_at`은 UTC Unix seconds이며 현재 metadata로만 저장합니다.
    `id`는 1~48자의 소문자·숫자·하이픈이며 양끝에 하이픈을 쓸 수 없습니다.
 4. 응답의 `id` 또는 `Location`으로 `GET /jobs/{id}`를 polling합니다.
    job 상태는 `queued → running → succeeded/failed`입니다. 데몬 강제 종료 시 `interrupted`가 될 수 있습니다.

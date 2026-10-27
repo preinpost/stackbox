@@ -5,7 +5,6 @@ import { Radio } from "@base-ui/react/radio";
 import { RadioGroup } from "@base-ui/react/radio-group";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  ArrowRight,
   Check,
   CircleAlert,
   Fingerprint,
@@ -13,6 +12,7 @@ import {
   LoaderCircle,
   Monitor,
   Plus,
+  RadioTower,
   RefreshCw,
   Upload,
   Server,
@@ -20,7 +20,6 @@ import {
   Terminal,
   Trash2,
 } from "lucide-react";
-import { Link } from "@tanstack/react-router";
 import { useRef, useState } from "react";
 import {
   api,
@@ -29,26 +28,29 @@ import {
   hostJobsQuery,
   keys,
   hostQuery,
-  type Host,
   type HostCapacity,
   type HostJob,
   type RemoteHost,
 } from "../api/client";
-import {
-  CreateFarmDialog,
-  localHostReady,
-  remoteHostReady,
-  remoteAgentNeedsUpdate,
-} from "../components/farm-actions";
+import { CreateFarmDialog } from "../components/farm-actions";
 import {
   Button,
+  CopyText,
   ErrorNotice,
   Loading,
   Modal,
   PageHeading,
   StatusBadge,
 } from "../components/ui";
-import { agentBuildMismatch, dateTime, memory, platform } from "../lib";
+import {
+  agentBuildMismatch,
+  dateTime,
+  hostNotice,
+  hostReady,
+  memory,
+  platform,
+  remoteAgentNeedsUpdate,
+} from "../lib";
 
 export function RemoteHostsPage() {
   const hosts = useQuery(hostsQuery());
@@ -56,17 +58,22 @@ export function RemoteHostsPage() {
   const coordinator = useQuery(hostQuery());
   const farms = useQuery(farmsQuery());
   const client = useQueryClient();
-  // Unset selects the local host, which is always listed first.
+  const buildId = coordinator.data?.build_id;
+  // Unset selects the first host.
   const [selectedId, setSelectedId] = useState<string>();
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState<RemoteHost>();
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<unknown>();
-  const selected = hosts.data?.find((h) => h.id === selectedId);
-  const farmCount = (hostId: string | null) =>
-    farms.data?.filter(
-      (f) => f.status !== "deleted" && (f.host_id ?? null) === hostId,
-    ).length ?? 0;
+  const selected =
+    hosts.data?.find((h) => h.id === selectedId) ?? hosts.data?.[0];
+  const local = selected?.kind === "local";
+  // Only SSH hosts have credentials, a host key and an installed agent.
+  const ssh = selected?.kind === "ssh";
+  const localRegistered = hosts.data?.some((h) => h.kind === "local");
+  const farmCount = (hostId: string) =>
+    farms.data?.filter((f) => f.status !== "deleted" && f.host_id === hostId)
+      .length ?? 0;
   const refresh = async () => {
     await Promise.all([
       client.invalidateQueries({ queryKey: keys.hosts }),
@@ -93,10 +100,16 @@ export function RemoteHostsPage() {
               : api.unregisterHost(id),
     onSuccess: refresh,
   });
-  const agentMismatch = agentBuildMismatch(
-    selected?.agent?.artifact,
-    coordinator.data?.build_id,
-  );
+  // Registering this machine checks it right away, like a new remote host.
+  const registerLocal = useMutation({
+    mutationFn: async () => {
+      const host = await api.registerLocalHost();
+      setSelectedId(host.id);
+      await api.checkHost(host.id);
+    },
+    onSettled: refresh,
+  });
+  const agentMismatch = agentBuildMismatch(selected?.agent?.artifact, buildId);
   const hostJobs =
     jobs.data
       ?.filter((j) => j.host_id === selected?.id)
@@ -108,13 +121,32 @@ export function RemoteHostsPage() {
       <PageHeading
         eyebrow="INFRASTRUCTURE"
         title="Hosts"
-        description="Farm을 실행할 호스트를 준비하세요. 로컬 머신과 SSH로 연결한 서버를 함께 관리합니다."
+        description="Farm을 실행할 호스트를 등록하고 준비하세요. 로컬 호스트와 원격 서버를 같은 방식으로 관리합니다."
         actions={
           <>
             <Button onClick={() => void refresh()} disabled={hosts.isFetching}>
               <RefreshCw size={15} />
               새로고침
             </Button>
+            {hosts.isSuccess && !localRegistered && (
+              <Button
+                disabled={registerLocal.isPending}
+                onClick={() => registerLocal.mutate()}
+              >
+                {registerLocal.isPending ? (
+                  <LoaderCircle size={15} className="animate-spin" />
+                ) : (
+                  <Monitor size={15} />
+                )}
+                로컬 호스트 등록
+              </Button>
+            )}
+            <RegisterAgentHostDialog
+              onRegistered={async (id) => {
+                setSelectedId(id);
+                await refresh();
+              }}
+            />
             <Dialog.Root
               open={open}
               onOpenChange={(next) => {
@@ -152,59 +184,40 @@ export function RemoteHostsPage() {
       <div className="remote-workflow">
         <ShieldCheck size={19} />
         <p>
-          <strong>호스트 준비 → 이 호스트에 Farm 만들기</strong>
+          <strong>호스트 등록 → 점검 → 환경 준비 → Farm 만들기</strong>
           <span>
-            로컬 호스트는 바로 사용할 수 있고, 원격 서버는 등록 → SSH 점검 →
-            환경 준비 → Farm 실행기 설치 후 사용할 수 있습니다. Farm마다 VM 한
-            대를 선택한 호스트에서 실행합니다.
+            Farm은 등록하고 준비를 마친 호스트에서만 실행됩니다. 로컬 호스트는
+            등록 후 바로 점검하고, 원격 서버는 SSH 점검과 환경 준비, Farm 실행기
+            설치를 거칩니다. Farm마다 VM 한 대를 선택한 호스트에서 실행합니다.
           </span>
         </p>
       </div>
-      {(hosts.error || jobs.error || action.error || error) && (
+      {(hosts.error ||
+        jobs.error ||
+        action.error ||
+        registerLocal.error ||
+        error) && (
         <ErrorNotice
-          error={hosts.error || jobs.error || action.error || error}
+          error={
+            hosts.error ||
+            jobs.error ||
+            action.error ||
+            registerLocal.error ||
+            error
+          }
         />
       )}
       <div className="remote-host-grid">
         <section className="panel remote-host-list" aria-label="호스트 목록">
           <div className="panel-toolbar">
             <h2>
-              호스트{" "}
-              <span className="muted">{1 + (hosts.data?.length ?? 0)}</span>
+              호스트 <span className="muted">{hosts.data?.length ?? 0}</span>
             </h2>
             <span className="muted text-xs">
-              {(coordinator.data && localHostReady(coordinator.data) ? 1 : 0) +
-                (hosts.data?.filter((h) =>
-                  remoteHostReady(h, coordinator.data?.build_id),
-                ).length ?? 0)}{" "}
+              {hosts.data?.filter((h) => hostReady(h, buildId)).length ?? 0}{" "}
               사용 가능
             </span>
           </div>
-          <button
-            onClick={() => setSelectedId(undefined)}
-            className={`remote-host-row ${!selected ? "selected" : ""}`}
-            aria-pressed={!selected}
-          >
-            <span className="remote-server-icon">
-              <Monitor size={20} strokeWidth={1.5} />
-            </span>
-            <span className="min-w-0 flex-1">
-              <strong>로컬 · Coordinator</strong>
-              <code>
-                localhost
-                {coordinator.data &&
-                  ` · ${platform(coordinator.data.os, coordinator.data.arch)}`}
-                {` · Farm ${farmCount(null)}개`}
-              </code>
-              {coordinator.data && (
-                <StatusBadge
-                  status={
-                    localHostReady(coordinator.data) ? "ready" : "needs_setup"
-                  }
-                />
-              )}
-            </span>
-          </button>
           {hosts.isPending ? (
             <Loading />
           ) : (
@@ -216,12 +229,24 @@ export function RemoteHostsPage() {
                 aria-pressed={selected?.id === host.id}
               >
                 <span className="remote-server-icon">
-                  <Server size={20} strokeWidth={1.5} />
+                  {host.kind === "local" ? (
+                    <Monitor size={20} strokeWidth={1.5} />
+                  ) : host.kind === "agent" ? (
+                    <RadioTower size={20} strokeWidth={1.5} />
+                  ) : (
+                    <Server size={20} strokeWidth={1.5} />
+                  )}
                 </span>
                 <span className="min-w-0 flex-1">
                   <strong>{host.id}</strong>
                   <code>
-                    {host.address}:{host.port}
+                    {host.kind === "local"
+                      ? "로컬"
+                      : host.kind === "agent"
+                        ? host.connected
+                          ? "에이전트 연결됨"
+                          : "에이전트 연결 끊김"
+                        : `${host.address}:${host.port}`}
                     {host.inspection &&
                       ` · ${platform(host.inspection.os, host.inspection.arch)}`}
                     {` · Farm ${farmCount(host.id)}개`}
@@ -235,22 +260,25 @@ export function RemoteHostsPage() {
               </button>
             ))
           )}
-          {!hosts.isPending && !hosts.error && !hosts.data?.length && (
+          {hosts.isSuccess && !hosts.data.length && (
             <p className="remote-unchecked">
-              원격 서버에 Farm을 실행하려면 SSH 인증 정보로 호스트를 등록하세요.{" "}
+              Farm을 실행할 호스트가 없습니다. coordinator가 실행 중인 머신에서
+              실행하려면{" "}
+              <button
+                className="text-link"
+                disabled={registerLocal.isPending}
+                onClick={() => registerLocal.mutate()}
+              >
+                로컬 호스트 등록
+              </button>
+              , 다른 서버에서 실행하려면{" "}
               <button className="text-link" onClick={() => setOpen(true)}>
                 원격 호스트 등록
               </button>
+              을 선택하세요.
             </p>
           )}
         </section>
-        {!selected && (
-          <LocalHostDetail
-            host={coordinator.data}
-            error={coordinator.error}
-            farms={farmCount(null)}
-          />
-        )}
         {selected && (
           <section
             className="panel remote-host-detail"
@@ -258,10 +286,18 @@ export function RemoteHostsPage() {
           >
             <div className="remote-detail-heading">
               <div>
-                <p className="eyebrow">REMOTE HOST</p>
+                <p className="eyebrow">
+                  {local ? "LOCAL HOST" : ssh ? "REMOTE HOST" : "AGENT HOST"}
+                </p>
                 <h2>{selected.id}</h2>
                 <p className="muted text-xs mt-1 break-all">
-                  {selected.username}@{selected.address}:{selected.port}
+                  {local
+                    ? "localhost · coordinator(farmd)가 실행 중인 머신"
+                    : ssh
+                      ? `${selected.username}@${selected.address}:${selected.port}`
+                      : selected.connected
+                        ? "에이전트 연결됨 · 호스트가 coordinator로 접속해 있습니다"
+                        : "에이전트 연결 끊김 · 호스트에서 farm agent connect를 실행하세요"}
                 </p>
               </div>
               <StatusBadge status={selected.status} />
@@ -272,73 +308,79 @@ export function RemoteHostsPage() {
                 <p>{selected.error}</p>
               </div>
             )}
-            <div className="remote-fingerprint">
-              <Fingerprint size={17} />
-              <div>
-                <span>
-                  등록된 서버 지문 ·{" "}
-                  {selected.auth_method === "password"
-                    ? "비밀번호 인증"
-                    : "SSH 키 인증"}
-                </span>
-                <code>{selected.fingerprint}</code>
+            {ssh && (
+              <div className="remote-fingerprint">
+                <Fingerprint size={17} />
+                <div>
+                  <span>
+                    등록된 서버 지문 ·{" "}
+                    {selected.auth_method === "password"
+                      ? "비밀번호 인증"
+                      : "SSH 키 인증"}
+                  </span>
+                  <code>{selected.fingerprint}</code>
+                </div>
               </div>
-            </div>
+            )}
             {selected.inspection ? (
               <HostInspection
                 host={selected}
                 farms={farmCount(selected.id)}
-                coordinatorBuildId={coordinator.data?.build_id}
+                coordinatorBuildId={buildId}
               />
             ) : (
               <p className="remote-unchecked">
-                아직 점검하지 않았습니다. SSH 접속과 실행 조건을 확인하세요.
+                {ssh
+                  ? "아직 점검하지 않았습니다. SSH 접속과 실행 조건을 확인하세요."
+                  : "아직 점검하지 않았습니다. 호스트의 msb·가상화·golden image를 확인하세요."}
               </p>
             )}
             <div className="remote-actions">
               <CreateFarmDialog
                 key={`${selected.id}-farm`}
-                target={`remote:${selected.id}`}
+                hostId={selected.id}
                 label="이 호스트에 Farm 만들기"
-                disabled={
-                  !remoteHostReady(selected, coordinator.data?.build_id)
-                }
+                disabled={!hostReady(selected, buildId)}
               />
-              <Button
-                disabled={!!selected.active_job || action.isPending}
-                onClick={() => {
-                  setEditing(selected);
-                  setOpen(true);
-                }}
-              >
-                <KeyRound size={14} />
-                인증 변경
-              </Button>
-              <Button
-                variant={agentMismatch ? "primary" : "default"}
-                disabled={
-                  !!selected.active_job ||
-                  action.isPending ||
-                  !coordinator.data?.agent_artifacts?.some(
-                    (artifact) => artifact.arch === selected.inspection?.arch,
-                  )
-                }
-                onClick={() =>
-                  action.mutate({ id: selected.id, kind: "agent" })
-                }
-                title={
-                  agentMismatch
-                    ? "설치된 실행기의 빌드가 coordinator와 다릅니다. 재설치하세요."
-                    : undefined
-                }
-              >
-                <Terminal size={14} />
-                {agentMismatch
-                  ? "Farm 실행기 재설치"
-                  : remoteAgentNeedsUpdate(selected)
-                    ? "Farm 실행기 업데이트"
-                    : "Farm 실행기 설치"}
-              </Button>
+              {ssh && (
+                <Button
+                  disabled={!!selected.active_job || action.isPending}
+                  onClick={() => {
+                    setEditing(selected);
+                    setOpen(true);
+                  }}
+                >
+                  <KeyRound size={14} />
+                  인증 변경
+                </Button>
+              )}
+              {ssh && (
+                <Button
+                  variant={agentMismatch ? "primary" : "default"}
+                  disabled={
+                    !!selected.active_job ||
+                    action.isPending ||
+                    !coordinator.data?.agent_artifacts?.some(
+                      (artifact) => artifact.arch === selected.inspection?.arch,
+                    )
+                  }
+                  onClick={() =>
+                    action.mutate({ id: selected.id, kind: "agent" })
+                  }
+                  title={
+                    agentMismatch
+                      ? "설치된 실행기의 빌드가 coordinator와 다릅니다. 재설치하세요."
+                      : undefined
+                  }
+                >
+                  <Terminal size={14} />
+                  {agentMismatch
+                    ? "Farm 실행기 재설치"
+                    : remoteAgentNeedsUpdate(selected)
+                      ? "Farm 실행기 업데이트"
+                      : "Farm 실행기 설치"}
+                </Button>
+              )}
               <Button
                 disabled={!!selected.active_job || action.isPending}
                 onClick={() =>
@@ -346,7 +388,7 @@ export function RemoteHostsPage() {
                 }
               >
                 <RefreshCw size={14} />
-                SSH 점검
+                {ssh ? "SSH 점검" : "점검"}
               </Button>
               <HostActionDialog
                 key={`${selected.id}-prepare`}
@@ -364,7 +406,7 @@ export function RemoteHostsPage() {
                 kind="remove"
                 disabled={!!selected.active_job || action.isPending}
                 farms={farmCount(selected.id)}
-                coordinatorBuildId={coordinator.data?.build_id}
+                coordinatorBuildId={buildId}
                 run={(purge) =>
                   action.mutateAsync({
                     id: selected.id,
@@ -373,15 +415,11 @@ export function RemoteHostsPage() {
                 }
               />
             </div>
-            {!remoteHostReady(selected, coordinator.data?.build_id) &&
-              !selected.active_job && (
-                <p className="field-hint mt-3">
-                  {remoteAgentNeedsUpdate(selected)
-                    ? "기존 실행기는 단일 VM 생성을 지원하지 않습니다. Farm 실행기를 업데이트하세요. 기존 Farm의 조회와 삭제는 계속 사용할 수 있습니다."
-                    : "Farm을 만들려면 환경 준비와 단일 VM용 Farm 실행기 설치를 마치고, 최근 5분 안에 SSH 점검을 통과해야 합니다."}
-                </p>
-              )}
-            {selected.inspection &&
+            {!hostReady(selected, buildId) && !selected.active_job && (
+              <p className="field-hint mt-3">{hostNotice(selected, buildId)}</p>
+            )}
+            {ssh &&
+              selected.inspection &&
               !coordinator.data?.agent_artifacts?.some(
                 (artifact) => artifact.arch === selected.inspection?.arch,
               ) && (
@@ -428,71 +466,113 @@ export function RemoteHostsPage() {
   );
 }
 
-function LocalHostDetail({
-  host,
-  error,
-  farms,
+/** A host whose agent dials in. Its token is shown once, with the command to run there. */
+export function RegisterAgentHostDialog({
+  onRegistered,
 }: {
-  host?: Host;
-  error: unknown;
-  farms: number;
+  onRegistered: (id: string) => Promise<void>;
 }) {
-  const ready = host && localHostReady(host);
-  const checks = host
-    ? [
-        { label: "microsandbox runtime", ready: host.msb_available },
-        {
-          label: `${host.hypervisor.toUpperCase()} 가상화`,
-          ready: host.hypervisor_available,
-        },
-        { label: "Golden image", ready: host.golden_image_available },
-      ]
-    : [];
+  const [open, setOpen] = useState(false);
+  const [id, setId] = useState("");
+  const register = useMutation({
+    mutationFn: () => api.registerAgentHost(id),
+    onSuccess: (registered) => onRegistered(registered.host.id),
+  });
+  const token = register.data?.token;
+  const command = token
+    ? `FARM_AGENT_TOKEN=${token} farm agent connect <coordinator URL>`
+    : "";
   return (
-    <section className="panel remote-host-detail" aria-label="로컬 호스트 상세">
-      <div className="remote-detail-heading">
-        <div>
-          <p className="eyebrow">LOCAL HOST</p>
-          <h2>로컬 · Coordinator</h2>
-          <p className="muted text-xs mt-1 break-all">
-            localhost · farm 데몬이 실행 중인 머신
-          </p>
-        </div>
-        {host && <StatusBadge status={ready ? "ready" : "needs_setup"} />}
-      </div>
-      {error ? (
-        <ErrorNotice error={error} />
-      ) : !host ? (
-        <Loading />
-      ) : (
-        <>
-          <HostResources resources={host} capacity={host} farms={farms} />
-          <ul className="remote-checks">
-            {checks.map((check) => (
-              <li
-                key={check.label}
-                className={check.ready ? "check-ok" : "check-missing"}
-              >
-                {check.ready ? <Check size={15} /> : <CircleAlert size={15} />}
-                <span>{check.label}</span>
-                <span>{check.ready ? "확인됨" : "확인 필요"}</span>
-              </li>
-            ))}
-          </ul>
-        </>
+    <Dialog.Root
+      open={open}
+      onOpenChange={(next) => {
+        if (register.isPending) return;
+        setOpen(next);
+        if (!next) {
+          // The token is not shown again once the dialog closes.
+          register.reset();
+          setId("");
+        }
+      }}
+    >
+      <Dialog.Trigger render={<Button />}>
+        <RadioTower size={15} />
+        에이전트 호스트 등록
+      </Dialog.Trigger>
+      {open && (
+        <Modal
+          title={token ? `${id} 에이전트 연결` : "에이전트 호스트 등록"}
+          description={
+            token
+              ? "호스트에서 아래 명령을 실행하면 coordinator로 접속합니다. 토큰은 지금만 표시됩니다."
+              : "호스트의 에이전트가 coordinator로 직접 접속합니다. SSH나 열린 포트가 필요 없어 NAT 뒤의 머신이나 클라우드에 둔 coordinator에도 연결할 수 있습니다."
+          }
+          closeDisabled={register.isPending}
+        >
+          {token ? (
+            <div className="modal-body space-y-4">
+              <label className="field">
+                <span>실행할 명령</span>
+                <code className="agent-command">{command}</code>
+                <CopyText value={command} hideValue name="실행 명령" />
+              </label>
+              <p className="field-hint">
+                <code>&lt;coordinator URL&gt;</code>에는 호스트에서 접근할 수
+                있는 farmd 주소(예: <code>https://farm.example</code>)를
+                넣으세요. 호스트에는 같은 빌드의 <code>farm</code>
+                (Linux 서버는 <code>farm-agent connect</code>)이 필요합니다.
+                연결되면 이 호스트를 점검하고 환경 준비를 실행하세요.
+              </p>
+              <div className="modal-footer justify-end">
+                <Dialog.Close render={<Button variant="primary" />}>
+                  완료
+                </Dialog.Close>
+              </div>
+            </div>
+          ) : (
+            <form
+              onSubmit={(event) => {
+                event.preventDefault();
+                register.mutate();
+              }}
+            >
+              <div className="modal-body space-y-4">
+                <label className="field">
+                  <span>호스트 ID</span>
+                  <Input
+                    autoFocus
+                    value={id}
+                    onValueChange={setId}
+                    className="input font-mono"
+                    placeholder="edge-01"
+                    required
+                    maxLength={48}
+                    pattern="[a-z0-9]([a-z0-9-]{0,46}[a-z0-9])?"
+                    disabled={register.isPending}
+                  />
+                </label>
+                {register.error && <ErrorNotice error={register.error} />}
+              </div>
+              <div className="modal-footer justify-end">
+                <Dialog.Close render={<Button disabled={register.isPending} />}>
+                  취소
+                </Dialog.Close>
+                <Button
+                  type="submit"
+                  variant="primary"
+                  disabled={register.isPending || !id}
+                >
+                  {register.isPending && (
+                    <LoaderCircle size={14} className="animate-spin" />
+                  )}
+                  등록하고 토큰 받기
+                </Button>
+              </div>
+            </form>
+          )}
+        </Modal>
       )}
-      <div className="remote-actions">
-        <CreateFarmDialog
-          target="local"
-          label="이 호스트에 Farm 만들기"
-          disabled={!ready}
-        />
-        <Link to="/host" className="btn btn-default">
-          상세 보기
-          <ArrowRight size={14} />
-        </Link>
-      </div>
-    </section>
+    </Dialog.Root>
   );
 }
 
@@ -551,13 +631,27 @@ function HostInspection({
   coordinatorBuildId?: string;
 }) {
   const i = host.inspection!;
-  const checks = [
-    { label: "Linux x86_64 · aarch64", ready: i.compatible },
-    { label: "KVM 접근", ready: i.kvm_available },
+  // This machine and dial-in hosts run their own agent and prepare their image by hand.
+  const local = host.kind !== "ssh";
+  const runtime = [
+    {
+      label: local
+        ? "macOS · Linux, x86_64 · aarch64"
+        : "Linux x86_64 · aarch64",
+      ready: i.compatible,
+    },
+    {
+      label: i.os === "macos" ? "HVF 가상화" : "KVM 접근",
+      ready: i.kvm_available,
+    },
     { label: "msb 0.7.8", ready: i.msb_compatible },
-    { label: "Docker 접근", ready: i.docker_available },
+    // A hand-prepared golden image needs no Docker access from the agent.
+    ...(local ? [] : [{ label: "Docker 접근", ready: i.docker_available }]),
     { label: "Golden image", ready: i.golden_image_available },
     { label: "VM 부팅·실행 검증", ready: i.vm_boot_verified },
+  ];
+  // Only SSH hosts get an agent installed by the coordinator.
+  const agent = [
     {
       label: remoteAgentNeedsUpdate(host)
         ? "Farm 실행기 · 업데이트 필요"
@@ -573,6 +667,7 @@ function HostInspection({
         !agentBuildMismatch(host.agent?.artifact, coordinatorBuildId),
     },
   ];
+  const checks = local ? runtime : [...runtime, ...agent];
   return (
     <>
       <HostResources resources={i} capacity={host.capacity} farms={farms} />
@@ -601,20 +696,22 @@ function HostInspection({
             {coordinatorBuildId || "미상"}
           </dd>
         </div>
-        <div>
-          <dt>remote</dt>
-          <dd
-            className={
-              agentBuildMismatch(host.agent?.artifact, coordinatorBuildId)
-                ? "build-mismatch"
-                : !host.agent
-                  ? "build-unknown"
-                  : ""
-            }
-          >
-            {host.agent?.artifact?.build_id || "설치 안 됨"}
-          </dd>
-        </div>
+        {!local && (
+          <div>
+            <dt>remote</dt>
+            <dd
+              className={
+                agentBuildMismatch(host.agent?.artifact, coordinatorBuildId)
+                  ? "build-mismatch"
+                  : !host.agent
+                    ? "build-unknown"
+                    : ""
+              }
+            >
+              {host.agent?.artifact?.build_id || "설치 안 됨"}
+            </dd>
+          </div>
+        )}
       </dl>
       <p className="field-hint">
         최근 점검 {dateTime(i.checked_at)}
@@ -635,7 +732,7 @@ export function HostJobHistory({ job }: { job: HostJob }) {
         <strong>{job.host_id}</strong>
         <span>
           {job.kind === "check"
-            ? "SSH 점검"
+            ? "점검"
             : job.kind === "install_agent"
               ? "Farm 실행기 설치"
               : "환경 준비"}
@@ -680,6 +777,9 @@ function HostActionDialog({
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<unknown>();
   const prepare = kind === "prepare";
+  // The local and dial-in hosts run their own agent and prepare msb by hand.
+  const local = host.kind !== "ssh";
+  const place = host.kind === "local" ? "로컬 호스트" : "이 호스트";
   const [purge, setPurge] = useState(true);
   const mismatch =
     !prepare && agentBuildMismatch(host.agent?.artifact, coordinatorBuildId);
@@ -703,13 +803,29 @@ function HostActionDialog({
           title={`${host.id} ${prepare ? "환경 준비" : "등록 해제"}`}
           description={
             prepare
-              ? "이 서버에서 다음 작업을 실행합니다."
-              : "Coordinator에 저장된 호스트 정보와 인증 정보를 삭제합니다. 필요하면 이 호스트의 VM과 디스크도 함께 정리합니다."
+              ? local
+                ? `${place}에서 다음 작업을 실행합니다.`
+                : "이 서버에서 다음 작업을 실행합니다."
+              : local
+                ? `Coordinator에 저장된 ${place}의 호스트 정보를 삭제합니다. 필요하면 ${place}의 farm VM과 디스크도 함께 정리합니다.`
+                : "Coordinator에 저장된 호스트 정보와 인증 정보를 삭제합니다. 필요하면 이 호스트의 VM과 디스크도 함께 정리합니다."
           }
           closeDisabled={pending}
         >
           <div className="modal-body space-y-4">
-            {prepare ? (
+            {prepare && local ? (
+              <>
+                <ol className="remote-prepare-list">
+                  <li>msb 0.7.8·가상화·golden image 확인</li>
+                  <li>512 MiB 시험 VM 부팅 → 명령 실행 → 시험 VM 삭제</li>
+                </ol>
+                <p className="field-hint">
+                  {place}에는 msb 0.7.8과 golden image를 직접 준비합니다.
+                  이미지가 없다면 먼저 <code>task docker-build</code>를
+                  실행하세요.
+                </p>
+              </>
+            ) : prepare ? (
               <>
                 <ol className="remote-prepare-list">
                   <li>msb 0.7.8과 libkrunfw 설치 또는 기존 버전 확인</li>
@@ -757,8 +873,10 @@ function HostActionDialog({
                 </label>
                 <p className="field-hint">
                   {purge
-                    ? "farm이 만든 VM과 디스크만 지웁니다. 이 서버에서 직접 만든 msb 샌드박스는 그대로 둡니다."
-                    : "호스트 기록과 인증 정보만 지웁니다. 서버의 VM·디스크는 남습니다."}
+                    ? `farm이 만든 VM과 디스크만 지웁니다. ${local ? place : "이 서버"}에서 직접 만든 msb 샌드박스는 그대로 둡니다.`
+                    : local
+                      ? `호스트 기록만 지웁니다. ${place}의 VM·디스크는 남습니다.`
+                      : "호스트 기록과 인증 정보만 지웁니다. 서버의 VM·디스크는 남습니다."}
                 </p>
               </>
             )}

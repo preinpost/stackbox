@@ -1,4 +1,4 @@
-import type { Farm, Job, Phase } from "./api/client";
+import type { Farm, Job, Phase, RemoteHost } from "./api/client";
 export const jobKindLabels: Record<Job["kind"], string> = {
   create: "VM 생성",
   deploy: "OpenStack 배포",
@@ -143,3 +143,33 @@ export function resolveComponents(
   }
   return catalog.map((c) => c.id).filter((id) => wanted.has(id));
 }
+export const remoteAgentNeedsUpdate = (host: RemoteHost) =>
+  Boolean(host.agent && !host.agent.artifact?.supports_single_vm);
+/** Whether a farm can be created on the host now. A remote host also needs an agent
+ * from this coordinator's build and an inspection from the last five minutes. */
+export function hostReady(host: RemoteHost, coordinatorBuildId?: string) {
+  if (host.status !== "ready" || host.active_job) return false;
+  if (host.kind === "local") return true;
+  if (host.kind === "agent") return host.connected;
+  return (
+    host.agent?.artifact?.supports_single_vm === true &&
+    !agentBuildMismatch(host.agent?.artifact, coordinatorBuildId) &&
+    Date.now() / 1000 - (host.inspection?.checked_at ?? 0) <= 300
+  );
+}
+/** What still stands between the host and a new farm. */
+export function hostNotice(host: RemoteHost, coordinatorBuildId?: string) {
+  if (host.kind === "local")
+    return "Hosts에서 로컬 호스트를 점검하고 환경 준비를 마치세요. msb 0.7.8과 golden image(`task docker-build`)가 필요합니다.";
+  if (host.kind === "agent")
+    return host.connected
+      ? "Hosts에서 이 호스트를 점검하고 환경 준비를 마치세요. 호스트에 msb 0.7.8과 golden image(`task docker-build`)가 필요합니다."
+      : "에이전트가 연결되어 있지 않습니다. 호스트에서 `farm agent connect`를 실행하세요.";
+  if (agentBuildMismatch(host.agent?.artifact, coordinatorBuildId))
+    return "설치된 Farm 실행기가 이 coordinator와 다른 소스에서 빌드되었습니다. `task agent-build`로 다시 빌드한 뒤 Hosts에서 실행기를 재설치하세요.";
+  if (remoteAgentNeedsUpdate(host))
+    return "설치된 Farm 실행기는 단일 VM 생성을 지원하지 않습니다. Hosts에서 최신 Farm 실행기를 설치하세요. 기존 Farm의 조회와 삭제는 계속 사용할 수 있습니다.";
+  return "Hosts에서 환경 준비와 단일 VM용 Farm 실행기 설치를 완료하세요. 마지막 SSH 점검이 5분을 지났다면 점검을 갱신하세요.";
+}
+export const hostLabel = (host: RemoteHost) =>
+  `${host.id} · ${host.kind === "local" ? "로컬" : host.kind === "agent" ? "에이전트" : "원격"}`;

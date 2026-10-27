@@ -264,7 +264,8 @@ pub fn plan(request: &PlanRequest) -> Result<Plan> {
 #[serde(deny_unknown_fields)]
 pub struct CreateRequest {
     pub id: String,
-    /// Registered remote host. Omit for the local coordinator.
+    /// Registered host that runs the farm: this machine's local host or a remote one.
+    /// Required; it is optional only so the error can say how to register one.
     #[serde(default)]
     pub host_id: Option<String>,
     #[serde(default)]
@@ -305,9 +306,6 @@ impl CreateRequest {
         }
         if let Some(snapshot) = &self.snapshot_id {
             validate_id(snapshot)?;
-            if self.host_id.is_some() {
-                bail!("snapshots restore on the local coordinator only");
-            }
             if !self.components.is_empty() {
                 bail!(
                     "a farm restored from a snapshot runs the snapshot's services; omit components"

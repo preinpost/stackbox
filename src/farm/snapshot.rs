@@ -17,12 +17,14 @@ use crate::shell::run;
 /// Clean shutdown of every Kolla container fits well within this.
 const STOP_TIMEOUT: Duration = Duration::from_secs(180);
 
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct FrozenSnapshot {
     pub reference: String,
     pub size_bytes: Option<u64>,
     /// The capture succeeded, but the source VM did not start again.
     pub restart_error: Option<String>,
 }
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ImportedSnapshot {
     pub reference: String,
     pub labels: BTreeMap<String, String>,

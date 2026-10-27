@@ -5,7 +5,7 @@ use crate::{
 };
 use anyhow::{Result, anyhow};
 use futures::future::BoxFuture;
-use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
+use std::{collections::BTreeMap, path::PathBuf};
 
 fn unsupported<T: Send + 'static>() -> BoxFuture<'static, Result<T>> {
     Box::pin(async { Err(anyhow!("snapshots are available for local farms only")) })
@@ -314,8 +314,4 @@ fn datastores(exposure: &Exposure, report: String) -> Vec<Datastore> {
             store
         })
         .collect()
-}
-
-pub fn real() -> Arc<dyn Backend> {
-    Arc::new(MicrosandboxBackend)
 }

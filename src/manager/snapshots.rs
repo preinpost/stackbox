@@ -212,8 +212,15 @@ impl FarmManager {
                 .get_mut(farm_id)
                 .ok_or_else(|| NotFound(format!("farm '{farm_id}'")))?;
             ensure_idle(farm)?;
-            if farm.host_id.is_some() {
-                return Err(conflict("snapshots are available for local farms only"));
+            if farm
+                .host_id
+                .as_ref()
+                .and_then(|id| state.hosts.get(id))
+                .is_none_or(|stored| stored.host.kind != crate::remote::HostKind::Local)
+            {
+                return Err(conflict(
+                    "snapshots are available for farms on the local host only",
+                ));
             }
             if !matches!(
                 farm.status,
@@ -271,9 +278,8 @@ impl FarmManager {
             None,
             "stopping the VM to capture its disks\n".into(),
         )?;
-        let frozen = match self
-            .0
-            .backend
+        let backend = self.backend_for(&farm)?;
+        let frozen = match backend
             .freeze(farm.id.clone(), id.clone(), labels(&snapshot))
             .await
         {
@@ -304,8 +310,7 @@ impl FarmManager {
             ));
         }
         if snapshot.deployed {
-            self.0
-                .backend
+            backend
                 .settle(
                     farm.id.clone(),
                     None,
@@ -339,9 +344,8 @@ impl FarmManager {
             None,
             format!("starting a copy of snapshot {id}\n"),
         )?;
-        let nodes = self
-            .0
-            .backend
+        let backend = self.backend_for(&farm)?;
+        let nodes = backend
             .restore(farm.id.clone(), reference, plan.clone(), exposure.clone())
             .await?;
         self.update(|state| {
@@ -355,8 +359,7 @@ impl FarmManager {
                 None,
                 "VM started; moving public endpoints and waiting for OpenStack\n".into(),
             )?;
-            self.0
-                .backend
+            backend
                 .settle(
                     farm.id.clone(),
                     Some((snapshot.source_exposure.clone(), exposure)),
@@ -434,8 +437,7 @@ impl FarmManager {
         let partial = PathBuf::from(format!("{}.partial", output.display()));
         let _ = std::fs::remove_file(&partial);
         let exported = self
-            .0
-            .backend
+            .local_backend()?
             .export_snapshot(reference, partial.clone())
             .await;
         if let Err(error) = exported {
@@ -532,16 +534,15 @@ impl FarmManager {
     }
     async fn run_import(&self, path: &Path, id: &str) -> Result<(Imported, String, Option<u64>)> {
         let _permit = self.0.snapshot_gate.acquire().await?;
-        let imported = self
-            .0
-            .backend
+        let backend = self.local_backend()?;
+        let imported = backend
             .import_snapshot(path.to_owned(), id.to_owned())
             .await?;
         match parse_labels(&imported.labels) {
             Ok(parsed) => Ok((parsed, imported.reference, imported.size_bytes)),
             Err(error) => {
                 // Do not keep an msb snapshot no farm can be restored from.
-                if let Err(cleanup) = self.0.backend.remove_snapshot(imported.reference).await {
+                if let Err(cleanup) = backend.remove_snapshot(imported.reference).await {
                     eprintln!("cannot remove rejected import {id}: {cleanup:#}");
                 }
                 Err(error)
@@ -574,7 +575,10 @@ impl FarmManager {
             Ok((snapshot.reference.clone(), previous))
         })?;
         if let Some(reference) = reference
-            && let Err(error) = self.0.backend.remove_snapshot(reference).await
+            && let Err(error) = match self.local_backend() {
+                Ok(backend) => backend.remove_snapshot(reference).await,
+                Err(error) => Err(error),
+            }
         {
             let message = format!("{error:#}");
             self.update_snapshot(id, |s| {

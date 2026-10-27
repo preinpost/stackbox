@@ -253,10 +253,47 @@ fn options(dir: &Path) -> ManagerOptions {
         public_bind: "127.0.0.1".parse().unwrap(),
     }
 }
+/// Registers this machine as a prepared host, as its check and preparation leave it.
+/// Its agent runs in-process on the test's fake backend.
+fn local_host(manager: &FarmManager) {
+    if manager.host("local").is_err() {
+        manager
+            .register_local_host(crate::remote::RegisterLocalHost { id: "local".into() })
+            .unwrap();
+    }
+    manager
+        .update(|state| {
+            let host = &mut state.hosts.get_mut("local").unwrap().host;
+            host.status = crate::remote::HostStatus::Ready;
+            host.inspection = Some(crate::remote::HostInspection {
+                os: "linux".into(),
+                arch: std::env::consts::ARCH.into(),
+                compatible: true,
+                kvm_available: true,
+                sudo_available: false,
+                memory_total_mib: 65536,
+                memory_available_mib: 65536,
+                disk_available_mib: 500_000,
+                msb_version: Some("0.7.8".into()),
+                msb_compatible: true,
+                docker_available: true,
+                golden_image_available: true,
+                vm_boot_verified: true,
+                checked_at: now(),
+            });
+            Ok(())
+        })
+        .unwrap();
+}
+async fn open_with(options: ManagerOptions, backend: Arc<Fake>) -> FarmManager {
+    let manager = FarmManager::with_backend(options, backend).await.unwrap();
+    local_host(&manager);
+    manager
+}
 fn request(id: &str) -> CreateRequest {
     CreateRequest {
         id: id.into(),
-        host_id: None,
+        host_id: Some("local".into()),
         components: vec![],
         external_host: "localhost".into(),
         owner: Some("test".into()),
@@ -282,9 +319,7 @@ async fn remote_farms_route_over_ssh_with_separate_budgets_ports_streams_and_off
     let backend = Arc::new(Fake::default());
     let mut opts = options(dir.path());
     opts.memory_budget_mib = 3072;
-    let manager = FarmManager::with_backend(opts, backend.clone())
-        .await
-        .unwrap();
+    let manager = open_with(opts, backend.clone()).await;
     manager
         .register_host(fixture.registration("target"))
         .unwrap();
@@ -506,9 +541,7 @@ async fn shell_websocket_relays_bytes_and_resizes_and_refuses_other_origins() {
     use futures::{SinkExt, StreamExt};
     use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest};
     let dir = tempfile::tempdir().unwrap();
-    let manager = FarmManager::with_backend(options(dir.path()), Arc::new(Fake::default()))
-        .await
-        .unwrap();
+    let manager = open_with(options(dir.path()), Arc::new(Fake::default())).await;
     let job = manager.create(request("shell")).unwrap();
     done(&manager, &job).await;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -582,9 +615,7 @@ async fn http_remote_host_registration_validation_job_locations_and_unregistrati
     use crate::remote::test_server::Fixture;
     let fixture = Fixture::start().await;
     let dir = tempfile::tempdir().unwrap();
-    let manager = FarmManager::with_backend(options(dir.path()), Arc::new(Fake::default()))
-        .await
-        .unwrap();
+    let manager = open_with(options(dir.path()), Arc::new(Fake::default())).await;
     let app = api::router(manager.clone(), None);
     let request = |method: &str, uri: &str, value: serde_json::Value| {
         Request::builder()
@@ -694,7 +725,7 @@ async fn http_remote_host_registration_validation_job_locations_and_unregistrati
             .status(),
         StatusCode::OK
     );
-    assert!(manager.hosts().unwrap().is_empty());
+    assert!(manager.hosts().unwrap().iter().all(|h| h.id == "local"));
     settle(&manager).await;
 }
 
@@ -703,9 +734,7 @@ async fn remote_host_preparation_is_serialized_idempotent_and_secrets_never_reac
     use crate::remote::{HostJobKind, test_server::Fixture};
     let fixture = Fixture::start().await;
     let dir = tempfile::tempdir().unwrap();
-    let manager = FarmManager::with_backend(options(dir.path()), Arc::new(Fake::default()))
-        .await
-        .unwrap();
+    let manager = open_with(options(dir.path()), Arc::new(Fake::default())).await;
     manager
         .register_host(fixture.registration("target"))
         .unwrap();
@@ -782,9 +811,7 @@ async fn remote_host_preparation_is_serialized_idempotent_and_secrets_never_reac
     drop(app);
     settle(&manager).await;
     drop(manager);
-    let manager = FarmManager::with_backend(options(dir.path()), Arc::new(Fake::default()))
-        .await
-        .unwrap();
+    let manager = open_with(options(dir.path()), Arc::new(Fake::default())).await;
     let job = manager
         .start_host_job("target", HostJobKind::Check)
         .unwrap();
@@ -793,7 +820,10 @@ async fn remote_host_preparation_is_serialized_idempotent_and_secrets_never_reac
         JobStatus::Succeeded
     );
     manager.unregister_host("target").unwrap();
-    assert!(manager.hosts().unwrap().is_empty() && manager.host_jobs().unwrap().is_empty());
+    assert!(
+        manager.hosts().unwrap().iter().all(|h| h.id == "local")
+            && manager.host_jobs().unwrap().is_empty()
+    );
     settle(&manager).await;
     assert!(
         manager
@@ -808,9 +838,7 @@ async fn remote_host_restart_recovers_interrupted_jobs_and_missing_key_never_rep
     use crate::remote::{HostJobKind, test_server::Fixture};
     let fixture = Fixture::start().await;
     let dir = tempfile::tempdir().unwrap();
-    let manager = FarmManager::with_backend(options(dir.path()), Arc::new(Fake::default()))
-        .await
-        .unwrap();
+    let manager = open_with(options(dir.path()), Arc::new(Fake::default())).await;
     manager
         .register_host(fixture.registration("target"))
         .unwrap();
@@ -835,9 +863,7 @@ async fn remote_host_restart_recovers_interrupted_jobs_and_missing_key_never_rep
         })
         .unwrap();
     drop(manager);
-    let manager = FarmManager::with_backend(options(dir.path()), Arc::new(Fake::default()))
-        .await
-        .unwrap();
+    let manager = open_with(options(dir.path()), Arc::new(Fake::default())).await;
     assert_eq!(
         manager.host_job("interrupted-test").unwrap().status,
         JobStatus::Interrupted
@@ -858,9 +884,7 @@ async fn remote_host_restart_recovers_interrupted_jobs_and_missing_key_never_rep
 async fn lifecycle_reservations_failures_and_logs_survive_restart() {
     let dir = tempfile::tempdir().unwrap();
     let backend = Arc::new(Fake::default());
-    let manager = FarmManager::with_backend(options(dir.path()), backend.clone())
-        .await
-        .unwrap();
+    let manager = open_with(options(dir.path()), backend.clone()).await;
     let create = manager.create(request("one")).unwrap();
     assert!(manager.create(request("one")).unwrap_err().is::<Conflict>());
     assert_eq!(done(&manager, &create).await.status, JobStatus::Succeeded);
@@ -916,9 +940,7 @@ async fn lifecycle_reservations_failures_and_logs_survive_restart() {
     );
     settle(&manager).await;
     drop(manager);
-    let manager = FarmManager::with_backend(options(dir.path()), backend.clone())
-        .await
-        .unwrap();
+    let manager = open_with(options(dir.path()), backend.clone()).await;
     assert_eq!(manager.get("one").unwrap().status, FarmStatus::Ready);
     assert_eq!(
         manager.logs("one", 0, 1000).unwrap().last().unwrap().id,
@@ -950,9 +972,7 @@ async fn deploy_queue_is_serial_and_farm_mutations_conflict() {
         deployment_gate: Some(Semaphore::new(0)),
         ..Default::default()
     });
-    let manager = FarmManager::with_backend(options(dir.path()), backend.clone())
-        .await
-        .unwrap();
+    let manager = open_with(options(dir.path()), backend.clone()).await;
     let a = manager.create(request("a")).unwrap();
     done(&manager, &a).await;
     let b = manager.create(request("b")).unwrap();
@@ -985,9 +1005,7 @@ async fn deploy_queue_is_serial_and_farm_mutations_conflict() {
 async fn recovers_interrupted_jobs_and_refuses_second_writer_or_corrupt_state() {
     let dir = tempfile::tempdir().unwrap();
     let backend = Arc::new(Fake::default());
-    let manager = FarmManager::with_backend(options(dir.path()), backend.clone())
-        .await
-        .unwrap();
+    let manager = open_with(options(dir.path()), backend.clone()).await;
     let create = manager.create(request("resume")).unwrap();
     done(&manager, &create).await;
     assert!(Store::open(dir.path()).is_err());
@@ -1005,9 +1023,7 @@ async fn recovers_interrupted_jobs_and_refuses_second_writer_or_corrupt_state() 
         })
         .unwrap();
     drop(manager);
-    let manager = FarmManager::with_backend(options(dir.path()), backend)
-        .await
-        .unwrap();
+    let manager = open_with(options(dir.path()), backend).await;
     let farm = manager.get("resume").unwrap();
     assert_eq!(farm.status, FarmStatus::Failed);
     assert_eq!(farm.phase, Some(Phase::Configure));
@@ -1036,9 +1052,7 @@ async fn memory_reservations_and_failed_state_writes_prevent_creation() {
     let backend = Arc::new(Fake::default());
     let mut opts = options(dir.path());
     opts.memory_budget_mib = 3072;
-    let manager = FarmManager::with_backend(opts, backend.clone())
-        .await
-        .unwrap();
+    let manager = open_with(opts, backend.clone()).await;
     let created = manager.create(request("first")).unwrap();
     done(&manager, &created).await;
     assert!(
@@ -1058,9 +1072,7 @@ async fn memory_reservations_and_failed_state_writes_prevent_creation() {
 #[tokio::test]
 async fn http_auth_validation_job_locations_and_schema() {
     let dir = tempfile::tempdir().unwrap();
-    let manager = FarmManager::with_backend(options(dir.path()), Arc::new(Fake::default()))
-        .await
-        .unwrap();
+    let manager = open_with(options(dir.path()), Arc::new(Fake::default())).await;
     let app = api::router(manager.clone(), Some("test-token".into()));
     let response = app
         .clone()
@@ -1101,6 +1113,17 @@ async fn http_auth_validation_job_locations_and_schema() {
     let response = app
         .clone()
         .oneshot(authorized("POST", "/api/v1/farms", r#"{"id":"http-demo"}"#))
+        .await
+        .unwrap();
+    // Every farm runs on a registered host.
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let response = app
+        .clone()
+        .oneshot(authorized(
+            "POST",
+            "/api/v1/farms",
+            r#"{"id":"http-demo","host_id":"local"}"#,
+        ))
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::ACCEPTED);
@@ -1171,9 +1194,9 @@ async fn http_auth_validation_job_locations_and_schema() {
 async fn stale_inventory_scan_does_not_break_a_newly_created_farm() {
     let dir = tempfile::tempdir().unwrap();
     let backend = Arc::new(Fake::default());
-    let manager = FarmManager::with_backend(options(dir.path()), backend.clone())
-        .await
-        .unwrap();
+    let manager = open_with(options(dir.path()), backend.clone()).await;
+    // Reconciliation scans the hosts that hold farms.
+    done(&manager, &manager.create(request("existing")).unwrap()).await;
     let started = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
     *backend.scan_delay.lock().unwrap() = Some((started.clone(), release.clone()));
@@ -1193,53 +1216,62 @@ async fn stale_inventory_scan_does_not_break_a_newly_created_farm() {
 }
 
 #[tokio::test]
-async fn legacy_inventory_is_preserved_but_only_single_vm_farms_can_deploy() {
+async fn unreserved_vms_are_never_adopted_and_hostless_farms_can_only_be_removed() {
     let dir = tempfile::tempdir().unwrap();
     let backend = Arc::new(Fake::default());
-    let roles = [
-        Role::Deployer,
-        Role::Lb,
-        Role::Infra,
-        Role::Keystone,
-        Role::Glance,
-        Role::Control,
-        Role::Compute,
-    ];
-    let legacy: Vec<_> = roles
-        .iter()
-        .map(|role| FarmNode {
-            name: format!("legacy-{role}"),
-            role: Some(*role),
+    // A VM with farm labels that no agent reservation of this coordinator covers.
+    backend.farms.lock().unwrap().insert(
+        "stray".into(),
+        vec![FarmNode {
+            name: "stray".into(),
+            role: Some(Role::AllInOne),
             status: "running".into(),
             memory_mib: 512,
-            ip: Some("10.250.0.1".into()),
+            ip: None,
+        }],
+    );
+    let manager = open_with(options(dir.path()), backend.clone()).await;
+    manager.reconcile().await.unwrap();
+    assert!(manager.get("stray").unwrap_err().is::<NotFound>());
+    // A farm recorded before farms needed a host has no agent to act through.
+    manager
+        .update(|state| {
+            let farm = FarmRecord {
+                id: "old".into(),
+                host_id: None,
+                remote_generation: None,
+                agent_sha256: None,
+                observation_error: None,
+                last_seen_at: None,
+                status: FarmStatus::Created,
+                plan: None,
+                exposure: None,
+                owner: None,
+                expires_at: None,
+                nodes: vec![],
+                phase: None,
+                step: None,
+                error: None,
+                active_job: None,
+                created_at: now(),
+                updated_at: now(),
+                snapshot_id: None,
+            };
+            state.farms.insert("old".into(), farm);
+            Ok(())
         })
-        .collect();
-    backend
-        .farms
-        .lock()
-        .unwrap()
-        .insert("legacy".into(), legacy.clone());
-    let manager = FarmManager::with_backend(options(dir.path()), backend.clone())
-        .await
         .unwrap();
-    let farm = manager.get("legacy").unwrap();
-    assert_eq!(farm.status, FarmStatus::Created);
-    assert_eq!(farm.nodes.len(), 7);
-    assert_eq!(farm.memory_mib(), 3584);
-    let error = manager
-        .deploy("legacy", DeployRequest::default())
-        .unwrap_err();
-    assert!(error.is::<Conflict>() && error.to_string().contains("legacy multi-node"));
-    assert_eq!(backend.farms.lock().unwrap()["legacy"].len(), 7);
-    let created = manager.create(request("single")).unwrap();
-    assert_eq!(done(&manager, &created).await.status, JobStatus::Succeeded);
-    let deployed = manager.deploy("single", DeployRequest::default()).unwrap();
-    assert_eq!(done(&manager, &deployed).await.status, JobStatus::Succeeded);
-    let deleted = manager.delete("legacy").unwrap();
+    assert!(
+        manager
+            .deploy("old", DeployRequest::default())
+            .unwrap_err()
+            .is::<Conflict>()
+    );
+    let deleted = manager.delete("old").unwrap();
     assert_eq!(done(&manager, &deleted).await.status, JobStatus::Succeeded);
-    assert!(!backend.farms.lock().unwrap().contains_key("legacy"));
-    assert_eq!(manager.get("single").unwrap().nodes.len(), 1);
+    assert_eq!(manager.get("old").unwrap().status, FarmStatus::Deleted);
+    // The stray VM was left alone.
+    assert!(backend.farms.lock().unwrap().contains_key("stray"));
     settle(&manager).await;
 }
 
@@ -1247,9 +1279,7 @@ async fn legacy_inventory_is_preserved_but_only_single_vm_farms_can_deploy() {
 async fn snapshots_freeze_restore_export_import_and_delete() {
     let dir = tempfile::tempdir().unwrap();
     let backend = Arc::new(Fake::default());
-    let manager = FarmManager::with_backend(options(dir.path()), backend.clone())
-        .await
-        .unwrap();
+    let manager = open_with(options(dir.path()), backend.clone()).await;
     let mut source = request("src");
     source.components = vec!["horizon".into()];
     done(&manager, &manager.create(source).unwrap()).await;
@@ -1474,9 +1504,7 @@ async fn snapshots_freeze_restore_export_import_and_delete() {
         serde_json::from_slice(&std::fs::read(&state).unwrap()).unwrap();
     saved["snapshots"]["clean"]["status"] = "exporting".into();
     std::fs::write(&state, serde_json::to_vec(&saved).unwrap()).unwrap();
-    let manager = FarmManager::with_backend(options(dir.path()), backend.clone())
-        .await
-        .unwrap();
+    let manager = open_with(options(dir.path()), backend.clone()).await;
     let clean = manager.snapshot("clean").unwrap();
     assert_eq!(clean.status, SnapshotStatus::Ready);
     assert!(clean.error.unwrap().contains("export again"));
@@ -1549,9 +1577,7 @@ async fn snapshots_freeze_restore_export_import_and_delete() {
 async fn settle_rechecks_a_restored_farm_without_redeploying() {
     let dir = tempfile::tempdir().unwrap();
     let backend = Arc::new(Fake::default());
-    let manager = FarmManager::with_backend(options(dir.path()), backend.clone())
-        .await
-        .unwrap();
+    let manager = open_with(options(dir.path()), backend.clone()).await;
     done(&manager, &manager.create(request("src")).unwrap()).await;
     assert!(
         manager
@@ -1623,9 +1649,7 @@ async fn purging_a_host_deletes_its_farms_and_leftover_vms_then_unregisters_it()
     use crate::remote::{AgentArtifactInfo, HostJobKind, InstalledAgent, test_server::Fixture};
     let fixture = Fixture::start().await;
     let dir = tempfile::tempdir().unwrap();
-    let manager = FarmManager::with_backend(options(dir.path()), Arc::new(Fake::default()))
-        .await
-        .unwrap();
+    let manager = open_with(options(dir.path()), Arc::new(Fake::default())).await;
     manager
         .register_host(fixture.registration("target"))
         .unwrap();
@@ -1710,9 +1734,7 @@ async fn deploying_a_remote_farm_moves_it_to_the_hosts_current_agent() {
     use crate::remote::{AgentArtifactInfo, HostJobKind, InstalledAgent, test_server::Fixture};
     let fixture = Fixture::start().await;
     let dir = tempfile::tempdir().unwrap();
-    let manager = FarmManager::with_backend(options(dir.path()), Arc::new(Fake::default()))
-        .await
-        .unwrap();
+    let manager = open_with(options(dir.path()), Arc::new(Fake::default())).await;
     manager
         .register_host(fixture.registration("target"))
         .unwrap();
@@ -1790,5 +1812,172 @@ async fn deploying_a_remote_farm_moves_it_to_the_hosts_current_agent() {
         .to_string();
     assert!(error.contains("reinstall it from Hosts"), "{error}");
     assert_eq!(manager.get("remote-farm").unwrap().agent_sha256, Some(new));
+    settle(&manager).await;
+}
+
+#[tokio::test]
+async fn this_machine_registers_once_without_credentials_and_runs_farms_through_its_agent() {
+    use crate::remote::{HostJobKind, HostKind, RegisterLocalHost};
+    let dir = tempfile::tempdir().unwrap();
+    let backend = Arc::new(Fake::default());
+    let manager = FarmManager::with_backend(options(dir.path()), backend.clone())
+        .await
+        .unwrap();
+    // No host yet: a farm has nowhere to run.
+    assert!(
+        manager
+            .create(request("early"))
+            .unwrap_err()
+            .is::<NotFound>()
+    );
+    let mut hostless = request("early");
+    hostless.host_id = None;
+    assert!(manager.create(hostless).unwrap_err().is::<BadRequest>());
+    let host = manager
+        .register_local_host(RegisterLocalHost { id: "local".into() })
+        .unwrap();
+    assert_eq!(host.kind, HostKind::Local);
+    assert!(host.auth_method.is_none());
+    for id in ["local", "other"] {
+        assert!(
+            manager
+                .register_local_host(RegisterLocalHost { id: id.into() })
+                .unwrap_err()
+                .is::<Conflict>()
+        );
+    }
+    // Registered but not prepared.
+    assert!(
+        manager
+            .create(request("early"))
+            .unwrap_err()
+            .is::<Conflict>()
+    );
+    assert!(
+        manager
+            .start_host_job("local", HostJobKind::InstallAgent)
+            .unwrap_err()
+            .is::<Conflict>()
+    );
+    local_host(&manager);
+    done(&manager, &manager.create(request("one")).unwrap()).await;
+    let farm = manager.get("one").unwrap();
+    assert_eq!(farm.host_id.as_deref(), Some("local"));
+    assert!(farm.agent_sha256.is_none() && farm.remote_generation.is_some());
+    assert_eq!(farm.exposure.unwrap().bind, options(dir.path()).public_bind);
+    // The agent keeps its own reservation, so a scan reports the farm back.
+    manager.reconcile().await.unwrap();
+    assert_eq!(manager.get("one").unwrap().status, FarmStatus::Created);
+    assert!(
+        manager
+            .unregister_host("local")
+            .unwrap_err()
+            .is::<Conflict>()
+    );
+    done(&manager, &manager.delete("one").unwrap()).await;
+    assert!(backend.farms.lock().unwrap().is_empty());
+    manager.unregister_host("local").unwrap();
+    settle(&manager).await;
+}
+
+#[tokio::test]
+async fn a_dial_in_host_runs_farms_and_shells_over_its_own_connection() {
+    use crate::remote::{HostKind, RegisterAgentHost, agent::Agent, dial};
+    let dir = tempfile::tempdir().unwrap();
+    // The coordinator holds no VMs itself; the dialling agent has its own fake runtime.
+    let manager = FarmManager::with_backend(options(dir.path()), Arc::new(Fake::default()))
+        .await
+        .unwrap();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(
+        axum::serve(
+            listener,
+            api::router(manager.clone(), Some("api-token".into())),
+        )
+        .into_future(),
+    );
+    let registered = manager
+        .register_agent_host(RegisterAgentHost { id: "edge".into() })
+        .unwrap();
+    assert_eq!(registered.host.kind, HostKind::Agent);
+    // The API token is not an agent token, and neither is anything else.
+    let url = dial::connect_url(&format!("http://{address}")).unwrap();
+    let remote = Arc::new(Fake::default());
+    let agent = Arc::new(Agent::in_process(
+        dir.path().join("edge-agent"),
+        remote.clone(),
+    ));
+    for token in ["api-token", "farm_wrong"] {
+        assert!(dial::serve(&url, token, agent.clone()).await.is_err());
+    }
+    let dialling = tokio::spawn({
+        let (url, token, agent) = (url.clone(), registered.token.clone(), agent.clone());
+        async move { dial::serve(&url, &token, agent).await }
+    });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !manager.host("edge").unwrap().connected {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    // A check asks the host's own agent; the coordinator inspects nothing itself.
+    let check = manager
+        .start_host_job("edge", crate::remote::HostJobKind::Check)
+        .unwrap();
+    let check = host_done(&manager, &check.id).await;
+    assert_eq!(check.status, JobStatus::Succeeded, "{:?}", check.error);
+    assert!(manager.host("edge").unwrap().inspection.is_some());
+    manager
+        .update(|state| {
+            let host = &mut state.hosts.get_mut("edge").unwrap().host;
+            host.status = crate::remote::HostStatus::Ready;
+            host.inspection.as_mut().unwrap().memory_total_mib = 65536;
+            Ok(())
+        })
+        .unwrap();
+    let mut on_edge = request("edge-farm");
+    on_edge.host_id = Some("edge".into());
+    let created = manager.create(on_edge).unwrap();
+    assert_eq!(done(&manager, &created).await.status, JobStatus::Succeeded);
+    assert!(remote.farms.lock().unwrap().contains_key("edge-farm"));
+    let farm = manager.get("edge-farm").unwrap();
+    assert_eq!(farm.exposure.unwrap().bind.to_string(), "0.0.0.0");
+    // A shell travels over the same socket.
+    let (input, input_rx) = tokio::sync::mpsc::channel(4);
+    let (output_tx, mut output) = tokio::sync::mpsc::channel(4);
+    let shell = manager.terminal(
+        "edge-farm",
+        crate::farm::TerminalSize { rows: 24, cols: 80 },
+        crate::farm::TerminalIo {
+            input: input_rx,
+            output: output_tx,
+        },
+    );
+    let client = async {
+        assert_eq!(output.recv().await.unwrap(), b"24x80");
+        input
+            .send(crate::farm::TerminalInput::Data(b"ls\r".to_vec()))
+            .await
+            .unwrap();
+        assert_eq!(output.recv().await.unwrap(), b"ls\r");
+        drop(input);
+    };
+    let (shell, ()) = tokio::join!(shell, client);
+    shell.unwrap();
+    // Without its connection the host takes no new farms.
+    dialling.abort();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while manager.host("edge").unwrap().connected {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let mut later = request("later");
+    later.host_id = Some("edge".into());
+    assert!(manager.create(later).unwrap_err().is::<Conflict>());
+    server.abort();
     settle(&manager).await;
 }

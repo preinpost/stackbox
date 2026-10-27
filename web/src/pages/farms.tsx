@@ -29,7 +29,7 @@ import { useMemo, useState } from "react";
 import {
   activeJob,
   farmsQuery,
-  hostQuery,
+  hostsQuery,
   jobsQuery,
   type Farm,
 } from "../api/client";
@@ -53,7 +53,7 @@ import {
 
 export function FarmsPage() {
   const farms = useQuery(farmsQuery());
-  const host = useQuery(hostQuery());
+  const hosts = useQuery(hostsQuery());
   const jobs = useQuery(jobsQuery());
   const [search, setSearch] = useState("");
   const [status, setStatus] = useState("all");
@@ -89,9 +89,9 @@ export function FarmsPage() {
       {
         id: "host",
         header: "실행 호스트",
-        accessorFn: (farm) => farm.host_id ?? "로컬",
+        accessorFn: (farm) => farm.host_id ?? "—",
         cell: ({ row }) => (
-          <span className="text-xs">{row.original.host_id ?? "로컬"}</span>
+          <span className="text-xs">{row.original.host_id ?? "—"}</span>
         ),
       },
       {
@@ -165,13 +165,15 @@ export function FarmsPage() {
     getPaginationRowModel: getPaginationRowModel(),
     initialState: { pagination: { pageSize: 8 } },
   });
-  const reserved =
-    host.data?.memory_reserved_mib ??
-    farms.data
-      ?.filter((f) => !f.host_id)
-      .reduce((sum, f) => sum + farmMemory(f), 0) ??
-    0;
-  const budget = host.data?.memory_budget_mib ?? 0;
+  // Every host reserves guest memory against its own budget; this sums them.
+  const capacities = (hosts.data ?? []).flatMap((h) =>
+    h.capacity ? [h.capacity] : [],
+  );
+  const reserved = capacities.reduce(
+    (sum, c) => sum + c.memory_reserved_mib,
+    0,
+  );
+  const budget = capacities.reduce((sum, c) => sum + c.memory_budget_mib, 0);
   const ratio = budget ? Math.min(100, (reserved / budget) * 100) : 0;
   return (
     <>
@@ -212,12 +214,12 @@ export function FarmsPage() {
         />
         <div className="metric-card">
           <div className="metric-label">
-            로컬 호스트 예약 메모리
+            호스트 예약 메모리
             <Cpu size={17} />
           </div>
           <div className="metric-value">
-            {host.data ? memory(reserved) : "—"}
-            <small>/ {host.data ? memory(budget) : "—"}</small>
+            {hosts.data ? memory(reserved) : "—"}
+            <small>/ {hosts.data ? memory(budget) : "—"}</small>
           </div>
           <div className="meter">
             <span style={{ width: `${ratio}%` }} />
@@ -394,18 +396,23 @@ export function FarmsPage() {
             <span className="small-icon">
               <Cpu size={17} />
             </span>
-            <h2>로컬 호스트 용량</h2>
+            <h2>호스트 용량</h2>
             <Link to="/hosts" className="text-link">
               상세 보기
               <ArrowRight size={13} />
             </Link>
           </div>
-          {host.error ? (
-            <ErrorNotice error={host.error} />
-          ) : host.isPending ? (
+          {hosts.error ? (
+            <ErrorNotice error={hosts.error} />
+          ) : hosts.isPending ? (
             <Loading />
+          ) : !capacities.length ? (
+            <p className="capacity-note">
+              준비된 호스트가 없습니다. Hosts에서 로컬 호스트나 원격 서버를
+              등록하세요.
+            </p>
           ) : (
-            host.data && (
+            hosts.data && (
               <>
                 <div className="capacity-top">
                   <span>
@@ -427,8 +434,8 @@ export function FarmsPage() {
                   </span>
                 </div>
                 <p className="capacity-note">
-                  게스트 메모리 예약 기준입니다. 현재 호스트 사용량과는 다를 수
-                  있습니다.
+                  점검한 호스트 {capacities.length}대의 게스트 메모리 예약
+                  합계입니다. 현재 호스트 사용량과는 다를 수 있습니다.
                 </p>
               </>
             )

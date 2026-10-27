@@ -296,7 +296,17 @@ impl server::Handler for Handler {
                     self.observed.rpc_farms.lock().unwrap().clear();
                     Reply::Purged { farms: removed }
                 }
-                Operation::Shell { .. } => Reply::Done,
+                Operation::Shell { .. }
+                | Operation::VerifyVm
+                | Operation::Settle { .. }
+                | Operation::ExportSnapshot { .. }
+                | Operation::RemoveSnapshot { .. } => Reply::Done,
+                Operation::Freeze { .. }
+                | Operation::Restore { .. }
+                | Operation::ImportSnapshot { .. }
+                | Operation::Inspect => {
+                    unimplemented!("the SSH fixture does not emulate snapshots")
+                }
                 Operation::Endpoints { .. } => Reply::Endpoints {
                     endpoints: crate::model::Endpoints {
                         services: std::collections::BTreeMap::new(),

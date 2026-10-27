@@ -16,12 +16,20 @@ import {
   busySnapshot,
   farmsQuery,
   hostQuery,
+  hostsQuery,
   keys,
   snapshotsQuery,
   type Farm,
   type Snapshot,
 } from "../api/client";
-import { componentLabel, isAllInOneFarm, memory, snapshotHost } from "../lib";
+import {
+  componentLabel,
+  hostNotice,
+  hostReady,
+  isAllInOneFarm,
+  memory,
+  snapshotHost,
+} from "../lib";
 import { Button, CopyText, ErrorNotice, Modal } from "./ui";
 
 const idPattern = "[a-z0-9]([a-z0-9\\-]{0,46}[a-z0-9])?";
@@ -48,8 +56,10 @@ function useDialog(pending: boolean, onOpen?: () => void) {
   };
 }
 
-export const canFreeze = (farm: Farm) =>
-  !farm.host_id &&
+/** Snapshots live with this machine's host, so only its farms can be frozen. */
+export const canFreeze = (farm: Farm, localHostId?: string) =>
+  Boolean(localHostId) &&
+  farm.host_id === localHostId &&
   !farm.active_job &&
   Boolean(farm.plan && farm.exposure) &&
   isAllInOneFarm(farm) &&
@@ -60,6 +70,9 @@ export const canFreeze = (farm: Farm) =>
 export function FreezeFarmDialog({ farm }: { farm: Farm }) {
   const client = useQueryClient();
   const host = useQuery(hostQuery());
+  const localHost = useQuery(hostsQuery()).data?.find(
+    (h) => h.kind === "local",
+  );
   const snapshots = useQuery(snapshotsQuery());
   const suggested = `${farm.id.slice(0, 42)}-${farm.status === "ready" ? "clean" : "base"}`;
   const [id, setId] = useState(suggested);
@@ -84,10 +97,10 @@ export function FreezeFarmDialog({ farm }: { farm: Farm }) {
   return (
     <Dialog.Root open={dialog.open} onOpenChange={dialog.onOpenChange}>
       <Dialog.Trigger
-        render={<Button disabled={!canFreeze(farm)} />}
+        render={<Button disabled={!canFreeze(farm, localHost?.id)} />}
         title={
-          farm.host_id
-            ? "스냅샷은 로컬 farm에서만 만들 수 있습니다."
+          farm.host_id !== localHost?.id
+            ? "스냅샷은 로컬 호스트의 farm만 만들 수 있습니다."
             : "VM을 스냅샷으로 얼려둡니다."
         }
       >
@@ -194,7 +207,10 @@ export function RestoreSnapshotDialog({
   const client = useQueryClient();
   const navigate = useNavigate();
   const farms = useQuery(farmsQuery());
-  const host = useQuery(hostQuery());
+  // A snapshot restores on this machine, where it is kept.
+  const localHost = useQuery(hostsQuery()).data?.find(
+    (h) => h.kind === "local",
+  );
   const [id, setId] = useState("");
   const [owner, setOwner] = useState("");
   const [hostName, setHostName] = useState("localhost");
@@ -202,6 +218,7 @@ export function RestoreSnapshotDialog({
     mutationFn: () =>
       api.create({
         id,
+        host_id: localHost?.id,
         snapshot_id: snapshot.id,
         external_host: hostName,
         ...(owner.trim() ? { owner: owner.trim() } : {}),
@@ -219,9 +236,11 @@ export function RestoreSnapshotDialog({
     mutation.reset();
   });
   const duplicate = farms.data?.some((f) => f.id === id);
-  const remaining = host.data
-    ? host.data.memory_budget_mib - host.data.memory_reserved_mib
+  const capacity = localHost?.capacity;
+  const remaining = capacity
+    ? capacity.memory_budget_mib - capacity.memory_reserved_mib
     : null;
+  const hostMissing = !localHost || !hostReady(localHost);
   const overBudget = remaining !== null && snapshot.plan.memory_mib > remaining;
   const ready =
     ["ready", "exporting"].includes(snapshot.status) && !foreignArch;
@@ -239,7 +258,7 @@ export function RestoreSnapshotDialog({
         <form
           onSubmit={(event) => {
             event.preventDefault();
-            if (!duplicate && !overBudget) mutation.mutate();
+            if (!duplicate && !overBudget && !hostMissing) mutation.mutate();
           }}
         >
           <div className="modal-body space-y-5">
@@ -321,6 +340,13 @@ export function RestoreSnapshotDialog({
                 {memory(Math.max(0, remaining ?? 0))}.
               </div>
             )}
+            {hostMissing && (
+              <div className="warning-notice">
+                {localHost
+                  ? hostNotice(localHost)
+                  : "스냅샷은 로컬 호스트로 복원합니다. Hosts에서 로컬 호스트를 등록하고 환경 준비를 마치세요."}
+              </div>
+            )}
             {mutation.error && <ErrorNotice error={mutation.error} />}
           </div>
           <div className="modal-footer justify-end">
@@ -330,7 +356,9 @@ export function RestoreSnapshotDialog({
             <Button
               type="submit"
               variant="primary"
-              disabled={mutation.isPending || duplicate || overBudget}
+              disabled={
+                mutation.isPending || duplicate || overBudget || hostMissing
+              }
             >
               {mutation.isPending ? (
                 <LoaderCircle size={15} className="animate-spin" />

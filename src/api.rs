@@ -1,4 +1,7 @@
-use crate::remote::{HostJob, HostJobKind, HostKey, RegisterHost, RemoteHost, SshTarget};
+use crate::remote::{
+    AgentHostToken, HostJob, HostJobKind, HostKey, HostKind, RegisterAgentHost, RegisterHost,
+    RegisterLocalHost, RemoteHost, SshTarget,
+};
 use crate::{
     manager::{BadRequest, Conflict, FarmManager, NotFound},
     model::*,
@@ -80,6 +83,9 @@ pub fn router(manager: FarmManager, token: Option<String>) -> Router {
     Router::new()
         .route("/api/v1/host", get(host))
         .route("/api/v1/hosts", get(remote_hosts).post(register_host))
+        .route("/api/v1/local-host", post(register_local_host))
+        .route("/api/v1/agent-hosts", post(register_agent_host))
+        .route(crate::remote::dial::CONNECT_PATH, get(agent_connect))
         .route("/api/v1/hosts/fingerprint", post(host_fingerprint))
         .route("/api/v1/hosts/test-connection", post(test_connection))
         .route(
@@ -119,7 +125,9 @@ pub fn router(manager: FarmManager, token: Option<String>) -> Router {
         .with_state(app)
 }
 async fn auth(State(app): State<App>, request: Request, next: Next) -> Response {
-    if let Some(token) = app.token {
+    // A dial-in agent authenticates with its own host token, never the API token.
+    let agent = request.uri().path() == crate::remote::dial::CONNECT_PATH;
+    if let Some(token) = app.token.filter(|_| !agent) {
         let expected = format!("Bearer {token}");
         let actual = request
             .headers()
@@ -195,11 +203,17 @@ async fn host(State(app): State<App>) -> Result<Json<HostInfo>, ApiError> {
         ),
         _ => (false, false),
     };
+    let local = app
+        .manager
+        .hosts()?
+        .into_iter()
+        .find(|h| h.kind == HostKind::Local)
+        .map(|h| h.id);
     let reserved = app
         .manager
         .list()?
         .iter()
-        .filter(|f| f.host_id.is_none())
+        .filter(|f| local.is_some() && f.host_id == local)
         .map(FarmRecord::memory_mib)
         .sum();
     Ok(Json(HostInfo {
@@ -207,18 +221,8 @@ async fn host(State(app): State<App>) -> Result<Json<HostInfo>, ApiError> {
         agent_artifacts: app.manager.agent_artifacts(),
         os: std::env::consts::OS.into(),
         arch: std::env::consts::ARCH.into(),
-        hypervisor: if cfg!(target_os = "macos") {
-            "hvf"
-        } else {
-            "kvm"
-        }
-        .into(),
-        hypervisor_available: cfg!(target_os = "macos")
-            || std::fs::OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open("/dev/kvm")
-                .is_ok(),
+        hypervisor: crate::remote::host::hypervisor().into(),
+        hypervisor_available: crate::remote::host::hypervisor_available(),
         msb_available: msb,
         golden_image: crate::farm::BASE_IMAGE.into(),
         golden_image_available: golden,
@@ -322,6 +326,92 @@ async fn register_host(
         Json(host),
     )
         .into_response())
+}
+#[utoipa::path(post, path="/api/v1/local-host", request_body=RegisterLocalHost, responses((status=201, body=RemoteHost), (status=400, body=ErrorBody), (status=409, body=ErrorBody)))]
+async fn register_local_host(
+    State(app): State<App>,
+    value: Result<Json<RegisterLocalHost>, JsonRejection>,
+) -> Result<Response, ApiError> {
+    let host = app.manager.register_local_host(body(value)?)?;
+    Ok((
+        StatusCode::CREATED,
+        [(header::LOCATION, format!("/api/v1/hosts/{}", host.id))],
+        Json(host),
+    )
+        .into_response())
+}
+#[utoipa::path(post, path="/api/v1/agent-hosts", request_body=RegisterAgentHost, responses((status=201, description="The host and the token its agent connects with; shown once", body=AgentHostToken), (status=400, body=ErrorBody), (status=409, body=ErrorBody)))]
+async fn register_agent_host(
+    State(app): State<App>,
+    value: Result<Json<RegisterAgentHost>, JsonRejection>,
+) -> Result<Response, ApiError> {
+    let registered = app.manager.register_agent_host(body(value)?)?;
+    Ok((
+        StatusCode::CREATED,
+        [(
+            header::LOCATION,
+            format!("/api/v1/hosts/{}", registered.host.id),
+        )],
+        Json(registered),
+    )
+        .into_response())
+}
+/// A dial-in host's agent holds this socket open; the coordinator sends it requests.
+async fn agent_connect(
+    State(app): State<App>,
+    headers: HeaderMap,
+    upgrade: WebSocketUpgrade,
+) -> Result<Response, ApiError> {
+    same_origin(&headers)?;
+    let unauthorized = || ApiError(StatusCode::UNAUTHORIZED, "agent token required".into());
+    let token = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .ok_or_else(unauthorized)?;
+    let host = app
+        .manager
+        .authenticate_agent(token)
+        .map_err(|_| unauthorized())?;
+    Ok(upgrade.on_upgrade(move |socket| relay_agent(app.manager, host, socket)))
+}
+async fn relay_agent(manager: FarmManager, host: String, socket: WebSocket) {
+    use futures::{SinkExt, StreamExt};
+    let mut attached = manager.attach_agent(&host);
+    let (mut sink, mut stream) = socket.split();
+    // Proxies close idle sockets; pings keep a quiet agent connected.
+    let mut ping = tokio::time::interval(Duration::from_secs(30));
+    loop {
+        tokio::select! {
+            envelope = attached.outgoing.recv() => {
+                let Some(envelope) = envelope else { break };
+                let Ok(text) = serde_json::to_string(&envelope) else { break };
+                if sink.send(Message::Text(text.into())).await.is_err() {
+                    break;
+                }
+            }
+            message = stream.next() => match message {
+                Some(Ok(Message::Text(text))) => {
+                    match serde_json::from_str(&text) {
+                        Ok(crate::remote::dial::Envelope::Frame { session, frame }) => {
+                            attached.deliver(session, frame)
+                        }
+                        _ => {
+                            eprintln!("agent of host {host} sent an invalid message; disconnecting");
+                            break;
+                        }
+                    }
+                }
+                Some(Ok(Message::Close(_)) | Err(_)) | None => break,
+                Some(Ok(_)) => {}
+            },
+            _ = ping.tick() => {
+                if sink.send(Message::Ping(Default::default())).await.is_err() {
+                    break;
+                }
+            }
+        }
+    }
 }
 #[derive(Serialize, ToSchema)]
 struct RemovedHost {
@@ -731,7 +821,7 @@ async fn relay_shell(
 }
 
 #[derive(OpenApi)]
-#[openapi(paths(host, remote_hosts, remote_host, host_fingerprint, test_connection, register_host, update_host_credentials, unregister_host, check_host, prepare_host, install_agent, host_jobs, host_job, catalog_handler, plan_handler, list, detail, create, deploy, settle, delete, endpoints, logs, log_stream, freeze, snapshots, snapshot, delete_snapshot, export_snapshot, import_snapshot, jobs, job), components(schemas(ErrorBody)), modifiers(&Security))]
+#[openapi(paths(host, remote_hosts, remote_host, host_fingerprint, test_connection, register_host, register_local_host, register_agent_host, update_host_credentials, unregister_host, check_host, prepare_host, install_agent, host_jobs, host_job, catalog_handler, plan_handler, list, detail, create, deploy, settle, delete, endpoints, logs, log_stream, freeze, snapshots, snapshot, delete_snapshot, export_snapshot, import_snapshot, jobs, job), components(schemas(ErrorBody)), modifiers(&Security))]
 struct ApiDoc;
 struct Security;
 impl utoipa::Modify for Security {

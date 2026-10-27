@@ -2967,6 +2967,16 @@ h2 {
   font-size: 14px;
   color: #3d5745;
 }
+.agent-command {
+  display: block;
+  padding: 10px 12px;
+  border: 1px solid #e1e9e2;
+  border-radius: 8px;
+  background: #f5f8f5;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+  color: #2f4a3a;
+}
 .remote-resources {
   display: grid;
   grid-template-columns: 1fr 1.3fr 1fr;

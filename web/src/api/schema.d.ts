@@ -4,6 +4,22 @@
  */
 
 export interface paths {
+  "/api/v1/agent-hosts": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    post: operations["register_agent_host"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/v1/catalog": {
     parameters: {
       query?: never;
@@ -340,6 +356,22 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/v1/local-host": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    post: operations["register_local_host"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/v1/plans": {
     parameters: {
       query?: never;
@@ -434,6 +466,11 @@ export interface components {
       /** @description Old installed agents remain usable for legacy inventory and deletion. */
       supports_single_vm?: boolean;
     };
+    /** @description The new host and the token its agent connects with. The token is not shown again. */
+    AgentHostToken: {
+      host: components["schemas"]["RemoteHost"];
+      token: string;
+    };
     /** @enum {string} */
     AuthMethod: "password" | "private_key";
     Catalog: {
@@ -469,7 +506,10 @@ export interface components {
        */
       expires_at?: number | null;
       external_host?: string;
-      /** @description Registered remote host. Omit for the local coordinator. */
+      /**
+       * @description Registered host that runs the farm: this machine's local host or a remote one.
+       *     Required; it is optional only so the error can say how to register one.
+       */
       host_id?: string | null;
       id: string;
       owner?: string | null;
@@ -658,6 +698,11 @@ export interface components {
       algorithm: string;
       fingerprint: string;
     };
+    /**
+     * @description How the coordinator reaches a host's farm-agent.
+     * @enum {string}
+     */
+    HostKind: "ssh" | "local" | "agent";
     /** @enum {string} */
     HostStatus:
       | "registered"
@@ -747,6 +792,10 @@ export interface components {
       /** @default [] */
       components: string[];
     };
+    /** @description Register a host whose agent will dial in. */
+    RegisterAgentHost: {
+      id: string;
+    };
     RegisterHost: {
       address: string;
       credentials: components["schemas"]["Credentials"];
@@ -757,19 +806,30 @@ export interface components {
       port?: number;
       username: string;
     };
+    /** @description Register the machine the coordinator runs on as a host. */
+    RegisterLocalHost: {
+      id?: string;
+    };
     RemoteHost: {
       active_job?: string | null;
+      /** @description SSH address; `localhost` for the local host. */
       address: string;
       agent?: null | components["schemas"]["InstalledAgent"];
-      auth_method: components["schemas"]["AuthMethod"];
+      auth_method?: null | components["schemas"]["AuthMethod"];
       capacity?: null | components["schemas"]["HostCapacity"];
+      /** @description Whether a dial-in host's agent holds its connection now. Not stored. */
+      connected?: boolean;
       /** Format: int64 */
       created_at: number;
       error?: string | null;
       fingerprint: string;
       id: string;
       inspection?: null | components["schemas"]["HostInspection"];
-      /** Format: int32 */
+      kind?: components["schemas"]["HostKind"];
+      /**
+       * Format: int32
+       * @description SSH port, user and host key; unused for the local host.
+       */
       port: number;
       status: components["schemas"]["HostStatus"];
       /** Format: int64 */
@@ -847,6 +907,46 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+  register_agent_host: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["RegisterAgentHost"];
+      };
+    };
+    responses: {
+      /** @description The host and the token its agent connects with; shown once */
+      201: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["AgentHostToken"];
+        };
+      };
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorBody"];
+        };
+      };
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorBody"];
+        };
+      };
+    };
+  };
   catalog_handler: {
     parameters: {
       query?: never;
@@ -1603,6 +1703,45 @@ export interface operations {
         };
       };
       404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorBody"];
+        };
+      };
+    };
+  };
+  register_local_host: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["RegisterLocalHost"];
+      };
+    };
+    responses: {
+      201: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["RemoteHost"];
+        };
+      };
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorBody"];
+        };
+      };
+      409: {
         headers: {
           [name: string]: unknown;
         };

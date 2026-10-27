@@ -2,11 +2,12 @@
 
 OpenStack 설치에는 수십 분이 걸립니다. 설치가 끝난 farm의 VM을 **스냅샷으로 얼려두면**
 같은 환경을 다시 설치하지 않고 새 farm으로 불러올 수 있습니다. 스냅샷은 `.msb` 파일로
-내보내 다른 호스트에서 가져올 수도 있습니다. 로컬 Coordinator의 farm만 지원합니다.
+내보내 다른 호스트에서 가져올 수도 있습니다. 스냅샷은 Coordinator가 실행 중인 머신의 로컬 호스트
+(`kind: "local"`)에 보관하므로, 그 호스트의 farm만 얼리고 그 호스트로만 복원합니다.
 
 ```bash
 farm snapshot create dev dev-clean --note "Nova·Neutron clean 설치"
-farm create dev2 --snapshot dev-clean      # 배포된 스냅샷이면 바로 ready
+farm create dev2 --host-id local --snapshot dev-clean      # 배포된 스냅샷이면 바로 ready
 farm snapshot export dev-clean -o ~/farm-snapshots/
 farm snapshot import ~/farm-snapshots/dev-clean.msb --id dev-clean
 farm snapshot list

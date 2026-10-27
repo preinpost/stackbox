@@ -114,19 +114,23 @@ pub struct Limits {
     pub memory_budget_mib: u64,
     pub available_mib: u64,
     pub virtualization: bool,
+    /// Bind a new farm's public port block before reserving it.
+    pub probe_ports: bool,
 }
 impl Limits {
     pub fn system() -> Self {
         let system = sysinfo::System::new_all();
         Self {
             memory_budget_mib: system.total_memory() / 1024 / 1024 * 80 / 100,
-            available_mib: system.available_memory() / 1024 / 1024,
-            virtualization: cfg!(target_os = "linux")
-                && OpenOptions::new()
-                    .read(true)
-                    .write(true)
-                    .open("/dev/kvm")
-                    .is_ok(),
+            // macOS counts reclaimable inactive pages as used, so its "available" memory
+            // refuses VMs that would fit; there the reservation budget alone applies.
+            available_mib: if cfg!(target_os = "macos") {
+                u64::MAX
+            } else {
+                system.available_memory() / 1024 / 1024
+            },
+            virtualization: crate::remote::host::hypervisor_available(),
+            probe_ports: true,
         }
     }
 }
@@ -136,6 +140,20 @@ pub struct Agent {
     limits: Limits,
 }
 impl Agent {
+    /// An agent that runs inside the coordinator's process, for tests.
+    pub fn in_process(dir: PathBuf, backend: Arc<dyn Backend>) -> Self {
+        Self {
+            dir,
+            backend,
+            limits: Limits {
+                memory_budget_mib: u64::MAX,
+                available_mib: u64::MAX,
+                virtualization: true,
+                // Parallel tests would contend for the same real ports.
+                probe_ports: false,
+            },
+        }
+    }
     pub fn local() -> Self {
         let home = std::env::var_os("HOME").unwrap_or_else(|| ".".into());
         Self {
@@ -178,6 +196,135 @@ impl Agent {
             failed.join("; ")
         );
         Ok(Reply::Purged { farms: purged })
+    }
+
+    /// Reserve capacity and public ports for a new farm on this host. A replay of the same
+    /// request returns the farm's existing nodes instead.
+    async fn reserve(
+        &self,
+        request: &Request,
+        id: &str,
+        generation: &str,
+        requested: &Plan,
+        exposure: &Exposure,
+    ) -> Result<Option<Vec<crate::farm::FarmNode>>> {
+        ensure!(
+            self.limits.virtualization,
+            "this host has no usable hypervisor (/dev/kvm on Linux)"
+        );
+        let canonical = plan(&PlanRequest {
+            components: requested.components.clone(),
+        })?;
+        ensure!(
+            serde_json::to_value(requested)? == serde_json::to_value(&canonical)?,
+            "farm plan differs from the supported layout"
+        );
+        // The coordinator picks the bind address (0.0.0.0 for remote hosts, its public bind
+        // locally); binding the whole block below proves the ports are free.
+        ensure!(
+            exposure.port_base >= 15000
+                && exposure.port_base <= 23990
+                && exposure.port_base.is_multiple_of(10),
+            "exposure requires a valid port block"
+        );
+        // Reuse public-host validation.
+        crate::model::CreateRequest {
+            id: id.into(),
+            host_id: None,
+            components: requested.components.clone(),
+            external_host: exposure.host.clone(),
+            owner: None,
+            expires_at: None,
+            snapshot_id: None,
+        }
+        .validate()?;
+        let _create_lock = lock(&self.dir, "create.lock")?;
+        let mut registry = LockedRegistry::open(&self.dir)?;
+        let observed = self.backend.scan().await?;
+        if let Some(entry) = registry.state.farms.get(id) {
+            ensure!(
+                entry.coordinator == request.coordinator_id,
+                "farm id is owned by another coordinator"
+            );
+            if !entry.deleted {
+                ensure!(
+                    entry.generation == generation,
+                    "farm id is reserved by an earlier generation"
+                );
+                ensure!(
+                    serde_json::to_value(&entry.plan)? == serde_json::to_value(requested)?
+                        && serde_json::to_value(&entry.exposure)?
+                            == serde_json::to_value(exposure)?,
+                    "replayed create differs from the original reservation"
+                );
+                let nodes = observed.get(id).cloned().unwrap_or_default();
+                ensure!(
+                    nodes.len() == requested.nodes.len()
+                        && nodes.iter().all(|n| n.status == "running"),
+                    "earlier create is incomplete; inspect and delete it explicitly before recreating"
+                );
+                return Ok(Some(nodes));
+            }
+            ensure!(
+                entry.generation != generation,
+                "this farm generation was already deleted"
+            );
+        }
+        ensure!(
+            observed.get(id).is_none_or(Vec::is_empty),
+            "existing VM labels conflict with this farm; refusing to adopt or remove them"
+        );
+        let reserved: u64 = registry
+            .state
+            .farms
+            .values()
+            .filter(|r| !r.deleted)
+            .map(|r| r.plan.memory_mib)
+            .sum();
+        let foreign: u64 = observed
+            .iter()
+            .filter(|(id, _)| !registry.state.farms.get(*id).is_some_and(|r| !r.deleted))
+            .flat_map(|(_, nodes)| nodes)
+            .map(|n| u64::from(n.memory_mib))
+            .sum();
+        ensure!(
+            reserved
+                .saturating_add(foreign)
+                .saturating_add(requested.memory_mib)
+                <= self.limits.memory_budget_mib,
+            "remote host memory reservation budget exceeded"
+        );
+        ensure!(
+            requested.memory_mib <= self.limits.available_mib,
+            "remote host available memory is insufficient"
+        );
+        ensure!(
+            !registry
+                .state
+                .farms
+                .values()
+                .any(|r| !r.deleted && r.exposure.port_base == exposure.port_base),
+            "remote public ports are reserved by another farm"
+        );
+        let sockets = (exposure.port_base..exposure.port_base + 10)
+            .filter(|_| self.limits.probe_ports)
+            .map(|p| TcpListener::bind((exposure.bind, p)))
+            .collect::<std::io::Result<Vec<_>>>()
+            .context("the farm's public port block is occupied on this host")?;
+        registry.state.farms.insert(
+            id.into(),
+            Reservation {
+                coordinator: request.coordinator_id.clone(),
+                generation: generation.into(),
+                plan: requested.clone(),
+                exposure: exposure.clone(),
+                deleted: false,
+            },
+        );
+        registry.save()?;
+        drop(registry);
+        drop(sockets);
+        Ok(None)
     }
 
     fn admit(request: &Request) -> Result<()> {
@@ -278,6 +425,54 @@ impl Agent {
         Ok(Reply::Done)
     }
 
+    /// The live reservation `request`'s coordinator holds for this farm generation.
+    fn owned(&self, request: &Request, id: &str, generation: &str) -> Result<Reservation> {
+        let registry = LockedRegistry::open(&self.dir)?;
+        let entry = registry
+            .owned(&request.coordinator_id, id, generation)?
+            .clone();
+        ensure!(!entry.deleted, "farm was deleted");
+        Ok(entry)
+    }
+
+    /// Snapshot storage on this host. Paths name files on this host, which the coordinator
+    /// only sends to the agent on its own machine.
+    async fn snapshot_operation(&self, operation: &Operation) -> Result<Reply> {
+        let path = |value: &str| {
+            let path = PathBuf::from(value);
+            ensure!(
+                path.is_absolute(),
+                "snapshot archive paths must be absolute"
+            );
+            Ok(path)
+        };
+        match operation {
+            Operation::ExportSnapshot { reference, output } => {
+                self.backend
+                    .export_snapshot(reference.clone(), path(output)?)
+                    .await?;
+                Ok(Reply::Done)
+            }
+            Operation::ImportSnapshot {
+                archive,
+                snapshot_id,
+            } => {
+                crate::model::validate_snapshot_id(snapshot_id)?;
+                Ok(Reply::Imported {
+                    snapshot: self
+                        .backend
+                        .import_snapshot(path(archive)?, snapshot_id.clone())
+                        .await?,
+                })
+            }
+            Operation::RemoveSnapshot { reference } => {
+                self.backend.remove_snapshot(reference.clone()).await?;
+                Ok(Reply::Done)
+            }
+            _ => bail!("not a snapshot storage operation"),
+        }
+    }
+
     pub async fn execute(&self, request: Request, emit: Emitter) -> Result<Reply> {
         Self::admit(&request)?;
         ensure!(
@@ -312,11 +507,29 @@ impl Agent {
                 .collect();
             return Ok(Reply::Inventory { farms });
         }
+        // Host-wide checks have no farm id either.
+        if matches!(request.operation, Operation::Inspect) {
+            return Ok(Reply::Inspection {
+                inspection: crate::remote::host::inspect().await,
+            });
+        }
+        if matches!(request.operation, Operation::VerifyVm) {
+            crate::remote::host::smoke(&uuid::Uuid::new_v4().to_string()).await?;
+            return Ok(Reply::Done);
+        }
         // A host-wide cleanup has no farm id, so it runs before the per-farm scope below.
         if matches!(request.operation, Operation::Purge) {
             // Serialize with creates so a reservation cannot appear mid-purge.
             let _create_lock = lock(&self.dir, "create.lock")?;
             return self.purge(&request).await;
+        }
+        if matches!(
+            request.operation,
+            Operation::ExportSnapshot { .. }
+                | Operation::ImportSnapshot { .. }
+                | Operation::RemoveSnapshot { .. }
+        ) {
+            return self.snapshot_operation(&request.operation).await;
         }
         let (id, generation) = request
             .operation
@@ -329,128 +542,44 @@ impl Agent {
                 exposure,
                 ..
             } => {
-                ensure!(
-                    self.limits.virtualization,
-                    "remote host has no accessible /dev/kvm"
-                );
-                let canonical = plan(&PlanRequest {
-                    components: requested.components.clone(),
-                })?;
-                ensure!(
-                    serde_json::to_value(requested)? == serde_json::to_value(&canonical)?,
-                    "farm plan differs from the supported layout"
-                );
-                ensure!(
-                    exposure.port_base >= 15000
-                        && exposure.port_base <= 23990
-                        && exposure.port_base.is_multiple_of(10)
-                        && exposure.bind == std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED),
-                    "remote exposure requires 0.0.0.0 and a valid port block"
-                );
-                // Reuse public-host validation; the worker accepts no shell or filesystem paths.
-                crate::model::CreateRequest {
-                    id: id.into(),
-                    host_id: None,
-                    components: requested.components.clone(),
-                    external_host: exposure.host.clone(),
-                    owner: None,
-                    expires_at: None,
-                    snapshot_id: None,
+                if let Some(nodes) = self
+                    .reserve(&request, id, generation, requested, exposure)
+                    .await?
+                {
+                    return Ok(Reply::Nodes { nodes });
                 }
-                .validate()?;
-                let _create_lock = lock(&self.dir, "create.lock")?;
-                let mut registry = LockedRegistry::open(&self.dir)?;
-                let observed = self.backend.scan().await?;
-                if let Some(entry) = registry.state.farms.get(id) {
-                    ensure!(
-                        entry.coordinator == request.coordinator_id,
-                        "farm id is owned by another coordinator"
-                    );
-                    if !entry.deleted {
-                        ensure!(
-                            entry.generation == generation,
-                            "farm id is reserved by an earlier generation"
-                        );
-                        ensure!(
-                            serde_json::to_value(&entry.plan)? == serde_json::to_value(requested)?
-                                && serde_json::to_value(&entry.exposure)?
-                                    == serde_json::to_value(exposure)?,
-                            "replayed create differs from the original reservation"
-                        );
-                        let nodes = observed.get(id).cloned().unwrap_or_default();
-                        ensure!(
-                            nodes.len() == requested.nodes.len()
-                                && nodes.iter().all(|n| n.status == "running"),
-                            "earlier create is incomplete; inspect and delete it explicitly before recreating"
-                        );
-                        return Ok(Reply::Nodes { nodes });
-                    }
-                    ensure!(
-                        entry.generation != generation,
-                        "this farm generation was already deleted"
-                    );
-                }
-                ensure!(
-                    observed.get(id).is_none_or(Vec::is_empty),
-                    "existing VM labels conflict with this farm; refusing to adopt or remove them"
-                );
-                let reserved: u64 = registry
-                    .state
-                    .farms
-                    .values()
-                    .filter(|r| !r.deleted)
-                    .map(|r| r.plan.memory_mib)
-                    .sum();
-                let foreign: u64 = observed
-                    .iter()
-                    .filter(|(id, _)| !registry.state.farms.get(*id).is_some_and(|r| !r.deleted))
-                    .flat_map(|(_, nodes)| nodes)
-                    .map(|n| u64::from(n.memory_mib))
-                    .sum();
-                ensure!(
-                    reserved
-                        .saturating_add(foreign)
-                        .saturating_add(requested.memory_mib)
-                        <= self.limits.memory_budget_mib,
-                    "remote host memory reservation budget exceeded"
-                );
-                ensure!(
-                    requested.memory_mib <= self.limits.available_mib,
-                    "remote host available memory is insufficient"
-                );
-                ensure!(
-                    !registry
-                        .state
-                        .farms
-                        .values()
-                        .any(|r| !r.deleted && r.exposure.port_base == exposure.port_base),
-                    "remote public ports are reserved by another farm"
-                );
-                let sockets = (exposure.port_base..exposure.port_base + 10)
-                    .map(|p| TcpListener::bind((exposure.bind, p)))
-                    .collect::<std::io::Result<Vec<_>>>()
-                    .context("remote public port block is occupied")?;
-                registry.state.farms.insert(
-                    id.into(),
-                    Reservation {
-                        coordinator: request.coordinator_id.clone(),
-                        generation: generation.into(),
-                        plan: requested.clone(),
-                        exposure: exposure.clone(),
-                        deleted: false,
-                    },
-                );
-                registry.save()?;
-                drop(registry);
-                drop(sockets);
                 emit(Frame::Output {
-                    message: "Remote capacity and public ports reserved; creating farm VMs\n"
+                    message: "Host capacity and public ports reserved; creating the farm VM\n"
                         .into(),
                 })?;
                 Ok(Reply::Nodes {
                     nodes: self
                         .backend
                         .create(id.into(), requested.clone(), exposure.clone())
+                        .await?,
+                })
+            }
+            Operation::Restore {
+                reference,
+                plan: requested,
+                exposure,
+                ..
+            } => {
+                if let Some(nodes) = self
+                    .reserve(&request, id, generation, requested, exposure)
+                    .await?
+                {
+                    return Ok(Reply::Nodes { nodes });
+                }
+                Ok(Reply::Nodes {
+                    nodes: self
+                        .backend
+                        .restore(
+                            id.into(),
+                            reference.clone(),
+                            requested.clone(),
+                            exposure.clone(),
+                        )
                         .await?,
                 })
             }
@@ -478,49 +607,74 @@ impl Agent {
                 registry.save()?;
                 Ok(Reply::Done)
             }
-            Operation::Deploy { .. } | Operation::Endpoints { .. } => {
-                let registry = LockedRegistry::open(&self.dir)?;
-                let entry = registry
-                    .owned(&request.coordinator_id, id, generation)?
-                    .clone();
-                ensure!(!entry.deleted, "remote farm was deleted");
-                drop(registry);
-                if let Operation::Deploy { from, .. } = &request.operation {
-                    ensure!(
-                        entry.plan.nodes.len() == 1
-                            && entry.plan.nodes[0].role == crate::farm::Role::AllInOne,
-                        "legacy multi-node farm cannot be deployed by the single-VM engine; create a new farm"
-                    );
-                    let _deploy_lock = lock(&self.dir, "deploy.lock")?;
-                    let sink = Arc::new(move |event| {
-                        emit(match event {
-                            crate::kolla::DeployEvent::Phase(phase) => Frame::Phase { phase },
-                            crate::kolla::DeployEvent::Step(step) => Frame::Step { step },
-                            crate::kolla::DeployEvent::Output(message) => Frame::Output { message },
-                        })
-                    });
-                    self.backend
-                        .deploy(
-                            id.into(),
-                            *from,
-                            Some(entry.exposure),
-                            entry.plan.components.clone(),
-                            sink,
-                        )
-                        .await?;
-                    Ok(Reply::Done)
-                } else {
-                    Ok(Reply::Endpoints {
-                        endpoints: self
-                            .backend
-                            .endpoints(id.into(), Some(entry.exposure), entry.plan.components)
-                            .await?,
-                    })
-                }
+            Operation::Deploy { from, .. } => {
+                let entry = self.owned(&request, id, generation)?;
+                ensure!(
+                    entry.plan.nodes.len() == 1
+                        && entry.plan.nodes[0].role == crate::farm::Role::AllInOne,
+                    "legacy multi-node farm cannot be deployed by the single-VM engine; create a new farm"
+                );
+                let _deploy_lock = lock(&self.dir, "deploy.lock")?;
+                self.backend
+                    .deploy(
+                        id.into(),
+                        *from,
+                        Some(entry.exposure),
+                        entry.plan.components.clone(),
+                        progress(emit),
+                    )
+                    .await?;
+                Ok(Reply::Done)
+            }
+            Operation::Endpoints { .. } => {
+                let entry = self.owned(&request, id, generation)?;
+                Ok(Reply::Endpoints {
+                    endpoints: self
+                        .backend
+                        .endpoints(id.into(), Some(entry.exposure), entry.plan.components)
+                        .await?,
+                })
+            }
+            Operation::Settle { rebind, .. } => {
+                let entry = self.owned(&request, id, generation)?;
+                self.backend
+                    .settle(
+                        id.into(),
+                        rebind.clone(),
+                        entry.plan.components,
+                        progress(emit),
+                    )
+                    .await?;
+                Ok(Reply::Done)
+            }
+            Operation::Freeze {
+                snapshot_id,
+                labels,
+                ..
+            } => {
+                self.owned(&request, id, generation)?;
+                crate::model::validate_snapshot_id(snapshot_id)?;
+                Ok(Reply::Frozen {
+                    snapshot: self
+                        .backend
+                        .freeze(id.into(), snapshot_id.clone(), labels.clone())
+                        .await?,
+                })
             }
             _ => bail!("unsupported operation"),
         }
     }
+}
+
+/// Forwards deployment progress to the coordinator as frames.
+fn progress(emit: Emitter) -> crate::kolla::EventSink {
+    Arc::new(move |event| {
+        emit(match event {
+            crate::kolla::DeployEvent::Phase(phase) => Frame::Phase { phase },
+            crate::kolla::DeployEvent::Step(step) => Frame::Step { step },
+            crate::kolla::DeployEvent::Output(message) => Frame::Output { message },
+        })
+    })
 }
 
 pub fn stdout_emitter() -> Emitter {
@@ -640,6 +794,7 @@ mod tests {
                 memory_budget_mib: 5000,
                 available_mib: 10000,
                 virtualization: true,
+                probe_ports: true,
             },
         };
         let owner = uuid::Uuid::new_v4().to_string();
@@ -791,6 +946,7 @@ mod tests {
                 memory_budget_mib: 20_000,
                 available_mib: 32_000,
                 virtualization: true,
+                probe_ports: true,
             },
         };
         let owner = uuid::Uuid::new_v4().to_string();
@@ -839,6 +995,7 @@ mod tests {
                 memory_budget_mib: 10000,
                 available_mib: 10000,
                 virtualization: true,
+                probe_ports: true,
             },
         };
         let owner = uuid::Uuid::new_v4().to_string();

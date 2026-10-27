@@ -1,5 +1,6 @@
 use anyhow::{Result, bail};
 use clap::{Parser, Subcommand};
+use farm::remote::{HostJobKind, RegisterLocalHost};
 use farm::{
     api,
     kolla::Phase,
@@ -47,9 +48,9 @@ enum Command {
     },
     Create {
         id: String,
-        /// Registered remote host; omit to execute locally
+        /// Registered host to run the farm on (see the Hosts page or `GET /api/v1/hosts`)
         #[arg(long)]
-        host_id: Option<String>,
+        host_id: String,
         #[arg(long, value_delimiter = ',')]
         components: Vec<String>,
         #[arg(long, default_value = "localhost")]
@@ -59,8 +60,8 @@ enum Command {
         /// UTC Unix seconds; metadata only
         #[arg(long)]
         expires_at: Option<u64>,
-        /// Start from a snapshot instead of an empty VM (local only; replaces --components)
-        #[arg(long, conflicts_with_all = ["components", "host_id"])]
+        /// Start from a snapshot instead of an empty VM (this machine's host only; replaces --components)
+        #[arg(long, conflicts_with = "components")]
         snapshot: Option<String>,
     },
     Deploy {
@@ -94,11 +95,48 @@ enum Command {
         #[arg(long, default_value_t = 0)]
         after: u64,
     },
+    /// Register, check and prepare the hosts farms run on
+    #[command(subcommand)]
+    Host(HostCommand),
     /// Freeze farms into snapshots, and move snapshots between hosts as archives
     #[command(subcommand)]
     Snapshot(SnapshotCommand),
     /// Print the OpenAPI document without opening the state store
     Openapi,
+    /// Run this machine's farm agent. Without a subcommand it serves one request on
+    /// stdin/stdout, which is how a coordinator runs its local host's agent.
+    Agent {
+        #[command(subcommand)]
+        mode: Option<AgentMode>,
+    },
+}
+#[derive(Subcommand)]
+enum AgentMode {
+    /// Keep this host connected to a coordinator, which then runs farms here.
+    /// Register the host first (Hosts → 에이전트 연결 등록) to get its token.
+    Connect {
+        /// Coordinator base URL, such as https://farm.example
+        coordinator: String,
+        /// Host token; defaults to the FARM_AGENT_TOKEN environment variable
+        #[arg(long)]
+        token: Option<String>,
+    },
+}
+#[derive(Subcommand)]
+enum HostCommand {
+    /// Register this machine as a host (no SSH) and prepare it
+    Local {
+        #[arg(long, default_value = "local")]
+        id: String,
+    },
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Inspect a registered host
+    Check { id: String },
+    /// Prepare a registered host and boot a test VM on it
+    Prepare { id: String },
 }
 #[derive(Subcommand)]
 enum SnapshotCommand {
@@ -149,6 +187,25 @@ async fn wait_snapshot(manager: &FarmManager, id: &str) -> Result<SnapshotRecord
 }
 fn absolute(path: PathBuf) -> Result<String> {
     Ok(std::path::absolute(path)?.display().to_string())
+}
+async fn wait_host(manager: &FarmManager, id: &str, kind: HostJobKind) -> Result<()> {
+    let job = manager.start_host_job(id, kind)?;
+    loop {
+        let job = manager.host_job(&job.id)?;
+        if !job.status.active() {
+            for event in &job.events {
+                println!("{}", event.message);
+            }
+            if job.status != JobStatus::Succeeded {
+                bail!(
+                    "{}",
+                    job.error.unwrap_or_else(|| format!("{:?}", job.status))
+                );
+            }
+            return Ok(());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
 }
 async fn wait(manager: &FarmManager, job: Job) -> Result<()> {
     println!("job {}: {:?}", job.id, job.kind);
@@ -216,6 +273,25 @@ async fn main() -> Result<()> {
             return Ok(());
         }
         Command::Openapi => return print_json(&api::openapi_document()),
+        Command::Agent {
+            mode: Some(AgentMode::Connect { coordinator, token }),
+        } => {
+            let token = token
+                .clone()
+                .or_else(|| std::env::var("FARM_AGENT_TOKEN").ok())
+                .filter(|t| !t.trim().is_empty())
+                .ok_or_else(|| anyhow::anyhow!("pass --token or set FARM_AGENT_TOKEN"))?;
+            let agent = std::sync::Arc::new(farm::remote::agent::Agent::local());
+            return farm::remote::dial::run(coordinator, &token, agent).await;
+        }
+        Command::Agent { mode: None } => {
+            if let Err(error) = farm::remote::agent::serve_stdio().await {
+                eprintln!("farm agent: {error}");
+                std::process::exit(1);
+            }
+            // A finished shell can leave tokio's blocking stdin read waiting for input that never comes.
+            std::process::exit(0);
+        }
         _ => {}
     }
     let mut options = ManagerOptions::local(cli.state_dir.unwrap_or_else(default_state_dir));
@@ -248,7 +324,7 @@ async fn main() -> Result<()> {
         } => {
             let job = manager.create(CreateRequest {
                 id: id.clone(),
-                host_id,
+                host_id: Some(host_id),
                 components,
                 external_host,
                 owner,
@@ -310,6 +386,27 @@ async fn main() -> Result<()> {
                 println!("[{}] {}", entry.id, entry.message);
             }
         }
+        Command::Host(command) => match command {
+            HostCommand::Local { id } => {
+                if manager.host(&id).is_err() {
+                    manager.register_local_host(RegisterLocalHost { id: id.clone() })?;
+                }
+                wait_host(&manager, &id, HostJobKind::Prepare).await?;
+                println!("host '{id}' is ready; create farms with --host-id {id}");
+            }
+            HostCommand::List { json } => {
+                let hosts = manager.hosts()?;
+                if json {
+                    print_json(&hosts)?;
+                } else {
+                    for host in hosts {
+                        println!("{:<24} {:?} {:?}", host.id, host.kind, host.status);
+                    }
+                }
+            }
+            HostCommand::Check { id } => wait_host(&manager, &id, HostJobKind::Check).await?,
+            HostCommand::Prepare { id } => wait_host(&manager, &id, HostJobKind::Prepare).await?,
+        },
         Command::Snapshot(command) => match command {
             SnapshotCommand::Create { farm, id, note } => {
                 wait(
@@ -366,7 +463,12 @@ async fn main() -> Result<()> {
                 println!("deleted snapshot '{id}'");
             }
         },
-        Command::Catalog { .. } | Command::Plan { .. } | Command::Openapi => unreachable!(),
+        Command::Catalog { .. }
+        | Command::Plan { .. }
+        | Command::Openapi
+        | Command::Agent { .. } => {
+            unreachable!()
+        }
     }
     Ok(())
 }
