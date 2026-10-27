@@ -791,15 +791,34 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "purge",
+            "in": "path",
+            "description": "Also delete this coordinator's farms and leftover VMs on the host, then unregister it.",
+            "required": true,
+            "schema": {
+              "type": "boolean"
+            }
           }
         ],
         "responses": {
           "200": {
-            "description": "",
+            "description": "Unregistered; records and credentials only",
             "content": {
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/RemovedHost"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "purge=true: host job that deletes the farms, their VMs and then the host",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostJob"
                 }
               }
             }
@@ -2073,7 +2092,8 @@
         "enum": [
           "check",
           "prepare",
-          "install_agent"
+          "install_agent",
+          "purge"
         ]
       },
       "HostKey": {

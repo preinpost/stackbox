@@ -653,7 +653,7 @@ export interface components {
       message: string;
     };
     /** @enum {string} */
-    HostJobKind: "check" | "prepare" | "install_agent";
+    HostJobKind: "check" | "prepare" | "install_agent" | "purge";
     HostKey: {
       algorithm: string;
       fingerprint: string;
@@ -1442,17 +1442,29 @@ export interface operations {
       header?: never;
       path: {
         id: string;
+        /** @description Also delete this coordinator's farms and leftover VMs on the host, then unregister it. */
+        purge: boolean;
       };
       cookie?: never;
     };
     requestBody?: never;
     responses: {
+      /** @description Unregistered; records and credentials only */
       200: {
         headers: {
           [name: string]: unknown;
         };
         content: {
           "application/json": components["schemas"]["RemovedHost"];
+        };
+      };
+      /** @description purge=true: host job that deletes the farms, their VMs and then the host */
+      202: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HostJob"];
         };
       };
       409: {
