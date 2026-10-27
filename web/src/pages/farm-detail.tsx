@@ -542,6 +542,12 @@ function Endpoints({ farm }: { farm: Farm }) {
     </section>
   );
 }
+/** One muted line per store, pinned to the card's bottom so the cards read alike. */
+const storeNotes: Record<string, string> = {
+  mariadb: "root 계정 · 배포한 서비스의 스키마가 함께 생성됩니다",
+  rabbitmq: "AMQP 0-9-1 · 아래 관리 UI에서도 같은 계정을 씁니다",
+  "rabbitmq-management": "웹 콘솔 · openstack 계정으로 로그인합니다",
+};
 const storeIcons: Record<string, React.ReactNode> = {
   mariadb: <Database size={16} />,
   rabbitmq: <MessageSquare size={16} />,
@@ -642,11 +648,7 @@ export function DatastoreCard({ store }: { store: Datastore }) {
           <code>
             {store.host}:{store.port}
           </code>
-          <CopyText
-            value={`${store.host}:${store.port}`}
-            hideValue
-            label="주소"
-          />
+          <CopyText value={store.url} hideValue label="URL" />
         </div>
         <dl className="datastore-fields">
           {store.username && (
@@ -698,11 +700,8 @@ export function DatastoreCard({ store }: { store: Datastore }) {
             </div>
           )}
         </dl>
+        <p className="datastore-note">{storeNotes[store.id]}</p>
       </div>
-      <footer className="datastore-foot">
-        <code title={store.url}>{store.url}</code>
-        <CopyText value={store.url} hideValue label="URL" />
-      </footer>
     </article>
   );
 }

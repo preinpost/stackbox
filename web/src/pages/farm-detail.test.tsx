@@ -81,6 +81,7 @@ test("keeps the data store password out of the page until it is revealed", async
   const user = userEvent.setup();
   const { container } = render(<DatastoreCard store={mariadb} />);
   expect(screen.getByText("MariaDB")).toBeTruthy();
+  // The pill shows the address; the copy button carries the full URL.
   expect(screen.getByText("localhost:15006")).toBeTruthy();
   expect(screen.getByText("keystone")).toBeTruthy();
   expect(container.textContent).not.toContain("database-secret-value");
