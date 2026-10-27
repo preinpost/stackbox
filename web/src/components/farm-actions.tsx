@@ -306,17 +306,19 @@ export function CreateFarmForm({
                       </Checkbox.Indicator>
                     </Checkbox.Root>
                     <span className="component-text">
-                      <strong>{componentLabel(c.id)}</strong>
+                      <span className="component-head">
+                        <strong>{componentLabel(c.id)}</strong>
+                        <span className="component-badge">
+                          {c.required
+                            ? "필수"
+                            : !c.available
+                              ? "준비 중"
+                              : neededBy.length
+                                ? `${neededBy.join("·")}에 필요`
+                                : "선택"}
+                        </span>
+                      </span>
                       <small>{componentInfo[c.id]?.description}</small>
-                    </span>
-                    <span className="optional">
-                      {c.required
-                        ? "필수"
-                        : !c.available
-                          ? "준비 중"
-                          : neededBy.length
-                            ? `${neededBy.join("·")}에 필요`
-                            : "선택"}
                     </span>
                   </label>
                 );
