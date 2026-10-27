@@ -351,6 +351,102 @@
         }
       }
     },
+    "/api/v1/farms/{id}/settle": {
+      "post": {
+        "tags": [],
+        "operationId": "settle",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Wait for the farm's services to answer again after its VM started from disk; no deployment runs",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Job"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/farms/{id}/snapshots": {
+      "post": {
+        "tags": [],
+        "operationId": "freeze",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SnapshotRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Snapshot job; the farm's VM stops for the capture and starts again",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Job"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/host": {
       "get": {
         "tags": [],
@@ -931,6 +1027,217 @@
           }
         }
       }
+    },
+    "/api/v1/snapshots": {
+      "get": {
+        "tags": [],
+        "operationId": "snapshots",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/SnapshotRecord"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/snapshots/import": {
+      "post": {
+        "tags": [],
+        "operationId": "import_snapshot",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ImportRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Import started; poll the snapshot until it leaves `importing`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SnapshotRecord"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/snapshots/{id}": {
+      "get": {
+        "tags": [],
+        "operationId": "snapshot",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SnapshotRecord"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [],
+        "operationId": "delete_snapshot",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RemovedSnapshot"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/snapshots/{id}/export": {
+      "post": {
+        "tags": [],
+        "operationId": "export_snapshot",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExportRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Export started; poll the snapshot until it leaves `exporting`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SnapshotRecord"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -1100,6 +1407,13 @@
               "string",
               "null"
             ]
+          },
+          "snapshot_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Start from this snapshot instead of an empty VM. Its services replace `components`."
           }
         },
         "additionalProperties": false
@@ -1206,6 +1520,20 @@
             "type": "string"
           }
         }
+      },
+      "ExportRequest": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Absolute archive path on the coordinator; defaults to `<state dir>/exports/<id>.msb`.",
+            "default": null
+          }
+        },
+        "additionalProperties": false
       },
       "Exposure": {
         "type": "object",
@@ -1378,6 +1706,13 @@
               "null"
             ]
           },
+          "snapshot_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Snapshot this farm was restored from."
+          },
           "status": {
             "$ref": "#/components/schemas/FarmStatus"
           },
@@ -1394,6 +1729,7 @@
           "creating",
           "created",
           "deploying",
+          "settling",
           "ready",
           "failed",
           "broken",
@@ -1682,6 +2018,26 @@
           "failed"
         ]
       },
+      "ImportRequest": {
+        "type": "object",
+        "required": [
+          "path"
+        ],
+        "properties": {
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Snapshot ID to import as; defaults to the ID recorded in the archive."
+          },
+          "path": {
+            "type": "string",
+            "description": "Absolute path of a `.msb` archive on the coordinator."
+          }
+        },
+        "additionalProperties": false
+      },
       "InstalledAgent": {
         "type": "object",
         "required": [
@@ -1747,6 +2103,13 @@
               }
             ]
           },
+          "snapshot_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Snapshot captured by a snapshot job, or restored by a restore job."
+          },
           "started_at": {
             "type": [
               "integer",
@@ -1765,7 +2128,10 @@
         "enum": [
           "create",
           "deploy",
-          "delete"
+          "delete",
+          "snapshot",
+          "restore",
+          "settle"
         ]
       },
       "JobStatus": {
@@ -2057,6 +2423,17 @@
           }
         }
       },
+      "RemovedSnapshot": {
+        "type": "object",
+        "required": [
+          "id"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          }
+        }
+      },
       "Role": {
         "type": "string",
         "enum": [
@@ -2068,6 +2445,145 @@
           "glance",
           "control",
           "compute"
+        ]
+      },
+      "SnapshotArchive": {
+        "type": "object",
+        "required": [
+          "path",
+          "size_bytes",
+          "exported_at"
+        ],
+        "properties": {
+          "exported_at": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "path": {
+            "type": "string"
+          },
+          "size_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "SnapshotRecord": {
+        "type": "object",
+        "required": [
+          "id",
+          "status",
+          "plan",
+          "deployed",
+          "source_exposure",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "archive": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/SnapshotArchive",
+                "description": "Most recent export."
+              }
+            ]
+          },
+          "created_at": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "deployed": {
+            "type": "boolean",
+            "description": "Whether OpenStack was deployed when frozen. Restored farms then start `ready`."
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "plan": {
+            "$ref": "#/components/schemas/Plan"
+          },
+          "reference": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "msb snapshot reference; set once captured or imported."
+          },
+          "size_bytes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
+          "source_exposure": {
+            "$ref": "#/components/schemas/Exposure",
+            "description": "Public ports the source farm's catalog was registered with; restores rewrite them."
+          },
+          "source_farm": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Farm the snapshot was frozen from; `None` when imported from an archive."
+          },
+          "status": {
+            "$ref": "#/components/schemas/SnapshotStatus"
+          },
+          "updated_at": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "SnapshotRequest": {
+        "type": "object",
+        "required": [
+          "id"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "Snapshot ID: 1-48 lowercase letters, digits or hyphens."
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "SnapshotStatus": {
+        "type": "string",
+        "enum": [
+          "creating",
+          "ready",
+          "exporting",
+          "importing",
+          "deleting",
+          "failed"
         ]
       },
       "SshTarget": {

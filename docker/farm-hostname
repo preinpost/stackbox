@@ -1,8 +1,12 @@
 #!/bin/bash
-# msb recreates /etc/hosts at boot. RabbitMQ must resolve our hostname to eth0.
+# msb recreates /etc/hosts at boot. RabbitMQ must resolve our hostname to the
+# fixed service address (see farm-identity), or to eth0 on farms created without one.
 set -euo pipefail
-address=""
+FARM_ADDRESS=""
+if [ -f /etc/farm/identity.conf ]; then . /etc/farm/identity.conf; fi
+address="$FARM_ADDRESS"
 for _ in $(seq 60); do
+  [ -n "$address" ] && break
   address=$(ip -4 -o addr show dev eth0 scope global | awk 'NR==1 { split($4, a, "/"); print a[1] }')
   [ -n "$address" ] && break
   sleep 1

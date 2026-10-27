@@ -35,6 +35,14 @@ const detail = createRoute({
     "FarmDetailRoute",
   ),
 });
+const snapshots = createRoute({
+  getParentRoute: () => root,
+  path: "/snapshots",
+  component: lazyRouteComponent(
+    () => import("./pages/snapshots"),
+    "SnapshotsPage",
+  ),
+});
 const jobs = createRoute({
   getParentRoute: () => root,
   path: "/jobs",
@@ -54,7 +62,14 @@ const remoteHosts = createRoute({
   ),
 });
 export const router = createRouter({
-  routeTree: root.addChildren([farms, detail, jobs, host, remoteHosts]),
+  routeTree: root.addChildren([
+    farms,
+    detail,
+    snapshots,
+    jobs,
+    host,
+    remoteHosts,
+  ]),
   defaultPreload: "intent",
   scrollRestoration: true,
 });

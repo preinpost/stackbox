@@ -1,4 +1,12 @@
-import type { Farm, Phase } from "./api/client";
+import type { Farm, Job, Phase } from "./api/client";
+export const jobKindLabels: Record<Job["kind"], string> = {
+  create: "VM 생성",
+  deploy: "OpenStack 배포",
+  delete: "Farm 삭제",
+  snapshot: "스냅샷 얼리기",
+  restore: "스냅샷에서 복원",
+  settle: "서비스 응답 확인",
+};
 export const phases: { id: Phase; label: string; description: string }[] = [
   {
     id: "prepare",
@@ -30,6 +38,10 @@ export const phases: { id: Phase; label: string; description: string }[] = [
   { id: "verify", label: "Verify", description: "Token과 이미지 API 검증" },
 ];
 export const memory = (mib: number) => `${Number((mib / 1024).toFixed(1))} GiB`;
+export const bytes = (value: number) =>
+  value >= 1024 ** 3
+    ? `${Number((value / 1024 ** 3).toFixed(1))} GiB`
+    : `${Number((value / 1024 ** 2).toFixed(1))} MiB`;
 const osLabels: Record<string, string> = { macos: "macOS", linux: "Linux" };
 export const platform = (os: string, arch: string) =>
   `${osLabels[os] ?? os} / ${arch}`;

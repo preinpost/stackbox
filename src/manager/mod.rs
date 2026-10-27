@@ -1,6 +1,7 @@
 mod backend;
 mod hosts;
 mod logs;
+mod snapshots;
 mod store;
 
 use crate::{
@@ -57,6 +58,8 @@ struct Inner {
     options: ManagerOptions,
     create_gate: Semaphore,
     deploy_gate: Semaphore,
+    /// Serializes capture, export and import, which each move the whole VM disk.
+    snapshot_gate: Semaphore,
     accepting: AtomicBool,
     vault: crate::remote::Vault,
     host_gate: Semaphore,
@@ -80,6 +83,17 @@ impl std::fmt::Display for Conflict {
 impl std::error::Error for Conflict {}
 fn conflict(message: impl Into<String>) -> anyhow::Error {
     Conflict(message.into()).into()
+}
+#[derive(Debug)]
+pub struct BadRequest(pub String);
+impl std::fmt::Display for BadRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+impl std::error::Error for BadRequest {}
+fn bad_request(message: impl Into<String>) -> anyhow::Error {
+    BadRequest(message.into()).into()
 }
 
 impl FarmManager {
@@ -124,6 +138,7 @@ impl FarmManager {
             options,
             create_gate: Semaphore::new(1),
             deploy_gate: Semaphore::new(1),
+            snapshot_gate: Semaphore::new(1),
             accepting: AtomicBool::new(true),
             vault,
             host_gate: Semaphore::new(2),
@@ -157,6 +172,7 @@ impl FarmManager {
                     farm.updated_at = now();
                 }
             }
+            snapshots::recover_interrupted(state);
             Ok(())
         })?;
         manager.reconcile().await?;
@@ -312,7 +328,7 @@ impl FarmManager {
     }
 
     pub fn create(&self, request: CreateRequest) -> Result<Job> {
-        let plan = request.validate()?;
+        let mut plan = request.validate()?;
         let id = request.id.clone();
         let job = self.update(|state| {
             self.ensure_accepting()?;
@@ -322,6 +338,9 @@ impl FarmManager {
                 .is_some_and(|f| f.status != FarmStatus::Deleted)
             {
                 return Err(conflict(format!("farm '{id}' already exists")));
+            }
+            if let Some(snapshot_id) = &request.snapshot_id {
+                plan = snapshots::restorable(state, snapshot_id)?.plan.clone();
             }
             let reserved: u64 = state
                 .farms
@@ -346,7 +365,8 @@ impl FarmManager {
             }
             let exposure =
                 allocate_ports(state, request.external_host, if request.host_id.is_some() { IpAddr::V4(Ipv4Addr::UNSPECIFIED) } else { self.0.options.public_bind }, request.host_id.as_deref())?;
-            let job = new_job(&id, JobKind::Create);
+            let mut job = new_job(&id, if request.snapshot_id.is_some() { JobKind::Restore } else { JobKind::Create });
+            job.snapshot_id = request.snapshot_id.clone();
             state.farms.insert(
                 id.clone(),
                 FarmRecord {
@@ -367,6 +387,7 @@ impl FarmManager {
                     active_job: Some(job.id.clone()),
                     created_at: now(),
                     updated_at: now(),
+                    snapshot_id: request.snapshot_id,
                 },
             );
             state.jobs.insert(job.id.clone(), job.clone());
@@ -419,6 +440,69 @@ impl FarmManager {
             Ok(job)
         })?;
         self.spawn(job.clone(), Some(request));
+        Ok(job)
+    }
+    /// Re-check a farm whose VM started from disk (or was restarted) without deploying again.
+    pub fn settle(&self, id: &str) -> Result<Job> {
+        let job = self.update(|state| {
+            self.ensure_accepting()?;
+            let farm = state
+                .farms
+                .get_mut(id)
+                .ok_or_else(|| NotFound(format!("farm '{id}'")))?;
+            ensure_idle(farm)?;
+            if farm
+                .host_id
+                .as_ref()
+                .and_then(|id| state.hosts.get(id))
+                .is_some_and(|h| h.host.active_job.is_some())
+            {
+                return Err(conflict("host preparation is running"));
+            }
+            // Only a farm that was deployed has services to wait for.
+            if !matches!(
+                farm.status,
+                FarmStatus::Ready | FarmStatus::Created | FarmStatus::Broken | FarmStatus::Settling
+            ) {
+                return Err(conflict(
+                    "farm must be deployed (or restored from a deployed snapshot) to check its services",
+                ));
+            }
+            let deployed = state.jobs.values().any(|j| {
+                j.farm_id == id
+                    && j.kind == JobKind::Deploy
+                    && j.status == JobStatus::Succeeded
+            }) || farm
+                .snapshot_id
+                .as_ref()
+                .and_then(|snapshot| state.snapshots.get(snapshot))
+                .is_some_and(|snapshot| snapshot.deployed);
+            if !deployed {
+                return Err(conflict(
+                    "farm has no successful deployment; deploy it before checking its services",
+                ));
+            }
+            if farm
+                .plan
+                .as_ref()
+                .is_none_or(|plan| plan.nodes.len() != 1)
+            {
+                return Err(conflict("farms imported from older versions cannot be checked"));
+            }
+            if farm.nodes.len() != 1 || farm.nodes[0].status != "running" {
+                return Err(conflict("the farm's VM must be running to check its services"));
+            }
+            let mut job = new_job(id, JobKind::Settle);
+            job.phase = Some(crate::kolla::Phase::Verify);
+            farm.status = FarmStatus::Settling;
+            farm.active_job = Some(job.id.clone());
+            farm.error = None;
+            farm.phase = Some(crate::kolla::Phase::Verify);
+            farm.updated_at = now();
+            state.jobs.insert(job.id.clone(), job.clone());
+            Ok(job)
+        })?;
+        self.spawn(job.clone(), None);
         Ok(job)
     }
     pub fn delete(&self, id: &str) -> Result<Job> {
@@ -491,8 +575,10 @@ impl FarmManager {
     }
     async fn execute(&self, job: &Job, request: Option<DeployRequest>) -> Result<()> {
         let _permit = match job.kind {
-            JobKind::Create => Some(self.0.create_gate.acquire().await?),
+            JobKind::Create | JobKind::Restore => Some(self.0.create_gate.acquire().await?),
             JobKind::Deploy => Some(self.0.deploy_gate.acquire().await?),
+            JobKind::Snapshot => Some(self.0.snapshot_gate.acquire().await?),
+            JobKind::Settle => Some(self.0.deploy_gate.acquire().await?),
             JobKind::Delete => None,
         };
         self.update(|state| {
@@ -528,35 +614,6 @@ impl FarmManager {
                 })?;
             }
             JobKind::Deploy => {
-                let manager = self.clone();
-                let job = job.clone();
-                let sink: EventSink = Arc::new(move |event| {
-                    let phase = match event {
-                        DeployEvent::Phase(phase) => {
-                            manager.update(|state| {
-                                let farm =
-                                    state.farms.get_mut(&job.farm_id).context("farm missing")?;
-                                farm.phase = Some(phase);
-                                farm.updated_at = now();
-                                state.jobs.get_mut(&job.id).context("job missing")?.phase =
-                                    Some(phase);
-                                Ok(())
-                            })?;
-                            manager.log(
-                                &job.farm_id,
-                                &job.id,
-                                Some(phase),
-                                format!("phase {phase}"),
-                            )?;
-                            return Ok(());
-                        }
-                        DeployEvent::Output(message) => {
-                            let phase = manager.job(&job.id)?.phase;
-                            (phase, message)
-                        }
-                    };
-                    manager.log(&job.farm_id, &job.id, phase.0, phase.1)
-                });
                 let components = farm_components(&farm);
                 self.backend_for(&farm)?
                     .deploy(
@@ -564,13 +621,46 @@ impl FarmManager {
                         request.unwrap_or_default().from,
                         farm.exposure,
                         components,
-                        sink,
+                        self.event_sink(job),
                     )
                     .await?;
             }
             JobKind::Delete => self.backend_for(&farm)?.delete(farm.id).await?,
+            JobKind::Settle => {
+                let components = farm_components(&farm);
+                self.backend_for(&farm)?
+                    .settle(farm.id, None, components, self.event_sink(job))
+                    .await?;
+            }
+            JobKind::Snapshot => self.freeze_job(job, farm).await?,
+            JobKind::Restore => self.restore_job(job, farm).await?,
         }
         Ok(())
+    }
+    /// Records deployment phases on the farm and job, and output in the farm log.
+    fn event_sink(&self, job: &Job) -> EventSink {
+        let manager = self.clone();
+        let job = job.clone();
+        Arc::new(move |event| {
+            let phase = match event {
+                DeployEvent::Phase(phase) => {
+                    manager.update(|state| {
+                        let farm = state.farms.get_mut(&job.farm_id).context("farm missing")?;
+                        farm.phase = Some(phase);
+                        farm.updated_at = now();
+                        state.jobs.get_mut(&job.id).context("job missing")?.phase = Some(phase);
+                        Ok(())
+                    })?;
+                    manager.log(&job.farm_id, &job.id, Some(phase), format!("phase {phase}"))?;
+                    return Ok(());
+                }
+                DeployEvent::Output(message) => {
+                    let phase = manager.job(&job.id)?.phase;
+                    (phase, message)
+                }
+            };
+            manager.log(&job.farm_id, &job.id, phase.0, phase.1)
+        })
     }
     fn finish(&self, job: &Job, result: Result<()>) -> Result<()> {
         let error = result.err().map(|e| format!("{e:#}"));
@@ -590,15 +680,25 @@ impl FarmManager {
             };
             current.error = error.clone();
             current.finished_at = Some(now());
+            // A farm restored from a deployed snapshot is ready as soon as its services answer.
+            let deployed = job
+                .snapshot_id
+                .as_ref()
+                .and_then(|id| state.snapshots.get(id))
+                .is_some_and(|s| s.deployed);
             let farm = state.farms.get_mut(&job.farm_id).context("farm missing")?;
-            farm.status = if error.is_some() {
-                FarmStatus::Failed
-            } else {
-                match job.kind {
-                    JobKind::Create => FarmStatus::Created,
-                    JobKind::Deploy => FarmStatus::Ready,
-                    JobKind::Delete => FarmStatus::Deleted,
-                }
+            farm.status = match (job.kind, error.is_some()) {
+                // Freezing leaves the farm as it was; a failure is reported on the job and snapshot.
+                (JobKind::Snapshot, _) => farm.status,
+                // A check that fails leaves the VM as it was; the user can run it again.
+                (JobKind::Settle, true) => FarmStatus::Created,
+                (JobKind::Settle, false) => FarmStatus::Ready,
+                (_, true) => FarmStatus::Failed,
+                (JobKind::Create, false) => FarmStatus::Created,
+                (JobKind::Deploy, false) => FarmStatus::Ready,
+                (JobKind::Delete, false) => FarmStatus::Deleted,
+                (JobKind::Restore, false) if deployed => FarmStatus::Ready,
+                (JobKind::Restore, false) => FarmStatus::Created,
             };
             farm.error = error;
             farm.active_job = None;
@@ -632,6 +732,7 @@ impl FarmManager {
         loop {
             if self.jobs()?.iter().all(|j| !j.status.active())
                 && self.host_jobs()?.iter().all(|j| !j.status.active())
+                && self.snapshots()?.iter().all(|s| !snapshots::busy(s.status))
             {
                 return Ok(());
             }
@@ -820,6 +921,7 @@ fn apply_inventory(
                 active_job: None,
                 created_at: now(),
                 updated_at: now(),
+                snapshot_id: None,
             },
         );
     }
@@ -844,6 +946,7 @@ fn new_job(farm: &str, kind: JobKind) -> Job {
         created_at: now(),
         started_at: None,
         finished_at: None,
+        snapshot_id: None,
     }
 }
 fn farm_components(farm: &FarmRecord) -> Vec<String> {

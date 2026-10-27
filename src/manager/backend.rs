@@ -1,11 +1,15 @@
 use crate::{
-    farm::{self, FarmNode},
+    farm::{self, FarmNode, FrozenSnapshot, ImportedSnapshot},
     kolla::{self, EventSink, Phase},
     model::{Endpoints, Exposure, Plan},
 };
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use futures::future::BoxFuture;
-use std::{collections::BTreeMap, sync::Arc};
+use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
+
+fn unsupported<T: Send + 'static>() -> BoxFuture<'static, Result<T>> {
+    Box::pin(async { Err(anyhow!("snapshots are available for local farms only")) })
+}
 
 /// VM boundary; tests can exercise the real manager without launching guests.
 pub trait Backend: Send + Sync + 'static {
@@ -32,6 +36,48 @@ pub trait Backend: Send + Sync + 'static {
         exposure: Option<Exposure>,
         components: Vec<String>,
     ) -> BoxFuture<'_, Result<Endpoints>>;
+    /// Stop the farm's VM, capture its disks under `labels`, and start it again.
+    fn freeze(
+        &self,
+        _id: String,
+        _snapshot_id: String,
+        _labels: BTreeMap<String, String>,
+    ) -> BoxFuture<'_, Result<FrozenSnapshot>> {
+        unsupported()
+    }
+    fn restore(
+        &self,
+        _id: String,
+        _reference: String,
+        _plan: Plan,
+        _exposure: Exposure,
+    ) -> BoxFuture<'_, Result<Vec<FarmNode>>> {
+        unsupported()
+    }
+    /// Wait for a deployed farm's services after a cold start, optionally moving its
+    /// public catalog entries from the first exposure to the second.
+    fn settle(
+        &self,
+        _id: String,
+        _rebind: Option<(Exposure, Exposure)>,
+        _components: Vec<String>,
+        _sink: EventSink,
+    ) -> BoxFuture<'_, Result<()>> {
+        unsupported()
+    }
+    fn export_snapshot(&self, _reference: String, _output: PathBuf) -> BoxFuture<'_, Result<()>> {
+        unsupported()
+    }
+    fn import_snapshot(
+        &self,
+        _archive: PathBuf,
+        _snapshot_id: String,
+    ) -> BoxFuture<'_, Result<ImportedSnapshot>> {
+        unsupported()
+    }
+    fn remove_snapshot(&self, _reference: String) -> BoxFuture<'_, Result<()>> {
+        unsupported()
+    }
 }
 pub struct MicrosandboxBackend;
 impl Backend for MicrosandboxBackend {
@@ -108,6 +154,53 @@ PY"#).await;
                 credentials,
             })
         })
+    }
+    fn freeze(
+        &self,
+        id: String,
+        snapshot_id: String,
+        labels: BTreeMap<String, String>,
+    ) -> BoxFuture<'_, Result<FrozenSnapshot>> {
+        Box::pin(async move { farm::freeze_farm(&id, &snapshot_id, &labels).await })
+    }
+    fn restore(
+        &self,
+        id: String,
+        reference: String,
+        plan: Plan,
+        exposure: Exposure,
+    ) -> BoxFuture<'_, Result<Vec<FarmNode>>> {
+        Box::pin(async move {
+            let [spec] = plan.nodes[..] else {
+                anyhow::bail!("snapshots hold exactly one all-in-one VM");
+            };
+            farm::restore_farm(&id, &reference, spec, &exposure, &plan.components).await
+        })
+    }
+    fn settle(
+        &self,
+        id: String,
+        rebind: Option<(Exposure, Exposure)>,
+        components: Vec<String>,
+        sink: EventSink,
+    ) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async move {
+            let rebind = rebind.as_ref().map(|(from, to)| (from, to));
+            kolla::settle(&id, rebind, &components, sink).await
+        })
+    }
+    fn export_snapshot(&self, reference: String, output: PathBuf) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async move { farm::export_snapshot(&reference, &output).await })
+    }
+    fn import_snapshot(
+        &self,
+        archive: PathBuf,
+        snapshot_id: String,
+    ) -> BoxFuture<'_, Result<ImportedSnapshot>> {
+        Box::pin(async move { farm::import_snapshot(&archive, &snapshot_id).await })
+    }
+    fn remove_snapshot(&self, reference: String) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async move { farm::remove_snapshot(&reference).await })
     }
 }
 pub fn real() -> Arc<dyn Backend> {

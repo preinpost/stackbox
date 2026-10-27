@@ -19,6 +19,9 @@ export type HostCapacity = Schema["HostCapacity"];
 export type HostJob = Schema["HostJob"];
 export type HostKey = Schema["HostKey"];
 export type RegisterHost = Schema["RegisterHost"];
+export type Snapshot = Schema["SnapshotRecord"];
+export type SnapshotRequest = Schema["SnapshotRequest"];
+export type ImportRequest = Schema["ImportRequest"];
 
 export class ApiError extends Error {
   constructor(
@@ -62,12 +65,15 @@ const encode = encodeURIComponent;
 export const activeJob = (job: Pick<Job, "status">) =>
   job.status === "queued" || job.status === "running";
 export const busyFarm = (farm: Farm) => Boolean(farm.active_job);
+export const busySnapshot = (snapshot: Pick<Snapshot, "status">) =>
+  ["creating", "exporting", "importing", "deleting"].includes(snapshot.status);
 export const keys = {
   farms: ["farms"] as const,
   jobs: ["jobs"] as const,
   host: ["host"] as const,
   hosts: ["remote-hosts"] as const,
   hostJobs: ["host-jobs"] as const,
+  snapshots: ["snapshots"] as const,
   farm: (id: string) => ["farms", id] as const,
   logs: (id: string) => ["logs", id] as const,
   endpoints: (id: string) => ["endpoints", id] as const,
@@ -106,6 +112,12 @@ export const hostJobsQuery = () =>
       q.state.data?.some((j) => ["queued", "running"].includes(j.status))
         ? 1500
         : 10_000,
+  });
+export const snapshotsQuery = () =>
+  queryOptions({
+    queryKey: keys.snapshots,
+    queryFn: ({ signal }) => request<Snapshot[]>("/snapshots", { signal }),
+    refetchInterval: (q) => (q.state.data?.some(busySnapshot) ? 1500 : 10_000),
   });
 export const catalogQuery = () =>
   queryOptions({
@@ -178,4 +190,23 @@ export const api = {
     }),
   endpoints: (id: string) =>
     request<ServiceEndpoints>(`/farms/${encode(id)}/endpoints`),
+  settle: (id: string) =>
+    request<Job>(`/farms/${encode(id)}/settle`, { method: "POST" }),
+  freeze: (farmId: string, body: SnapshotRequest) =>
+    request<Job>(`/farms/${encode(farmId)}/snapshots`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  exportSnapshot: (id: string, path?: string) =>
+    request<Snapshot>(`/snapshots/${encode(id)}/export`, {
+      method: "POST",
+      body: JSON.stringify(path ? { path } : {}),
+    }),
+  importSnapshot: (body: ImportRequest) =>
+    request<Snapshot>("/snapshots/import", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  deleteSnapshot: (id: string) =>
+    request<{ id: string }>(`/snapshots/${encode(id)}`, { method: "DELETE" }),
 };

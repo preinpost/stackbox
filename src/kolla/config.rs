@@ -9,6 +9,8 @@ pub const OPENSTACK_RELEASE: &str = "2026.2";
 pub struct Topology {
     pub name: String,
     pub ip: Option<String>,
+    /// Interface holding `ip`: the fixed `farm0` service address, or eth0 on older farms.
+    pub interface: String,
 }
 
 impl Topology {
@@ -27,6 +29,7 @@ impl Topology {
         Ok(Self {
             name: node.name.clone(),
             ip: None,
+            interface: "eth0".into(),
         })
     }
 
@@ -49,7 +52,7 @@ impl Topology {
     }
 }
 
-pub fn globals(vip: &str, arch: &str, kvm: bool, components: &[String]) -> String {
+pub fn globals(vip: &str, interface: &str, arch: &str, kvm: bool, components: &[String]) -> String {
     let tag_suffix = if arch == "aarch64" { "-aarch64" } else { "" };
     format!(
         r#"---
@@ -57,11 +60,11 @@ kolla_base_distro: "rocky"
 openstack_release: "{OPENSTACK_RELEASE}"
 openstack_tag_suffix: "{tag_suffix}"
 kolla_internal_vip_address: "{vip}"
-network_interface: "eth0"
-api_interface: "eth0"
+network_interface: "{interface}"
+api_interface: "{interface}"
 database_address: "{vip}"
 kolla_external_vip_address: "{vip}"
-kolla_external_vip_interface: "eth0"
+kolla_external_vip_interface: "{interface}"
 
 # quay.io/openstack.kolla images are flagged as test images by prechecks.
 kolla_test_images: true
@@ -160,7 +163,7 @@ mod tests {
     #[test]
     fn direct_services_use_eth0_and_bounded_shared_resources() {
         let base = ["keystone", "glance"].map(String::from);
-        let globals = globals("192.168.127.2", "aarch64", false, &base);
+        let globals = globals("192.168.127.2", "eth0", "aarch64", false, &base);
         assert!(globals.contains("openstack_tag_suffix: \"-aarch64\""));
         assert!(globals.contains("network_interface: \"eth0\""));
         assert!(globals.contains("database_address: \"192.168.127.2\""));
@@ -173,9 +176,24 @@ mod tests {
     }
 
     #[test]
+    fn fixed_identity_binds_every_service_to_the_dummy_interface() {
+        let base = ["keystone", "glance"].map(String::from);
+        let globals = globals("10.254.0.2", "farm0", "aarch64", false, &base);
+        for key in [
+            "network_interface",
+            "api_interface",
+            "kolla_external_vip_interface",
+        ] {
+            assert!(globals.contains(&format!("{key}: \"farm0\"\n")), "{key}");
+        }
+        assert!(globals.contains("kolla_internal_vip_address: \"10.254.0.2\""));
+        assert!(!globals.contains("eth0"));
+    }
+
+    #[test]
     fn enables_only_selected_optional_services_and_keeps_netdev_workarounds() {
         let selected = ["keystone", "glance", "horizon", "neutron"].map(String::from);
-        let globals = globals("192.168.127.2", "x86_64", false, &selected);
+        let globals = globals("192.168.127.2", "eth0", "x86_64", false, &selected);
         for id in ["horizon", "neutron"] {
             assert!(globals.contains(&format!("enable_{id}: true\n")));
         }
@@ -191,13 +209,13 @@ mod tests {
     #[test]
     fn nova_uses_kvm_when_available_and_falls_back_to_qemu_tcg() {
         let selected = ["keystone", "glance", "nova"].map(String::from);
-        let kvm_globals = globals("192.168.127.2", "aarch64", true, &selected);
+        let kvm_globals = globals("192.168.127.2", "eth0", "aarch64", true, &selected);
         assert!(kvm_globals.contains("enable_nova: true\n"));
         assert!(kvm_globals.contains("nova_compute_virt_type: \"kvm\"\n"));
         assert!(kvm_globals.contains("nova_libvirt_cpu_mode: \"host-passthrough\"\n"));
         assert!(kvm_globals.contains("nova_console: \"none\"\n"));
 
-        let tcg_globals = globals("192.168.127.2", "aarch64", false, &selected);
+        let tcg_globals = globals("192.168.127.2", "eth0", "aarch64", false, &selected);
         assert!(tcg_globals.contains("enable_nova: true\n"));
         assert!(tcg_globals.contains("nova_compute_virt_type: \"qemu\"\n"));
         assert!(tcg_globals.contains("nova_libvirt_cpu_mode: \"none\"\n"));

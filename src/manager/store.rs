@@ -1,4 +1,4 @@
-use crate::model::{FarmRecord, Job};
+use crate::model::{FarmRecord, Job, SnapshotRecord};
 use anyhow::{Context, Result, ensure};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
@@ -21,6 +21,8 @@ pub struct State {
     pub hosts: BTreeMap<String, crate::remote::StoredHost>,
     #[serde(default)]
     pub host_jobs: BTreeMap<String, crate::remote::HostJob>,
+    #[serde(default)]
+    pub snapshots: BTreeMap<String, SnapshotRecord>,
 }
 impl Default for State {
     fn default() -> Self {
@@ -31,6 +33,7 @@ impl Default for State {
             jobs: BTreeMap::new(),
             hosts: BTreeMap::new(),
             host_jobs: BTreeMap::new(),
+            snapshots: BTreeMap::new(),
         }
     }
 }

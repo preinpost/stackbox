@@ -116,6 +116,38 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/v1/farms/{id}/settle": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    post: operations["settle"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/v1/farms/{id}/snapshots": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    post: operations["freeze"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/v1/host": {
     parameters: {
       query?: never;
@@ -324,6 +356,70 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/v1/snapshots": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get: operations["snapshots"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/v1/snapshots/import": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    post: operations["import_snapshot"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/v1/snapshots/{id}": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get: operations["snapshot"];
+    put?: never;
+    post?: never;
+    delete: operations["delete_snapshot"];
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/v1/snapshots/{id}/export": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    post: operations["export_snapshot"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -375,6 +471,8 @@ export interface components {
       host_id?: string | null;
       id: string;
       owner?: string | null;
+      /** @description Start from this snapshot instead of an empty VM. Its services replace `components`. */
+      snapshot_id?: string | null;
     };
     /** @description Write-only input. Never include this type in a host/job response or derive Debug. */
     Credentials:
@@ -404,6 +502,13 @@ export interface components {
     };
     ErrorBody: {
       error: string;
+    };
+    ExportRequest: {
+      /**
+       * @description Absolute archive path on the coordinator; defaults to `<state dir>/exports/<id>.msb`.
+       * @default null
+       */
+      path: string | null;
     };
     Exposure: {
       bind: string;
@@ -439,6 +544,8 @@ export interface components {
       phase?: null | components["schemas"]["Phase"];
       plan?: null | components["schemas"]["Plan"];
       remote_generation?: string | null;
+      /** @description Snapshot this farm was restored from. */
+      snapshot_id?: string | null;
       status: components["schemas"]["FarmStatus"];
       /** Format: int64 */
       updated_at: number;
@@ -448,6 +555,7 @@ export interface components {
       | "creating"
       | "created"
       | "deploying"
+      | "settling"
       | "ready"
       | "failed"
       | "broken"
@@ -533,6 +641,12 @@ export interface components {
       | "runtime_ready"
       | "ready"
       | "failed";
+    ImportRequest: {
+      /** @description Snapshot ID to import as; defaults to the ID recorded in the archive. */
+      id?: string | null;
+      /** @description Absolute path of a `.msb` archive on the coordinator. */
+      path: string;
+    };
     InstalledAgent: {
       artifact: components["schemas"]["AgentArtifactInfo"];
       /** Format: int64 */
@@ -548,12 +662,14 @@ export interface components {
       id: string;
       kind: components["schemas"]["JobKind"];
       phase?: null | components["schemas"]["Phase"];
+      /** @description Snapshot captured by a snapshot job, or restored by a restore job. */
+      snapshot_id?: string | null;
       /** Format: int64 */
       started_at?: number | null;
       status: components["schemas"]["JobStatus"];
     };
     /** @enum {string} */
-    JobKind: "create" | "deploy" | "delete";
+    JobKind: "create" | "deploy" | "delete" | "snapshot" | "restore" | "settle";
     /** @enum {string} */
     JobStatus: "queued" | "running" | "succeeded" | "failed" | "interrupted";
     LogEntry: {
@@ -637,6 +753,9 @@ export interface components {
     RemovedHost: {
       id: string;
     };
+    RemovedSnapshot: {
+      id: string;
+    };
     /** @enum {string} */
     Role:
       | "all-in-one"
@@ -647,6 +766,43 @@ export interface components {
       | "glance"
       | "control"
       | "compute";
+    SnapshotArchive: {
+      /** Format: int64 */
+      exported_at: number;
+      path: string;
+      /** Format: int64 */
+      size_bytes: number;
+    };
+    SnapshotRecord: {
+      archive?: null | components["schemas"]["SnapshotArchive"];
+      /** Format: int64 */
+      created_at: number;
+      /** @description Whether OpenStack was deployed when frozen. Restored farms then start `ready`. */
+      deployed: boolean;
+      error?: string | null;
+      id: string;
+      note?: string | null;
+      plan: components["schemas"]["Plan"];
+      /** @description msb snapshot reference; set once captured or imported. */
+      reference?: string | null;
+      /** Format: int64 */
+      size_bytes?: number | null;
+      /** @description Public ports the source farm's catalog was registered with; restores rewrite them. */
+      source_exposure: components["schemas"]["Exposure"];
+      /** @description Farm the snapshot was frozen from; `None` when imported from an archive. */
+      source_farm?: string | null;
+      status: components["schemas"]["SnapshotStatus"];
+      /** Format: int64 */
+      updated_at: number;
+    };
+    SnapshotRequest: {
+      /** @description Snapshot ID: 1-48 lowercase letters, digits or hyphens. */
+      id: string;
+      note?: string | null;
+    };
+    /** @enum {string} */
+    SnapshotStatus:
+      "creating" | "ready" | "exporting" | "importing" | "deleting" | "failed";
     SshTarget: {
       address: string;
       /** Format: int32 */
@@ -901,6 +1057,78 @@ export interface operations {
         };
         content: {
           "text/event-stream": string;
+        };
+      };
+    };
+  };
+  settle: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Wait for the farm's services to answer again after its VM started from disk; no deployment runs */
+      202: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["Job"];
+        };
+      };
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorBody"];
+        };
+      };
+    };
+  };
+  freeze: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["SnapshotRequest"];
+      };
+    };
+    responses: {
+      /** @description Snapshot job; the farm's VM stops for the capture and starts again */
+      202: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["Job"];
+        };
+      };
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorBody"];
+        };
+      };
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorBody"];
         };
       };
     };
@@ -1364,6 +1592,173 @@ export interface operations {
         };
       };
       400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorBody"];
+        };
+      };
+    };
+  };
+  snapshots: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["SnapshotRecord"][];
+        };
+      };
+    };
+  };
+  import_snapshot: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["ImportRequest"];
+      };
+    };
+    responses: {
+      /** @description Import started; poll the snapshot until it leaves `importing` */
+      202: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["SnapshotRecord"];
+        };
+      };
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorBody"];
+        };
+      };
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorBody"];
+        };
+      };
+    };
+  };
+  snapshot: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["SnapshotRecord"];
+        };
+      };
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorBody"];
+        };
+      };
+    };
+  };
+  delete_snapshot: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["RemovedSnapshot"];
+        };
+      };
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorBody"];
+        };
+      };
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorBody"];
+        };
+      };
+    };
+  };
+  export_snapshot: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["ExportRequest"];
+      };
+    };
+    responses: {
+      /** @description Export started; poll the snapshot until it leaves `exporting` */
+      202: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["SnapshotRecord"];
+        };
+      };
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorBody"];
+        };
+      };
+      409: {
         headers: {
           [name: string]: unknown;
         };

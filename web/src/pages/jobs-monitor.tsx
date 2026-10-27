@@ -43,7 +43,7 @@ import {
   SelectInput,
   StatusBadge,
 } from "../components/ui";
-import { dateTime, phases } from "../lib";
+import { dateTime, jobKindLabels, phases } from "../lib";
 import {
   activityLabel,
   activityStep,
@@ -288,9 +288,10 @@ function JobWorkspace({
               scope === "farm"
                 ? [
                     { value: "all", label: "모든 작업" },
-                    { value: "create", label: "VM 생성" },
-                    { value: "deploy", label: "OpenStack 배포" },
-                    { value: "delete", label: "Farm 삭제" },
+                    ...Object.entries(jobKindLabels).map(([value, label]) => ({
+                      value,
+                      label,
+                    })),
                   ]
                 : [
                     { value: "all", label: "모든 작업" },

@@ -1,6 +1,6 @@
 use crate::remote::{HostJob, HostJobKind, HostKey, RegisterHost, RemoteHost, SshTarget};
 use crate::{
-    manager::{Conflict, FarmManager, NotFound},
+    manager::{BadRequest, Conflict, FarmManager, NotFound},
     model::*,
 };
 use axum::{
@@ -33,6 +33,8 @@ impl From<anyhow::Error> for ApiError {
     fn from(e: anyhow::Error) -> Self {
         let status = if e.is::<NotFound>() {
             StatusCode::NOT_FOUND
+        } else if e.is::<BadRequest>() {
+            StatusCode::BAD_REQUEST
         } else if e.is::<Conflict>() {
             StatusCode::CONFLICT
         } else {
@@ -92,9 +94,18 @@ pub fn router(manager: FarmManager, token: Option<String>) -> Router {
         .route("/api/v1/farms", get(list).post(create))
         .route("/api/v1/farms/{id}", get(detail).delete(delete))
         .route("/api/v1/farms/{id}/deploy", post(deploy))
+        .route("/api/v1/farms/{id}/settle", post(settle))
         .route("/api/v1/farms/{id}/endpoints", get(endpoints))
         .route("/api/v1/farms/{id}/logs", get(logs))
         .route("/api/v1/farms/{id}/logs/stream", get(log_stream))
+        .route("/api/v1/farms/{id}/snapshots", post(freeze))
+        .route("/api/v1/snapshots", get(snapshots))
+        .route("/api/v1/snapshots/import", post(import_snapshot))
+        .route(
+            "/api/v1/snapshots/{id}",
+            get(snapshot).delete(delete_snapshot),
+        )
+        .route("/api/v1/snapshots/{id}/export", post(export_snapshot))
         .route("/api/v1/jobs", get(jobs))
         .route("/api/v1/jobs/{id}", get(job))
         .route("/api/v1/openapi.json", get(openapi))
@@ -441,6 +452,10 @@ async fn deploy(
 ) -> Result<Response, ApiError> {
     Ok(accepted(app.manager.deploy(&id, body(value)?)?))
 }
+#[utoipa::path(post, path="/api/v1/farms/{id}/settle", params(("id"=String, Path)), responses((status=202, description="Wait for the farm's services to answer again after its VM started from disk; no deployment runs", body=Job), (status=409, body=ErrorBody)))]
+async fn settle(State(app): State<App>, Path(id): Path<String>) -> Result<Response, ApiError> {
+    Ok(accepted(app.manager.settle(&id)?))
+}
 #[utoipa::path(delete, path="/api/v1/farms/{id}", params(("id"=String, Path)), responses((status=202, body=Job), (status=409, body=ErrorBody)))]
 async fn delete(State(app): State<App>, Path(id): Path<String>) -> Result<Response, ApiError> {
     Ok(accepted(app.manager.delete(&id)?))
@@ -459,6 +474,67 @@ async fn endpoints(
     Path(id): Path<String>,
 ) -> Result<Json<Endpoints>, ApiError> {
     Ok(Json(app.manager.endpoints(&id).await?))
+}
+#[utoipa::path(post, path="/api/v1/farms/{id}/snapshots", params(("id"=String, Path)), request_body=SnapshotRequest, responses((status=202, description="Snapshot job; the farm's VM stops for the capture and starts again", body=Job), (status=400, body=ErrorBody), (status=409, body=ErrorBody)))]
+async fn freeze(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    value: Result<Json<SnapshotRequest>, JsonRejection>,
+) -> Result<Response, ApiError> {
+    Ok(accepted(app.manager.freeze(&id, body(value)?)?))
+}
+#[utoipa::path(get, path="/api/v1/snapshots", responses((status=200, body=Vec<SnapshotRecord>)))]
+async fn snapshots(State(app): State<App>) -> Result<Json<Vec<SnapshotRecord>>, ApiError> {
+    Ok(Json(app.manager.snapshots()?))
+}
+#[utoipa::path(get, path="/api/v1/snapshots/{id}", params(("id"=String, Path)), responses((status=200, body=SnapshotRecord), (status=404, body=ErrorBody)))]
+async fn snapshot(
+    State(app): State<App>,
+    Path(id): Path<String>,
+) -> Result<Json<SnapshotRecord>, ApiError> {
+    Ok(Json(app.manager.snapshot(&id)?))
+}
+#[derive(Serialize, ToSchema)]
+struct RemovedSnapshot {
+    id: String,
+}
+#[utoipa::path(delete, path="/api/v1/snapshots/{id}", params(("id"=String, Path)), responses((status=200, body=RemovedSnapshot), (status=404, body=ErrorBody), (status=409, body=ErrorBody)))]
+async fn delete_snapshot(
+    State(app): State<App>,
+    Path(id): Path<String>,
+) -> Result<Json<RemovedSnapshot>, ApiError> {
+    app.manager.delete_snapshot(&id).await?;
+    Ok(Json(RemovedSnapshot { id }))
+}
+fn accepted_snapshot(snapshot: SnapshotRecord) -> Response {
+    (
+        StatusCode::ACCEPTED,
+        [(
+            header::LOCATION,
+            format!("/api/v1/snapshots/{}", snapshot.id),
+        )],
+        Json(snapshot),
+    )
+        .into_response()
+}
+#[utoipa::path(post, path="/api/v1/snapshots/{id}/export", params(("id"=String, Path)), request_body=ExportRequest, responses((status=202, description="Export started; poll the snapshot until it leaves `exporting`", body=SnapshotRecord), (status=400, body=ErrorBody), (status=409, body=ErrorBody)))]
+async fn export_snapshot(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    value: Result<Json<ExportRequest>, JsonRejection>,
+) -> Result<Response, ApiError> {
+    Ok(accepted_snapshot(
+        app.manager.export_snapshot(&id, body(value)?)?,
+    ))
+}
+#[utoipa::path(post, path="/api/v1/snapshots/import", request_body=ImportRequest, responses((status=202, description="Import started; poll the snapshot until it leaves `importing`", body=SnapshotRecord), (status=400, body=ErrorBody), (status=409, body=ErrorBody)))]
+async fn import_snapshot(
+    State(app): State<App>,
+    value: Result<Json<ImportRequest>, JsonRejection>,
+) -> Result<Response, ApiError> {
+    Ok(accepted_snapshot(
+        app.manager.import_snapshot(body(value)?)?,
+    ))
 }
 #[derive(Deserialize, utoipa::IntoParams)]
 struct LogQuery {
@@ -509,7 +585,7 @@ async fn log_stream(
 }
 
 #[derive(OpenApi)]
-#[openapi(paths(host, remote_hosts, remote_host, host_fingerprint, test_connection, register_host, update_host_credentials, unregister_host, check_host, prepare_host, install_agent, host_jobs, host_job, catalog_handler, plan_handler, list, detail, create, deploy, delete, endpoints, logs, log_stream, jobs, job), components(schemas(ErrorBody)), modifiers(&Security))]
+#[openapi(paths(host, remote_hosts, remote_host, host_fingerprint, test_connection, register_host, update_host_credentials, unregister_host, check_host, prepare_host, install_agent, host_jobs, host_job, catalog_handler, plan_handler, list, detail, create, deploy, settle, delete, endpoints, logs, log_stream, freeze, snapshots, snapshot, delete_snapshot, export_snapshot, import_snapshot, jobs, job), components(schemas(ErrorBody)), modifiers(&Security))]
 struct ApiDoc;
 struct Security;
 impl utoipa::Modify for Security {

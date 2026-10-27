@@ -33,10 +33,25 @@ API prefix는 `/api/v1`입니다. token이 설정된 경우 모든 경로에
 7. 삭제는 `DELETE /farms/{id}`로 요청하고 동일하게 job 완료를 기다립니다.
    삭제 성공 후에도 개별 farm 조회에는 `deleted` tombstone이 남지만 목록에서 제외됩니다.
 
-farm 상태는 `creating`, `created`, `deploying`, `ready`, `failed`, `broken`, `deleting`, `deleted`입니다.
+farm 상태는 `creating`, `created`, `deploying`, `settling`, `ready`, `failed`, `broken`, `deleting`, `deleted`입니다.
 `creating`/`deploying`은 job이 큐에서 대기하는 시간도 포함하므로 job 상태를 같이 표시하세요.
 VM 관측 결과는 시작 시와 30초 주기로 갱신되며, 실행 중인 job의 farm은 reconcile에서 건너뜁니다.
 `ready`는 마지막 배포가 성공하고 예상 VM이 실행 중이라는 뜻이며 OpenStack API의 상시 health check는 아닙니다.
+
+## 스냅샷
+
+`POST /farms/{id}/snapshots`에 `{"id":"dev-clean"}`를 전달하면 `snapshot` job이 VM을 정지해
+디스크를 저장하고 다시 시작합니다. farm 상태는 바뀌지 않으며 진행 중에는 `active_job`이 설정됩니다.
+`POST /farms`에 `snapshot_id`를 지정하면 `restore` job이 스냅샷에서 VM을 만들고, 배포된 스냅샷이면
+성공 시 바로 `ready`가 됩니다. 이때 `components`와 `host_id`는 생략합니다. 두 job 모두 `snapshot_id`를 포함합니다.
+
+내보내기(`POST /snapshots/{id}/export`)와 가져오기(`POST /snapshots/import`)는 `202`와 스냅샷 레코드를
+반환합니다. 스냅샷이 `exporting`/`importing` 상태를 벗어날 때까지 `GET /snapshots/{id}`를 polling하고,
+`error`와 `archive.path`를 표시하세요. 경로는 farmd 호스트의 절대 경로이며 상대 경로는 `400`입니다.
+`POST /farms/{id}/settle`은 배포를 다시 실행하지 않고 Keystone과 선택 서비스의 응답만 기다립니다.
+farm 상태가 `settling`으로 바뀌고, 성공하면 `ready`, 실패하면 `created`로 돌아갑니다.
+VM을 직접 재시작했거나 host가 재부팅된 뒤에 사용합니다.
+자세한 동작은 [snapshots.md](snapshots.md)를 참고하세요.
 
 ## 로그
 

@@ -236,6 +236,9 @@ pub struct CreateRequest {
     /// UTC Unix seconds. Metadata only in this version; no automatic deletion.
     #[serde(default)]
     pub expires_at: Option<u64>,
+    /// Start from this snapshot instead of an empty VM. Its services replace `components`.
+    #[serde(default)]
+    pub snapshot_id: Option<String>,
 }
 fn default_host() -> String {
     "localhost".into()
@@ -252,6 +255,17 @@ impl CreateRequest {
         }
         if self.expires_at.is_some_and(|t| t <= now()) {
             bail!("expires_at must be in the future");
+        }
+        if let Some(snapshot) = &self.snapshot_id {
+            validate_id(snapshot)?;
+            if self.host_id.is_some() {
+                bail!("snapshots restore on the local coordinator only");
+            }
+            if !self.components.is_empty() {
+                bail!(
+                    "a farm restored from a snapshot runs the snapshot's services; omit components"
+                );
+            }
         }
         let host = &self.external_host;
         if host.is_empty()
@@ -330,6 +344,8 @@ pub enum FarmStatus {
     Creating,
     Created,
     Deploying,
+    /// Waiting for a deployed farm's services to answer after its VM started from disk
+    Settling,
     Ready,
     Failed,
     Broken,
@@ -342,6 +358,12 @@ pub enum JobKind {
     Create,
     Deploy,
     Delete,
+    /// Freeze the farm's VM into a snapshot
+    Snapshot,
+    /// Create the farm's VM from a snapshot
+    Restore,
+    /// Check that a deployed farm's services answer again, without deploying
+    Settle,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
@@ -382,6 +404,9 @@ pub struct FarmRecord {
     pub active_job: Option<String>,
     pub created_at: u64,
     pub updated_at: u64,
+    /// Snapshot this farm was restored from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot_id: Option<String>,
 }
 impl FarmRecord {
     pub fn memory_mib(&self) -> u64 {
@@ -402,6 +427,100 @@ pub struct Job {
     pub created_at: u64,
     pub started_at: Option<u64>,
     pub finished_at: Option<u64>,
+    /// Snapshot captured by a snapshot job, or restored by a restore job.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SnapshotRequest {
+    /// Snapshot ID: 1-48 lowercase letters, digits or hyphens.
+    pub id: String,
+    #[serde(default)]
+    pub note: Option<String>,
+}
+impl SnapshotRequest {
+    pub fn validate(&self) -> Result<()> {
+        validate_snapshot_id(&self.id)?;
+        if self.note.as_ref().is_some_and(|n| n.len() > 512) {
+            bail!("note must be at most 512 bytes");
+        }
+        Ok(())
+    }
+}
+#[derive(Clone, Debug, Default, Serialize, Deserialize, ToSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct ExportRequest {
+    /// Absolute archive path on the coordinator; defaults to `<state dir>/exports/<id>.msb`.
+    pub path: Option<String>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ImportRequest {
+    /// Absolute path of a `.msb` archive on the coordinator.
+    pub path: String,
+    /// Snapshot ID to import as; defaults to the ID recorded in the archive.
+    #[serde(default)]
+    pub id: Option<String>,
+}
+pub fn validate_snapshot_id(id: &str) -> Result<()> {
+    validate_id(id).map_err(|_| {
+        anyhow::anyhow!(
+            "snapshot id must be 1-48 lowercase letters, digits or hyphens, starting and ending with a letter or digit"
+        )
+    })
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SnapshotStatus {
+    Creating,
+    Ready,
+    Exporting,
+    Importing,
+    Deleting,
+    Failed,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
+pub struct SnapshotArchive {
+    pub path: String,
+    pub size_bytes: u64,
+    pub exported_at: u64,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
+pub struct SnapshotRecord {
+    pub id: String,
+    pub status: SnapshotStatus,
+    /// Farm the snapshot was frozen from; `None` when imported from an archive.
+    pub source_farm: Option<String>,
+    pub plan: Plan,
+    /// Whether OpenStack was deployed when frozen. Restored farms then start `ready`.
+    pub deployed: bool,
+    /// Public ports the source farm's catalog was registered with; restores rewrite them.
+    pub source_exposure: Exposure,
+    pub note: Option<String>,
+    /// msb snapshot reference; set once captured or imported.
+    pub reference: Option<String>,
+    pub size_bytes: Option<u64>,
+    /// Most recent export.
+    pub archive: Option<SnapshotArchive>,
+    pub error: Option<String>,
+    pub created_at: u64,
+    pub updated_at: u64,
+}
+
+/// Snapshot metadata kept in msb labels, which travel inside exported archives.
+pub mod snapshot_labels {
+    pub const ID: &str = "farm.snapshot.id";
+    pub const SOURCE: &str = "farm.snapshot.source";
+    pub const COMPONENTS: &str = "farm.snapshot.components";
+    pub const DEPLOYED: &str = "farm.snapshot.deployed";
+    pub const EXPOSURE_HOST: &str = "farm.snapshot.exposure.host";
+    pub const EXPOSURE_PORT_BASE: &str = "farm.snapshot.exposure.port-base";
+    pub const RELEASE: &str = "farm.snapshot.openstack-release";
+    pub const ARCH: &str = "farm.snapshot.arch";
+    pub const NOTE: &str = "farm.snapshot.note";
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]

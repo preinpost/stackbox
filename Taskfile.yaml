@@ -33,12 +33,28 @@ tasks:
     desc: Destroy the VM
     cmds:
       - msb stop devbox && msb rm devbox
+  build:
+    desc: Build the farm release binary
+    cmds:
+      - cargo build --release
+  serve:
+    desc: Run the farm API daemon on 127.0.0.1:8080 (pass flags after --)
+    cmds:
+      - cargo run --release -- serve {{.CLI_ARGS}}
+  dev:
+    desc: Run the farm API daemon and the local web portal together
+    cmds:
+      - task: build
+      - task: dev-run
+  dev-run:
+    internal: true
+    deps: [serve, portal-dev]
   portal-install:
     desc: Install web portal dependencies
     cmds:
       - npm --prefix web ci
   portal-dev:
-    desc: Run the local web portal (start farm serve separately)
+    desc: Run the local web portal (run task serve separately)
     cmds:
       - npm --prefix web run dev
   portal-build:

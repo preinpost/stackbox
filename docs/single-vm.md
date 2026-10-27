@@ -9,10 +9,15 @@
 - 기본 2 vCPU, 3072 MiB에 선택한 서비스의 메모리를 더한다.
 - Placement·Horizon·Neutron을 모두 고르면 6144 MiB, Nova까지 고르면 8192 MiB다.
 - root disk 20 GiB와 Docker·containerd용 owned ext4 disk 각 32 GiB를 사용한다.
-- 서비스는 eth0에 직접 바인딩하고 호스트의 기존 `15000 + 10n + offset` 포트로 공개한다.
+- 서비스는 고정 서비스 주소(`farm0`의 `10.254.0.2`)에 바인딩하고 호스트의 기존
+  `15000 + 10n + offset` 포트로 공개한다. eth0으로 들어온 연결은 nftables DNAT로 전달한다.
+  msb가 시작할 때마다 eth0 주소를 다시 고르므로, 재시작·스냅샷 복원 후에도 같은 주소와
+  hostname(`farm-aio`)을 유지하기 위해서다. 자세한 내용은 [snapshots.md](snapshots.md)를 참고한다.
+  이 기능 이전에 만든 farm은 계속 eth0 주소로 배포한다.
 - HAProxy·keepalived·ProxySQL은 사용하지 않는다. MariaDB 버퍼풀 512 MiB,
   API/RPC worker 1개, Memcached 64 MiB로 공유 메모리 사용을 제한한다.
-- `farm-hostname.service`가 재부팅 때 자기 호스트명을 eth0 주소로 복원한 뒤 Docker를 시작한다.
+- `farm-identity.service`가 hostname과 서비스 주소를 적용하고, `farm-hostname.service`가
+  호스트명을 그 주소(이전 farm은 eth0 주소)로 복원한 뒤 Docker를 시작한다.
   `farm-external.service`는 Neutron 선택 시 외부 veth와 nftables NAT만 구성한다.
 - msb 커널 제약 때문에 Neutron의 userspace OVS와 기존 커널 호환 패치는 유지한다.
 

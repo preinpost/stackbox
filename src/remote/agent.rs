@@ -213,6 +213,7 @@ impl Agent {
                     external_host: exposure.host.clone(),
                     owner: None,
                     expires_at: None,
+                    snapshot_id: None,
                 }
                 .validate()?;
                 let _create_lock = lock(&self.dir, "create.lock")?;

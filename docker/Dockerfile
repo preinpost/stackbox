@@ -6,7 +6,7 @@ RUN dnf install -y \
       systemd dbus-broker \
       openssh-server openssh-clients sudo \
       python3 python3-pip python3-libselinux git \
-      iproute iputils procps-ng hostname which chrony tar && \
+      iproute iputils procps-ng hostname which chrony tar nftables && \
     dnf clean all && \
     systemctl enable sshd chronyd && \
     mkdir -p /root/.ssh && chmod 700 /root/.ssh
@@ -16,12 +16,15 @@ RUN dnf install -y \
 COPY disable-ipv6.service /etc/systemd/system/disable-ipv6.service
 RUN systemctl enable disable-ipv6
 
-# Restore msb's generated hostname mapping before Docker/RabbitMQ start.
+# Pin the guest hostname and service address, then restore msb's generated
+# hostname mapping before Docker/RabbitMQ start.
+COPY --chmod=755 farm-identity /usr/local/sbin/farm-identity
+COPY farm-identity.service /etc/systemd/system/farm-identity.service
 COPY --chmod=755 farm-hostname /usr/local/sbin/farm-hostname
 COPY farm-hostname.service /etc/systemd/system/farm-hostname.service
 COPY --chmod=755 farm-external /usr/local/sbin/farm-external
 COPY farm-external.service /etc/systemd/system/farm-external.service
-RUN mkdir -p /etc/farm && systemctl enable farm-hostname farm-external
+RUN mkdir -p /etc/farm && systemctl enable farm-identity farm-hostname farm-external
 
 # Optional host SSH public key; all-in-one Kolla runs locally without peer SSH.
 COPY authorized_keys /root/.ssh/authorized_keys

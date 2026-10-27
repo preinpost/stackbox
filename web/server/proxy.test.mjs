@@ -148,6 +148,33 @@ test("rejects cross-origin mutations, unsupported routes and encoded credential-
     403,
   );
 });
+test("forwards snapshot routes and keeps others closed", async (t) => {
+  const seen = [];
+  const address = await setup(t, (req, res) => {
+    seen.push(`${req.method} ${req.url}`);
+    res.writeHead(202, { "content-type": "application/json" });
+    res.end("{}");
+  });
+  for (const [method, path] of [
+    ["POST", "/api/v1/farms/demo/snapshots"],
+    ["GET", "/api/v1/snapshots"],
+    ["POST", "/api/v1/snapshots/import"],
+    ["DELETE", "/api/v1/snapshots/demo-clean"],
+    ["POST", "/api/v1/snapshots/demo-clean/export"],
+  ]) {
+    const response = await fetch(address + path, { method });
+    assert.equal(response.status, 202, path);
+  }
+  assert.equal(seen.length, 5);
+  for (const path of [
+    "/api/v1/snapshots/demo/restore",
+    "/api/v1/snapshots/Demo",
+    "/api/v1/farms/demo/snapshots/x",
+  ]) {
+    assert.equal((await fetch(address + path)).status, 404, path);
+  }
+  assert.equal(seen.length, 5);
+});
 test("streams SSE and propagates resume cursors without buffering", async (t) => {
   const address = await setup(t, (req, res) => {
     assert.equal(req.headers["last-event-id"], "12");

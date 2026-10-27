@@ -729,6 +729,8 @@ h2 {
 }
 .status-creating,
 .status-deploying,
+.status-exporting,
+.status-importing,
 .status-running {
   color: #4c6d8c;
   background: #eef5fb;
@@ -747,6 +749,9 @@ h2 {
 }
 .status-running .status-dot,
 .status-creating .status-dot,
+.status-exporting .status-dot,
+.status-importing .status-dot,
+.status-settling .status-dot,
 .status-deploying .status-dot {
   animation: pulse 2s ease-in-out infinite;
 }
@@ -3149,4 +3154,9 @@ h2 {
 .text-xs {
   font-size: 13px;
   line-height: 1.5;
+}
+@media (max-width: 760px) {
+  .snapshot-row {
+    flex-wrap: wrap;
+  }
 }

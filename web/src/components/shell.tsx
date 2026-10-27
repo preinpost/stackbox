@@ -9,6 +9,7 @@ import {
   Menu,
   PanelLeftClose,
   Server,
+  Snowflake,
   Terminal,
 } from "lucide-react";
 import { useEffect, useState } from "react";
@@ -42,6 +43,7 @@ export function Shell() {
     // Hosts come first: a farm is always created on one of them.
     { to: "/hosts" as const, label: "Hosts", icon: Server },
     { to: "/" as const, label: "Farms", icon: LayoutGrid },
+    { to: "/snapshots" as const, label: "Snapshots", icon: Snowflake },
     { to: "/jobs" as const, label: "Jobs", icon: Activity },
   ];
   const sectionActive = (to: string) =>
@@ -165,7 +167,9 @@ export function Shell() {
                   ? "Hosts / 로컬"
                   : pathname.startsWith("/jobs")
                     ? "Jobs"
-                    : "Farms"}
+                    : pathname.startsWith("/snapshots")
+                      ? "Snapshots"
+                      : "Farms"}
             </strong>
           </div>
           <div className="topbar-right">

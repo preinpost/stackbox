@@ -9,6 +9,25 @@ pub const FARM_LABEL: &str = "farm";
 pub const ROLE_LABEL: &str = "farm.role";
 pub const OVERLAY_IP_LABEL: &str = "farm.overlay.ip";
 
+/// Every farm guest gets the same hostname and service address, so a snapshot
+/// restores into another farm (and a restart into a new msb slot) unchanged.
+pub const GUEST_HOSTNAME: &str = "farm-aio";
+pub const GUEST_ADDRESS: &str = "10.254.0.2";
+pub const GUEST_INTERFACE: &str = "farm0";
+pub const IDENTITY_CONF: &str = "/etc/farm/identity.conf";
+
+/// Guest ports DNATed from eth0 to the service address: every published port in the catalog.
+pub fn identity_conf() -> String {
+    let ports: Vec<String> = crate::model::COMPONENTS
+        .iter()
+        .filter_map(|c| c.public.as_ref().map(|p| p.guest_port.to_string()))
+        .collect();
+    format!(
+        "FARM_HOSTNAME={GUEST_HOSTNAME}\nFARM_ADDRESS={GUEST_ADDRESS}\nFARM_PREFIX=24\nFARM_PORTS=\"{}\"\n",
+        ports.join(" ")
+    )
+}
+
 // msb's default root is an overlay; Docker's overlayfs cannot nest on it,
 // so container storage gets its own ext4 disks.
 const CONTAINER_DIRS: &[&str] = &["/var/lib/docker", "/var/lib/containerd"];
@@ -44,7 +63,7 @@ pub async fn create_node(
         .memory(spec.memory_mib)
         .root_disk(spec.disk_mib)
         .init("/sbin/init")
-        .hostname(&name)
+        .hostname(GUEST_HOSTNAME)
         .network(|n| {
             let mut n = n.policy(NetworkPolicy::from_profiles([
                 NetworkProfile::Public,
@@ -56,6 +75,23 @@ pub async fn create_node(
                 }
             }
             n
+        })
+        .patch(|p| p.text(IDENTITY_CONF, identity_conf(), Some(0o644), true))
+        .patch(|p| {
+            p.text(
+                "/usr/local/sbin/farm-identity",
+                include_str!("../../docker/farm-identity"),
+                Some(0o755),
+                true,
+            )
+        })
+        .patch(|p| {
+            p.text(
+                "/etc/systemd/system/farm-identity.service",
+                include_str!("../../docker/farm-identity.service"),
+                Some(0o644),
+                true,
+            )
         })
         .patch(|p| {
             p.text(
@@ -87,7 +123,8 @@ pub async fn create_node(
         .with_context(|| format!("create {name}"))?;
     let boot = async {
         wait_until_booted(&sandbox).await?;
-        run(&sandbox, "systemctl daemon-reload && systemctl enable farm-hostname && systemctl restart farm-hostname").await?;
+        // Golden images built before the identity unit lack nftables.
+        run(&sandbox, "rpm -q nftables >/dev/null || dnf install -y -q nftables; systemctl daemon-reload && systemctl enable farm-identity farm-hostname && systemctl restart farm-identity farm-hostname").await?;
         let ip = run(&sandbox, "ip -4 -o addr show dev eth0 scope global | awk 'NR==1 { split($4, a, \"/\"); print a[1] }'").await?;
         let ip = ip.trim().parse::<std::net::Ipv4Addr>().context("eth0 has no valid IPv4 address")?;
         Ok::<_, anyhow::Error>(ip.to_string())
@@ -156,6 +193,8 @@ pub async fn wait_until_booted(sandbox: &Sandbox) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use super::{GUEST_ADDRESS, GUEST_HOSTNAME, IDENTITY_CONF, identity_conf};
+
     #[test]
     fn longest_valid_farm_id_fits_the_hostname_label_limit() {
         let id = "a".repeat(48);
@@ -172,7 +211,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let hosts = dir.path().join("hosts");
         let script = include_str!("../../docker/farm-hostname")
-            .replace("/etc/hosts", "\"$FARM_TEST_HOSTS\"");
+            .replace("/etc/hosts", "\"$FARM_TEST_HOSTS\"")
+            .replace(IDENTITY_CONF, "\"$FARM_TEST_HOSTS.identity\"");
         let initial = "127.0.0.1 localhost demo-all-in-one\n::1 localhost ip6-localhost demo-all-in-one\n192.0.2.1 custom-host\n";
         std::fs::write(&hosts, initial).unwrap();
         let mut observer = std::fs::File::open(&hosts).unwrap();
@@ -214,5 +254,39 @@ mod tests {
             observer.read_to_string(&mut observed).unwrap();
             assert_eq!(observed, text);
         }
+        // With a fixed identity the hostname maps to the service address, whatever eth0 holds.
+        std::fs::write(dir.path().join("hosts.identity"), identity_conf()).unwrap();
+        let output = std::process::Command::new("bash")
+            .args(["-c", &format!("hostname() {{ echo {GUEST_HOSTNAME}; }}\nip() {{ echo '2: eth0 inet 172.16.0.14/30 scope global eth0'; }}\n{script}")])
+            .env("FARM_TEST_HOSTS", &hosts)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let text = std::fs::read_to_string(&hosts).unwrap();
+        assert!(text.contains(&format!("{GUEST_ADDRESS} {GUEST_HOSTNAME}\n")));
+        assert!(!text.contains("172.16.0.14"));
+    }
+
+    #[test]
+    fn identity_dnats_every_published_guest_port() {
+        let conf = identity_conf();
+        assert!(conf.contains("FARM_ADDRESS=10.254.0.2\n"));
+        assert!(conf.contains("FARM_PORTS=\"5000 9292 8780 80 9696 8774\"\n"));
+        // The nft set is rendered from FARM_PORTS by bash substitution.
+        let output = std::process::Command::new("bash")
+            .args([
+                "-c",
+                &format!("{conf}\necho \"{{ ${{FARM_PORTS// /, }} }}\""),
+            ])
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            "{ 5000, 9292, 8780, 80, 9696, 8774 }\n"
+        );
     }
 }

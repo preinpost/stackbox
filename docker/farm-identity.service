@@ -1,0 +1,14 @@
+[Unit]
+Description=Farm guest hostname and service address
+After=network-online.target disable-ipv6.service
+Wants=network-online.target
+Before=farm-hostname.service farm-external.service docker.service
+ConditionPathExists=/etc/farm/identity.conf
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/farm-identity
+
+[Install]
+WantedBy=multi-user.target

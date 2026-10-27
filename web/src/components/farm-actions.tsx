@@ -12,6 +12,7 @@ import {
   LoaderCircle,
   Play,
   Plus,
+  RefreshCw,
   ShieldCheck,
   Trash2,
 } from "lucide-react";
@@ -643,5 +644,45 @@ export function DeleteFarmDialog({ farm }: { farm: Farm }) {
         </form>
       </Modal>
     </Dialog.Root>
+  );
+}
+
+/** Re-checks a deployed farm's services after its VM started from disk; nothing is deployed. */
+export function CheckServicesButton({
+  farm,
+  deployed,
+}: {
+  farm: Farm;
+  deployed: boolean;
+}) {
+  const client = useQueryClient();
+  const mutation = useMutation({
+    mutationFn: () => api.settle(farm.id),
+    onSuccess: () => refresh(client),
+  });
+  const allowed =
+    deployed &&
+    !farm.active_job &&
+    isAllInOneFarm(farm) &&
+    ["created", "broken", "ready"].includes(farm.status) &&
+    farm.nodes.length === 1 &&
+    farm.nodes[0].status === "running";
+  return (
+    <Button
+      onClick={() => mutation.mutate()}
+      disabled={!allowed || mutation.isPending}
+      title={
+        deployed
+          ? "VM을 다시 시작한 뒤 서비스가 응답하는지 확인합니다. 배포는 다시 실행하지 않습니다."
+          : "배포를 한 번 완료한 farm에서 사용할 수 있습니다."
+      }
+    >
+      {mutation.isPending ? (
+        <LoaderCircle size={14} className="animate-spin" />
+      ) : (
+        <RefreshCw size={14} />
+      )}
+      서비스 확인
+    </Button>
   );
 }

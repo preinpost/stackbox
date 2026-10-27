@@ -15,9 +15,15 @@ import {
   Network,
   Server,
   ShieldCheck,
+  Snowflake,
 } from "lucide-react";
 import { api, farmQuery, jobsQuery, keys, type Farm } from "../api/client";
-import { DeleteFarmDialog, DeployFarmDialog } from "../components/farm-actions";
+import {
+  CheckServicesButton,
+  DeleteFarmDialog,
+  DeployFarmDialog,
+} from "../components/farm-actions";
+import { FreezeFarmDialog } from "../components/snapshot-actions";
 import { LogViewer } from "../components/log-viewer";
 import {
   EmptyState,
@@ -66,6 +72,11 @@ export function FarmDetailPage({ id }: { id: string }) {
     .filter((j) => j.farm_id === id)
     .sort((a, b) => b.created_at - a.created_at);
   const latestDeployment = history.find((j) => j.kind === "deploy");
+  const activeJob = history.find((j) => j.id === farm.active_job);
+  // A restored farm was deployed before freezing; its VM starts from disk without a deploy job.
+  const deployed =
+    history.some((j) => j.kind === "deploy" && j.status === "succeeded") ||
+    Boolean(farm.snapshot_id);
   return (
     <>
       <Link to="/" className="back-link">
@@ -88,6 +99,14 @@ export function FarmDetailPage({ id }: { id: string }) {
               {farm.host_id ? `원격 · ${farm.host_id}` : "로컬 · Coordinator"}
               <span>·</span>
               {dateTime(farm.created_at)} 생성
+              {farm.snapshot_id && (
+                <>
+                  <span>·</span>
+                  <Link to="/snapshots" className="hover:underline">
+                    스냅샷 {farm.snapshot_id}에서 복원
+                  </Link>
+                </>
+              )}
             </p>
           </div>
         </div>
@@ -95,6 +114,8 @@ export function FarmDetailPage({ id }: { id: string }) {
           {farm.status !== "deleted" && (
             <>
               <DeployFarmDialog farm={farm} lastJob={latestDeployment} />
+              <CheckServicesButton farm={farm} deployed={deployed} />
+              {!farm.host_id && <FreezeFarmDialog farm={farm} />}
               <DeleteFarmDialog farm={farm} />
             </>
           )}
@@ -137,15 +158,39 @@ export function FarmDetailPage({ id }: { id: string }) {
           </div>
         </div>
       )}
-      {farm.status === "created" && isAllInOneFarm(farm) && (
+      {activeJob?.kind === "snapshot" && (
         <div className="info-notice">
-          <ShieldCheck size={18} />
+          <Snowflake size={18} />
           <div>
-            <strong>VM이 준비되었습니다.</strong> OpenStack 배포를 시작하면 API
-            서비스를 사용할 수 있습니다.
+            <strong>스냅샷 {activeJob.snapshot_id}을 만드는 중입니다.</strong>{" "}
+            VM을 잠시 정지했다가 다시 시작합니다. 그동안 서비스가 응답하지
+            않습니다.
           </div>
         </div>
       )}
+      {activeJob?.kind === "restore" && (
+        <div className="info-notice">
+          <Snowflake size={18} />
+          <div>
+            <strong>
+              스냅샷 {activeJob.snapshot_id}에서 복원하는 중입니다.
+            </strong>{" "}
+            VM이 부팅되면 public endpoint를 이 farm의 포트로 옮기고 서비스가
+            응답할 때까지 기다립니다.
+          </div>
+        </div>
+      )}
+      {farm.status === "created" &&
+        !farm.active_job &&
+        isAllInOneFarm(farm) && (
+          <div className="info-notice">
+            <ShieldCheck size={18} />
+            <div>
+              <strong>VM이 준비되었습니다.</strong> OpenStack 배포를 시작하면
+              API 서비스를 사용할 수 있습니다.
+            </div>
+          </div>
+        )}
       {farm.status === "deleted" && (
         <div className="info-notice">
           <CheckCheck size={18} />
@@ -286,7 +331,7 @@ export function NodeTopology({ farm }: { farm: Farm }) {
           VM topology
         </h2>
         <span className="topology-network">
-          {single ? "eth0 · 단일 VM" : "기존 다중 VM 구성"}
+          {single ? "farm0 10.254.0.2 · 단일 VM" : "기존 다중 VM 구성"}
           <span className="status-dot" />
         </span>
       </div>
@@ -322,7 +367,9 @@ export function NodeTopology({ farm }: { farm: Farm }) {
                   ))}
                 </div>
               )}
-              <div className="node-address">{node?.ip ?? "—"}</div>
+              <div className="node-address" title="고정 서비스 주소">
+                {single ? "10.254.0.2" : (node?.ip ?? "—")}
+              </div>
               <div className="node-memory">
                 {node
                   ? memory(node.memory_mib)

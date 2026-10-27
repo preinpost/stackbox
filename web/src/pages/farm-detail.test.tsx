@@ -29,7 +29,9 @@ const farm: Farm = {
 test("shows selected services inside one VM without overlay or separate role nodes", () => {
   const { container } = render(<NodeTopology farm={farm} />);
   expect(container.querySelectorAll(".topology-node")).toHaveLength(1);
-  expect(screen.getByText("eth0 · 단일 VM")).toBeTruthy();
+  expect(screen.getByText("farm0 10.254.0.2 · 단일 VM")).toBeTruthy();
+  // Services bind the fixed service address, not the per-start eth0 address.
+  expect(screen.getAllByText("10.254.0.2").length).toBeGreaterThan(0);
   expect(screen.getByText("workspace-all-in-one")).toBeTruthy();
   expect(screen.getByText("Horizon")).toBeTruthy();
   expect(screen.queryByText("Deployer")).toBeNull();

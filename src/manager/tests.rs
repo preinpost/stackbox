@@ -17,6 +17,12 @@ use tower::ServiceExt;
 pub(crate) struct Fake {
     pub(crate) fail_create: AtomicBool,
     farms: Mutex<BTreeMap<String, Vec<FarmNode>>>,
+    /// msb snapshot references and their labels.
+    snapshots: Mutex<BTreeMap<String, BTreeMap<String, String>>>,
+    /// Exported archive contents: the labels of the snapshot written there.
+    archives: Mutex<BTreeMap<std::path::PathBuf, BTreeMap<String, String>>>,
+    /// `(from, to)` of each settle call.
+    settled: Mutex<Vec<Option<(Exposure, Exposure)>>>,
     deploys: AtomicUsize,
     max_deploys: AtomicUsize,
     fail: AtomicBool,
@@ -97,6 +103,110 @@ impl Backend for Fake {
             })
         })
     }
+    fn freeze(
+        &self,
+        id: String,
+        snapshot_id: String,
+        labels: BTreeMap<String, String>,
+    ) -> BoxFuture<'_, Result<crate::farm::FrozenSnapshot>> {
+        Box::pin(async move {
+            if self.fail.load(Ordering::SeqCst) {
+                bail!("intentional freeze failure");
+            }
+            assert!(self.farms.lock().unwrap().contains_key(&id));
+            let reference = format!("fake/{snapshot_id}");
+            self.snapshots
+                .lock()
+                .unwrap()
+                .insert(reference.clone(), labels);
+            Ok(crate::farm::FrozenSnapshot {
+                reference,
+                size_bytes: Some(4096),
+                restart_error: None,
+            })
+        })
+    }
+    fn restore(
+        &self,
+        id: String,
+        reference: String,
+        plan: Plan,
+        exposure: Exposure,
+    ) -> BoxFuture<'_, Result<Vec<FarmNode>>> {
+        Box::pin(async move {
+            assert!(self.snapshots.lock().unwrap().contains_key(&reference));
+            self.create(id, plan, exposure).await
+        })
+    }
+    fn settle(
+        &self,
+        _: String,
+        rebind: Option<(Exposure, Exposure)>,
+        _: Vec<String>,
+        sink: EventSink,
+    ) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async move {
+            if self.fail.load(Ordering::SeqCst) {
+                bail!("intentional settle failure");
+            }
+            sink(DeployEvent::Output("services answer".into()))?;
+            self.settled.lock().unwrap().push(rebind);
+            Ok(())
+        })
+    }
+    fn export_snapshot(
+        &self,
+        reference: String,
+        output: std::path::PathBuf,
+    ) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async move {
+            let labels = self.snapshots.lock().unwrap()[&reference].clone();
+            std::fs::write(&output, b"archive")?;
+            // The manager renames the partial file; the labels travel with it.
+            let published = output.display().to_string();
+            let published = published.strip_suffix(".partial").unwrap_or(&published);
+            self.archives
+                .lock()
+                .unwrap()
+                .insert(published.into(), labels);
+            Ok(())
+        })
+    }
+    fn import_snapshot(
+        &self,
+        archive: std::path::PathBuf,
+        snapshot_id: String,
+    ) -> BoxFuture<'_, Result<crate::farm::ImportedSnapshot>> {
+        Box::pin(async move {
+            let labels = self
+                .archives
+                .lock()
+                .unwrap()
+                .get(&archive)
+                .cloned()
+                .unwrap_or_default();
+            let reference = format!("fake/imported/{snapshot_id}");
+            self.snapshots
+                .lock()
+                .unwrap()
+                .insert(reference.clone(), labels.clone());
+            Ok(crate::farm::ImportedSnapshot {
+                reference,
+                labels,
+                size_bytes: Some(4096),
+            })
+        })
+    }
+    fn remove_snapshot(&self, reference: String) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async move {
+            self.snapshots
+                .lock()
+                .unwrap()
+                .remove(&reference)
+                .context("no such snapshot")?;
+            Ok(())
+        })
+    }
 }
 fn options(dir: &Path) -> ManagerOptions {
     ManagerOptions {
@@ -114,6 +224,7 @@ fn request(id: &str) -> CreateRequest {
         external_host: "localhost".into(),
         owner: Some("test".into()),
         expires_at: None,
+        snapshot_id: None,
     }
 }
 async fn done(manager: &FarmManager, job: &Job) -> Job {
@@ -1015,5 +1126,321 @@ async fn legacy_inventory_is_preserved_but_only_single_vm_farms_can_deploy() {
     assert_eq!(done(&manager, &deleted).await.status, JobStatus::Succeeded);
     assert!(!backend.farms.lock().unwrap().contains_key("legacy"));
     assert_eq!(manager.get("single").unwrap().nodes.len(), 1);
+    settle(&manager).await;
+}
+
+#[tokio::test]
+async fn snapshots_freeze_restore_export_import_and_delete() {
+    let dir = tempfile::tempdir().unwrap();
+    let backend = Arc::new(Fake::default());
+    let manager = FarmManager::with_backend(options(dir.path()), backend.clone())
+        .await
+        .unwrap();
+    let mut source = request("src");
+    source.components = vec!["horizon".into()];
+    done(&manager, &manager.create(source).unwrap()).await;
+    done(
+        &manager,
+        &manager.deploy("src", DeployRequest::default()).unwrap(),
+    )
+    .await;
+    let freeze = |id: &str| {
+        manager.freeze(
+            "src",
+            SnapshotRequest {
+                id: id.into(),
+                note: Some("clean install".into()),
+            },
+        )
+    };
+    assert!(freeze("../bad").unwrap_err().is::<BadRequest>());
+    let job = freeze("clean").unwrap();
+    assert_eq!(job.kind, JobKind::Snapshot);
+    assert!(freeze("other").unwrap_err().is::<Conflict>());
+    assert_eq!(done(&manager, &job).await.status, JobStatus::Succeeded);
+    assert!(freeze("clean").unwrap_err().is::<Conflict>());
+    let snapshot = manager.snapshot("clean").unwrap();
+    assert_eq!(snapshot.status, SnapshotStatus::Ready);
+    assert!(snapshot.deployed);
+    assert_eq!(snapshot.plan.components, ["keystone", "glance", "horizon"]);
+    assert_eq!(snapshot.reference.as_deref(), Some("fake/clean"));
+    let source = manager.get("src").unwrap();
+    assert_eq!(source.status, FarmStatus::Ready);
+    assert!(source.active_job.is_none());
+    // The source's services were awaited after its restart, without rebinding.
+    assert!(matches!(backend.settled.lock().unwrap()[..], [None]));
+    let labels = backend.snapshots.lock().unwrap()["fake/clean"].clone();
+    assert_eq!(
+        labels["farm.snapshot.components"],
+        "keystone,glance,horizon"
+    );
+    assert_eq!(labels["farm.snapshot.source"], "src");
+
+    // Restore: the snapshot's plan replaces components, and public endpoints move to new ports.
+    let mut copy = request("copy");
+    copy.snapshot_id = Some("clean".into());
+    copy.components = vec!["nova".into()];
+    assert!(manager.create(copy.clone()).is_err());
+    copy.components.clear();
+    let mut missing = copy.clone();
+    missing.id = "missing".into();
+    missing.snapshot_id = Some("nope".into());
+    assert!(manager.create(missing).unwrap_err().is::<NotFound>());
+    let job = manager.create(copy).unwrap();
+    assert_eq!(job.kind, JobKind::Restore);
+    assert_eq!(job.snapshot_id.as_deref(), Some("clean"));
+    assert_eq!(done(&manager, &job).await.status, JobStatus::Succeeded);
+    let restored = manager.get("copy").unwrap();
+    assert_eq!(restored.status, FarmStatus::Ready);
+    assert_eq!(restored.snapshot_id.as_deref(), Some("clean"));
+    assert_eq!(
+        restored.plan.as_ref().unwrap().components,
+        snapshot.plan.components
+    );
+    let (from, to) = backend.settled.lock().unwrap()[1].clone().unwrap();
+    assert_eq!(from.port_base, source.exposure.as_ref().unwrap().port_base);
+    assert_eq!(to.port_base, restored.exposure.as_ref().unwrap().port_base);
+    assert_ne!(from.port_base, to.port_base);
+    assert!(
+        manager
+            .logs("copy", 0, 1000)
+            .unwrap()
+            .iter()
+            .any(|e| e.message == "services answer")
+    );
+
+    // Export writes the archive under its final name only when complete.
+    assert!(
+        manager
+            .export_snapshot(
+                "clean",
+                ExportRequest {
+                    path: Some("relative.msb".into())
+                }
+            )
+            .unwrap_err()
+            .is::<BadRequest>()
+    );
+    let exporting = manager
+        .export_snapshot("clean", ExportRequest::default())
+        .unwrap();
+    assert_eq!(exporting.status, SnapshotStatus::Exporting);
+    let exported = manager.wait_snapshot("clean").await.unwrap();
+    assert_eq!(exported.status, SnapshotStatus::Ready);
+    let archive = exported.archive.unwrap();
+    let path = dir.path().join("exports/clean.msb");
+    assert_eq!(archive.path, path.display().to_string());
+    assert_eq!(archive.size_bytes, 7);
+    assert!(!dir.path().join("exports/clean.msb.partial").exists());
+    assert!(
+        manager
+            .export_snapshot("clean", ExportRequest::default())
+            .unwrap_err()
+            .is::<Conflict>()
+    );
+
+    // Import reads the plan back from the archive's labels.
+    let import = |path: &std::path::Path, id: Option<&str>| {
+        manager.import_snapshot(ImportRequest {
+            path: path.display().to_string(),
+            id: id.map(Into::into),
+        })
+    };
+    assert!(import(&path, None).unwrap_err().is::<Conflict>());
+    assert!(
+        import(&dir.path().join("absent.msb"), Some("x"))
+            .unwrap_err()
+            .is::<BadRequest>()
+    );
+    assert_eq!(
+        import(&path, Some("moved")).unwrap().status,
+        SnapshotStatus::Importing
+    );
+    let moved = manager.wait_snapshot("moved").await.unwrap();
+    assert_eq!(moved.status, SnapshotStatus::Ready);
+    assert_eq!(moved.plan.components, snapshot.plan.components);
+    assert!(moved.deployed);
+    assert_eq!(moved.source_farm.as_deref(), Some("src"));
+    assert_eq!(moved.note.as_deref(), Some("clean install"));
+    assert_eq!(moved.source_exposure.port_base, from.port_base);
+    // An archive without farm labels is rejected and not left in msb.
+    let plain = dir.path().join("plain.msb");
+    std::fs::write(&plain, b"x").unwrap();
+    import(&plain, None).unwrap();
+    let rejected = manager.wait_snapshot("plain").await.unwrap();
+    assert_eq!(rejected.status, SnapshotStatus::Failed);
+    assert!(rejected.error.unwrap().contains("not frozen by farm"));
+    assert!(
+        !backend
+            .snapshots
+            .lock()
+            .unwrap()
+            .contains_key("fake/imported/plain")
+    );
+
+    // A failed capture leaves the farm as it was and records the error on the snapshot.
+    backend.fail.store(true, Ordering::SeqCst);
+    let failed = done(&manager, &freeze("broken").unwrap()).await;
+    assert_eq!(failed.status, JobStatus::Failed);
+    assert_eq!(
+        manager.snapshot("broken").unwrap().status,
+        SnapshotStatus::Failed
+    );
+    assert_eq!(manager.get("src").unwrap().status, FarmStatus::Ready);
+    backend.fail.store(false, Ordering::SeqCst);
+
+    manager.delete_snapshot("moved").await.unwrap();
+    assert!(manager.snapshot("moved").unwrap_err().is::<NotFound>());
+    assert!(
+        !backend
+            .snapshots
+            .lock()
+            .unwrap()
+            .contains_key("fake/imported/moved")
+    );
+    manager.delete_snapshot("broken").await.unwrap();
+    assert!(
+        manager
+            .delete_snapshot("moved")
+            .await
+            .unwrap_err()
+            .is::<NotFound>()
+    );
+
+    // Snapshots persist, and interrupted operations recover to an actionable state.
+    settle(&manager).await;
+    drop(manager);
+    let state = dir.path().join("state.json");
+    let mut saved: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&state).unwrap()).unwrap();
+    saved["snapshots"]["clean"]["status"] = "exporting".into();
+    std::fs::write(&state, serde_json::to_vec(&saved).unwrap()).unwrap();
+    let manager = FarmManager::with_backend(options(dir.path()), backend.clone())
+        .await
+        .unwrap();
+    let clean = manager.snapshot("clean").unwrap();
+    assert_eq!(clean.status, SnapshotStatus::Ready);
+    assert!(clean.error.unwrap().contains("export again"));
+    assert_eq!(
+        manager
+            .snapshots()
+            .unwrap()
+            .iter()
+            .map(|s| s.id.as_str())
+            .collect::<Vec<_>>(),
+        ["clean", "plain"]
+    );
+
+    let app = api::router(manager.clone(), None);
+    let call = |method: &str, uri: &str, payload: &str| {
+        Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("content-type", "application/json")
+            .body(Body::from(payload.to_string()))
+            .unwrap()
+    };
+    let response = app
+        .clone()
+        .oneshot(call("GET", "/api/v1/snapshots", ""))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let response = app
+        .clone()
+        .oneshot(call(
+            "POST",
+            "/api/v1/farms/src/snapshots",
+            r#"{"id":"Bad"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let response = app
+        .clone()
+        .oneshot(call(
+            "POST",
+            "/api/v1/snapshots/import",
+            r#"{"path":"rel.msb"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let response = app
+        .clone()
+        .oneshot(call("POST", "/api/v1/snapshots/clean/export", "{}"))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let response = app
+        .clone()
+        .oneshot(call("DELETE", "/api/v1/snapshots/plain", ""))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let response = app
+        .oneshot(call("GET", "/api/v1/snapshots/plain", ""))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    settle(&manager).await;
+}
+
+#[tokio::test]
+async fn settle_rechecks_a_restored_farm_without_redeploying() {
+    let dir = tempfile::tempdir().unwrap();
+    let backend = Arc::new(Fake::default());
+    let manager = FarmManager::with_backend(options(dir.path()), backend.clone())
+        .await
+        .unwrap();
+    done(&manager, &manager.create(request("src")).unwrap()).await;
+    assert!(
+        manager
+            .settle("src")
+            .unwrap_err()
+            .to_string()
+            .contains("no successful deployment")
+    );
+    done(
+        &manager,
+        &manager.deploy("src", DeployRequest::default()).unwrap(),
+    )
+    .await;
+    let freezer = manager
+        .freeze(
+            "src",
+            SnapshotRequest {
+                id: "frozen".into(),
+                note: None,
+            },
+        )
+        .unwrap();
+    done(&manager, &freezer).await;
+    let mut copy = request("copy");
+    copy.snapshot_id = Some("frozen".into());
+    done(&manager, &manager.create(copy).unwrap()).await;
+    assert_eq!(manager.get("copy").unwrap().status, FarmStatus::Ready);
+
+    // A restart is observed as broken, then created; the check restores Ready without deploying.
+    backend.farms.lock().unwrap().get_mut("copy").unwrap()[0].status = "stopped".into();
+    manager.reconcile().await.unwrap();
+    assert_eq!(manager.get("copy").unwrap().status, FarmStatus::Broken);
+    backend.farms.lock().unwrap().get_mut("copy").unwrap()[0].status = "running".into();
+    manager.reconcile().await.unwrap();
+    assert_eq!(manager.get("copy").unwrap().status, FarmStatus::Created);
+    let deploys = backend.deploys.load(Ordering::SeqCst);
+    let job = manager.settle("copy").unwrap();
+    assert_eq!(job.kind, JobKind::Settle);
+    assert_eq!(job.phase, Some(Phase::Verify));
+    assert!(manager.settle("copy").unwrap_err().is::<Conflict>());
+    assert_eq!(done(&manager, &job).await.status, JobStatus::Succeeded);
+    assert_eq!(manager.get("copy").unwrap().status, FarmStatus::Ready);
+    assert_eq!(backend.deploys.load(Ordering::SeqCst), deploys);
+    assert!(matches!(backend.settled.lock().unwrap().last(), Some(None)));
+
+    backend.fail.store(true, Ordering::SeqCst);
+    let failed = manager.settle("copy").unwrap();
+    assert_eq!(done(&manager, &failed).await.status, JobStatus::Failed);
+    assert_eq!(manager.get("copy").unwrap().status, FarmStatus::Created);
     settle(&manager).await;
 }

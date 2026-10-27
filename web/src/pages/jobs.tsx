@@ -1,18 +1,32 @@
 import { Link } from "@tanstack/react-router";
-import { ArrowRight, Play, Plus, Trash2 } from "lucide-react";
+import {
+  ArrowRight,
+  CopyPlus,
+  Play,
+  Plus,
+  ShieldCheck,
+  Snowflake,
+  Trash2,
+} from "lucide-react";
 import type { Job } from "../api/client";
 import { StatusBadge } from "../components/ui";
-import { dateTime, relativeTime } from "../lib";
+import { dateTime, jobKindLabels, relativeTime } from "../lib";
 import { JobsMonitor } from "./jobs-monitor";
 
-export const jobLabel = (kind: Job["kind"]) =>
-  ({ create: "VM 생성", deploy: "OpenStack 배포", delete: "Farm 삭제" })[kind];
+export const jobLabel = (kind: Job["kind"]) => jobKindLabels[kind];
+const jobIcons = {
+  create: Plus,
+  deploy: Play,
+  delete: Trash2,
+  snapshot: Snowflake,
+  restore: CopyPlus,
+  settle: ShieldCheck,
+};
 export function JobsPage() {
   return <JobsMonitor />;
 }
 export function JobRow({ job }: { job: Job }) {
-  const Icon =
-    job.kind === "create" ? Plus : job.kind === "delete" ? Trash2 : Play;
+  const Icon = jobIcons[job.kind];
   return (
     <div className="job-row">
       <span className={`job-kind-icon ${job.status}`}>
@@ -27,7 +41,10 @@ export function JobRow({ job }: { job: Job }) {
           >
             {job.farm_id}
           </Link>
-          <span className="muted text-xs">{jobLabel(job.kind)}</span>
+          <span className="muted text-xs">
+            {jobLabel(job.kind)}
+            {job.snapshot_id && ` · ${job.snapshot_id}`}
+          </span>
           <StatusBadge status={job.status} />
         </div>
         <div className="job-meta">

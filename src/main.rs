@@ -4,7 +4,10 @@ use farm::{
     api,
     kolla::Phase,
     manager::{FarmManager, ManagerOptions, default_state_dir},
-    model::{self, CreateRequest, DeployRequest, Job, JobStatus, PlanRequest},
+    model::{
+        self, CreateRequest, DeployRequest, ExportRequest, ImportRequest, Job, JobStatus,
+        PlanRequest, SnapshotRecord, SnapshotRequest, SnapshotStatus,
+    },
 };
 use std::{
     net::{IpAddr, SocketAddr},
@@ -56,11 +59,18 @@ enum Command {
         /// UTC Unix seconds; metadata only
         #[arg(long)]
         expires_at: Option<u64>,
+        /// Start from a snapshot instead of an empty VM (local only; replaces --components)
+        #[arg(long, conflicts_with_all = ["components", "host_id"])]
+        snapshot: Option<String>,
     },
     Deploy {
         id: String,
         #[arg(long, value_enum, default_value_t=Phase::Prepare)]
         from: Phase,
+    },
+    /// Check that a deployed farm's services answer again after its VM started from disk
+    Settle {
+        id: String,
     },
     Status {
         id: String,
@@ -84,12 +94,61 @@ enum Command {
         #[arg(long, default_value_t = 0)]
         after: u64,
     },
+    /// Freeze farms into snapshots, and move snapshots between hosts as archives
+    #[command(subcommand)]
+    Snapshot(SnapshotCommand),
     /// Print the OpenAPI document without opening the state store
     Openapi,
+}
+#[derive(Subcommand)]
+enum SnapshotCommand {
+    /// Freeze a farm's VM; it stops for the capture and starts again
+    Create {
+        farm: String,
+        id: String,
+        #[arg(long)]
+        note: Option<String>,
+    },
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Write a self-contained .msb archive (default: <state dir>/exports/<id>.msb)
+    Export {
+        id: String,
+        /// Archive file or existing directory
+        #[arg(long, short)]
+        output: Option<PathBuf>,
+    },
+    Import {
+        archive: PathBuf,
+        /// Defaults to the archive's file name
+        #[arg(long)]
+        id: Option<String>,
+    },
+    Delete {
+        id: String,
+    },
 }
 fn print_json(value: &impl serde::Serialize) -> Result<()> {
     println!("{}", serde_json::to_string_pretty(value)?);
     Ok(())
+}
+async fn wait_snapshot(manager: &FarmManager, id: &str) -> Result<SnapshotRecord> {
+    let snapshot = manager.wait_snapshot(id).await?;
+    if snapshot.status == SnapshotStatus::Failed {
+        bail!(
+            "{}",
+            snapshot.error.unwrap_or_else(|| "snapshot failed".into())
+        );
+    }
+    if let Some(error) = &snapshot.error {
+        bail!("{error}");
+    }
+    Ok(snapshot)
+}
+fn absolute(path: PathBuf) -> Result<String> {
+    Ok(std::path::absolute(path)?.display().to_string())
 }
 async fn wait(manager: &FarmManager, job: Job) -> Result<()> {
     println!("job {}: {:?}", job.id, job.kind);
@@ -185,6 +244,7 @@ async fn main() -> Result<()> {
             external_host,
             owner,
             expires_at,
+            snapshot,
         } => {
             let job = manager.create(CreateRequest {
                 id: id.clone(),
@@ -193,12 +253,17 @@ async fn main() -> Result<()> {
                 external_host,
                 owner,
                 expires_at,
+                snapshot_id: snapshot,
             })?;
             wait(&manager, job).await?;
             print_json(&manager.get(&id)?)?;
         }
         Command::Deploy { id, from } => {
             wait(&manager, manager.deploy(&id, DeployRequest { from })?).await?;
+        }
+        Command::Settle { id } => {
+            wait(&manager, manager.settle(&id)?).await?;
+            println!("{id}: services answer again");
         }
         Command::Delete { id } => {
             wait(&manager, manager.delete(&id)?).await?;
@@ -245,6 +310,61 @@ async fn main() -> Result<()> {
                 println!("[{}] {}", entry.id, entry.message);
             }
         }
+        Command::Snapshot(command) => match command {
+            SnapshotCommand::Create { farm, id, note } => {
+                wait(
+                    &manager,
+                    manager.freeze(
+                        &farm,
+                        SnapshotRequest {
+                            id: id.clone(),
+                            note,
+                        },
+                    )?,
+                )
+                .await?;
+                print_json(&manager.snapshot(&id)?)?;
+            }
+            SnapshotCommand::List { json } => {
+                let snapshots = manager.snapshots()?;
+                if json {
+                    print_json(&snapshots)?;
+                } else {
+                    for s in snapshots {
+                        println!(
+                            "{:<24} {:?} from {} ({}{})",
+                            s.id,
+                            s.status,
+                            s.source_farm.as_deref().unwrap_or("archive"),
+                            s.plan.components.join(","),
+                            if s.deployed { ", deployed" } else { "" }
+                        );
+                    }
+                }
+            }
+            SnapshotCommand::Export { id, output } => {
+                manager.export_snapshot(
+                    &id,
+                    ExportRequest {
+                        path: output.map(absolute).transpose()?,
+                    },
+                )?;
+                let snapshot = wait_snapshot(&manager, &id).await?;
+                let archive = snapshot.archive.expect("export records its archive");
+                println!("{} ({} bytes)", archive.path, archive.size_bytes);
+            }
+            SnapshotCommand::Import { archive, id } => {
+                let record = manager.import_snapshot(ImportRequest {
+                    path: absolute(archive)?,
+                    id,
+                })?;
+                print_json(&wait_snapshot(&manager, &record.id).await?)?;
+            }
+            SnapshotCommand::Delete { id } => {
+                manager.delete_snapshot(&id).await?;
+                println!("deleted snapshot '{id}'");
+            }
+        },
         Command::Catalog { .. } | Command::Plan { .. } | Command::Openapi => unreachable!(),
     }
     Ok(())

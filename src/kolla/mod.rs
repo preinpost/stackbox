@@ -8,8 +8,9 @@ use microsandbox::Sandbox;
 use crate::farm;
 use crate::model::Exposure;
 use crate::shell::{run, stream};
-use config::{OPENSTACK_RELEASE, Topology};
-use std::sync::Arc;
+pub use config::OPENSTACK_RELEASE;
+use config::Topology;
+use std::{collections::BTreeMap, sync::Arc};
 
 #[derive(Clone, Debug)]
 pub enum DeployEvent {
@@ -116,12 +117,22 @@ pub async fn deploy_with(
     let deployer = farm::connect(&topology.name).await?;
     let result = async {
         farm::wait_until_booted(&deployer).await?;
-        let address = run(
+        // Farms created with a fixed guest identity bind every service to it; older farms use eth0.
+        let identity = run(
             &deployer,
-            "ip -4 -o addr show dev eth0 | awk '{split($4,a,\"/\"); print a[1]; exit}'",
+            &format!(
+                "if [ -f {conf} ]; then . {conf}; echo \"{dummy} $FARM_ADDRESS\"; else echo \"eth0 $(ip -4 -o addr show dev eth0 | awk '{{split($4,a,\"/\"); print a[1]; exit}}')\"; fi",
+                conf = farm::IDENTITY_CONF,
+                dummy = farm::GUEST_INTERFACE,
+            ),
         )
         .await?;
-        topology.set_address(&address)?;
+        let (interface, address) = identity
+            .trim()
+            .split_once(' ')
+            .context("cannot read the guest service address")?;
+        topology.set_address(address)?;
+        topology.interface = interface.to_owned();
         deploy_phases(
             farm_id,
             from,
@@ -189,6 +200,20 @@ async fn prepare(sandbox: &Sandbox, components: &[String]) -> Result<()> {
     sandbox
         .fs()
         .write(
+            "/usr/local/sbin/farm-identity",
+            include_str!("../../docker/farm-identity"),
+        )
+        .await?;
+    sandbox
+        .fs()
+        .write(
+            "/etc/systemd/system/farm-identity.service",
+            include_str!("../../docker/farm-identity.service"),
+        )
+        .await?;
+    sandbox
+        .fs()
+        .write(
             "/usr/local/sbin/farm-hostname",
             include_str!("../../docker/farm-hostname"),
         )
@@ -214,7 +239,7 @@ async fn prepare(sandbox: &Sandbox, components: &[String]) -> Result<()> {
             include_str!("../../docker/farm-external.service"),
         )
         .await?;
-    run(sandbox, "chmod 755 /usr/local/sbin/farm-hostname /usr/local/sbin/farm-external; systemctl daemon-reload; systemctl enable farm-hostname.service farm-external.service; systemctl restart farm-hostname.service").await?;
+    run(sandbox, "chmod 755 /usr/local/sbin/farm-identity /usr/local/sbin/farm-hostname /usr/local/sbin/farm-external; systemctl daemon-reload; systemctl enable farm-identity.service farm-hostname.service farm-external.service; systemctl restart farm-identity.service farm-hostname.service").await?;
     // Kolla toolbox bind-mounts /run with shared propagation, and nova_libvirt runs QEMU
     // as uid/gid 42427 without systemd-udevd in the guest. Apply both now and on every Docker start.
     run(
@@ -224,7 +249,7 @@ mkdir -p /etc/udev/rules.d /etc/systemd/system/docker.service.d
 cat > /etc/systemd/system/docker.service.d/farm-mounts.conf <<'EOF'
 [Unit]
 Requires=farm-hostname.service
-After=farm-hostname.service farm-external.service
+After=farm-identity.service farm-hostname.service farm-external.service
 
 [Service]
 ExecStartPre=/usr/bin/mount --make-shared /run
@@ -348,7 +373,13 @@ async fn configure(
     // Everything runs on one VM, including the Ansible controller.
     let forks = 1;
     let fs = deployer.fs();
-    let mut globals = config::globals(topology.vip()?, arch.trim(), kvm, components);
+    let mut globals = config::globals(
+        topology.vip()?,
+        &topology.interface,
+        arch.trim(),
+        kvm,
+        components,
+    );
     // Public catalog URLs retain host-side offset ports; service listeners and
     // all internal API/database calls use the VM's eth0 address and native ports.
     if let Some(exposure) = exposure {
@@ -416,6 +447,132 @@ async fn configure(
         topology.vip()?
     );
     Ok(())
+}
+
+/// Wait until a deployed farm's services answer again after its VM started from disk.
+/// With `rebind`, first point the public catalog entries recorded for `from` at `to`:
+/// a farm restored from a snapshot publishes the services on its own host ports.
+pub async fn settle(
+    farm_id: &str,
+    rebind: Option<(&Exposure, &Exposure)>,
+    components: &[String],
+    sink: EventSink,
+) -> Result<()> {
+    let name = farm::node_name(farm_id, farm::Role::AllInOne);
+    let sandbox = farm::connect(&name).await?;
+    let result = async {
+        farm::wait_until_booted(&sandbox).await?;
+        stream(
+            &sandbox,
+            &settle_script(rebind, components),
+            &format!("{LOG_DIR}/settle.log"),
+            &sink,
+        )
+        .await
+    }
+    .await;
+    sandbox.detach().await;
+    result
+}
+
+/// Public base URL prefixes of `from`, keyed to the same services on `to`.
+fn rebind_map(from: &Exposure, to: &Exposure) -> BTreeMap<String, String> {
+    crate::model::COMPONENTS
+        .iter()
+        .filter_map(|c| c.public.as_ref())
+        .map(|p| {
+            (
+                format!("http://{}:{}", from.host, from.port_base + p.offset),
+                format!("http://{}:{}", to.host, to.port_base + p.offset),
+            )
+        })
+        .filter(|(old, new)| old != new)
+        .collect()
+}
+
+fn settle_script(rebind: Option<(&Exposure, &Exposure)>, components: &[String]) -> String {
+    let has = |id: &str| components.iter().any(|c| c == id);
+    let mut script = format!(
+        r#"set -euo pipefail
+. {CONFIG_DIR}/admin-openrc.sh
+os={OSC_VENV}/bin/openstack
+ok=''
+for _ in $(seq 120); do
+  if $os token issue -f value -c expires >/dev/null 2>&1; then ok=1; break; fi
+  sleep 5
+done
+[ -n "$ok" ] || {{ echo "keystone did not answer within 10 minutes" >&2; exit 1; }}
+echo "keystone OK"
+"#
+    );
+    let mapping = rebind
+        .map(|(from, to)| rebind_map(from, to))
+        .unwrap_or_default();
+    if !mapping.is_empty() {
+        // Replace only whole host:port prefixes, keeping each URL's scheme and version path.
+        script.push_str(&format!(
+            r#"python3 - <<'PY'
+import json, subprocess
+from pathlib import Path
+os_ = "{OSC_VENV}/bin/openstack"
+mapping = json.loads(r'''{mapping}''')
+def moved(url):
+    for old, new in mapping.items():
+        if url == old or url.startswith(old + "/"):
+            return new + url[len(old):]
+for ep in json.loads(subprocess.check_output([os_, "endpoint", "list", "--interface", "public", "-f", "json"])):
+    url = moved(ep["URL"])
+    if url:
+        subprocess.check_call([os_, "endpoint", "set", "--url", url, ep["ID"]])
+        print(f"{{ep['Service Name']}} public endpoint: {{ep['URL']}} -> {{url}}", flush=True)
+# Keep globals.yml in step so a later redeploy registers the same URLs.
+path = Path("{CONFIG_DIR}/globals.yml")
+text = path.read_text()
+for old, new in mapping.items():
+    text = text.replace(f'"{{old}}"', f'"{{new}}"')
+path.write_text(text)
+PY
+"#,
+            mapping = serde_json::to_string(&mapping).expect("string map serializes"),
+        ));
+    }
+    script.push_str(
+        r#"for _ in $(seq 60); do $os image list -f value -c ID >/dev/null 2>&1 && break; sleep 5; done
+$os image list -f value -c ID >/dev/null
+echo "glance OK"
+"#,
+    );
+    if has("neutron") {
+        script.push_str(
+            r#"agents=''
+for _ in $(seq 100); do
+  agents=$($os network agent list -f value -c "Agent Type" -c Alive 2>/dev/null || true)
+  if [ "$(echo "$agents" | grep -c True)" -ge 4 ] && ! echo "$agents" | grep -q False; then break; fi
+  sleep 3
+done
+echo "$agents"
+for agent in "Open vSwitch agent" "DHCP agent" "L3 agent" "Metadata agent"; do
+  echo "$agents" | grep -q "^$agent True" || { echo "$agent is not alive" >&2; exit 1; }
+done
+echo "neutron OK"
+"#,
+        );
+    }
+    if has("nova") {
+        script.push_str(
+            r#"compute_state=''
+for _ in $(seq 60); do
+  compute_state=$($os compute service list --service nova-compute -f value -c State 2>/dev/null | head -1)
+  [ "$compute_state" = up ] && break
+  sleep 5
+done
+[ "$compute_state" = up ] || { echo "nova-compute is not up: ${compute_state:-missing}" >&2; exit 1; }
+echo "nova OK"
+"#,
+        );
+    }
+    script.push_str("echo \"services answer\"\n");
+    script
 }
 
 /// Kolla variable holding each service's public base URL (without the API version path).
@@ -662,12 +819,21 @@ mod tests {
             "nova",
         ]
         .map(String::from);
+        let exposure = |port_base| Exposure {
+            host: "localhost".into(),
+            bind: [127, 0, 0, 1].into(),
+            port_base,
+        };
+        let (from, to) = (exposure(15000), exposure(15010));
         let scripts = [
             install_script(),
             post_deploy_script(&components),
             verify_script(&components),
+            settle_script(None, &components),
+            settle_script(Some((&from, &to)), &components),
             OVS_EXTEND_START_SCRIPT.to_owned(),
             include_str!("../../docker/farm-external").to_owned(),
+            include_str!("../../docker/farm-identity").to_owned(),
         ];
         for script in scripts {
             let mut child = Command::new("bash")
@@ -697,5 +863,70 @@ mod tests {
         assert!(verify.contains("ip netns exec \"qrouter-$router_id\""));
         assert!(verify.contains("nova-compute is not up"));
         assert!(verify.contains("cirros-0.6.3-aarch64-disk.img"));
+        assert!(!settle_script(None, &components).contains("endpoint set"));
+        assert!(!settle_script(Some((&from, &from)), &components).contains("endpoint set"));
+    }
+
+    #[test]
+    fn rebinding_moves_whole_host_port_prefixes_and_keeps_paths() {
+        let exposure = |host: &str, port_base| Exposure {
+            host: host.into(),
+            bind: [127, 0, 0, 1].into(),
+            port_base,
+        };
+        let map = rebind_map(
+            &exposure("localhost", 15000),
+            &exposure("farm.example", 15010),
+        );
+        assert_eq!(map["http://localhost:15000"], "http://farm.example:15010");
+        assert_eq!(map["http://localhost:15005"], "http://farm.example:15015");
+        assert_eq!(map.len(), crate::model::COMPONENTS.len());
+        // Run the generated rewrite against a stub client and globals.yml.
+        let dir = tempfile::tempdir().unwrap();
+        let script = settle_script(
+            Some((&exposure("localhost", 15000), &exposure("localhost", 15010))),
+            &["keystone".into(), "glance".into()],
+        );
+        let python = script
+            .split("python3 - <<'PY'\n")
+            .nth(1)
+            .and_then(|rest| rest.split("\nPY\n").next())
+            .unwrap()
+            .replace("/etc/kolla", &dir.path().display().to_string())
+            .replace(
+                "/opt/osc/bin/openstack",
+                &dir.path().join("openstack").display().to_string(),
+            );
+        std::fs::write(
+            dir.path().join("globals.yml"),
+            "keystone_public_url: \"http://localhost:15000\"\nglance_public_endpoint: \"http://localhost:15001\"\nkolla_internal_vip_address: \"10.254.0.2\"\n",
+        )
+        .unwrap();
+        let calls = dir.path().join("calls");
+        let stub = format!(
+            "#!/bin/sh\necho \"$@\" >> {calls}\ncase \"$1 $2\" in\n  'endpoint list') echo '[{{\"ID\":\"k\",\"Service Name\":\"keystone\",\"URL\":\"http://localhost:15000\"}},{{\"ID\":\"n\",\"Service Name\":\"nova\",\"URL\":\"http://localhost:15005/v2.1\"}},{{\"ID\":\"o\",\"Service Name\":\"other\",\"URL\":\"http://localhost:150001\"}}]' ;;\nesac\n",
+            calls = calls.display()
+        );
+        let client = dir.path().join("openstack");
+        std::fs::write(&client, stub).unwrap();
+        std::fs::set_permissions(&client, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        let output = Command::new("python3")
+            .args(["-c", &python])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let calls = std::fs::read_to_string(calls).unwrap();
+        assert!(calls.contains("endpoint set --url http://localhost:15010 k"));
+        assert!(calls.contains("endpoint set --url http://localhost:15015/v2.1 n"));
+        assert!(!calls.contains(" o\n"), "{calls}");
+        let globals = std::fs::read_to_string(dir.path().join("globals.yml")).unwrap();
+        assert!(globals.contains("keystone_public_url: \"http://localhost:15010\""));
+        assert!(globals.contains("glance_public_endpoint: \"http://localhost:15011\""));
+        assert!(globals.contains("10.254.0.2"));
     }
 }

@@ -37,7 +37,15 @@ farm list --json
 farm endpoints demo --json      # 배포 성공 후 명시적으로만 admin 인증정보 조회
 farm logs demo
 farm delete demo
+
+farm snapshot create demo demo-clean     # VM을 얼려두기 (잠시 정지 후 재시작)
+farm create demo2 --snapshot demo-clean  # 다시 설치하지 않고 불러오기
+farm snapshot export demo-clean -o ~/farm-snapshots/
+farm snapshot import ~/farm-snapshots/demo-clean.msb
+farm settle demo                         # VM 재시작 뒤 배포 없이 서비스 응답만 확인
 ```
+
+스냅샷의 동작과 제약은 [docs/snapshots.md](docs/snapshots.md)를 참고하세요.
 
 데몬과 CLI는 같은 상태 디렉터리에 대해 배타 잠금을 사용합니다.
 **데몬 실행 중에는 포탈/API로 작업하고, 직접 CLI를 사용하려면 데몬을 먼저 종료**합니다.
@@ -107,9 +115,13 @@ curl -N http://127.0.0.1:8080/api/v1/farms/demo/logs/stream
 | GET / POST | `/farms` | 목록 / 생성 job |
 | GET / DELETE | `/farms/{id}` | farm 상태 / 삭제 job |
 | POST | `/farms/{id}/deploy` | 배포 job (`{"from":"prechecks"}`로 재개) |
+| POST | `/farms/{id}/settle` | VM 재시작 뒤 서비스 응답 확인 job |
 | GET | `/farms/{id}/endpoints` | public 서비스 URL과 admin 인증정보 |
 | GET | `/farms/{id}/logs?after=0&limit=1000` | 최근 로그 |
 | GET | `/farms/{id}/logs/stream` | 로그 SSE (`Last-Event-ID`로 재연결) |
+| POST | `/farms/{id}/snapshots` | VM을 스냅샷으로 얼리는 job |
+| GET / DELETE | `/snapshots`, `/snapshots/{id}` | 스냅샷 목록·상세 / 삭제 |
+| POST | `/snapshots/{id}/export`, `/snapshots/import` | `.msb` 아카이브 내보내기 / 가져오기 |
 | GET | `/jobs`, `/jobs/{id}` | 작업 상태·phase·오류 |
 | GET | `/openapi.json` | 생성된 OpenAPI 스키마 |
 

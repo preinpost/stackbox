@@ -1,5 +1,5 @@
 import { activeJob, type HostJob, type Job } from "../api/client";
-import { phases } from "../lib";
+import { jobKindLabels, phases } from "../lib";
 
 export type Activity =
   { scope: "farm"; job: Job } | { scope: "host"; job: HostJob };
@@ -18,9 +18,7 @@ export const startedAt = (a: Activity) =>
     : a.job.created_at;
 export const activityLabel = (a: Activity) =>
   a.scope === "farm"
-    ? { create: "VM 생성", deploy: "OpenStack 배포", delete: "Farm 삭제" }[
-        a.job.kind
-      ]
+    ? jobKindLabels[a.job.kind]
     : {
         check: "SSH 점검",
         prepare: "환경 준비",
