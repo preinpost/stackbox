@@ -1,7 +1,9 @@
 import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, expect, test } from "vitest";
 import type { Farm } from "../api/client";
-import { NodeTopology } from "./farm-detail";
+import { userEvent } from "@testing-library/user-event";
+import type { Datastore } from "../api/client";
+import { DatastoreCard, NodeTopology } from "./farm-detail";
 
 afterEach(cleanup);
 const farm: Farm = {
@@ -61,4 +63,37 @@ test("retains observed legacy and unclassified nodes instead of inventing a new 
   expect(screen.getByText("old-other")).toBeTruthy();
   expect(screen.queryByText("All-in-one")).toBeNull();
   expect(container.textContent).toContain("자동 변환하지 않습니다");
+});
+
+const mariadb: Datastore = {
+  id: "mariadb",
+  label: "MariaDB",
+  protocol: "mysql",
+  host: "localhost",
+  port: 15006,
+  username: "root",
+  password: "database-secret-value",
+  url: "mysql://root@localhost:15006/",
+  databases: ["keystone", "nova"],
+};
+
+test("keeps the data store password out of the page until it is revealed", async () => {
+  const user = userEvent.setup();
+  const { container } = render(<DatastoreCard store={mariadb} />);
+  expect(screen.getByText("MariaDB")).toBeTruthy();
+  expect(screen.getByText("localhost:15006")).toBeTruthy();
+  expect(screen.getByText("keystone")).toBeTruthy();
+  expect(container.textContent).not.toContain("database-secret-value");
+
+  await user.click(screen.getByRole("button", { name: "비밀번호 표시" }));
+  expect(screen.getByText("database-secret-value")).toBeTruthy();
+  await user.click(screen.getByRole("button", { name: "비밀번호 가리기" }));
+  expect(container.textContent).not.toContain("database-secret-value");
+});
+
+test("offers copy affordances without printing the secret", () => {
+  render(<DatastoreCard store={mariadb} />);
+  const copy = screen.getByRole("button", { name: "비밀번호 복사" });
+  expect(copy.textContent).not.toContain("database-secret-value");
+  expect(screen.getByRole("button", { name: "URL 복사" })).toBeTruthy();
 });

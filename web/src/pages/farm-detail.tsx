@@ -1,4 +1,5 @@
 import { Tabs } from "@base-ui/react/tabs";
+import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link, useParams } from "@tanstack/react-router";
 import {
@@ -12,13 +13,23 @@ import {
   Cpu,
   Database,
   Globe,
+  KeyRound,
+  MessageSquare,
+  MonitorDot,
   HardDrive,
   Network,
   Server,
   ShieldCheck,
   Snowflake,
 } from "lucide-react";
-import { api, farmQuery, jobsQuery, keys, type Farm } from "../api/client";
+import {
+  api,
+  farmQuery,
+  jobsQuery,
+  keys,
+  type Datastore,
+  type Farm,
+} from "../api/client";
 import {
   CheckServicesButton,
   DeleteFarmDialog,
@@ -527,6 +538,11 @@ function Endpoints({ farm }: { farm: Farm }) {
     </section>
   );
 }
+const storeIcons: Record<string, React.ReactNode> = {
+  mariadb: <Database size={16} />,
+  rabbitmq: <MessageSquare size={16} />,
+  "rabbitmq-management": <MonitorDot size={16} />,
+};
 /**
  * MariaDB and RabbitMQ ship with every farm; integrations connect through their published ports.
  * Shares the endpoints query cache with the service panel above.
@@ -540,7 +556,6 @@ function Datastores({ farm }: { farm: Farm }) {
     staleTime: 60_000,
   });
   const stores = query.data?.datastores ?? [];
-  const exposure = farm.exposure;
   return (
     <section className="panel datastore-panel">
       <div className="section-label">
@@ -567,77 +582,14 @@ function Datastores({ farm }: { farm: Farm }) {
         </div>
       ) : (
         <>
-          <p className="field-hint mb-4">
+          <p className="field-hint">
             farm마다 같은 VM 안에서 실행되는 데이터베이스와 메시지 큐입니다.
-            포트는 {exposure?.port_base ?? "—"}번대 블록의 해당 offset을 씁니다.
+            포트는 {farm.exposure?.port_base ?? "—"}번대 블록의 해당 offset을
+            씁니다.
           </p>
           <div className="datastore-list">
             {stores.map((store) => (
-              <div className="datastore" key={store.id}>
-                <div className="datastore-head">
-                  <strong>{store.label}</strong>
-                  <span className="datastore-proto">{store.protocol}</span>
-                  {store.protocol === "http" ? (
-                    <a
-                      href={store.url}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="icon-button ml-auto"
-                      aria-label={`${store.label} 열기`}
-                    >
-                      <ArrowUpRight size={16} />
-                    </a>
-                  ) : null}
-                </div>
-                <code className="datastore-url">
-                  {`${store.host}:${store.port}`}
-                </code>
-                <dl className="datastore-fields">
-                  {store.username && (
-                    <div>
-                      <dt>사용자</dt>
-                      <dd>
-                        <code>{store.username}</code>
-                      </dd>
-                    </div>
-                  )}
-                  {store.vhost && (
-                    <div>
-                      <dt>vhost</dt>
-                      <dd>
-                        <code>{store.vhost}</code>
-                      </dd>
-                    </div>
-                  )}
-                  {store.password && (
-                    <div>
-                      <dt>비밀번호</dt>
-                      <dd>
-                        <details>
-                          <summary>표시</summary>
-                          <CopyText value={store.password} />
-                        </details>
-                      </dd>
-                    </div>
-                  )}
-                  {store.protocol === "mysql" && store.databases?.length ? (
-                    <div className="datastore-wide">
-                      <dt>데이터베이스</dt>
-                      <dd className="datastore-dbs">
-                        {store.databases.map((name) => (
-                          <span key={name}>{name}</span>
-                        ))}
-                      </dd>
-                    </div>
-                  ) : null}
-                  <div className="datastore-wide">
-                    <dt>URL</dt>
-                    <dd>
-                      <code>{store.url}</code>
-                    </dd>
-                  </div>
-                </dl>
-              </div>
+              <DatastoreCard store={store} key={store.id} />
             ))}
           </div>
           <div className="credential-note">
@@ -651,6 +603,103 @@ function Datastores({ farm }: { farm: Farm }) {
         </>
       )}
     </section>
+  );
+}
+
+/** One data store: connection, account, and the schemas a client may open. */
+export function DatastoreCard({ store }: { store: Datastore }) {
+  const [revealed, setRevealed] = useState(false);
+  const console_ = store.protocol === "http";
+  return (
+    <article className="datastore">
+      <header className="datastore-head">
+        <span className="datastore-icon">
+          {storeIcons[store.id] ?? <Database size={16} />}
+        </span>
+        <div className="datastore-title">
+          <strong>{store.label}</strong>
+          <span className="datastore-proto">{store.protocol}</span>
+        </div>
+        {console_ && (
+          <a
+            href={store.url}
+            target="_blank"
+            rel="noreferrer"
+            className="icon-button datastore-open"
+            aria-label={`${store.label} 열기`}
+          >
+            <ArrowUpRight size={16} />
+          </a>
+        )}
+      </header>
+      <div className="datastore-body">
+        <div className="datastore-conn">
+          <KeyRound size={14} />
+          <code>
+            {store.host}:{store.port}
+          </code>
+          <CopyText
+            value={`${store.host}:${store.port}`}
+            hideValue
+            label="주소"
+          />
+        </div>
+        <dl className="datastore-fields">
+          {store.username && (
+            <div>
+              <dt>사용자</dt>
+              <dd>
+                <code>{store.username}</code>
+              </dd>
+            </div>
+          )}
+          {store.vhost && (
+            <div>
+              <dt>vhost</dt>
+              <dd>
+                <code>{store.vhost}</code>
+              </dd>
+            </div>
+          )}
+          {store.password && (
+            <div className="datastore-wide">
+              <dt>
+                비밀번호
+                <button
+                  type="button"
+                  className="secret-toggle"
+                  aria-label={revealed ? "비밀번호 가리기" : "비밀번호 표시"}
+                  aria-pressed={revealed}
+                  onClick={() => setRevealed((open) => !open)}
+                >
+                  {revealed ? "가리기" : "표시"}
+                </button>
+              </dt>
+              <dd className="datastore-secret">
+                <code className={revealed ? "" : "masked"}>
+                  {revealed ? store.password : "••••••••••••"}
+                </code>
+                <CopyText value={store.password} hideValue label="비밀번호" />
+              </dd>
+            </div>
+          )}
+          {(store.databases?.length ?? 0) > 0 && (
+            <div className="datastore-wide">
+              <dt>데이터베이스 {store.databases!.length}</dt>
+              <dd className="datastore-dbs">
+                {store.databases!.map((name) => (
+                  <span key={name}>{name}</span>
+                ))}
+              </dd>
+            </div>
+          )}
+        </dl>
+      </div>
+      <footer className="datastore-foot">
+        <code title={store.url}>{store.url}</code>
+        <CopyText value={store.url} hideValue label="URL" />
+      </footer>
+    </article>
   );
 }
 

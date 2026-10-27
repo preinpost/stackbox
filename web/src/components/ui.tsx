@@ -226,17 +226,26 @@ export function EmptyState({
   );
 }
 
-/** Inline value that copies itself; falls back to selecting the text when clipboard access is denied. */
-export function CopyText({ value }: { value: string }) {
+/** Inline value that copies itself; falls back to selecting the text when clipboard access is denied.
+ *  `hideValue` keeps a secret out of the DOM and shows only the copy affordance. */
+export function CopyText({
+  value,
+  hideValue = false,
+  label,
+}: {
+  value: string;
+  hideValue?: boolean;
+  label?: string;
+}) {
   const [copied, setCopied] = useState(false);
   const timeout = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   useEffect(() => () => clearTimeout(timeout.current), []);
   return (
     <button
       type="button"
-      className="copy-text"
+      className={`copy-text ${hideValue ? "copy-only" : ""}`}
       title={copied ? "복사됨" : "클릭해서 복사"}
-      aria-label={`${value} 복사`}
+      aria-label={hideValue ? `${label ?? "값"} 복사` : `${value} 복사`}
       onClick={async (event) => {
         const target = event.currentTarget;
         try {
@@ -249,7 +258,7 @@ export function CopyText({ value }: { value: string }) {
         }
       }}
     >
-      <span>{value}</span>
+      {!hideValue && <span>{label ?? value}</span>}
       {copied ? <Check size={12} /> : <Copy size={12} />}
     </button>
   );
