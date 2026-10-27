@@ -12,6 +12,8 @@ import {
   CircleAlert,
   Cpu,
   Database,
+  Eye,
+  EyeOff,
   Globe,
   LoaderCircle,
   RefreshCw,
@@ -818,24 +820,23 @@ function LoginRow({
   const shown = !secret || revealed;
   return (
     <div>
-      <dt>
-        {label}
-        {secret && (
-          <button
-            type="button"
-            className="secret-toggle"
-            aria-label={shown ? `${label} 가리기` : `${label} 표시`}
-            aria-pressed={shown}
-            onClick={onToggle}
-          >
-            {shown ? "가리기" : "표시"}
-          </button>
-        )}
-      </dt>
+      <dt>{label}</dt>
       <dd>
         <code className={shown ? "" : "masked"}>
           {shown ? value : "••••••••••••"}
         </code>
+        {secret && (
+          <button
+            type="button"
+            className="secret-toggle"
+            title={shown ? `${label} 가리기` : `${label} 표시`}
+            aria-label={shown ? `${label} 가리기` : `${label} 표시`}
+            aria-pressed={shown}
+            onClick={onToggle}
+          >
+            {shown ? <EyeOff size={14} /> : <Eye size={14} />}
+          </button>
+        )}
         <CopyText value={value} hideValue label={label} />
       </dd>
     </div>

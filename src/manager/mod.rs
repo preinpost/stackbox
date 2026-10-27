@@ -514,6 +514,11 @@ rebuild it with `task agent-build` and install the agent again",
         Ok(job)
     }
     pub fn delete(&self, id: &str) -> Result<Job> {
+        self.delete_farm(id, false)
+    }
+
+    /// `own_host_job` lets a purge delete the farms of the host whose job it already holds.
+    pub(crate) fn delete_farm(&self, id: &str, own_host_job: bool) -> Result<Job> {
         let job = self.update(|state| {
             self.ensure_accepting()?;
             let farm = state
@@ -521,11 +526,12 @@ rebuild it with `task agent-build` and install the agent again",
                 .get_mut(id)
                 .ok_or_else(|| NotFound(format!("farm '{id}'")))?;
             ensure_idle(farm)?;
-            if farm
-                .host_id
-                .as_ref()
-                .and_then(|id| state.hosts.get(id))
-                .is_some_and(|h| h.host.active_job.is_some())
+            if !own_host_job
+                && farm
+                    .host_id
+                    .as_ref()
+                    .and_then(|id| state.hosts.get(id))
+                    .is_some_and(|h| h.host.active_job.is_some())
             {
                 return Err(conflict("host preparation is running"));
             }

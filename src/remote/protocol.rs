@@ -39,6 +39,9 @@ pub enum Operation {
         farm_id: String,
         generation: String,
     },
+    /// Destroy every VM this coordinator reserved on the host, then forget them.
+    /// The coordinator runs this only when removing the host.
+    Purge,
 }
 impl Operation {
     pub fn scope(&self) -> Option<(&str, &str)> {
@@ -115,11 +118,29 @@ pub enum Reply {
         endpoints: Endpoints,
     },
     Done,
+    Purged {
+        /// Farms whose VMs were destroyed, including ones already deleted from the registry.
+        farms: usize,
+    },
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn new_frames_and_replies_round_trip() {
+        let step = serde_json::to_string(&Frame::Step {
+            step: "TASK [nova : Copy config]".into(),
+        })
+        .unwrap();
+        assert!(matches!(
+            serde_json::from_str::<Frame>(&step).unwrap(),
+            Frame::Step { ref step } if step.contains("nova")
+        ));
+        let purged: Reply = serde_json::from_str(r#"{"result":"purged","farms":3}"#).unwrap();
+        assert!(matches!(purged, Reply::Purged { farms: 3 }));
+    }
+
     #[test]
     fn legacy_hello_is_readable_without_advertising_the_new_layout() {
         let reply: Reply =

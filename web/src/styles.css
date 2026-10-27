@@ -1674,6 +1674,23 @@ h2 {
 .horizon-login dt {
   color: #5e7062;
   font-size: 13px;
+  white-space: nowrap;
+}
+/* The reveal toggle sits with the value so the narrow label column stays clear. */
+.horizon-login .secret-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 24px;
+  height: 24px;
+  border-radius: 5px;
+  color: #7d9184;
+  text-decoration: none;
+}
+.horizon-login .secret-toggle:hover {
+  background: #eef3ef;
+  color: #48664f;
 }
 .horizon-login dd {
   display: flex;
@@ -3429,4 +3446,26 @@ h2 {
 }
 .phase-step svg {
   flex-shrink: 0;
+}
+/* A choice that carries its own explanation, used by the unregister dialog. */
+.checkbox-row {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 12px 14px;
+  border: 1px solid #e4ece4;
+  border-radius: 8px;
+  background: #fbfcfb;
+  font-size: 13px;
+  color: #3d5343;
+}
+.checkbox-row small {
+  display: block;
+  margin-top: 2px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: #7c8b80;
+}
+.checkbox-row .checkbox {
+  margin-top: 2px;
 }

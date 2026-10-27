@@ -337,6 +337,45 @@ impl Agent {
                 registry.save()?;
                 Ok(Reply::Done)
             }
+            Operation::Purge => {
+                // Only this coordinator's reservations; a user's own sandboxes have no label.
+                let reserved: Vec<String> = {
+                    let registry = LockedRegistry::open(&self.dir)?;
+                    registry
+                        .state
+                        .farms
+                        .iter()
+                        .filter(|(_, entry)| entry.coordinator == request.coordinator_id)
+                        .map(|(id, _)| id.clone())
+                        .collect()
+                };
+                let mut purged = 0;
+                let mut failed = Vec::new();
+                for id in &reserved {
+                    match self.backend.delete(id.clone()).await {
+                        Ok(()) => purged += 1,
+                        Err(error) => failed.push(format!("{id}: {error:#}")),
+                    }
+                }
+                // Forget only what is gone, so a retry still knows what to clean up.
+                let mut registry = LockedRegistry::open(&self.dir)?;
+                for id in &reserved {
+                    if !failed
+                        .iter()
+                        .any(|message| message.starts_with(&format!("{id}:")))
+                    {
+                        registry.state.farms.remove(id);
+                    }
+                }
+                registry.save()?;
+                ensure!(
+                    failed.is_empty(),
+                    "failed to remove {} reserved farm(s): {}",
+                    failed.len(),
+                    failed.join("; ")
+                );
+                Ok(Reply::Purged { farms: purged })
+            }
             Operation::Deploy { .. } | Operation::Endpoints { .. } => {
                 let registry = LockedRegistry::open(&self.dir)?;
                 let entry = registry

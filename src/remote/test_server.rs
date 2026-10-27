@@ -226,6 +226,11 @@ impl server::Handler for Handler {
                     self.observed.rpc_farms.lock().unwrap().remove(&farm_id);
                     Reply::Done
                 }
+                Operation::Purge => {
+                    let removed = self.observed.rpc_farms.lock().unwrap().len();
+                    self.observed.rpc_farms.lock().unwrap().clear();
+                    Reply::Purged { farms: removed }
+                }
                 Operation::Endpoints { .. } => Reply::Endpoints {
                     endpoints: crate::model::Endpoints {
                         services: std::collections::BTreeMap::new(),

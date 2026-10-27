@@ -275,6 +275,8 @@ pub enum HostJobKind {
     Check,
     Prepare,
     InstallAgent,
+    /// Delete this coordinator's farms and leftover VMs on the host, then unregister it.
+    Purge,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]

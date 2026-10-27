@@ -1516,3 +1516,90 @@ fn port_blocks_never_overlap_even_when_the_block_width_grows() {
     assert!(blocks_overlap(15000, 15016, 20));
     assert!(!blocks_overlap(15000, 15020, 20));
 }
+
+#[tokio::test]
+async fn purging_a_host_deletes_its_farms_and_leftover_vms_then_unregisters_it() {
+    use crate::remote::{AgentArtifactInfo, HostJobKind, InstalledAgent, test_server::Fixture};
+    let fixture = Fixture::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let manager = FarmManager::with_backend(options(dir.path()), Arc::new(Fake::default()))
+        .await
+        .unwrap();
+    manager
+        .register_host(fixture.registration("target"))
+        .unwrap();
+    let prep = manager
+        .start_host_job("target", HostJobKind::Prepare)
+        .unwrap();
+    assert_eq!(
+        host_done(&manager, &prep.id).await.status,
+        JobStatus::Succeeded
+    );
+    manager
+        .update(|state| {
+            state.hosts.get_mut("target").unwrap().host.agent = Some(InstalledAgent {
+                artifact: AgentArtifactInfo {
+                    sha256: "a".repeat(64),
+                    arch: std::env::consts::ARCH.into(),
+                    protocol: 1,
+                    supports_single_vm: true,
+                    build_id: crate::BUILD_ID.into(),
+                },
+                verified_at: now(),
+            });
+            Ok(())
+        })
+        .unwrap();
+
+    let mut remote = request("remote-farm");
+    remote.host_id = Some("target".into());
+    remote.external_host = "target.example".into();
+    done(&manager, &manager.create(remote).unwrap()).await;
+    // A local farm must survive a purge of the remote host.
+    done(&manager, &manager.create(request("local-farm")).unwrap()).await;
+
+    // Plain unregister still refuses while a farm lives on the host.
+    assert!(
+        manager
+            .unregister_host("target")
+            .unwrap_err()
+            .to_string()
+            .contains("delete all farms")
+    );
+
+    let purge = manager
+        .start_host_job("target", HostJobKind::Purge)
+        .unwrap();
+    let finished = host_done(&manager, &purge.id).await;
+    assert_eq!(
+        finished.status,
+        JobStatus::Succeeded,
+        "{:?} {:?}",
+        finished.error,
+        finished.events
+    );
+    assert!(manager.host("target").is_err());
+    // Only the purge job remains, so the caller can still read its result.
+    let jobs = manager.host_jobs().unwrap();
+    assert_eq!(jobs.len(), 1);
+    assert!(matches!(jobs[0].kind, HostJobKind::Purge));
+    assert_eq!(
+        manager.get("remote-farm").unwrap().status,
+        FarmStatus::Deleted
+    );
+    assert_eq!(
+        manager.get("local-farm").unwrap().status,
+        FarmStatus::Created
+    );
+    // The agent was asked to drop what it still reserved for this coordinator.
+    assert!(
+        jobs[0]
+            .events
+            .iter()
+            .any(|event| event.message.contains("reserved VM(s)")),
+        "{:?}",
+        jobs[0].events
+    );
+    assert_eq!(jobs[0].status, JobStatus::Succeeded);
+    settle(&manager).await;
+}

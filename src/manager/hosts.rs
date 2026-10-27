@@ -224,7 +224,9 @@ impl FarmManager {
             host.error = None;
             host.status = match kind {
                 HostJobKind::Check => HostStatus::Checking,
-                HostJobKind::Prepare | HostJobKind::InstallAgent => HostStatus::Preparing,
+                HostJobKind::Prepare | HostJobKind::InstallAgent | HostJobKind::Purge => {
+                    HostStatus::Preparing
+                }
             };
             host.updated_at = now();
             state.host_jobs.insert(job.id.clone(), job.clone());
@@ -232,14 +234,123 @@ impl FarmManager {
         })?;
         let manager = self.clone();
         let job_id = job.id.clone();
+        let purging = matches!(kind, HostJobKind::Purge);
         tokio::spawn(async move {
             let result = manager.run_host_job(&job_id).await;
-            if let Err(error) = manager.finish_host_job(&job_id, result) {
+            let recorded = if purging {
+                // A successful purge has already removed the host it would update.
+                match result {
+                    Ok(_) => Ok(()),
+                    Err(error) => manager.fail_purge_job(&job_id, &format!("{error:#}")),
+                }
+            } else {
+                manager.finish_host_job(&job_id, result)
+            };
+            if let Err(error) = recorded {
                 eprintln!("failed to persist host job result: {error:#}");
             }
         });
         Ok(job)
     }
+    /// Removes everything this coordinator put on the host: its farms' VMs, any VM left in the
+    /// agent's registry, and then the host record itself. Sandboxes the agent does not own stay.
+    async fn purge_host(&self, job: &HostJob) -> Result<HostInspection> {
+        let host_id = job.host_id.clone();
+        let stored = self.stored_host(&host_id)?;
+        self.host_event(
+            job.id.as_str(),
+            "Verifying pinned SSH host key and authenticating",
+        )?;
+        let credentials = self.0.vault.unseal(&stored.credentials, &stored.aad())?;
+        let ssh = Session::connect(&stored.host, credentials).await?;
+
+        let farms: Vec<String> = self
+            .list()?
+            .into_iter()
+            .filter(|farm| farm.host_id.as_deref() == Some(host_id.as_str()))
+            .map(|farm| farm.id)
+            .collect();
+        if !farms.is_empty() {
+            self.host_event(
+                &job.id,
+                &format!("Deleting {} farm(s) and their VMs", farms.len()),
+            )?;
+        }
+        for farm in &farms {
+            // This job owns the host's active_job slot, so bypass that guard.
+            let delete = self.delete_farm(farm, true)?;
+            let outcome = self.wait(&delete.id).await?;
+            if outcome.status != crate::model::JobStatus::Succeeded {
+                anyhow::bail!(
+                    "deleting farm {farm} failed: {}; the host was left registered",
+                    outcome.error.unwrap_or_else(|| "unknown error".into())
+                );
+            }
+        }
+
+        let agent = self
+            .stored_host(&host_id)?
+            .host
+            .agent
+            .ok_or_else(|| anyhow::anyhow!("host has no installed agent to clean up with"))?;
+        self.host_event(
+            &job.id,
+            "Removing VM reservations the agent still holds for this coordinator",
+        )?;
+        let coordinator_id = self
+            .0
+            .store
+            .lock()
+            .map_err(|_| anyhow!("state mutex poisoned"))?
+            .state
+            .coordinator_id
+            .clone();
+        let reply = ssh
+            .rpc(
+                &agent.artifact.sha256,
+                &crate::remote::protocol::Request {
+                    version: crate::remote::protocol::VERSION,
+                    coordinator_id,
+                    operation: crate::remote::protocol::Operation::Purge,
+                },
+                None,
+            )
+            .await?;
+        let purged = match reply {
+            crate::remote::protocol::Reply::Purged { farms } => farms,
+            _ => anyhow::bail!("unexpected remote purge response"),
+        };
+        self.host_event(
+            &job.id,
+            &format!("Removed {purged} reserved VM(s); unregistering the host"),
+        )?;
+        let mut finished = self.host_job(&job.id)?;
+        // This job is the host's active job, and unregistering refuses while one is set.
+        let inspection = stored.host.inspection.clone();
+        self.update(|state| {
+            if let Some(host) = state.hosts.get_mut(&host_id) {
+                host.host.active_job = None;
+            }
+            Ok(())
+        })?;
+        self.unregister_host(&host_id)?;
+        // Unregistering drops this host's job history; keep the purge job so the
+        // caller polling its Location still sees the outcome.
+        finished.status = JobStatus::Succeeded;
+        finished.finished_at = Some(now());
+        finished.events.push(HostJobEvent {
+            at: now(),
+            message: "Host removed".into(),
+        });
+        self.update(|state| {
+            state
+                .host_jobs
+                .insert(finished.id.clone(), finished.clone());
+            Ok(())
+        })?;
+        inspection.ok_or_else(|| anyhow::anyhow!("host has no inspection to report"))
+    }
+
     fn host_event(&self, job: &str, message: &str) -> Result<()> {
         self.update(|state| {
             let job = state
@@ -269,6 +380,9 @@ impl FarmManager {
     async fn run_host_job(&self, id: &str) -> Result<HostInspection> {
         let _permit = self.0.host_gate.acquire().await?;
         let job = self.host_job(id)?;
+        if matches!(job.kind, HostJobKind::Purge) {
+            return self.purge_host(&job).await;
+        }
         let stored = self.stored_host(&job.host_id)?;
         self.host_event(id, "Verifying pinned SSH host key and authenticating")?;
         let credentials = self.0.vault.unseal(&stored.credentials, &stored.aad())?;
@@ -444,6 +558,26 @@ impl FarmManager {
             Ok(())
         })
     }
+    /// Records a failed purge. The host itself stays registered so the operator can retry.
+    fn fail_purge_job(&self, id: &str, message: &str) -> Result<()> {
+        self.update(|state| {
+            let job = state
+                .host_jobs
+                .get_mut(id)
+                .ok_or_else(|| NotFound("host job".into()))?;
+            job.status = JobStatus::Failed;
+            job.error = Some(message.into());
+            job.finished_at = Some(now());
+            if let Some(stored) = state.hosts.get_mut(&job.host_id) {
+                stored.host.status = crate::remote::HostStatus::Failed;
+                stored.host.error = Some(message.into());
+                stored.host.active_job = None;
+                stored.host.updated_at = now();
+            }
+            Ok(())
+        })
+    }
+
     fn finish_host_job(&self, id: &str, result: Result<HostInspection>) -> Result<()> {
         self.update(|state| {
             let job = state

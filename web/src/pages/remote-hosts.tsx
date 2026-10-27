@@ -80,7 +80,7 @@ export function RemoteHostsPage() {
       kind,
     }: {
       id: string;
-      kind: "check" | "prepare" | "remove" | "agent";
+      kind: "check" | "prepare" | "remove" | "purge" | "agent";
     }) =>
       kind === "check"
         ? api.checkHost(id)
@@ -88,7 +88,9 @@ export function RemoteHostsPage() {
           ? api.prepareHost(id)
           : kind === "agent"
             ? api.installHostAgent(id)
-            : api.unregisterHost(id),
+            : kind === "purge"
+              ? api.purgeHost(id)
+              : api.unregisterHost(id),
     onSuccess: refresh,
   });
   const hostJobs =
@@ -339,6 +341,7 @@ export function RemoteHostsPage() {
                 host={selected}
                 kind="prepare"
                 disabled={!!selected.active_job || action.isPending}
+                farms={farmCount(selected.id)}
                 run={() =>
                   action.mutateAsync({ id: selected.id, kind: "prepare" })
                 }
@@ -348,8 +351,12 @@ export function RemoteHostsPage() {
                 host={selected}
                 kind="remove"
                 disabled={!!selected.active_job || action.isPending}
-                run={() =>
-                  action.mutateAsync({ id: selected.id, kind: "remove" })
+                farms={farmCount(selected.id)}
+                run={(purge) =>
+                  action.mutateAsync({
+                    id: selected.id,
+                    kind: purge ? "purge" : "remove",
+                  })
                 }
               />
             </div>
@@ -619,17 +626,20 @@ function HostActionDialog({
   host,
   kind,
   disabled,
+  farms,
   run,
 }: {
   host: RemoteHost;
   kind: "prepare" | "remove";
   disabled: boolean;
-  run: () => Promise<unknown>;
+  farms: number;
+  run: (purge: boolean) => Promise<unknown>;
 }) {
   const [open, setOpen] = useState(false);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<unknown>();
   const prepare = kind === "prepare";
+  const [purge, setPurge] = useState(true);
   return (
     <Dialog.Root
       open={open}
@@ -651,7 +661,7 @@ function HostActionDialog({
           description={
             prepare
               ? "이 서버에서 다음 작업을 실행합니다."
-              : "Coordinator에 저장된 호스트 정보와 인증 정보를 삭제합니다."
+              : "Coordinator에 저장된 호스트 정보와 인증 정보를 삭제합니다. 필요하면 이 호스트의 VM과 디스크도 함께 정리합니다."
           }
           closeDisabled={pending}
         >
@@ -670,9 +680,32 @@ function HostActionDialog({
                 </p>
               </>
             ) : (
-              <p className="text-sm">
-                서버에 설치한 msb·이미지와 원격 VM은 유지됩니다.
-              </p>
+              <>
+                <label className="checkbox-row">
+                  <Checkbox.Root
+                    checked={purge}
+                    onCheckedChange={(checked) => setPurge(checked === true)}
+                    className="checkbox"
+                  >
+                    <Checkbox.Indicator>
+                      <Check size={12} strokeWidth={3} />
+                    </Checkbox.Indicator>
+                  </Checkbox.Root>
+                  <span>
+                    이 호스트의 Farm {farms}개와 VM·디스크도 삭제
+                    <small>
+                      {farms > 0
+                        ? "farm을 순서대로 삭제한 뒤, 실행기가 보관 중인 남은 VM까지 정리합니다."
+                        : "남아 있는 예약 VM이 있으면 함께 정리합니다."}
+                    </small>
+                  </span>
+                </label>
+                <p className="field-hint">
+                  {purge
+                    ? "Coordinator가 만든 VM만 지웁니다. 이 서버에서 직접 만든 msb 샌드박스는 그대로 둡니다."
+                    : "호스트 기록과 인증 정보만 지웁니다. 서버의 VM·디스크는 남습니다."}
+                </p>
+              </>
             )}
             {error ? <ErrorNotice error={error} /> : null}
           </div>
@@ -687,7 +720,7 @@ function HostActionDialog({
                 setPending(true);
                 setError(undefined);
                 try {
-                  await run();
+                  await run(prepare ? false : purge);
                   setOpen(false);
                 } catch (e) {
                   setError(e);

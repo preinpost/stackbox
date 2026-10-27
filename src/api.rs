@@ -358,13 +358,25 @@ async fn update_host_credentials(
             })??,
     ))
 }
-#[utoipa::path(delete, path="/api/v1/hosts/{id}", params(("id"=String, Path)), responses((status=200, body=RemovedHost), (status=409, body=ErrorBody)))]
+#[derive(Deserialize, utoipa::IntoParams)]
+struct UnregisterQuery {
+    /// Also delete this coordinator's farms and leftover VMs on the host, then unregister it.
+    #[serde(default)]
+    purge: bool,
+}
+#[utoipa::path(delete, path="/api/v1/hosts/{id}", params(("id"=String, Path), UnregisterQuery), responses((status=200, description="Unregistered; records and credentials only", body=RemovedHost), (status=202, description="purge=true: host job that deletes the farms, their VMs and then the host", body=HostJob), (status=409, body=ErrorBody)))]
 async fn unregister_host(
     State(app): State<App>,
     Path(id): Path<String>,
-) -> Result<Json<RemovedHost>, ApiError> {
+    Query(query): Query<UnregisterQuery>,
+) -> Result<Response, ApiError> {
+    if query.purge {
+        return Ok(accepted_host(
+            app.manager.start_host_job(&id, HostJobKind::Purge)?,
+        ));
+    }
     app.manager.unregister_host(&id)?;
-    Ok(Json(RemovedHost { id }))
+    Ok(Json(RemovedHost { id }).into_response())
 }
 fn accepted_host(job: HostJob) -> Response {
     (
