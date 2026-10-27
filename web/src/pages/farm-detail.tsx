@@ -538,11 +538,6 @@ function DeploymentPhases({ farm }: { farm: Farm }) {
                   </span>
                 )}
               </div>
-              {current && !ready && (
-                <span className="phase-current-label">
-                  {farm.active_job ? "현재 단계" : "마지막 단계"}
-                </span>
-              )}
             </li>
           );
         })}
