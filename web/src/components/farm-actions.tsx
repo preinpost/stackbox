@@ -494,13 +494,15 @@ export function DeployFarmDialog({
         }
       >
         <Play size={14} />
-        {farm.active_job
-          ? "작업 진행 중"
-          : resumable
-            ? "배포 재개"
-            : farm.status === "ready"
-              ? "다시 배포"
-              : "OpenStack 배포"}
+        {farm.status === "creating"
+          ? "VM 생성 중..."
+          : farm.active_job
+            ? "작업 진행 중"
+            : resumable
+              ? "배포 재개"
+              : farm.status === "ready"
+                ? "다시 배포"
+                : "OpenStack 배포"}
       </Dialog.Trigger>
       <Modal
         title={resumable ? "OpenStack 배포 재개" : "OpenStack 배포"}
