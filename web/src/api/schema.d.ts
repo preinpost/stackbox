@@ -426,6 +426,8 @@ export interface components {
   schemas: {
     AgentArtifactInfo: {
       arch: string;
+      /** @description Revision the artifact was built from; empty for artifacts older than this field. */
+      build_id?: string;
       /** Format: int32 */
       protocol: number;
       sha256: string;
@@ -591,6 +593,8 @@ export interface components {
       agent_artifact?: null | components["schemas"]["AgentArtifactInfo"];
       agent_artifacts?: components["schemas"]["AgentArtifactInfo"][];
       arch: string;
+      /** @description Revision this daemon was built from; a host agent must report the same one. */
+      build_id: string;
       /** Format: int64 */
       disk_available_mib?: number | null;
       golden_image: string;

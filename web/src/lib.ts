@@ -39,6 +39,16 @@ export const phases: { id: Phase; label: string; description: string }[] = [
 ];
 export const memory = (mib: number) => `${Number((mib / 1024).toFixed(1))} GiB`;
 /** Where a snapshot can be restored: its guest boots only on the same architecture. */
+/** A host agent built from other sources cannot parse this coordinator's requests. */
+export const agentBuildMismatch = (
+  artifact: { build_id?: string | null } | undefined,
+  coordinatorBuildId?: string | null,
+) =>
+  Boolean(
+    artifact?.build_id &&
+    coordinatorBuildId &&
+    artifact.build_id !== coordinatorBuildId,
+  );
 export const snapshotHost = (snapshot: {
   arch?: string | null;
   platform?: string | null;

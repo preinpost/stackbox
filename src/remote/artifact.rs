@@ -23,12 +23,18 @@ impl Artifact {
             62 => "x86_64",
             _ => anyhow::bail!("unsupported farm-agent CPU architecture"),
         };
+        let build_id = crate::remote::agent::artifact_build_id(&bytes).ok_or_else(|| {
+            anyhow::anyhow!(
+                "farm-agent artifact has no build marker; rebuild it with `scripts/build-agent.sh {arch}`"
+            )
+        })?;
         Ok(Self {
             info: AgentArtifactInfo {
                 sha256: format!("{:x}", Sha256::digest(&bytes)),
                 arch: arch.into(),
                 protocol: VERSION,
                 supports_single_vm: true,
+                build_id,
             },
             bytes: bytes.into(),
         })
@@ -66,4 +72,33 @@ pub fn validate_digest(value: &str) -> Result<()> {
         "invalid agent digest"
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn reads_the_build_marker_embedded_in_an_artifact() {
+        let stamp = crate::remote::agent::FARM_AGENT_BUILD_STAMP;
+        let mut bytes = b"\x7fELF".to_vec();
+        bytes.extend_from_slice(&stamp);
+        bytes.extend_from_slice(b"\0trailing");
+        assert_eq!(
+            crate::remote::agent::artifact_build_id(&bytes).as_deref(),
+            Some(crate::BUILD_ID)
+        );
+        // An artifact from before the marker, or a truncated one, is reported as unknown.
+        assert!(crate::remote::agent::artifact_build_id(b"\x7fELF nothing here").is_none());
+        let mut cut = b"farm-agent-build:".to_vec();
+        cut.extend_from_slice(b"abc");
+        assert!(crate::remote::agent::artifact_build_id(&cut).is_none());
+    }
+
+    #[test]
+    fn a_stale_artifact_is_refused_with_the_rebuild_command() {
+        let stale =
+            crate::manager::hosts::artifact_built_by_daemon_for_test("aarch64", "old-build");
+        let error = stale.unwrap_err().to_string();
+        assert!(error.contains("built from old-build"), "{error}");
+        assert!(error.contains("scripts/build-agent.sh aarch64"), "{error}");
+    }
 }

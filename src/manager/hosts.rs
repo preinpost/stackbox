@@ -320,7 +320,7 @@ impl FarmManager {
                         None,
                     )
                     .await;
-                if !matches!(result, Ok(crate::remote::protocol::Reply::Hello { version: crate::remote::protocol::VERSION, ref arch, supports_single_vm: true }) if arch == &agent.artifact.arch)
+                if !matches!(result, Ok(crate::remote::protocol::Reply::Hello { version: crate::remote::protocol::VERSION, ref arch, supports_single_vm: true, ref build_id }) if arch == &agent.artifact.arch && build_id == crate::BUILD_ID)
                 {
                     self.update(|state| {
                         state
@@ -332,7 +332,8 @@ impl FarmManager {
                         Ok(())
                     })?;
                     anyhow::bail!(
-                        "installed Farm execution agent is unavailable or incompatible; reinstall the agent"
+                        "the installed Farm execution agent was built from a different revision than this coordinator ({build}); run `task agent-build` and install the agent again",
+                        build = crate::BUILD_ID
                     );
                 }
             }
@@ -418,6 +419,8 @@ impl FarmManager {
             .arch
             .clone();
         let artifact = self.artifact_for(&arch)?;
+        // A stale artifact would install an agent that cannot parse this daemon's requests.
+        artifact_built_by_daemon(&artifact)?;
         let coordinator = self
             .0
             .store
@@ -474,4 +477,25 @@ impl FarmManager {
             Ok(())
         })
     }
+}
+
+/// Rejects an artifact that was built from other sources than the running coordinator.
+pub(crate) fn artifact_built_by_daemon(artifact: &crate::remote::artifact::Artifact) -> Result<()> {
+    check_artifact_build(&artifact.info.arch, &artifact.info.build_id)
+}
+
+fn check_artifact_build(arch: &str, build_id: &str) -> Result<()> {
+    if build_id == crate::BUILD_ID {
+        return Ok(());
+    }
+    Err(anyhow::anyhow!(
+        "the {arch} farm-agent artifact was built from {build_id} but this coordinator is {daemon}; rebuild it with `scripts/build-agent.sh {arch}` and install the agent again",
+        daemon = crate::BUILD_ID
+    ))
+}
+
+/// Test hook: the same check without a real artifact file.
+#[cfg(test)]
+pub(crate) fn artifact_built_by_daemon_for_test(arch: &str, build_id: &str) -> Result<()> {
+    check_artifact_build(arch, build_id)
 }

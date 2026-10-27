@@ -129,9 +129,11 @@ impl Session {
                 version,
                 arch,
                 supports_single_vm,
+                build_id,
             } if version == artifact.info.protocol
                 && arch == artifact.info.arch
-                && supports_single_vm =>
+                && supports_single_vm
+                && build_id == artifact.info.build_id =>
             {
                 Ok(super::InstalledAgent {
                     artifact: artifact.info.clone(),
@@ -139,7 +141,8 @@ impl Session {
                 })
             }
             _ => bail!(
-                "farm-agent protocol, CPU architecture or single-VM capability mismatch; build and install the updated agent"
+                "the installed farm-agent does not match this artifact (protocol, architecture, build {b}); rebuild with `task agent-build` and install it again",
+                b = artifact.info.build_id
             ),
         }
     }

@@ -1,5 +1,5 @@
 mod backend;
-mod hosts;
+pub(crate) mod hosts;
 mod logs;
 mod snapshots;
 mod store;
@@ -355,6 +355,13 @@ impl FarmManager {
                 if now().saturating_sub(inspection.checked_at) > 300 { return Err(conflict("remote inspection is older than 5 minutes; check the host again before creating a farm")); }
                 let agent = host.agent.as_ref().ok_or_else(|| conflict("install the Farm execution agent on this host first"))?;
                 if !agent.artifact.supports_single_vm { return Err(conflict("install the updated Farm execution agent to create single-VM farms")); }
+                if agent.artifact.build_id != crate::BUILD_ID {
+                    return Err(conflict(format!(
+                        "the agent installed on this host was built from {} but this coordinator is {};
+rebuild it with `task agent-build` and install the agent again",
+                        agent.artifact.build_id, crate::BUILD_ID
+                    )));
+                }
                 (inspection.memory_total_mib * 80 / 100, Some(agent.artifact.sha256.clone()), Some(uuid::Uuid::new_v4().to_string()))
             } else { (self.0.options.memory_budget_mib, None, None) };
             if reserved.saturating_add(plan.memory_mib) > budget {

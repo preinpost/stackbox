@@ -31,6 +31,7 @@ import {
   type RemoteHost,
 } from "../api/client";
 import {
+  agentBuildMismatch,
   componentInfo,
   componentLabel,
   farmComponents,
@@ -66,10 +67,11 @@ export function localHostReady(host: Host) {
 export const remoteAgentNeedsUpdate = (host: RemoteHost) =>
   Boolean(host.agent && !host.agent.artifact?.supports_single_vm);
 // Creation requires an updated agent plus a fresh inspection and an idle host.
-export function remoteHostReady(host: RemoteHost) {
+export function remoteHostReady(host: RemoteHost, coordinatorBuildId?: string) {
   return (
     host.status === "ready" &&
     host.agent?.artifact?.supports_single_vm === true &&
+    !agentBuildMismatch(host.agent?.artifact, coordinatorBuildId) &&
     !host.active_job &&
     Date.now() / 1000 - (host.inspection?.checked_at ?? 0) <= 300
   );
@@ -171,7 +173,7 @@ export function CreateFarmForm({
     remaining !== null && plan.data && plan.data.memory_mib > remaining;
   const targetError = hostId ? remoteHosts.error : host.error;
   const hostUnavailable = hostId
-    ? !remote || !remoteHostReady(remote)
+    ? !remote || !remoteHostReady(remote, host.data?.build_id)
     : host.data && !localHostReady(host.data);
   return (
     <Modal
@@ -207,7 +209,7 @@ export function CreateFarmForm({
               items={[
                 { value: "local", label: "로컬 · Coordinator" },
                 ...(remoteHosts.data ?? []).map((h) => {
-                  const ready = remoteHostReady(h);
+                  const ready = remoteHostReady(h, host.data?.build_id);
                   return {
                     value: `remote:${h.id}`,
                     label: `${h.id} · ${ready ? "원격 실행" : remoteAgentNeedsUpdate(h) ? "실행기 업데이트 필요" : "준비 필요"}`,
@@ -388,9 +390,15 @@ export function CreateFarmForm({
           {hostUnavailable && (
             <div className="warning-notice">
               {hostId
-                ? remote && remoteAgentNeedsUpdate(remote)
-                  ? "설치된 Farm 실행기는 단일 VM 생성을 지원하지 않습니다. Hosts에서 최신 Farm 실행기를 설치하세요. 기존 Farm의 조회와 삭제는 계속 사용할 수 있습니다."
-                  : "Hosts에서 환경 준비와 단일 VM용 Farm 실행기 설치를 완료하세요. 마지막 SSH 점검이 5분을 지났다면 점검을 갱신하세요."
+                ? remote &&
+                  agentBuildMismatch(
+                    remote.agent?.artifact,
+                    host.data?.build_id,
+                  )
+                  ? "설치된 Farm 실행기가 이 coordinator와 다른 소스에서 빌드되었습니다. `task agent-build`로 다시 빌드한 뒤 Hosts에서 실행기를 재설치하세요."
+                  : remote && remoteAgentNeedsUpdate(remote)
+                    ? "설치된 Farm 실행기는 단일 VM 생성을 지원하지 않습니다. Hosts에서 최신 Farm 실행기를 설치하세요. 기존 Farm의 조회와 삭제는 계속 사용할 수 있습니다."
+                    : "Hosts에서 환경 준비와 단일 VM용 Farm 실행기 설치를 완료하세요. 마지막 SSH 점검이 5분을 지났다면 점검을 갱신하세요."
                 : "Hosts의 로컬 호스트에서 msb·가상화·golden image 상태를 확인하세요."}
             </div>
           )}

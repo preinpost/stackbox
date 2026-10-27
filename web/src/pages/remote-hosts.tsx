@@ -48,7 +48,7 @@ import {
   PageHeading,
   StatusBadge,
 } from "../components/ui";
-import { dateTime, memory, platform } from "../lib";
+import { agentBuildMismatch, dateTime, memory, platform } from "../lib";
 
 export function RemoteHostsPage() {
   const hosts = useQuery(hostsQuery());
@@ -168,7 +168,9 @@ export function RemoteHostsPage() {
             </h2>
             <span className="muted text-xs">
               {(coordinator.data && localHostReady(coordinator.data) ? 1 : 0) +
-                (hosts.data?.filter(remoteHostReady).length ?? 0)}{" "}
+                (hosts.data?.filter((h) =>
+                  remoteHostReady(h, coordinator.data?.build_id),
+                ).length ?? 0)}{" "}
               사용 가능
             </span>
           </div>
@@ -277,7 +279,11 @@ export function RemoteHostsPage() {
               </div>
             </div>
             {selected.inspection ? (
-              <HostInspection host={selected} farms={farmCount(selected.id)} />
+              <HostInspection
+                host={selected}
+                farms={farmCount(selected.id)}
+                coordinatorBuildId={coordinator.data?.build_id}
+              />
             ) : (
               <p className="remote-unchecked">
                 아직 점검하지 않았습니다. SSH 접속과 실행 조건을 확인하세요.
@@ -288,7 +294,9 @@ export function RemoteHostsPage() {
                 key={`${selected.id}-farm`}
                 target={`remote:${selected.id}`}
                 label="이 호스트에 Farm 만들기"
-                disabled={!remoteHostReady(selected)}
+                disabled={
+                  !remoteHostReady(selected, coordinator.data?.build_id)
+                }
               />
               <Button
                 disabled={!!selected.active_job || action.isPending}
@@ -345,13 +353,14 @@ export function RemoteHostsPage() {
                 }
               />
             </div>
-            {!remoteHostReady(selected) && !selected.active_job && (
-              <p className="field-hint mt-3">
-                {remoteAgentNeedsUpdate(selected)
-                  ? "기존 실행기는 단일 VM 생성을 지원하지 않습니다. Farm 실행기를 업데이트하세요. 기존 Farm의 조회와 삭제는 계속 사용할 수 있습니다."
-                  : "Farm을 만들려면 환경 준비와 단일 VM용 Farm 실행기 설치를 마치고, 최근 5분 안에 SSH 점검을 통과해야 합니다."}
-              </p>
-            )}
+            {!remoteHostReady(selected, coordinator.data?.build_id) &&
+              !selected.active_job && (
+                <p className="field-hint mt-3">
+                  {remoteAgentNeedsUpdate(selected)
+                    ? "기존 실행기는 단일 VM 생성을 지원하지 않습니다. Farm 실행기를 업데이트하세요. 기존 Farm의 조회와 삭제는 계속 사용할 수 있습니다."
+                    : "Farm을 만들려면 환경 준비와 단일 VM용 Farm 실행기 설치를 마치고, 최근 5분 안에 SSH 점검을 통과해야 합니다."}
+                </p>
+              )}
             {selected.inspection &&
               !coordinator.data?.agent_artifacts?.some(
                 (artifact) => artifact.arch === selected.inspection?.arch,
@@ -512,7 +521,15 @@ function HostResources({
   );
 }
 
-function HostInspection({ host, farms }: { host: RemoteHost; farms: number }) {
+function HostInspection({
+  host,
+  farms,
+  coordinatorBuildId,
+}: {
+  host: RemoteHost;
+  farms: number;
+  coordinatorBuildId?: string;
+}) {
   const i = host.inspection!;
   const checks = [
     { label: "Linux x86_64 · aarch64", ready: i.compatible },
@@ -526,6 +543,14 @@ function HostInspection({ host, farms }: { host: RemoteHost; farms: number }) {
         ? "Farm 실행기 · 업데이트 필요"
         : "단일 VM Farm 실행기",
       ready: host.agent?.artifact?.supports_single_vm === true,
+    },
+    {
+      label: agentBuildMismatch(host.agent?.artifact, coordinatorBuildId)
+        ? "Farm 실행기 버전 · 재설치 필요"
+        : "Farm 실행기 버전",
+      ready:
+        Boolean(host.agent) &&
+        !agentBuildMismatch(host.agent?.artifact, coordinatorBuildId),
     },
   ];
   return (
@@ -544,7 +569,9 @@ function HostInspection({ host, farms }: { host: RemoteHost; farms: number }) {
         ))}
       </ul>
       <p className="field-hint">
-        최근 점검 {dateTime(i.checked_at)} · msb {i.msb_version ?? "미설치"}
+        최근 점검 {dateTime(i.checked_at)} · msb {i.msb_version ?? "미설치"} ·
+        실행기 {host.agent?.artifact?.build_id || "버전 미상"} (coordinator{" "}
+        {coordinatorBuildId || "미상"})
         {!i.kvm_available &&
           " · VM 위에서 실행한다면 nested virtualization을 먼저 활성화하세요."}
       </p>

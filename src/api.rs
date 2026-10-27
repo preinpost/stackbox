@@ -147,6 +147,8 @@ pub struct HostInfo {
     pub msb_available: bool,
     pub golden_image: String,
     pub golden_image_available: bool,
+    /// Revision this daemon was built from; a host agent must report the same one.
+    pub build_id: String,
     pub memory_total_mib: u64,
     pub memory_available_mib: u64,
     pub memory_budget_mib: u64,
@@ -215,6 +217,7 @@ async fn host(State(app): State<App>) -> Result<Json<HostInfo>, ApiError> {
         msb_available: msb,
         golden_image: crate::farm::BASE_IMAGE.into(),
         golden_image_available: golden,
+        build_id: crate::BUILD_ID.into(),
         memory_total_mib: total,
         memory_available_mib: available,
         memory_budget_mib: app.manager.options().memory_budget_mib,

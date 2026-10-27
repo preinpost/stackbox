@@ -278,6 +278,7 @@ async fn remote_farms_route_over_ssh_with_separate_budgets_ports_streams_and_off
                     arch: std::env::consts::ARCH.into(),
                     protocol: 1,
                     supports_single_vm: true,
+                    build_id: crate::BUILD_ID.into(),
                 },
                 verified_at: now(),
             });

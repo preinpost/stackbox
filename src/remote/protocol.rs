@@ -89,6 +89,9 @@ pub enum Reply {
         arch: String,
         #[serde(default)]
         supports_single_vm: bool,
+        /// Revision the installed agent was built from; empty for agents older than this field.
+        #[serde(default)]
+        build_id: String,
     },
     Inventory {
         farms: BTreeMap<String, Vec<FarmNode>>,

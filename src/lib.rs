@@ -5,3 +5,6 @@ pub mod manager;
 pub mod model;
 pub mod remote;
 mod shell;
+
+/// Revision this binary was built from, baked in by `build.rs`.
+pub const BUILD_ID: &str = env!("FARM_BUILD_ID");

@@ -285,6 +285,9 @@ pub struct AgentArtifactInfo {
     /// Old installed agents remain usable for legacy inventory and deletion.
     #[serde(default)]
     pub supports_single_vm: bool,
+    /// Revision the artifact was built from; empty for artifacts older than this field.
+    #[serde(default)]
+    pub build_id: String,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
 pub struct InstalledAgent {

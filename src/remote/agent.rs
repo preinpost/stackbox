@@ -157,6 +157,7 @@ impl Agent {
                 version: VERSION,
                 arch: std::env::consts::ARCH.into(),
                 supports_single_vm: true,
+                build_id: crate::BUILD_ID.into(),
             });
         }
         if matches!(request.operation, Operation::Scan) {
@@ -389,6 +390,47 @@ pub fn stdout_emitter() -> Emitter {
         Ok(())
     })
 }
+/// Marker the coordinator reads out of the artifact file instead of executing it.
+///
+/// The artifact is a Linux binary that cannot run on every coordinator host, so the
+/// build id has to be greppable bytes rather than a runtime report.
+#[used]
+#[unsafe(no_mangle)]
+pub static FARM_AGENT_BUILD_STAMP: [u8; BUILD_STAMP_LEN] = build_stamp();
+
+pub const BUILD_STAMP_PREFIX: &str = "farm-agent-build:";
+const BUILD_STAMP_LEN: usize = 64;
+
+const fn build_stamp() -> [u8; BUILD_STAMP_LEN] {
+    let prefix = BUILD_STAMP_PREFIX.as_bytes();
+    let id = crate::BUILD_ID.as_bytes();
+    let mut stamp = [0u8; BUILD_STAMP_LEN];
+    let mut at = 0;
+    while at < prefix.len() {
+        stamp[at] = prefix[at];
+        at += 1;
+    }
+    let mut index = 0;
+    while index < id.len() && at < BUILD_STAMP_LEN - 1 {
+        stamp[at] = id[index];
+        at += 1;
+        index += 1;
+    }
+    stamp
+}
+
+/// Build id written into an ELF artifact, or `None` when it predates the marker.
+pub(crate) fn artifact_build_id(bytes: &[u8]) -> Option<String> {
+    let prefix = BUILD_STAMP_PREFIX.as_bytes();
+    let start = bytes
+        .windows(prefix.len())
+        .position(|window| window == prefix)?;
+    let rest = &bytes[start + prefix.len()..];
+    let end = rest.iter().position(|byte| *byte == 0)?;
+    let id = std::str::from_utf8(&rest[..end]).ok()?;
+    (!id.is_empty() && id.len() <= 40).then(|| id.to_owned())
+}
+
 pub async fn serve_stdio() -> Result<()> {
     use std::io::Read;
     let mut input = String::new();

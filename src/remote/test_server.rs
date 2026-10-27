@@ -172,6 +172,7 @@ impl server::Handler for Handler {
                     version: VERSION,
                     arch: std::env::consts::ARCH.into(),
                     supports_single_vm: true,
+                    build_id: crate::BUILD_ID.into(),
                 },
                 Operation::Scan => {
                     if self.observed.fail_scan.load(Ordering::SeqCst) {

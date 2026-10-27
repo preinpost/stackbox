@@ -1253,6 +1253,10 @@
           "arch": {
             "type": "string"
           },
+          "build_id": {
+            "type": "string",
+            "description": "Revision the artifact was built from; empty for artifacts older than this field."
+          },
           "protocol": {
             "type": "integer",
             "format": "int32",
@@ -1835,6 +1839,7 @@
           "msb_available",
           "golden_image",
           "golden_image_available",
+          "build_id",
           "memory_total_mib",
           "memory_available_mib",
           "memory_budget_mib",
@@ -1860,6 +1865,10 @@
           },
           "arch": {
             "type": "string"
+          },
+          "build_id": {
+            "type": "string",
+            "description": "Revision this daemon was built from; a host agent must report the same one."
           },
           "disk_available_mib": {
             "type": [
