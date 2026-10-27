@@ -719,7 +719,7 @@ function HostActionDialog({
                 </label>
                 <p className="field-hint">
                   {purge
-                    ? "Coordinator가 만든 VM만 지웁니다. 이 서버에서 직접 만든 msb 샌드박스는 그대로 둡니다."
+                    ? "farm이 만든 VM과 디스크만 지웁니다. 이 서버에서 직접 만든 msb 샌드박스는 그대로 둡니다."
                     : "호스트 기록과 인증 정보만 지웁니다. 서버의 VM·디스크는 남습니다."}
                 </p>
               </>
