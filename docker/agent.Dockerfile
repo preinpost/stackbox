@@ -1,7 +1,4 @@
 FROM rust:1.99.1-bookworm AS build
-# The build context has no .git, so the caller passes the revision it built from.
-ARG FARM_BUILD_ID=unknown
-ENV FARM_BUILD_ID=${FARM_BUILD_ID}
 WORKDIR /build
 COPY Cargo.toml Cargo.lock build.rs ./
 COPY src ./src
