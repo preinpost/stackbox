@@ -98,7 +98,27 @@ export function proxyApi(req, res, env = process.env) {
             );
             value =
               response.statusCode === 200
-                ? { services: raw.services, credentials }
+                ? {
+                    services: raw.services,
+                    credentials,
+                    // Published data stores: host port, account and databases.
+                    datastores: Array.isArray(raw.datastores)
+                      ? raw.datastores.map((store) => ({
+                          id: store.id,
+                          label: store.label,
+                          protocol: store.protocol,
+                          host: store.host,
+                          port: store.port,
+                          username: store.username,
+                          password: store.password,
+                          vhost: store.vhost,
+                          url: store.url,
+                          databases: Array.isArray(store.databases)
+                            ? store.databases
+                            : [],
+                        }))
+                      : [],
+                  }
                 : { error: raw.error || "Endpoint 조회에 실패했습니다." };
           } catch {
             return json(res, 502, "Endpoint 응답을 읽을 수 없습니다.");

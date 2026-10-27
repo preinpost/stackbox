@@ -68,6 +68,9 @@ SSE 재연결 시 `Last-Event-ID` 또는 `after` query를 전달하면 이후 �
 ## 인증정보
 
 `GET /farms/{id}/endpoints`는 **ready 상태일 때만** admin 인증정보를 반환합니다.
+`datastores`에는 farm마다 함께 설치되는 MariaDB(`mysql://`), RabbitMQ(`amqp://`), RabbitMQ 관리 UI가
+호스트 포트·계정·비밀번호·데이터베이스 목록과 함께 들어갑니다. 포탈은 이 중 필요한 필드만
+브라우저로 전달합니다.
 `services`는 서비스 ID별 public URL이며 `credentials`는 `OS_*` 환경 변수 mapping입니다.
 새 관리 farm에서는 `OS_AUTH_URL`이 public Keystone URL, `OS_INTERFACE`가 `public`으로 반환됩니다.
 비밀번호는 guest의 admin-openrc에서 매번 읽고 host 상태 파일에는 저장하지 않습니다.

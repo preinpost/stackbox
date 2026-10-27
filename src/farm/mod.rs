@@ -40,12 +40,17 @@ pub async fn create_farm_with(
     Ok(vec![node])
 }
 
-/// `(port_base offset, guest port)` of each selected service with a public port.
+/// `(port_base offset, guest port)` of each selected service, plus the data stores every farm installs.
 fn public_ports(components: &[String]) -> Vec<(u16, u16)> {
     crate::model::COMPONENTS
         .iter()
         .filter(|c| components.iter().any(|id| id == c.id))
         .filter_map(|c| c.public.as_ref().map(|p| (p.offset, p.guest_port)))
+        .chain(
+            crate::model::INFRA_PORTS
+                .iter()
+                .map(|p| (p.offset, p.guest_port)),
+        )
         .collect()
 }
 

@@ -1468,6 +1468,68 @@
         ],
         "description": "Write-only input. Never include this type in a host/job response or derive Debug."
       },
+      "Datastore": {
+        "type": "object",
+        "description": "One published data store; ports are the host's, not the guest's per-start address.",
+        "required": [
+          "id",
+          "label",
+          "protocol",
+          "host",
+          "port",
+          "url"
+        ],
+        "properties": {
+          "databases": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Databases a client can open, excluding MariaDB's own schemas."
+          },
+          "host": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "label": {
+            "type": "string"
+          },
+          "password": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "port": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "protocol": {
+            "type": "string",
+            "description": "Client protocol: `mysql`, `amqp` or `http`."
+          },
+          "url": {
+            "type": "string",
+            "description": "Connection URL without the password."
+          },
+          "username": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "vhost": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "RabbitMQ vhost; unused by MariaDB."
+          }
+        }
+      },
       "DeployRequest": {
         "type": "object",
         "properties": {
@@ -1498,6 +1560,13 @@
             "propertyNames": {
               "type": "string"
             }
+          },
+          "datastores": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Datastore"
+            },
+            "description": "Data stores published next to the service APIs, for integrations."
           },
           "services": {
             "type": "object",

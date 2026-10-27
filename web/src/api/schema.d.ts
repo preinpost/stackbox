@@ -487,6 +487,24 @@ export interface components {
           passphrase?: string | null;
           private_key: string;
         };
+    /** @description One published data store; ports are the host's, not the guest's per-start address. */
+    Datastore: {
+      /** @description Databases a client can open, excluding MariaDB's own schemas. */
+      databases?: string[];
+      host: string;
+      id: string;
+      label: string;
+      password?: string | null;
+      /** Format: int32 */
+      port: number;
+      /** @description Client protocol: `mysql`, `amqp` or `http`. */
+      protocol: string;
+      /** @description Connection URL without the password. */
+      url: string;
+      username?: string | null;
+      /** @description RabbitMQ vhost; unused by MariaDB. */
+      vhost?: string | null;
+    };
     DeployRequest: {
       /** @default prepare */
       from: components["schemas"]["Phase"];
@@ -496,6 +514,8 @@ export interface components {
       credentials: {
         [key: string]: string;
       };
+      /** @description Data stores published next to the service APIs, for integrations. */
+      datastores?: components["schemas"]["Datastore"][];
       services: {
         [key: string]: string;
       };

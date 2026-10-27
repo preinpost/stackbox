@@ -12,8 +12,9 @@ export type LogEntry = Schema["LogEntry"];
 export type CreateRequest = Schema["CreateRequest"];
 export type ServiceEndpoints = Pick<
   Schema["Endpoints"],
-  "services" | "credentials"
+  "services" | "credentials" | "datastores"
 >;
+export type Datastore = Schema["Datastore"];
 export type RemoteHost = Schema["RemoteHost"];
 export type HostCapacity = Schema["HostCapacity"];
 export type HostJob = Schema["HostJob"];

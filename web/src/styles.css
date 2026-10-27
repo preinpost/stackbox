@@ -3160,3 +3160,77 @@ h2 {
     flex-wrap: wrap;
   }
 }
+.datastore-panel {
+  margin-top: 20px;
+}
+.datastore-list {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+}
+.datastore {
+  border: 1px solid #e6ece6;
+  border-radius: 8px;
+  padding: 14px 16px;
+  background: #fbfcfb;
+}
+.datastore-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  color: #3d5343;
+}
+.datastore-proto {
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #7c8b80;
+  border: 1px solid #e6ece6;
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+.datastore-url {
+  display: block;
+  margin-top: 8px;
+  font-size: 13px;
+  color: #44604c;
+}
+.datastore-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 8px 14px;
+  margin-top: 12px;
+}
+.datastore-fields dt {
+  font-size: 11px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: #7c8b80;
+}
+.datastore-fields dd {
+  margin: 2px 0 0;
+  font-size: 13px;
+  color: #3d5343;
+  overflow-wrap: anywhere;
+}
+.datastore-fields details summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: #597260;
+}
+.datastore-wide {
+  grid-column: 1 / -1;
+}
+.datastore-dbs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.datastore-dbs span {
+  border: 1px solid #e6ece6;
+  border-radius: 4px;
+  padding: 1px 6px;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 12px;
+}

@@ -181,6 +181,14 @@ HAProxy·keepalived·ProxySQL은 사용하지 않습니다.
 | 3 | Horizon (`/`) | 80 |
 | 4 | Neutron | 9696 |
 | 5 | Nova (`/v2.1`) | 8774 |
+| 6 | MariaDB | 3306 |
+| 7 | RabbitMQ (AMQP) | 5672 |
+| 8 | RabbitMQ 관리 UI | 15672 |
+
+6~8번은 모든 farm에 설치되는 데이터 스토어입니다. 배포가 끝나면 `GET /farms/{id}/endpoints`의
+`datastores`와 포탈의 **Data stores** 패널에서 계정·비밀번호·데이터베이스 목록을 확인합니다.
+이 릴리스 전에 만든 farm은 이 포트를 공개하지 않으므로, 필요하면 farm을 다시 만들거나
+게스트의 `/etc/farm/identity.conf`와 `msb modify --port`로 직접 추가합니다.
 
 서비스 카탈로그의 public URL에는 `external_host`와 호스트 포트를 기록하고,
 내부 통신은 VM의 고정 서비스 주소(`10.254.0.2`)와 기존 서비스 포트를 사용합니다.

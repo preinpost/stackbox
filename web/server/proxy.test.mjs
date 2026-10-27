@@ -65,6 +65,20 @@ test("forwards the Horizon login and drops unrelated endpoint secrets", async (t
           OS_USER_DOMAIN_NAME: "Default",
           OS_TOKEN: "not-a-login-field",
         },
+        datastores: [
+          {
+            id: "mariadb",
+            label: "MariaDB",
+            protocol: "mysql",
+            host: "localhost",
+            port: 15006,
+            username: "root",
+            password: "database-secret",
+            url: "mysql://root@localhost:15006/",
+            databases: ["keystone", "nova"],
+            internal_address: "10.254.0.2",
+          },
+        ],
         extra_secret: "hidden",
       }),
     );
@@ -77,7 +91,29 @@ test("forwards the Horizon login and drops unrelated endpoint secrets", async (t
       OS_PASSWORD: "horizon-login",
       OS_USER_DOMAIN_NAME: "Default",
     },
+    // Data stores pass through field by field; the guest's own address stays behind.
+    datastores: [
+      {
+        id: "mariadb",
+        label: "MariaDB",
+        protocol: "mysql",
+        host: "localhost",
+        port: 15006,
+        username: "root",
+        password: "database-secret",
+        url: "mysql://root@localhost:15006/",
+        databases: ["keystone", "nova"],
+      },
+    ],
   });
+  assert.deepEqual(
+    JSON.parse(
+      JSON.stringify(
+        await (await fetch(`${address}/api/v1/farms/demo/endpoints`)).json(),
+      ),
+    ).datastores[0].internal_address,
+    undefined,
+  );
 });
 test("forwards host registration credentials only in the upstream request and permits host jobs", async (t) => {
   const address = await setup(t, async (req, res) => {

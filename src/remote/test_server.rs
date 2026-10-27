@@ -232,6 +232,7 @@ impl server::Handler for Handler {
                             "OS_PASSWORD".into(),
                             "remote-guest-secret".into(),
                         )]),
+                        datastores: Vec::new(),
                     },
                 },
             };

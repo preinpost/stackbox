@@ -10,6 +10,7 @@ import {
   Circle,
   CircleAlert,
   Cpu,
+  Database,
   Globe,
   HardDrive,
   Network,
@@ -26,6 +27,7 @@ import {
 import { FreezeFarmDialog } from "../components/snapshot-actions";
 import { LogViewer } from "../components/log-viewer";
 import {
+  CopyText,
   EmptyState,
   ErrorNotice,
   Loading,
@@ -251,6 +253,7 @@ export function FarmDetailPage({ id }: { id: string }) {
             <DeploymentPhases farm={farm} />
             <Endpoints farm={farm} />
           </div>
+          <Datastores farm={farm} />
         </Tabs.Panel>
         <Tabs.Panel value="logs" className="tab-panel">
           <LogViewer id={id} />
@@ -524,6 +527,133 @@ function Endpoints({ farm }: { farm: Farm }) {
     </section>
   );
 }
+/**
+ * MariaDB and RabbitMQ ship with every farm; integrations connect through their published ports.
+ * Shares the endpoints query cache with the service panel above.
+ */
+function Datastores({ farm }: { farm: Farm }) {
+  const ready = farm.status === "ready";
+  const query = useQuery({
+    queryKey: keys.endpoints(farm.id),
+    queryFn: () => api.endpoints(farm.id),
+    enabled: ready,
+    staleTime: 60_000,
+  });
+  const stores = query.data?.datastores ?? [];
+  const exposure = farm.exposure;
+  return (
+    <section className="panel datastore-panel">
+      <div className="section-label">
+        <span className="small-icon">
+          <Database size={17} />
+        </span>
+        <h2>Data stores</h2>
+        {ready && stores.length > 0 && (
+          <span className="count-pill ml-auto">{stores.length}</span>
+        )}
+      </div>
+      {!ready ? (
+        <div className="endpoint-note">
+          배포가 끝나면 MariaDB와 RabbitMQ 접속 정보가 여기에 표시됩니다.
+        </div>
+      ) : query.isPending ? (
+        <Loading label="데이터 스토어 정보를 불러오는 중" />
+      ) : query.error ? (
+        <ErrorNotice error={query.error} />
+      ) : !stores.length ? (
+        <div className="endpoint-note">
+          이 farm은 데이터 스토어 포트를 공개하지 않았습니다. 새로 만든 farm부터
+          MariaDB·RabbitMQ 포트가 함께 열립니다.
+        </div>
+      ) : (
+        <>
+          <p className="field-hint mb-4">
+            farm마다 같은 VM 안에서 실행되는 데이터베이스와 메시지 큐입니다.
+            포트는 {exposure?.port_base ?? "—"}번대 블록의 해당 offset을 씁니다.
+          </p>
+          <div className="datastore-list">
+            {stores.map((store) => (
+              <div className="datastore" key={store.id}>
+                <div className="datastore-head">
+                  <strong>{store.label}</strong>
+                  <span className="datastore-proto">{store.protocol}</span>
+                  {store.protocol === "http" ? (
+                    <a
+                      href={store.url}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="icon-button ml-auto"
+                      aria-label={`${store.label} 열기`}
+                    >
+                      <ArrowUpRight size={16} />
+                    </a>
+                  ) : null}
+                </div>
+                <code className="datastore-url">
+                  {`${store.host}:${store.port}`}
+                </code>
+                <dl className="datastore-fields">
+                  {store.username && (
+                    <div>
+                      <dt>사용자</dt>
+                      <dd>
+                        <code>{store.username}</code>
+                      </dd>
+                    </div>
+                  )}
+                  {store.vhost && (
+                    <div>
+                      <dt>vhost</dt>
+                      <dd>
+                        <code>{store.vhost}</code>
+                      </dd>
+                    </div>
+                  )}
+                  {store.password && (
+                    <div>
+                      <dt>비밀번호</dt>
+                      <dd>
+                        <details>
+                          <summary>표시</summary>
+                          <CopyText value={store.password} />
+                        </details>
+                      </dd>
+                    </div>
+                  )}
+                  {store.protocol === "mysql" && store.databases?.length ? (
+                    <div className="datastore-wide">
+                      <dt>데이터베이스</dt>
+                      <dd className="datastore-dbs">
+                        {store.databases.map((name) => (
+                          <span key={name}>{name}</span>
+                        ))}
+                      </dd>
+                    </div>
+                  ) : null}
+                  <div className="datastore-wide">
+                    <dt>URL</dt>
+                    <dd>
+                      <code>{store.url}</code>
+                    </dd>
+                  </div>
+                </dl>
+              </div>
+            ))}
+          </div>
+          <div className="credential-note">
+            <ShieldCheck size={16} />
+            <p>
+              이 포트는 farm VM의 고정 주소로 DNAT됩니다. 외부에 공개한
+              포털이라면 인증정보 표시를 끄고 방화벽으로 3306·5672·15672를
+              제한하세요.
+            </p>
+          </div>
+        </>
+      )}
+    </section>
+  );
+}
+
 function HorizonLogin({
   credentials,
   pending,

@@ -65,6 +65,36 @@ pub struct PublicPort {
 /// also changes the grid of port blocks, so `allocate_ports` rejects any overlap, not just
 /// an equal base.
 pub const PUBLIC_PORT_BLOCK: u16 = 20;
+
+/// A data store installed in every farm and published for integrations.
+pub struct InfraPort {
+    pub id: &'static str,
+    pub label: &'static str,
+    pub offset: u16,
+    pub guest_port: u16,
+}
+/// MariaDB and RabbitMQ come with `enable_mariadb`/`enable_rabbitmq`, so every farm owns
+/// these ports. Their offsets continue the service catalog's 0..5.
+pub const INFRA_PORTS: &[InfraPort] = &[
+    InfraPort {
+        id: "mariadb",
+        label: "MariaDB",
+        offset: 6,
+        guest_port: 3306,
+    },
+    InfraPort {
+        id: "rabbitmq",
+        label: "RabbitMQ (AMQP)",
+        offset: 7,
+        guest_port: 5672,
+    },
+    InfraPort {
+        id: "rabbitmq-management",
+        label: "RabbitMQ 관리 UI",
+        offset: 8,
+        guest_port: 15672,
+    },
+];
 pub struct ComponentDef {
     pub id: &'static str,
     pub required: bool,
@@ -547,6 +577,29 @@ pub struct Endpoints {
     pub services: BTreeMap<String, String>,
     /// Admin credentials; returned only by the explicit endpoints call, never persisted.
     pub credentials: BTreeMap<String, String>,
+    /// Data stores published next to the service APIs, for integrations.
+    #[serde(default)]
+    pub datastores: Vec<Datastore>,
+}
+
+/// One published data store; ports are the host's, not the guest's per-start address.
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
+pub struct Datastore {
+    pub id: String,
+    pub label: String,
+    /// Client protocol: `mysql`, `amqp` or `http`.
+    pub protocol: String,
+    pub host: String,
+    pub port: u16,
+    pub username: Option<String>,
+    pub password: Option<String>,
+    /// RabbitMQ vhost; unused by MariaDB.
+    pub vhost: Option<String>,
+    /// Connection URL without the password.
+    pub url: String,
+    /// Databases a client can open, excluding MariaDB's own schemas.
+    #[serde(default)]
+    pub databases: Vec<String>,
 }
 
 #[cfg(test)]
@@ -620,6 +673,7 @@ mod tests {
         let mut offsets: Vec<u16> = COMPONENTS
             .iter()
             .filter_map(|c| c.public.as_ref().map(|p| p.offset))
+            .chain(INFRA_PORTS.iter().map(|p| p.offset))
             .collect();
         let published = offsets.len();
         offsets.sort_unstable();
@@ -627,15 +681,18 @@ mod tests {
         assert_eq!(
             offsets.len(),
             published,
-            "each service needs its own offset"
+            "each published port needs its own offset"
         );
         let highest = *offsets.last().expect("the catalog publishes keystone");
         assert!(
             highest < PUBLIC_PORT_BLOCK,
             "offset {highest} would spill into the next farm's block of {PUBLIC_PORT_BLOCK} ports; raise PUBLIC_PORT_BLOCK or reuse an offset"
         );
-        // Offsets 6..19 are free for optional services such as cinder, swift and heat.
-        assert_eq!(highest, 5, "the published catalog still ends at nova");
+        // Offsets 9..19 are free for optional services such as cinder, swift and heat.
+        assert_eq!(
+            highest, 8,
+            "the published set ends with the RabbitMQ console"
+        );
         assert_eq!(PUBLIC_PORT_BLOCK, 20, "the block is capped at twenty ports");
         // The grid still holds more farms than one host's memory can admit.
         let blocks = (24_000 - 15_000) / PUBLIC_PORT_BLOCK;

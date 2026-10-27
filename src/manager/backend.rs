@@ -1,7 +1,7 @@
 use crate::{
     farm::{self, FarmNode, FrozenSnapshot, ImportedSnapshot},
     kolla::{self, EventSink, Phase},
-    model::{Endpoints, Exposure, Plan},
+    model::{Datastore, Endpoints, Exposure, Plan},
 };
 use anyhow::{Result, anyhow};
 use futures::future::BoxFuture;
@@ -134,8 +134,14 @@ import os, json
 keys = ['OS_AUTH_URL', 'OS_USERNAME', 'OS_PASSWORD', 'OS_PROJECT_NAME', 'OS_USER_DOMAIN_NAME', 'OS_PROJECT_DOMAIN_NAME', 'OS_REGION_NAME', 'OS_IDENTITY_API_VERSION', 'OS_INTERFACE']
 print(json.dumps({k: os.environ[k] for k in keys if k in os.environ}))
 PY"#).await;
+            // The data stores report their own credentials and live schemas.
+            let stores = crate::shell::run(&sandbox, DATASTORES_SCRIPT).await;
             sandbox.detach().await;
             let mut credentials: BTreeMap<String, String> = serde_json::from_str(&result?)?;
+            let datastores = exposure
+                .as_ref()
+                .map(|e| datastores(&e.clone(), stores.unwrap_or_default()))
+                .unwrap_or_default();
             let services = exposure
                 .map(|e| {
                     let urls = e.urls(Some(&components));
@@ -152,6 +158,7 @@ PY"#).await;
             Ok(Endpoints {
                 services,
                 credentials,
+                datastores,
             })
         })
     }
@@ -203,6 +210,95 @@ PY"#).await;
         Box::pin(async move { farm::remove_snapshot(&reference).await })
     }
 }
+/// Reads the data store credentials from Kolla's generated passwords and the live schemas.
+const DATASTORES_SCRIPT: &str = r#"set -euo pipefail
+python3 - <<'PY'
+import json, re, subprocess
+passwords = open('/etc/kolla/passwords.yml').read()
+def value(key):
+    match = re.search(rf'^{key}:\s*(\S+)\s*$', passwords, re.MULTILINE)
+    return match.group(1) if match else None
+databases = []
+try:
+    out = subprocess.run(['docker', 'exec', 'mariadb', 'mariadb', '-uroot',
+                          f"-p{value('database_password') or ''}", '-N', '-e', 'show databases'],
+                         capture_output=True, text=True, timeout=60)
+    own = {'information_schema', 'performance_schema', 'mysql', 'sys'}
+    databases = [line.strip() for line in out.stdout.splitlines() if line.strip() not in own]
+except Exception:
+    pass
+print(json.dumps({
+    'database_password': value('database_password'),
+    'rabbitmq_password': value('rabbitmq_password'),
+    'rabbitmq_user': value('rabbitmq_userid') or 'openstack',
+    'databases': databases,
+}))
+PY"#;
+
+/// Builds the data store list from the guest's own report, keyed by published port.
+fn datastores(exposure: &Exposure, report: String) -> Vec<Datastore> {
+    let report: serde_json::Value = serde_json::from_str(report.trim()).unwrap_or_default();
+    let field = |key: &str| {
+        report
+            .get(key)
+            .and_then(|v| v.as_str())
+            .filter(|v| !v.is_empty())
+            .map(str::to_owned)
+    };
+    let databases: Vec<String> = report
+        .get("databases")
+        .and_then(|v| v.as_array())
+        .map(|list| {
+            list.iter()
+                .filter_map(|v| v.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default();
+    crate::model::INFRA_PORTS
+        .iter()
+        .map(|port| {
+            let host = exposure.host.clone();
+            let host_port = exposure.port_base + port.offset;
+            let mut store = Datastore {
+                id: port.id.into(),
+                label: port.label.into(),
+                protocol: "http".into(),
+                host: host.clone(),
+                port: host_port,
+                username: None,
+                password: None,
+                vhost: None,
+                url: format!("http://{host}:{host_port}/"),
+                databases: vec![],
+            };
+            match port.id {
+                "mariadb" => {
+                    store.protocol = "mysql".into();
+                    store.username = Some("root".into());
+                    store.password = field("database_password");
+                    store.databases = databases.clone();
+                    store.url = format!("mysql://root@{host}:{host_port}/");
+                }
+                "rabbitmq" => {
+                    store.protocol = "amqp".into();
+                    store.vhost = Some("/".into());
+                    store.username =
+                        Some(field("rabbitmq_user").unwrap_or_else(|| "openstack".into()));
+                    store.password = field("rabbitmq_password");
+                    store.url = format!("amqp://{host}:{host_port}/%2f");
+                }
+                // The management UI signs in with the same RabbitMQ account.
+                _ => {
+                    store.username =
+                        Some(field("rabbitmq_user").unwrap_or_else(|| "openstack".into()));
+                    store.password = field("rabbitmq_password");
+                }
+            }
+            store
+        })
+        .collect()
+}
+
 pub fn real() -> Arc<dyn Backend> {
     Arc::new(MicrosandboxBackend)
 }

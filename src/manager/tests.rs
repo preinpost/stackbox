@@ -100,6 +100,18 @@ impl Backend for Fake {
             Ok(Endpoints {
                 services: exposure.unwrap().urls(Some(&components)),
                 credentials: BTreeMap::from([("OS_PASSWORD".into(), "test-secret".into())]),
+                datastores: vec![Datastore {
+                    id: "mariadb".into(),
+                    label: "MariaDB".into(),
+                    protocol: "mysql".into(),
+                    host: "localhost".into(),
+                    port: 15006,
+                    username: Some("root".into()),
+                    password: Some("test-secret".into()),
+                    vhost: None,
+                    url: "mysql://root@localhost:15006/".into(),
+                    databases: vec!["keystone".into()],
+                }],
             })
         })
     }
