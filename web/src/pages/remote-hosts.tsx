@@ -352,6 +352,7 @@ export function RemoteHostsPage() {
                 kind="remove"
                 disabled={!!selected.active_job || action.isPending}
                 farms={farmCount(selected.id)}
+                coordinatorBuildId={coordinator.data?.build_id}
                 run={(purge) =>
                   action.mutateAsync({
                     id: selected.id,
@@ -627,12 +628,14 @@ function HostActionDialog({
   kind,
   disabled,
   farms,
+  coordinatorBuildId,
   run,
 }: {
   host: RemoteHost;
   kind: "prepare" | "remove";
   disabled: boolean;
   farms: number;
+  coordinatorBuildId?: string;
   run: (purge: boolean) => Promise<unknown>;
 }) {
   const [open, setOpen] = useState(false);
@@ -640,6 +643,8 @@ function HostActionDialog({
   const [error, setError] = useState<unknown>();
   const prepare = kind === "prepare";
   const [purge, setPurge] = useState(true);
+  const mismatch =
+    !prepare && agentBuildMismatch(host.agent?.artifact, coordinatorBuildId);
   return (
     <Dialog.Root
       open={open}
@@ -681,9 +686,21 @@ function HostActionDialog({
               </>
             ) : (
               <>
+                {agentBuildMismatch(
+                  host.agent?.artifact,
+                  coordinatorBuildId,
+                ) && (
+                  <div className="warning-notice">
+                    설치된 Farm 실행기가 coordinator와 다른 빌드입니다
+                    {` (${host.agent?.artifact?.build_id || "버전 미상"} ≠ ${coordinatorBuildId})`}
+                    . VM 정리는 새 실행기가 필요하므로, 먼저 실행기를
+                    재설치하거나 이 옵션을 끄고 기록만 지우세요.
+                  </div>
+                )}
                 <label className="checkbox-row">
                   <Checkbox.Root
-                    checked={purge}
+                    checked={purge && !mismatch}
+                    disabled={mismatch}
                     onCheckedChange={(checked) => setPurge(checked === true)}
                     className="checkbox"
                   >

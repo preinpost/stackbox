@@ -23,6 +23,7 @@ export const activityLabel = (a: Activity) =>
         check: "SSH 점검",
         prepare: "환경 준비",
         install_agent: "Farm 실행기 설치",
+        purge: "호스트 VM 정리",
       }[a.job.kind];
 export function activityStep(a: Activity) {
   if (a.job.status === "queued") return "실행 대기";

@@ -72,6 +72,8 @@ impl Operation {
             Self::Deploy { .. } => 7200,
             Self::Create { .. } => 600,
             Self::Delete { .. } => 180,
+            // A host can hold several farms, each destroyed VM by VM.
+            Self::Purge => 1800,
             _ => 60,
         }
     }
