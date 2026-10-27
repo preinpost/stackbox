@@ -83,6 +83,9 @@ FARM_AGENT_PATH="$PWD/dist/agent/aarch64/farm-agent" cargo run -- serve
 ```
 
 Hosts에서 환경 준비를 완료하면 실행기도 설치합니다. 이미 준비한 호스트는 `Farm 실행기 설치`를 누르세요.
+실행기에는 빌드 리비전이 박혀 있어서, coordinator를 다시 빌드한 뒤에는 `task agent-build`로 실행기
+아티팩트도 함께 만들어야 합니다. 버전이 다르면 Hosts 체크리스트의 **Farm 실행기 버전**에 표시되고,
+설치와 Farm 생성이 그 리비전을 안내하며 거절됩니다.
 그다음 Farm 생성 화면의 `실행 호스트`에서 선택합니다. CLI는
 `farm create remote-demo --host-id worker-01 --external-host worker-01.example` 형태입니다.
 원격 호스트의 설치 조건·지문 검증·암호화 키 보관은 [docs/remote-hosts.md](docs/remote-hosts.md)를 참고하세요.
