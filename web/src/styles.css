@@ -1529,7 +1529,8 @@ h2 {
   margin-top: 22px;
 }
 .phase-panel,
-.endpoints-panel {
+.endpoints-panel,
+.datastore-panel {
   padding: 20px;
 }
 .phase-list {
