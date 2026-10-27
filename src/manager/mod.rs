@@ -896,6 +896,8 @@ impl FarmManager {
             };
             farm.error = error;
             farm.active_job = None;
+            // The step describes work in flight; once the job ends it is stale.
+            farm.step = None;
             farm.updated_at = now();
             if farm.status == FarmStatus::Deleted {
                 farm.nodes.clear();

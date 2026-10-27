@@ -3,7 +3,12 @@ import { afterEach, expect, test } from "vitest";
 import type { Farm } from "../api/client";
 import { userEvent } from "@testing-library/user-event";
 import type { Datastore } from "../api/client";
-import { DatastoreCard, HorizonLogin, NodeTopology } from "./farm-detail";
+import {
+  DatastoreCard,
+  DeploymentPhases,
+  HorizonLogin,
+  NodeTopology,
+} from "./farm-detail";
 
 afterEach(cleanup);
 const farm: Farm = {
@@ -63,6 +68,31 @@ test("retains observed legacy and unclassified nodes instead of inventing a new 
   expect(screen.getByText("old-other")).toBeTruthy();
   expect(screen.queryByText("All-in-one")).toBeNull();
   expect(container.textContent).toContain("자동 변환하지 않습니다");
+});
+
+test("keeps the step line out of a finished deployment", () => {
+  const { container, rerender } = render(
+    <DeploymentPhases
+      farm={{
+        ...farm,
+        status: "deploying",
+        active_job: "job-1",
+        phase: "verify",
+        step: "Cirros 인스턴스 생성과 라우터 경유 ping 검증",
+      }}
+    />,
+  );
+  // While the job runs, the fine-grained step stays visible.
+  expect(container.querySelectorAll(".phase-step")).toHaveLength(1);
+  expect(container.textContent).toContain("Cirros 인스턴스 생성");
+
+  rerender(
+    <DeploymentPhases farm={{ ...farm, status: "ready", phase: "verify" }} />,
+  );
+  // A ready farm shows the finished phases but no leftover step text.
+  expect(container.querySelectorAll(".phase-step")).toHaveLength(0);
+  expect(container.textContent).not.toContain("Cirros 인스턴스 생성");
+  expect(container.querySelectorAll(".phase-done")).toHaveLength(8);
 });
 
 const mariadb: Datastore = {

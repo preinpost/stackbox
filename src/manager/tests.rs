@@ -74,6 +74,7 @@ impl Backend for Fake {
             self.max_deploys.fetch_max(active, Ordering::SeqCst);
             sink(DeployEvent::Phase(from))?;
             sink(DeployEvent::Output("test deployment output".into()))?;
+            sink(DeployEvent::Step("make images".into()))?;
             if let Some(gate) = &self.deployment_gate {
                 gate.acquire().await?.forget();
             }
@@ -962,6 +963,36 @@ async fn lifecycle_reservations_failures_and_logs_survive_restart() {
             .iter()
             .all(|e| e.id > last)
     );
+    settle(&manager).await;
+}
+
+#[tokio::test]
+async fn deploy_step_is_shown_while_running_and_cleared_after() {
+    let dir = tempfile::tempdir().unwrap();
+    let backend = Arc::new(Fake {
+        deployment_gate: Some(Semaphore::new(0)),
+        ..Default::default()
+    });
+    let manager = open_with(options(dir.path()), backend.clone()).await;
+    let create = manager.create(request("step")).unwrap();
+    done(&manager, &create).await;
+    let job = manager.deploy("step", DeployRequest::default()).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while manager.get("step").unwrap().step.is_none() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        manager.get("step").unwrap().step.as_deref(),
+        Some("make images")
+    );
+    backend.deployment_gate.as_ref().unwrap().add_permits(1);
+    done(&manager, &job).await;
+    let farm = manager.get("step").unwrap();
+    assert_eq!(farm.status, FarmStatus::Ready);
+    assert!(farm.step.is_none(), "a finished job keeps no step text");
     settle(&manager).await;
 }
 

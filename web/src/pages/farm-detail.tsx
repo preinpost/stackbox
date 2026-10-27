@@ -546,7 +546,7 @@ export function NodeTopology({ farm }: { farm: Farm }) {
     </section>
   );
 }
-function DeploymentPhases({ farm }: { farm: Farm }) {
+export function DeploymentPhases({ farm }: { farm: Farm }) {
   return (
     <section className="panel phase-panel">
       <div className="section-label">
@@ -574,14 +574,12 @@ function DeploymentPhases({ farm }: { farm: Farm }) {
                   <strong>{phase.label}</strong>
                   <span>{phase.description}</span>
                 </div>
-                {current && farm.step && (
+                {running && farm.step && (
                   <span
-                    className={`phase-step ${running ? "phase-step-live" : ""}`}
+                    className="phase-step phase-step-live"
                     title={farm.step}
                   >
-                    {running && (
-                      <LoaderCircle size={11} className="animate-spin" />
-                    )}
+                    <LoaderCircle size={11} className="animate-spin" />
                     <span className="phase-step-text">{farm.step}</span>
                   </span>
                 )}
