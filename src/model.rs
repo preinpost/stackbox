@@ -58,11 +58,13 @@ pub struct PublicPort {
 
 /// Host ports reserved per farm: `[port_base, port_base + PUBLIC_PORT_BLOCK)`.
 ///
-/// Every [`PublicPort::offset`] must stay below this, and offsets are append-only so an
-/// existing farm's public URLs never move when the catalog grows. Raising the block also
-/// changes the grid of port blocks, so `allocate_ports` rejects any overlap, not just an
-/// equal base.
-pub const PUBLIC_PORT_BLOCK: u16 = 10;
+/// Twenty leaves room for the twelve optional OpenStack APIs beyond the six published
+/// today, and still yields 450 blocks in `15000..24000` — more than a host's memory budget
+/// can hold. Every [`PublicPort::offset`] must stay below this, and offsets are append-only
+/// so an existing farm's public URLs never move when the catalog grows. Raising the block
+/// also changes the grid of port blocks, so `allocate_ports` rejects any overlap, not just
+/// an equal base.
+pub const PUBLIC_PORT_BLOCK: u16 = 20;
 pub struct ComponentDef {
     pub id: &'static str,
     pub required: bool,
@@ -632,11 +634,13 @@ mod tests {
             highest < PUBLIC_PORT_BLOCK,
             "offset {highest} would spill into the next farm's block of {PUBLIC_PORT_BLOCK} ports; raise PUBLIC_PORT_BLOCK or reuse an offset"
         );
-        // Room to add services without touching the block size.
-        assert!(
-            u16::try_from(published).unwrap() < PUBLIC_PORT_BLOCK,
-            "the catalog already fills its port block"
-        );
+        // Offsets 6..19 are free for optional services such as cinder, swift and heat.
+        assert_eq!(highest, 5, "the published catalog still ends at nova");
+        assert_eq!(PUBLIC_PORT_BLOCK, 20, "the block is capped at twenty ports");
+        // The grid still holds more farms than one host's memory can admit.
+        let blocks = (24_000 - 15_000) / PUBLIC_PORT_BLOCK;
+        assert_eq!(blocks, 450);
+        assert!(u16::try_from(published).unwrap() < PUBLIC_PORT_BLOCK);
     }
 
     #[test]

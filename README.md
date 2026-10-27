@@ -168,7 +168,10 @@ loopback 이외의 관리 API 바인딩에는 token이 필수입니다. TLS는 �
 종료하도록 구성하세요. 포탈 backend가 farmd와 OpenStack API를 호출하고, 브라우저에 admin
 인증정보를 전달하지 않는 구조를 전제로 합니다. CORS는 활성화하지 않습니다.
 
-farm별 public TCP block은 `15000 + 10 × n`으로 예약하고, 선택한 서비스만 all-in-one VM에 직접 전달합니다. HAProxy·keepalived·ProxySQL은 사용하지 않습니다.
+farm별 public TCP block은 `15000 + 20 × n`으로 20개 포트씩 예약하고(`PUBLIC_PORT_BLOCK`),
+선택한 서비스만 all-in-one VM에 직접 전달합니다. offset 6~19는 추가 서비스를 위해 비워 둡니다.
+블록 폭을 넘는 서비스를 추가하면 카탈로그 테스트가 실패합니다.
+HAProxy·keepalived·ProxySQL은 사용하지 않습니다.
 
 | offset | 서비스 | VM 포트 |
 |---:|---|---:|
@@ -179,8 +182,8 @@ farm별 public TCP block은 `15000 + 10 × n`으로 예약하고, 선택한 서�
 | 4 | Neutron | 9696 |
 | 5 | Nova (`/v2.1`) | 8774 |
 
-서비스 카탈로그의 public URL에는
-`external_host`와 호스트 포트를 기록하고, 내부 통신은 VM의 eth0 주소와 기존 서비스 포트를 사용합니다.
+서비스 카탈로그의 public URL에는 `external_host`와 호스트 포트를 기록하고,
+내부 통신은 VM의 고정 서비스 주소(`10.254.0.2`)와 기존 서비스 포트를 사용합니다.
 외부 호스트 변경이나 포트 재할당은 현재 지원하지 않습니다.
 
 관리 계층 추가 전에 생성된 VM은 원래 포트 설정으로 가져오므로 `exposure: null`입니다.

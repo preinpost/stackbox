@@ -151,7 +151,7 @@ Farm 생성 요청에 `host_id`를 추가한다. 생략하면 기존 Coordinator
 `external_host=localhost`는 원격 서비스에 맞지 않으므로 명시적으로 설정한다.
 생성하려는 타겟은 `ready`, 설치된 agent, 최근 5분 이내 점검 결과가 있어야 한다.
 VM 1대와 선택한 모든 서비스는 같은 원격 서버에서 실행하며 VM 간 overlay는 필요하지 않다.
-원격 public 서비스는 0.0.0.0의 `15000 + 10n` block 중 선택한 서비스 offset(Keystone 0, Glance 1, Placement 2, Horizon 3, Neutron 4)을 사용한다. 방화벽과 외부 주소의 경로는 운영자가 설정한다.
+원격 public 서비스는 0.0.0.0의 `15000 + 20n` block 중 선택한 서비스 offset(Keystone 0, Glance 1, Placement 2, Horizon 3, Neutron 4)을 사용한다. 방화벽과 외부 주소의 경로는 운영자가 설정한다.
 동일 port block을 다른 물리 호스트에서 재사용할 수 있으며 실제 타겟에서 사용 중인 포트도 생성 직전에 확인한다.
 
 기존 deploy/delete/endpoints/logs API와 CLI는 Farm의 `host_id`에 따라 원격으로 전달한다.
