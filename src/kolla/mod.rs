@@ -15,6 +15,8 @@ use std::{collections::BTreeMap, sync::Arc};
 #[derive(Clone, Debug)]
 pub enum DeployEvent {
     Phase(Phase),
+    /// A finer step inside the phase: our own markers, or an Ansible task name.
+    Step(String),
     Output(String),
 }
 pub type EventSink = Arc<dyn Fn(DeployEvent) -> Result<()> + Send + Sync>;
@@ -149,6 +151,11 @@ pub async fn deploy_with(
     result
 }
 
+/// Reports a step inside the running phase.
+fn step(sink: &EventSink, text: impl Into<String>) -> Result<()> {
+    sink(DeployEvent::Step(text.into()))
+}
+
 async fn deploy_phases(
     farm_id: &str,
     from: Phase,
@@ -163,18 +170,32 @@ async fn deploy_phases(
         eprintln!("\n==> [{farm_id}] {phase}");
         let log = format!("{LOG_DIR}/{phase}.log");
         match phase {
-            Phase::Prepare => prepare(deployer, components).await,
+            Phase::Prepare => prepare(deployer, components, sink).await,
             Phase::Install => stream(deployer, &install_script(), &log, sink).await,
-            Phase::Configure => configure(deployer, topology, exposure, components).await,
+            Phase::Configure => configure(deployer, topology, exposure, components, sink).await,
             Phase::Bootstrap => {
+                step(
+                    sink,
+                    "kolla-ansible bootstrap-servers (컨테이너 호스트 초기화)",
+                )?;
                 stream(deployer, &kolla_ansible("bootstrap-servers"), &log, sink).await
             }
-            Phase::Prechecks => stream(deployer, &kolla_ansible("prechecks"), &log, sink).await,
-            Phase::Deploy => stream(deployer, &kolla_ansible("deploy"), &log, sink).await,
+            Phase::Prechecks => {
+                step(sink, "kolla-ansible prechecks")?;
+                stream(deployer, &kolla_ansible("prechecks"), &log, sink).await
+            }
+            Phase::Deploy => {
+                step(sink, "kolla-ansible deploy")?;
+                stream(deployer, &kolla_ansible("deploy"), &log, sink).await
+            }
             Phase::PostDeploy => {
+                step(sink, "kolla-ansible post-deploy (admin-openrc.sh 생성)")?;
                 stream(deployer, &post_deploy_script(components), &log, sink).await
             }
-            Phase::Verify => stream(deployer, &verify_script(components), &log, sink).await,
+            Phase::Verify => {
+                step(sink, "배포 검증 시작")?;
+                stream(deployer, &verify_script(components), &log, sink).await
+            }
         }
         .with_context(|| {
             format!("phase '{phase}' failed; resume with `farm deploy {farm_id} --from {phase}`")
@@ -193,8 +214,10 @@ async fn deploy_phases(
     Ok(())
 }
 
-async fn prepare(sandbox: &Sandbox, components: &[String]) -> Result<()> {
+async fn prepare(sandbox: &Sandbox, components: &[String], sink: &EventSink) -> Result<()> {
+    step(sink, "게스트 부팅과 systemd 대기")?;
     farm::wait_until_booted(sandbox).await?;
+    step(sink, "farm-identity·farm-hostname 유닛 적용")?;
     // Upgrade cached golden images too. msb resets /etc/hosts on reboot, so
     // restore the live eth0 hostname before Docker creates host-network containers.
     sandbox
@@ -240,6 +263,7 @@ async fn prepare(sandbox: &Sandbox, components: &[String]) -> Result<()> {
         )
         .await?;
     run(sandbox, "chmod 755 /usr/local/sbin/farm-identity /usr/local/sbin/farm-hostname /usr/local/sbin/farm-external; systemctl daemon-reload; systemctl enable farm-identity.service farm-hostname.service farm-external.service; systemctl restart farm-identity.service farm-hostname.service").await?;
+    step(sink, "Docker 마운트 전파와 /dev/kvm 권한 준비")?;
     // Kolla toolbox bind-mounts /run with shared propagation, and nova_libvirt runs QEMU
     // as uid/gid 42427 without systemd-udevd in the guest. Apply both now and on every Docker start.
     run(
@@ -261,6 +285,7 @@ systemctl daemon-reload"#,
     )
     .await?;
     if components.iter().any(|c| c == "neutron") {
+        step(sink, "Neutron 외부 네트워크(veth·nftables) 준비")?;
         sandbox
             .fs()
             .write(
@@ -290,13 +315,19 @@ fn install_script() -> String {
     format!(
         r#"set -euo pipefail
 export PATH={VENV}/bin:$PATH
+step "빌드 도구 설치 (gcc, python3-devel, libffi, openssl)"
 dnf install -y -q gcc python3-devel libffi-devel openssl-devel
 if [ ! -x {VENV}/bin/kolla-ansible ]; then
+  step "kolla-ansible 가상환경 생성 ({VENV})"
   python3 -m venv {VENV}
   {VENV}/bin/pip install -q -U pip
+  step "kolla-ansible 설치 (stable/{OPENSTACK_RELEASE})"
   {VENV}/bin/pip install -q "git+https://opendev.org/openstack/kolla-ansible@stable/{OPENSTACK_RELEASE}"
 fi
+step "kolla-ansible install-deps (컨테이너 런타임 의존성)"
 kolla-ansible install-deps
+step "게스트 커널 호환 패치 적용 (OVS netdev, br_netfilter)"
+python3 - <<'PY' 
 # Retain the guest-kernel compatibility patches for Neutron's userspace OVS.
 python3 - <<'PY'
 from pathlib import Path
@@ -332,10 +363,13 @@ if patched not in text:
     path.write_text(text.replace(marker, patched, 1))
 PY
 if [ ! -x {OSC_VENV}/bin/openstack ]; then
+  step "OpenStack CLI 가상환경 생성 ({OSC_VENV})"
   python3 -m venv {OSC_VENV}
   {OSC_VENV}/bin/pip install -q -U pip
+  step "python-openstackclient 설치"
   {OSC_VENV}/bin/pip install -q -c https://releases.openstack.org/constraints/upper/{OPENSTACK_RELEASE} python-openstackclient
 fi
+step "kolla-ansible 버전 확인"
 kolla-ansible --version"#
     )
 }
@@ -345,7 +379,9 @@ async fn configure(
     topology: &Topology,
     exposure: Option<&Exposure>,
     components: &[String],
+    sink: &EventSink,
 ) -> Result<()> {
+    step(sink, "passwords.yml 생성 (kolla-genpwd)")?;
     run(
         deployer,
         &format!(
@@ -364,6 +400,7 @@ async fn configure(
     .await?
     .trim()
         == "true";
+    step(sink, "globals.yml 작성 (주소·서비스·게스트 제약 반영)")?;
     let template = deployer
         .fs()
         .read_to_string(&format!(
@@ -428,6 +465,7 @@ async fn configure(
         config::GALERA_CONFIG,
     )
     .await?;
+    step(sink, "all-in-one inventory와 Ansible 설정 작성")?;
     fs.write(INVENTORY, template).await?;
     run(deployer, "mkdir -p /etc/kolla/callback_plugins").await?;
     fs.write(
@@ -597,6 +635,7 @@ fn post_deploy_script(components: &[String]) -> String {
 set -euo pipefail
 . {CONFIG_DIR}/admin-openrc.sh
 os={OSC_VENV}/bin/openstack
+step "외부 네트워크 public 구성 (flat, physnet1)"
 if ! $os network show public >/dev/null 2>&1; then
   $os network create --external --share --provider-network-type flat --provider-physical-network physnet1 public
 fi
@@ -621,6 +660,7 @@ fn verify_script(components: &[String]) -> String {
         r#"set -euo pipefail
 . {CONFIG_DIR}/admin-openrc.sh
 os={OSC_VENV}/bin/openstack
+step "Keystone token 발급"
 $os token issue -f value -c expires
 $os endpoint list --service glance -f value -c interface -c url
 work=$(mktemp -d)
@@ -632,6 +672,7 @@ cleanup() {{
   rm -rf "$work"
 }}
 trap cleanup EXIT
+step "Glance 이미지 업로드·다운로드 검증"
 head -c 1048576 /dev/urandom > "$work/upload.img"
 image_id=$($os image create --disk-format raw --container-format bare --file "$work/upload.img" "farm-verify-$(cat /proc/sys/kernel/random/uuid)" -f value -c id)
 test "$($os image show "$image_id" -f value -c status)" = active
@@ -644,7 +685,8 @@ echo "keystone and glance OK"
     );
     if has("placement") {
         script.push_str(
-            r#"token=$($os token issue -f value -c id)
+            r#"step "Placement resource_providers 조회"
+token=$($os token issue -f value -c id)
 placement=$($os endpoint list --service placement --interface internal -f value -c url)
 curl -sSf -o /dev/null -H "X-Auth-Token: $token" -H "OpenStack-API-Version: placement 1.0" "$placement/resource_providers"
 echo "placement OK"
@@ -654,7 +696,8 @@ echo "placement OK"
     if has("horizon") {
         // Log in directly like a browser: exercise Django, Keystone and memcached sessions.
         script.push_str(
-            r#"horizon="http://$(awk -F'"' '/^kolla_internal_vip_address:/ {print $2}' /etc/kolla/globals.yml)"
+            r#"step "Horizon 로그인과 대시보드 확인"
+horizon="http://$(awk -F'"' '/^kolla_internal_vip_address:/ {print $2}' /etc/kolla/globals.yml)"
 jar="$work/horizon.cookies"
 curl -sSf -c "$jar" -o "$work/login.html" "$horizon/auth/login/"
 csrf=$(awk '$6 == "csrftoken" {print $7}' "$jar")
@@ -697,7 +740,8 @@ echo "horizon OK: ${home#200 }"
 /// userspace datapath forwards: the all-in-one host pings the router's gateway and,
 /// from the router namespace, the DHCP port on the tenant network.
 fn neutron_verify_script() -> String {
-    r#"for _ in $(seq 60); do
+    r#"step "Neutron agent 상태 확인 (OVS·DHCP·L3·Metadata)"
+for _ in $(seq 60); do
   agents=$($os network agent list -f value -c "Agent Type" -c Alive)
   if [ "$(echo "$agents" | grep -c True)" -ge 4 ] && ! echo "$agents" | grep -q False; then break; fi
   sleep 3
@@ -706,6 +750,7 @@ echo "$agents"
 for agent in "Open vSwitch agent" "DHCP agent" "L3 agent" "Metadata agent"; do
   echo "$agents" | grep -q "^$agent True" || { echo "$agent is not alive" >&2; exit 1; }
 done
+step "테넌트 네트워크·라우터·DHCP 포트 검증"
 name="farm-verify-$(cut -c1-8 /proc/sys/kernel/random/uuid)"
 net_id=''; router_id=''; subnet_id=''
 extra_cleanup() {
@@ -739,13 +784,15 @@ echo "neutron OK: router gateway $gateway and DHCP port $dhcp reachable"
 
 /// Boots a tiny Cirros instance and pings it from the router namespace.
 fn nova_verify_script() -> String {
-    r#"for _ in $(seq 40); do
+    r#"step "nova-compute 서비스 상태 확인"
+for _ in $(seq 40); do
   compute_state=$($os compute service list --service nova-compute -f value -c State | head -1)
   [ "$compute_state" = up ] && break
   sleep 5
 done
 [ "$compute_state" = up ] || { echo "nova-compute is not up: ${compute_state:-missing}" >&2; exit 1; }
 $os flavor show m1.tiny >/dev/null 2>&1 || $os flavor create --ram 512 --disk 1 --vcpus 1 m1.tiny >/dev/null
+step "Cirros 인스턴스 생성과 라우터 경유 ping 검증"
 $os security group rule create --ingress --protocol icmp --ethertype IPv4 default >/dev/null 2>&1 || true
 arch=$(uname -m)
 case "$arch" in
@@ -863,6 +910,13 @@ mod tests {
         assert!(verify.contains("ip netns exec \"qrouter-$router_id\""));
         assert!(verify.contains("nova-compute is not up"));
         assert!(verify.contains("cirros-0.6.3-aarch64-disk.img"));
+        for script in [
+            install_script(),
+            verify_script(&components),
+            post_deploy_script(&components),
+        ] {
+            assert!(script.contains("step \""), "a phase script reports no step");
+        }
         assert!(!settle_script(None, &components).contains("endpoint set"));
         assert!(!settle_script(Some((&from, &from)), &components).contains("endpoint set"));
     }

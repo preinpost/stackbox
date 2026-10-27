@@ -569,6 +569,8 @@ export interface components {
       /** @description Snapshot this farm was restored from. */
       snapshot_id?: string | null;
       status: components["schemas"]["FarmStatus"];
+      /** @description Finer progress inside `phase`: our marker or the running Ansible task. */
+      step?: string | null;
       /** Format: int64 */
       updated_at: number;
     };

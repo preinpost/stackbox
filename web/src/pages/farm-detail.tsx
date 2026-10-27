@@ -13,6 +13,7 @@ import {
   Cpu,
   Database,
   Globe,
+  LoaderCircle,
   KeyRound,
   MessageSquare,
   MonitorDot,
@@ -418,6 +419,7 @@ function DeploymentPhases({ farm }: { farm: Farm }) {
         {phases.map((phase) => {
           const ready = farm.status === "ready";
           const current = farm.phase === phase.id;
+          const running = current && Boolean(farm.active_job) && !ready;
           return (
             <li
               key={phase.id}
@@ -429,6 +431,17 @@ function DeploymentPhases({ farm }: { farm: Farm }) {
               <div>
                 <strong>{phase.label}</strong>
                 <span>{phase.description}</span>
+                {current && farm.step && (
+                  <span
+                    className={`phase-step ${running ? "phase-step-live" : ""}`}
+                    title={farm.step}
+                  >
+                    {running && (
+                      <LoaderCircle size={11} className="animate-spin" />
+                    )}
+                    {farm.step}
+                  </span>
+                )}
               </div>
               {current && !ready && (
                 <span className="phase-current-label">

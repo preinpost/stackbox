@@ -1789,6 +1789,13 @@
           "status": {
             "$ref": "#/components/schemas/FarmStatus"
           },
+          "step": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Finer progress inside `phase`: our marker or the running Ansible task."
+          },
           "updated_at": {
             "type": "integer",
             "format": "int64",

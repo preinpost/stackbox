@@ -25,8 +25,7 @@ impl Artifact {
         };
         // An artifact from before the marker still loads, but cannot be installed anywhere:
         // `artifact_built_by_daemon` refuses it with the rebuild command.
-        let build_id =
-            crate::remote::agent::artifact_build_id(&bytes).unwrap_or_default();
+        let build_id = crate::remote::agent::artifact_build_id(&bytes).unwrap_or_default();
         Ok(Self {
             info: AgentArtifactInfo {
                 sha256: format!("{:x}", Sha256::digest(&bytes)),

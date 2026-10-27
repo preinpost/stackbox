@@ -208,6 +208,15 @@ impl Session {
                                         sink(crate::kolla::DeployEvent::Phase(phase))?;
                                     }
                                 }
+                                Frame::Step { step } => {
+                                    ensure!(
+                                        matches!(request.operation, Operation::Deploy { .. }),
+                                        "unexpected remote step event"
+                                    );
+                                    if let Some(sink) = &sink {
+                                        sink(crate::kolla::DeployEvent::Step(step))?;
+                                    }
+                                }
                                 Frame::Output { message } => {
                                     ensure!(
                                         !matches!(

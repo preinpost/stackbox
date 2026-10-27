@@ -390,6 +390,7 @@ rebuild it with `task agent-build` and install the agent again",
                     expires_at: request.expires_at,
                     nodes: vec![],
                     phase: None,
+                    step: None,
                     error: None,
                     active_job: Some(job.id.clone()),
                     created_at: now(),
@@ -650,10 +651,21 @@ rebuild it with `task agent-build` and install the agent again",
         let job = job.clone();
         Arc::new(move |event| {
             let phase = match event {
+                DeployEvent::Step(step) => {
+                    manager.update(|state| {
+                        let farm = state.farms.get_mut(&job.farm_id).context("farm missing")?;
+                        farm.step = Some(step.clone());
+                        farm.updated_at = now();
+                        Ok(())
+                    })?;
+                    manager.log(&job.farm_id, &job.id, None, format!("step: {step}"))?;
+                    return Ok(());
+                }
                 DeployEvent::Phase(phase) => {
                     manager.update(|state| {
                         let farm = state.farms.get_mut(&job.farm_id).context("farm missing")?;
                         farm.phase = Some(phase);
+                        farm.step = None;
                         farm.updated_at = now();
                         state.jobs.get_mut(&job.id).context("job missing")?.phase = Some(phase);
                         Ok(())
@@ -924,6 +936,7 @@ fn apply_inventory(
                 expires_at: None,
                 nodes,
                 phase: None,
+                step: None,
                 error: None,
                 active_job: None,
                 created_at: now(),

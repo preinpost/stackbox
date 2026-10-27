@@ -442,6 +442,9 @@ pub struct FarmRecord {
     pub phase: Option<Phase>,
     pub error: Option<String>,
     pub active_job: Option<String>,
+    /// Finer progress inside `phase`: our marker or the running Ansible task.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step: Option<String>,
     pub created_at: u64,
     pub updated_at: u64,
     /// Snapshot this farm was restored from.

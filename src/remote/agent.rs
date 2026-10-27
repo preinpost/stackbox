@@ -354,6 +354,7 @@ impl Agent {
                     let sink = Arc::new(move |event| {
                         emit(match event {
                             crate::kolla::DeployEvent::Phase(phase) => Frame::Phase { phase },
+                            crate::kolla::DeployEvent::Step(step) => Frame::Step { step },
                             crate::kolla::DeployEvent::Output(message) => Frame::Output { message },
                         })
                     });

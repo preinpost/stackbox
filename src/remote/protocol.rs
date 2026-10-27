@@ -76,10 +76,22 @@ impl Operation {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Frame {
-    Phase { phase: Phase },
-    Output { message: String },
-    Result { result: Reply },
-    Error { message: String },
+    Phase {
+        phase: Phase,
+    },
+    /// A finer step inside the phase, forwarded to the coordinator's farm record.
+    Step {
+        step: String,
+    },
+    Output {
+        message: String,
+    },
+    Result {
+        result: Reply,
+    },
+    Error {
+        message: String,
+    },
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "result", rename_all = "snake_case", deny_unknown_fields)]
