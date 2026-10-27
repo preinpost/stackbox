@@ -71,6 +71,20 @@ SSE 재연결 시 `Last-Event-ID` 또는 `after` query를 전달하면 이후 �
 `event: error`는 로그 읽기 실패를 의미합니다. 연결이 종료되면 재연결하세요.
 서비스 종료 시 stream은 닫힙니다. `limit`은 JSON 로그 조회에만 적용됩니다.
 
+## 셸
+
+`GET /farms/{id}/shell?rows=<1-500>&cols=<1-1000>`을 WebSocket으로 열면 farm VM 안에서
+`bash -l`이 root PTY로 실행됩니다. 터미널 바이트는 양방향 모두 binary frame으로 오가고,
+text frame은 제어 메시지입니다. 클라이언트는 `{"type":"resize","rows":40,"cols":120}`을 보내고,
+서버는 셸이 끝나면 `{"type":"exit"}`, 실패하면 `{"type":"error","message":"..."}`를 보낸 뒤 닫습니다.
+연결이 끊기면 셸에 SIGHUP을 보내 그 안에서 실행 중인 작업도 함께 종료합니다.
+
+VM이 실행 중이어야 하며(`409`), 배포 등 작업 중에도 열 수 있습니다. 원격 호스트 farm은
+farm-agent가 SSH로 중계하므로 이 기능이 들어간 agent를 호스트에 다시 설치해야 합니다.
+WebSocket에는 CORS가 적용되지 않으므로 farmd는 `Origin`이 없거나(포탈 프록시) 같은 호스트일 때만
+연결을 받고, 포탈 프록시는 브라우저의 `Origin`이 포탈 자신일 때만 중계합니다.
+셸은 VM의 root 권한이므로 외부에 공개된 포털이라면 API token과 포탈 사용자 권한을 반드시 설정하세요.
+
 ## 인증정보
 
 `GET /farms/{id}/endpoints`는 **ready 상태일 때만** admin 인증정보를 반환합니다.

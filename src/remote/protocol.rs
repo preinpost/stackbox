@@ -1,5 +1,5 @@
 use crate::{
-    farm::FarmNode,
+    farm::{FarmNode, TerminalSize},
     kolla::Phase,
     model::{Endpoints, Exposure, Plan},
 };
@@ -39,6 +39,13 @@ pub enum Operation {
         farm_id: String,
         generation: String,
     },
+    /// Interactive shell in the farm's VM. After the request line, the coordinator keeps
+    /// stdin open and writes one `TerminalFrame` per line until the session ends.
+    Shell {
+        farm_id: String,
+        generation: String,
+        size: TerminalSize,
+    },
     /// Destroy every VM this coordinator reserved on the host, then forget them.
     /// The coordinator runs this only when removing the host.
     Purge,
@@ -63,6 +70,11 @@ impl Operation {
             | Self::Endpoints {
                 farm_id,
                 generation,
+            }
+            | Self::Shell {
+                farm_id,
+                generation,
+                ..
             } => Some((farm_id, generation)),
             _ => None,
         }
@@ -74,6 +86,7 @@ impl Operation {
             Self::Delete { .. } => 180,
             // A host can hold several farms, each destroyed VM by VM.
             Self::Purge => 1800,
+            Self::Shell { .. } => 12 * 3600,
             _ => 60,
         }
     }
@@ -90,6 +103,12 @@ pub enum Frame {
     },
     Output {
         message: String,
+    },
+    /// The shell is running; terminal output follows.
+    Attached,
+    /// Base64 terminal output.
+    Terminal {
+        data: String,
     },
     Result {
         result: Reply,
@@ -123,6 +142,20 @@ pub enum Reply {
     Purged {
         /// Farms whose VMs were destroyed, including ones already deleted from the registry.
         farms: usize,
+    },
+}
+
+/// Coordinator-to-agent input of a shell session, one JSON object per line.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum TerminalFrame {
+    /// Base64 keystrokes.
+    Input {
+        data: String,
+    },
+    Resize {
+        rows: u16,
+        cols: u16,
     },
 }
 

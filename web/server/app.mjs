@@ -2,7 +2,7 @@ import http from "node:http";
 import { createReadStream } from "node:fs";
 import { stat } from "node:fs/promises";
 import path from "node:path";
-import { proxyApi } from "./proxy.mjs";
+import { proxyApi, proxyUpgrade } from "./proxy.mjs";
 
 export function createPortalServer({ root, env = process.env }) {
   root = path.resolve(root);
@@ -14,7 +14,7 @@ export function createPortalServer({ root, env = process.env }) {
     ".woff2": "font/woff2",
     ".png": "image/png",
   };
-  return http.createServer(async (req, res) => {
+  const server = http.createServer(async (req, res) => {
     if (req.url?.startsWith("/api/")) return proxyApi(req, res, env);
     if (!["GET", "HEAD"].includes(req.method || "")) {
       res.writeHead(405);
@@ -56,4 +56,9 @@ export function createPortalServer({ root, env = process.env }) {
       res.end("Bad request");
     }
   });
+  server.on("upgrade", (req, socket, head) => {
+    if (req.url?.startsWith("/api/")) proxyUpgrade(req, socket, head, env);
+    else socket.destroy();
+  });
+  return server;
 }

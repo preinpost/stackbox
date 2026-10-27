@@ -122,6 +122,7 @@ curl -N http://127.0.0.1:8080/api/v1/farms/demo/logs/stream
 | GET | `/farms/{id}/endpoints` | public 서비스 URL과 admin 인증정보 |
 | GET | `/farms/{id}/logs?after=0&limit=1000` | 최근 로그 |
 | GET | `/farms/{id}/logs/stream` | 로그 SSE (`Last-Event-ID`로 재연결) |
+| GET (WebSocket) | `/farms/{id}/shell?rows=24&cols=80` | VM의 root 로그인 셸 |
 | POST | `/farms/{id}/snapshots` | VM을 스냅샷으로 얼리는 job |
 | GET / DELETE | `/snapshots`, `/snapshots/{id}` | 스냅샷 목록·상세 / 삭제 |
 | POST | `/snapshots/{id}/export`, `/snapshots/import` | `.msb` 아카이브 내보내기 / 가져오기 |

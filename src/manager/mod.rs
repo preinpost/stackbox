@@ -265,6 +265,56 @@ impl FarmManager {
             .endpoints(id.into(), farm.exposure, components)
             .await
     }
+    /// Fails unless the farm's VM can take a shell session.
+    pub fn check_terminal(&self, id: &str) -> Result<FarmRecord> {
+        let farm = self.get(id)?;
+        let running = farm
+            .nodes
+            .iter()
+            .any(|node| node.role == Some(Role::AllInOne) && node.status == "running");
+        if !running {
+            return Err(conflict("the shell needs the farm's VM to be running"));
+        }
+        Ok(farm)
+    }
+    /// Interactive shell in the farm's VM; it does not wait for or block the farm's jobs.
+    pub async fn terminal(
+        &self,
+        id: &str,
+        size: crate::farm::TerminalSize,
+        io: crate::farm::TerminalIo,
+    ) -> Result<()> {
+        let farm = self.check_terminal(id)?;
+        let backend = match &farm.host_id {
+            None => self.0.backend.clone(),
+            // A shell needs only the host's reservation, not the agent the farm was built
+            // with, so it uses the host's current agent once that matches this coordinator.
+            Some(host_id) => {
+                let current = self
+                    .0
+                    .store
+                    .lock()
+                    .map_err(|_| anyhow!("state mutex poisoned"))?
+                    .state
+                    .hosts
+                    .get(host_id)
+                    .and_then(|stored| stored.host.agent.as_ref())
+                    .filter(|agent| agent.artifact.build_id == crate::BUILD_ID)
+                    .map(|agent| agent.artifact.sha256.clone());
+                let digest = current
+                    .or(farm.agent_sha256.clone())
+                    .context("remote farm has no pinned agent")?;
+                self.remote_backend(
+                    host_id,
+                    &digest,
+                    farm.remote_generation
+                        .as_deref()
+                        .context("remote farm has no generation")?,
+                )?
+            }
+        };
+        backend.terminal(id.into(), size, io).await
+    }
     pub fn options(&self) -> &ManagerOptions {
         &self.0.options
     }

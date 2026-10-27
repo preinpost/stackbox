@@ -5,7 +5,11 @@ use crate::{
 };
 use axum::{
     Json, Router,
-    extract::{Path, Query, Request, State, rejection::JsonRejection},
+    extract::{
+        Path, Query, Request, State,
+        rejection::JsonRejection,
+        ws::{Message, WebSocket, WebSocketUpgrade},
+    },
     http::{HeaderMap, StatusCode, header},
     middleware::{self, Next},
     response::{
@@ -98,6 +102,7 @@ pub fn router(manager: FarmManager, token: Option<String>) -> Router {
         .route("/api/v1/farms/{id}/endpoints", get(endpoints))
         .route("/api/v1/farms/{id}/logs", get(logs))
         .route("/api/v1/farms/{id}/logs/stream", get(log_stream))
+        .route("/api/v1/farms/{id}/shell", get(shell))
         .route("/api/v1/farms/{id}/snapshots", post(freeze))
         .route("/api/v1/snapshots", get(snapshots))
         .route("/api/v1/snapshots/import", post(import_snapshot))
@@ -599,6 +604,132 @@ async fn log_stream(
     Ok(Sse::new(stream).keep_alive(KeepAlive::new().interval(Duration::from_secs(15))))
 }
 
+#[derive(Deserialize)]
+struct ShellQuery {
+    rows: u16,
+    cols: u16,
+}
+/// Control messages share the socket with terminal bytes, which travel as binary frames.
+#[derive(Deserialize, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+enum ShellControl {
+    Resize { rows: u16, cols: u16 },
+    Exit,
+    Error { message: String },
+}
+/// A browser always names the page that opened a WebSocket, and CORS does not apply to it.
+/// Only the portal's same-origin proxy (which sends no Origin) or a same-host page may attach.
+fn same_origin(headers: &HeaderMap) -> Result<(), ApiError> {
+    let Some(origin) = headers.get(header::ORIGIN) else {
+        return Ok(());
+    };
+    let host = headers.get(header::HOST).and_then(|v| v.to_str().ok());
+    let origin_host = origin
+        .to_str()
+        .ok()
+        .and_then(|o| o.split_once("://"))
+        .map(|(_, rest)| rest);
+    if host.is_some() && origin_host == host {
+        Ok(())
+    } else {
+        Err(ApiError(
+            StatusCode::FORBIDDEN,
+            "cross-origin shell sessions are not allowed".into(),
+        ))
+    }
+}
+/// Interactive login shell in the farm's VM over a WebSocket: binary frames carry terminal
+/// bytes both ways; text frames carry `ShellControl` messages.
+async fn shell(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    Query(query): Query<ShellQuery>,
+    headers: HeaderMap,
+    upgrade: WebSocketUpgrade,
+) -> Result<Response, ApiError> {
+    same_origin(&headers)?;
+    let size = crate::farm::TerminalSize {
+        rows: query.rows,
+        cols: query.cols,
+    }
+    .validate()
+    .map_err(bad)?;
+    app.manager.check_terminal(&id)?;
+    Ok(upgrade.on_upgrade(move |socket| relay_shell(app.manager, id, size, socket)))
+}
+async fn relay_shell(
+    manager: FarmManager,
+    id: String,
+    size: crate::farm::TerminalSize,
+    socket: WebSocket,
+) {
+    use crate::farm::{TerminalInput, TerminalIo, TerminalSize};
+    use futures::{SinkExt, StreamExt};
+    let (mut sink, mut stream) = socket.split();
+    let (input_tx, input_rx) = tokio::sync::mpsc::channel(64);
+    let (output_tx, output_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
+    let result = {
+        let session = manager.terminal(
+            &id,
+            size,
+            TerminalIo {
+                input: input_rx,
+                output: output_tx,
+            },
+        );
+        // Owns the receiver, so a dead socket unblocks the shell's output instead of stalling it.
+        let send = async {
+            let mut output_rx = output_rx;
+            while let Some(data) = output_rx.recv().await {
+                if sink.send(Message::Binary(data.into())).await.is_err() {
+                    break;
+                }
+            }
+        };
+        let pump = async { tokio::join!(session, send).0 };
+        // Ends when the browser leaves, which drops `input_tx` and hangs the shell up.
+        let receive = async move {
+            while let Some(Ok(message)) = stream.next().await {
+                let input = match message {
+                    Message::Binary(data) => TerminalInput::Data(data.to_vec()),
+                    Message::Text(text) => match serde_json::from_str(&text) {
+                        Ok(ShellControl::Resize { rows, cols }) => {
+                            match (TerminalSize { rows, cols }).validate() {
+                                Ok(size) => TerminalInput::Resize(size),
+                                Err(_) => continue,
+                            }
+                        }
+                        _ => continue,
+                    },
+                    Message::Close(_) => break,
+                    _ => continue,
+                };
+                if input_tx.send(input).await.is_err() {
+                    break;
+                }
+            }
+        };
+        tokio::pin!(pump, receive);
+        tokio::select! {
+            result = &mut pump => result,
+            _ = &mut receive => pump.await,
+        }
+    };
+    let notice = match result {
+        Ok(()) => ShellControl::Exit,
+        Err(error) => {
+            eprintln!("shell for farm {id} ended: {error:#}");
+            ShellControl::Error {
+                message: format!("{error:#}"),
+            }
+        }
+    };
+    if let Ok(text) = serde_json::to_string(&notice) {
+        let _ = sink.send(Message::Text(text.into())).await;
+    }
+    let _ = sink.close().await;
+}
+
 #[derive(OpenApi)]
 #[openapi(paths(host, remote_hosts, remote_host, host_fingerprint, test_connection, register_host, update_host_credentials, unregister_host, check_host, prepare_host, install_agent, host_jobs, host_job, catalog_handler, plan_handler, list, detail, create, deploy, settle, delete, endpoints, logs, log_stream, freeze, snapshots, snapshot, delete_snapshot, export_snapshot, import_snapshot, jobs, job), components(schemas(ErrorBody)), modifiers(&Security))]
 struct ApiDoc;
@@ -676,5 +807,38 @@ async fn shutdown_signal() {
     #[cfg(not(unix))]
     {
         let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shell_sockets_accept_the_proxy_or_the_same_host_only() {
+        let headers = |pairs: &[(header::HeaderName, &str)]| {
+            let mut map = HeaderMap::new();
+            for (name, value) in pairs {
+                map.insert(name.clone(), value.parse().unwrap());
+            }
+            map
+        };
+        assert!(same_origin(&headers(&[(header::HOST, "127.0.0.1:8080")])).is_ok());
+        assert!(
+            same_origin(&headers(&[
+                (header::HOST, "127.0.0.1:8080"),
+                (header::ORIGIN, "http://127.0.0.1:8080"),
+            ]))
+            .is_ok()
+        );
+        for origin in ["https://evil.example", "null", "http://127.0.0.1:8081"] {
+            assert!(
+                same_origin(&headers(&[
+                    (header::HOST, "127.0.0.1:8080"),
+                    (header::ORIGIN, origin),
+                ]))
+                .is_err()
+            );
+        }
     }
 }

@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
 import { once } from "node:events";
-import { proxyApi } from "./proxy.mjs";
+import { proxyApi, proxyUpgrade } from "./proxy.mjs";
 
 async function listen(server) {
   server.listen(0, "127.0.0.1");
@@ -256,4 +256,86 @@ test("flushes SSE headers before the first event or keepalive", async (t) => {
   });
   assert.equal(response.status, 200);
   await response.body.cancel();
+});
+
+async function upgradeSetup(t, onUpgrade) {
+  const upstream = http.createServer((_req, res) => {
+    res.writeHead(409, { "content-type": "application/json" });
+    res.end('{"error":"the shell needs the farm\'s VM to be running"}');
+  });
+  if (onUpgrade) upstream.on("upgrade", onUpgrade);
+  const url = await listen(upstream);
+  const portal = http.createServer();
+  portal.on("upgrade", (req, socket, head) =>
+    proxyUpgrade(req, socket, head, {
+      FARM_API_URL: url,
+      FARM_API_TOKEN: "server-only-token",
+    }),
+  );
+  const address = await listen(portal);
+  t.after(() => {
+    portal.closeAllConnections();
+    portal.close();
+    upstream.closeAllConnections();
+    upstream.close();
+  });
+  return address;
+}
+function openSocket(address, path, origin = address) {
+  const request = http.request(`${address}${path}`, {
+    headers: {
+      connection: "Upgrade",
+      upgrade: "websocket",
+      "sec-websocket-key": "dGhlIHNhbXBsZSBub25jZQ==",
+      "sec-websocket-version": "13",
+      ...(origin ? { origin } : {}),
+    },
+  });
+  request.end();
+  return new Promise((resolve, reject) => {
+    request.on("upgrade", (response, socket) => resolve({ response, socket }));
+    request.on("response", (response) => resolve({ response }));
+    request.on("error", reject);
+  });
+}
+test("tunnels the shell WebSocket with the server token and normalized query", async (t) => {
+  const address = await upgradeSetup(t, (req, socket) => {
+    assert.equal(req.headers.authorization, "Bearer server-only-token");
+    assert.equal(req.url, "/api/v1/farms/demo/shell?rows=24&cols=80");
+    assert.equal(req.headers.origin, undefined);
+    socket.write(
+      "HTTP/1.1 101 Switching Protocols\r\nupgrade: websocket\r\nconnection: Upgrade\r\nsec-websocket-accept: fixture\r\n\r\n",
+    );
+    socket.pipe(socket);
+  });
+  const { response, socket } = await openSocket(
+    address,
+    "/api/v1/farms/demo/shell?rows=24&cols=80&token=leak",
+  );
+  assert.equal(response.statusCode, 101);
+  assert.equal(response.headers["sec-websocket-accept"], "fixture");
+  socket.write("echo");
+  const [echo] = await once(socket, "data");
+  assert.equal(echo.toString(), "echo");
+  socket.destroy();
+});
+test("refuses cross-origin, origin-less and unknown shell upgrades and relays farmd refusals", async (t) => {
+  const address = await upgradeSetup(t);
+  const path = "/api/v1/farms/demo/shell?rows=24&cols=80";
+  for (const origin of ["https://evil.example", null]) {
+    const { response } = await openSocket(address, path, origin);
+    assert.equal(response.statusCode, 403);
+  }
+  for (const other of [
+    "/api/v1/farms/demo/logs?rows=24&cols=80",
+    "/api/v1/farms/demo/shell?rows=x&cols=80",
+  ]) {
+    const { response } = await openSocket(address, other);
+    assert.equal(response.statusCode, 404);
+  }
+  const { response } = await openSocket(address, path);
+  assert.equal(response.statusCode, 409);
+  let body = "";
+  for await (const chunk of response) body += chunk;
+  assert.match(JSON.parse(body).error, /running/);
 });

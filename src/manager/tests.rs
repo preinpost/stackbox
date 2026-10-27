@@ -219,6 +219,31 @@ impl Backend for Fake {
             Ok(())
         })
     }
+    /// Echoes input and reports resizes until the client closes its side.
+    fn terminal(
+        &self,
+        _id: String,
+        size: crate::farm::TerminalSize,
+        io: crate::farm::TerminalIo,
+    ) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async move {
+            let crate::farm::TerminalIo { mut input, output } = io;
+            output
+                .send(format!("{}x{}", size.rows, size.cols).into_bytes())
+                .await?;
+            while let Some(message) = input.recv().await {
+                output
+                    .send(match message {
+                        crate::farm::TerminalInput::Data(data) => data,
+                        crate::farm::TerminalInput::Resize(size) => {
+                            format!("{}x{}", size.rows, size.cols).into_bytes()
+                        }
+                    })
+                    .await?;
+            }
+            Ok(())
+        })
+    }
 }
 fn options(dir: &Path) -> ManagerOptions {
     ManagerOptions {
@@ -474,6 +499,82 @@ async fn host_done(manager: &FarmManager, id: &str) -> crate::remote::HostJob {
     })
     .await
     .unwrap()
+}
+
+#[tokio::test]
+async fn shell_websocket_relays_bytes_and_resizes_and_refuses_other_origins() {
+    use futures::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest};
+    let dir = tempfile::tempdir().unwrap();
+    let manager = FarmManager::with_backend(options(dir.path()), Arc::new(Fake::default()))
+        .await
+        .unwrap();
+    let job = manager.create(request("shell")).unwrap();
+    done(&manager, &job).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server =
+        tokio::spawn(axum::serve(listener, api::router(manager.clone(), None)).into_future());
+    let url = |farm: &str, query: &str| format!("ws://{address}/api/v1/farms/{farm}/shell?{query}");
+
+    let (mut socket, _) = tokio_tungstenite::connect_async(url("shell", "rows=24&cols=80"))
+        .await
+        .unwrap();
+    async fn next<S>(socket: &mut S) -> String
+    where
+        S: futures::Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
+    {
+        match socket.next().await.unwrap().unwrap() {
+            Message::Binary(data) => String::from_utf8(data.to_vec()).unwrap(),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+    assert_eq!(next(&mut socket).await, "24x80");
+    socket
+        .send(Message::Binary(b"ls\r".to_vec().into()))
+        .await
+        .unwrap();
+    assert_eq!(next(&mut socket).await, "ls\r");
+    socket
+        .send(Message::Text(
+            r#"{"type":"resize","rows":40,"cols":120}"#.into(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(next(&mut socket).await, "40x120");
+    socket.close(None).await.unwrap();
+
+    let refused = async |request| match tokio_tungstenite::connect_async(request).await {
+        Err(tokio_tungstenite::tungstenite::Error::Http(response)) => response.status(),
+        other => panic!("expected an HTTP refusal, got {:?}", other.map(|_| ())),
+    };
+    let mut foreign = url("shell", "rows=24&cols=80")
+        .into_client_request()
+        .unwrap();
+    foreign
+        .headers_mut()
+        .insert("origin", "https://evil.example".parse().unwrap());
+    assert_eq!(refused(foreign).await, StatusCode::FORBIDDEN);
+    assert_eq!(
+        refused(
+            url("shell", "rows=0&cols=80")
+                .into_client_request()
+                .unwrap()
+        )
+        .await,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(
+        refused(
+            url("missing", "rows=24&cols=80")
+                .into_client_request()
+                .unwrap()
+        )
+        .await,
+        StatusCode::NOT_FOUND
+    );
+    server.abort();
+    settle(&manager).await;
 }
 
 #[tokio::test]

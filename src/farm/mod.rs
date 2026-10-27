@@ -1,6 +1,7 @@
 mod node;
 mod snapshot;
 mod template;
+mod terminal;
 
 use std::collections::BTreeMap;
 
@@ -20,6 +21,7 @@ pub use snapshot::{
 };
 pub use template::BASE_IMAGE;
 pub use template::{ALL_IN_ONE, NodeSpec, Role};
+pub use terminal::{TerminalInput, TerminalIo, TerminalSize, attach as attach_terminal};
 
 /// Create the farm's single all-in-one VM and confirm it boots.
 pub async fn create_farm(farm_id: &str, template: &[NodeSpec]) -> Result<Vec<FarmNode>> {

@@ -46,6 +46,7 @@ impl Fixture {
         let mut handler = Handler {
             observed: observed.clone(),
             input: Vec::new(),
+            shell: false,
         };
         let (send, receive) = tokio::sync::oneshot::channel();
         let task = tokio::spawn(async move {
@@ -85,6 +86,53 @@ impl Drop for Fixture {
 struct Handler {
     observed: Arc<Observed>,
     input: Vec<u8>,
+    /// A shell request arrived: stdin stays open and carries terminal frames.
+    shell: bool,
+}
+impl Handler {
+    fn frame(
+        session: &mut server::Session,
+        channel: ChannelId,
+        frame: &super::protocol::Frame,
+    ) -> Result<(), russh::Error> {
+        session.data(
+            channel,
+            format!("{}\n", serde_json::to_string(frame).unwrap()).into_bytes(),
+        )
+    }
+    /// Echo terminal input back and report resizes as `ROWSxCOLS`.
+    fn relay_shell(
+        &mut self,
+        channel: ChannelId,
+        session: &mut server::Session,
+    ) -> Result<(), russh::Error> {
+        use super::protocol::{Frame, Operation, Request, TerminalFrame};
+        use base64::{Engine, engine::general_purpose::STANDARD};
+        while let Some(end) = self.input.iter().position(|b| *b == b'\n') {
+            if !self.shell {
+                // Scripts have newlines too; leave anything but a shell request untouched.
+                let Ok(Request {
+                    operation: Operation::Shell { .. },
+                    ..
+                }) = serde_json::from_slice(&self.input[..end])
+                else {
+                    return Ok(());
+                };
+                self.input.drain(..=end);
+                self.shell = true;
+                self.observed.calls.lock().unwrap().push("rpc:shell".into());
+                Self::frame(session, channel, &Frame::Attached)?;
+                continue;
+            }
+            let line: Vec<u8> = self.input.drain(..=end).collect();
+            let data = match serde_json::from_slice(&line).unwrap() {
+                TerminalFrame::Input { data } => data,
+                TerminalFrame::Resize { rows, cols } => STANDARD.encode(format!("{rows}x{cols}")),
+            };
+            Self::frame(session, channel, &Frame::Terminal { data })?;
+        }
+        Ok(())
+    }
 }
 impl server::Server for Handler {
     type Handler = Self;
@@ -92,6 +140,7 @@ impl server::Server for Handler {
         Self {
             observed: self.observed.clone(),
             input: Vec::new(),
+            shell: false,
         }
     }
 }
@@ -143,23 +192,39 @@ impl server::Handler for Handler {
                 || String::from_utf8_lossy(command).contains("/farm-agent")
         );
         self.input.clear();
+        self.shell = false;
         session.channel_success(channel)?;
         Ok(())
     }
     async fn data(
         &mut self,
-        _: ChannelId,
+        channel: ChannelId,
         data: &[u8],
-        _: &mut server::Session,
+        session: &mut server::Session,
     ) -> Result<(), Self::Error> {
         self.input.extend_from_slice(data);
-        Ok(())
+        // One-shot requests have no newline; only a shell request is line-delimited.
+        self.relay_shell(channel, session)
     }
     async fn channel_eof(
         &mut self,
         channel: ChannelId,
         session: &mut server::Session,
     ) -> Result<(), Self::Error> {
+        if self.shell {
+            use super::protocol::{Frame, Reply};
+            Self::frame(
+                session,
+                channel,
+                &Frame::Result {
+                    result: Reply::Done,
+                },
+            )?;
+            session.exit_status_request(channel, 0)?;
+            session.eof(channel)?;
+            session.close(channel)?;
+            return Ok(());
+        }
         if let Ok(request) = serde_json::from_slice::<super::protocol::Request>(&self.input) {
             use super::protocol::{Frame, Operation, Reply, VERSION};
             self.observed.calls.lock().unwrap().push(format!(
@@ -231,6 +296,7 @@ impl server::Handler for Handler {
                     self.observed.rpc_farms.lock().unwrap().clear();
                     Reply::Purged { farms: removed }
                 }
+                Operation::Shell { .. } => Reply::Done,
                 Operation::Endpoints { .. } => Reply::Endpoints {
                     endpoints: crate::model::Endpoints {
                         services: std::collections::BTreeMap::new(),

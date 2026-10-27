@@ -1,10 +1,12 @@
 //! One SSH request per process; no listener and no SSH credentials on the target.
-use super::protocol::{Frame, Operation, Reply, Request, VERSION};
+use super::protocol::{Frame, MAX_FRAME, Operation, Reply, Request, TerminalFrame, VERSION};
 use crate::{
+    farm::{TerminalInput, TerminalIo, TerminalSize},
     manager::{Backend, MicrosandboxBackend},
     model::{Exposure, Plan, PlanRequest, plan, validate_id},
 };
 use anyhow::{Context, Result, bail, ensure};
+use base64::{Engine, engine::general_purpose::STANDARD};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -178,7 +180,7 @@ impl Agent {
         Ok(Reply::Purged { farms: purged })
     }
 
-    pub async fn execute(&self, request: Request, emit: Emitter) -> Result<Reply> {
+    fn admit(request: &Request) -> Result<()> {
         ensure!(
             request.version == VERSION,
             "incompatible farm-agent protocol"
@@ -188,6 +190,100 @@ impl Agent {
             validate_id(id)?;
             uuid::Uuid::parse_str(generation).context("invalid farm generation")?;
         }
+        Ok(())
+    }
+
+    /// Relay a shell in the farm's VM: `TerminalFrame` lines in, `Frame::Terminal` out.
+    /// It takes no farm lock, so a shell can watch a running deployment.
+    pub async fn terminal<R>(&self, request: &Request, input: R, emit: Emitter) -> Result<Reply>
+    where
+        R: tokio::io::AsyncBufRead + Unpin,
+    {
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt};
+        Self::admit(request)?;
+        let Operation::Shell {
+            farm_id: id,
+            generation,
+            size,
+        } = &request.operation
+        else {
+            bail!("not a shell request");
+        };
+        let size = size.validate()?;
+        {
+            let registry = LockedRegistry::open(&self.dir)?;
+            let entry = registry.owned(&request.coordinator_id, id, generation)?;
+            ensure!(!entry.deleted, "remote farm was deleted");
+        }
+        emit(Frame::Attached)?;
+        let (input_tx, input_rx) = tokio::sync::mpsc::channel(64);
+        let (output_tx, output_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
+        let session = self.backend.terminal(
+            id.clone(),
+            size,
+            TerminalIo {
+                input: input_rx,
+                output: output_tx,
+            },
+        );
+        // Owns the receiver, so a lost coordinator unblocks the shell's output instead of stalling it.
+        let relay = async {
+            let mut output_rx = output_rx;
+            while let Some(data) = output_rx.recv().await {
+                emit(Frame::Terminal {
+                    data: STANDARD.encode(data),
+                })?;
+            }
+            Ok::<_, anyhow::Error>(())
+        };
+        let pump = async { tokio::join!(session, relay) };
+        // Ends at EOF, which drops `input_tx` and hangs the shell up.
+        let read = async move {
+            let mut input = input;
+            let mut line = String::new();
+            loop {
+                line.clear();
+                let read = (&mut input)
+                    .take(MAX_FRAME as u64 + 1)
+                    .read_line(&mut line)
+                    .await?;
+                if read == 0 {
+                    return Ok::<_, anyhow::Error>(());
+                }
+                ensure!(line.len() <= MAX_FRAME, "terminal frame exceeds limit");
+                let message = match serde_json::from_str(&line).context("invalid terminal frame")? {
+                    TerminalFrame::Input { data } => TerminalInput::Data(
+                        STANDARD.decode(data).context("invalid terminal input")?,
+                    ),
+                    TerminalFrame::Resize { rows, cols } => {
+                        TerminalInput::Resize(TerminalSize { rows, cols }.validate()?)
+                    }
+                };
+                if input_tx.send(message).await.is_err() {
+                    return Ok(());
+                }
+            }
+        };
+        tokio::pin!(pump, read);
+        let (session, relay) = tokio::select! {
+            outcome = &mut pump => outcome,
+            read = &mut read => {
+                let outcome = pump.await;
+                read?;
+                outcome
+            }
+        };
+        session?;
+        relay?;
+        Ok(Reply::Done)
+    }
+
+    pub async fn execute(&self, request: Request, emit: Emitter) -> Result<Reply> {
+        Self::admit(&request)?;
+        ensure!(
+            !matches!(request.operation, Operation::Shell { .. }),
+            "shell sessions need a terminal stream"
+        );
         if matches!(request.operation, Operation::Hello) {
             return Ok(Reply::Hello {
                 version: VERSION,
@@ -477,16 +573,24 @@ pub(crate) fn artifact_build_id(bytes: &[u8]) -> Option<String> {
     (!id.is_empty() && id.len() <= 40).then(|| id.to_owned())
 }
 
+/// The request is the first line of stdin, or all of it. Only a shell keeps reading after it.
 pub async fn serve_stdio() -> Result<()> {
-    use std::io::Read;
-    let mut input = String::new();
-    std::io::stdin()
-        .take(128 * 1024 + 1)
-        .read_to_string(&mut input)?;
-    ensure!(input.len() <= 128 * 1024, "agent request too large");
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt};
+    const LIMIT: usize = 128 * 1024;
+    let mut stdin = tokio::io::BufReader::new(tokio::io::stdin());
+    let mut input = Vec::new();
+    (&mut stdin)
+        .take(LIMIT as u64 + 1)
+        .read_until(b'\n', &mut input)
+        .await?;
+    ensure!(input.len() <= LIMIT, "agent request too large");
     let emit = stdout_emitter();
-    let result = match serde_json::from_str::<Request>(&input) {
-        Ok(request) => Agent::local().execute(request, emit.clone()).await,
+    let agent = Agent::local();
+    let result = match serde_json::from_slice::<Request>(&input) {
+        Ok(request) if matches!(request.operation, Operation::Shell { .. }) => {
+            agent.terminal(&request, stdin, emit.clone()).await
+        }
+        Ok(request) => agent.execute(request, emit.clone()).await,
         Err(_) => Err(anyhow::anyhow!("invalid farm-agent request")),
     };
     match result {
@@ -723,5 +827,93 @@ mod tests {
                 .unwrap(),
             Reply::Purged { farms: 0 }
         ));
+    }
+
+    #[tokio::test]
+    async fn shell_relays_frames_for_the_owner_only_and_ends_at_eof() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent = Agent {
+            dir: dir.path().into(),
+            backend: Arc::new(Fake::default()),
+            limits: Limits {
+                memory_budget_mib: 10000,
+                available_mib: 10000,
+                virtualization: true,
+            },
+        };
+        let owner = uuid::Uuid::new_v4().to_string();
+        let generation = uuid::Uuid::new_v4().to_string();
+        let silent: Emitter = Arc::new(|_| Ok(()));
+        agent
+            .execute(
+                request(&owner, create("one", &generation, 23900)),
+                silent.clone(),
+            )
+            .await
+            .unwrap();
+        let shell = |who: &str| {
+            request(
+                who,
+                Operation::Shell {
+                    farm_id: "one".into(),
+                    generation: generation.clone(),
+                    size: TerminalSize { rows: 24, cols: 80 },
+                },
+            )
+        };
+        let frames = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let collect: Emitter = {
+            let frames = frames.clone();
+            Arc::new(move |frame| {
+                frames.lock().unwrap().push(frame);
+                Ok(())
+            })
+        };
+        let input = format!(
+            "{}\n{}\n",
+            serde_json::to_string(&TerminalFrame::Input {
+                data: STANDARD.encode("ls\r")
+            })
+            .unwrap(),
+            serde_json::to_string(&TerminalFrame::Resize {
+                rows: 40,
+                cols: 120
+            })
+            .unwrap()
+        );
+        let reply = agent
+            .terminal(&shell(&owner), input.as_bytes(), collect)
+            .await
+            .unwrap();
+        assert!(matches!(reply, Reply::Done));
+        let output: Vec<String> = frames
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|frame| match frame {
+                Frame::Terminal { data } => {
+                    Some(String::from_utf8(STANDARD.decode(data).unwrap()).unwrap())
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(matches!(frames.lock().unwrap()[0], Frame::Attached));
+        assert_eq!(output, ["24x80", "ls\r", "40x120"]);
+
+        let other = uuid::Uuid::new_v4().to_string();
+        assert!(
+            agent
+                .terminal(&shell(&other), &b""[..], silent.clone())
+                .await
+                .is_err()
+        );
+        assert!(
+            agent
+                .terminal(&shell(&owner), &b"not json\n"[..], silent.clone())
+                .await
+                .is_err()
+        );
+        // A shell is a stream; the one-shot entry point refuses it.
+        assert!(agent.execute(shell(&owner), silent).await.is_err());
     }
 }

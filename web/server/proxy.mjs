@@ -10,6 +10,25 @@ const json = (res, status, error) => {
   res.end(JSON.stringify({ error }));
 };
 
+/** farmd URL for the request's path and query, or null when FARM_API_URL is unusable. */
+function upstreamUrl(req, env) {
+  try {
+    const url = new URL(env.FARM_API_URL || "http://127.0.0.1:8080");
+    if (
+      !["http:", "https:"].includes(url.protocol) ||
+      url.username ||
+      url.password
+    )
+      return null;
+    const requested = new URL(req.url, "http://portal.local");
+    url.pathname = requested.pathname;
+    url.search = requested.search;
+    return url;
+  } catch {
+    return null;
+  }
+}
+
 /** Shared dev/production boundary. Secrets remain on this side of the connection. */
 export function proxyApi(req, res, env = process.env) {
   if (!req.url?.startsWith("/api/v1/"))
@@ -22,21 +41,8 @@ export function proxyApi(req, res, env = process.env) {
       return json(res, 403, "잘못된 Origin 헤더입니다.");
     }
   }
-  let url;
-  try {
-    url = new URL(env.FARM_API_URL || "http://127.0.0.1:8080");
-    if (
-      !["http:", "https:"].includes(url.protocol) ||
-      url.username ||
-      url.password
-    )
-      throw new Error();
-    const requested = new URL(req.url, "http://portal.local");
-    url.pathname = requested.pathname;
-    url.search = requested.search;
-  } catch {
-    return json(res, 502, "서버의 FARM_API_URL 설정을 확인하세요.");
-  }
+  const url = upstreamUrl(req, env);
+  if (!url) return json(res, 502, "서버의 FARM_API_URL 설정을 확인하세요.");
 
   // Only expose the portal's known API surface, including canonical farm IDs.
   // Encoded/alternate spellings cannot bypass the credential response filter.
@@ -150,4 +156,106 @@ export function proxyApi(req, res, env = process.env) {
   req.on("aborted", () => upstream.destroy());
   res.on("close", () => upstream.destroy());
   req.pipe(upstream);
+}
+
+const refuse = (socket, status, error) => {
+  const body = JSON.stringify({ error });
+  socket.end(
+    `HTTP/1.1 ${status} ${http.STATUS_CODES[status]}\r\n` +
+      "content-type: application/json\r\n" +
+      `content-length: ${Buffer.byteLength(body)}\r\n` +
+      "connection: close\r\n\r\n" +
+      body,
+  );
+};
+
+/**
+ * WebSocket counterpart of proxyApi, for the farm shell only. A browser opens a WebSocket
+ * without CORS, so the page's Origin must be this portal, and it must name one.
+ */
+export function proxyUpgrade(req, socket, head, env = process.env) {
+  socket.on("error", () => socket.destroy());
+  try {
+    if (new URL(req.headers.origin).host !== req.headers.host)
+      return refuse(socket, 403, "다른 출처의 셸 연결은 허용하지 않습니다.");
+  } catch {
+    return refuse(socket, 403, "Origin 헤더가 없거나 잘못되었습니다.");
+  }
+  if (req.headers.upgrade?.toLowerCase() !== "websocket")
+    return refuse(socket, 400, "WebSocket 연결만 지원합니다.");
+  const url = upstreamUrl(req, env);
+  if (!url)
+    return refuse(socket, 502, "서버의 FARM_API_URL 설정을 확인하세요.");
+  const rows = url.searchParams.get("rows");
+  const cols = url.searchParams.get("cols");
+  if (
+    !/^\/api\/v1\/farms\/[a-z0-9-]+\/shell$/.test(url.pathname) ||
+    !/^\d{1,4}$/.test(rows ?? "") ||
+    !/^\d{1,4}$/.test(cols ?? "")
+  )
+    return refuse(socket, 404, "API 경로를 찾을 수 없습니다.");
+  url.search = `?rows=${rows}&cols=${cols}`;
+  const headers = { connection: "Upgrade", upgrade: "websocket" };
+  for (const name of [
+    "sec-websocket-key",
+    "sec-websocket-version",
+    "sec-websocket-extensions",
+  ]) {
+    if (req.headers[name]) headers[name] = req.headers[name];
+  }
+  if (env.FARM_API_TOKEN)
+    headers.authorization = `Bearer ${env.FARM_API_TOKEN}`;
+  const upstream = (url.protocol === "https:" ? https : http).request(url, {
+    headers,
+    timeout: 30_000,
+  });
+  upstream.on("upgrade", (response, tunnel, tunnelHead) => {
+    const lines = ["HTTP/1.1 101 Switching Protocols"];
+    for (const name of [
+      "upgrade",
+      "connection",
+      "sec-websocket-accept",
+      "sec-websocket-extensions",
+    ]) {
+      if (response.headers[name])
+        lines.push(`${name}: ${response.headers[name]}`);
+    }
+    socket.write(lines.join("\r\n") + "\r\n\r\n");
+    if (tunnelHead?.length) socket.write(tunnelHead);
+    if (head?.length) tunnel.write(head);
+    const close = () => {
+      socket.destroy();
+      tunnel.destroy();
+    };
+    tunnel.on("error", close).on("close", close);
+    socket.on("close", close);
+    tunnel.pipe(socket);
+    socket.pipe(tunnel);
+  });
+  // farmd refused the upgrade: relay its status and error message.
+  upstream.on("response", (response) => {
+    let body = "";
+    response.setEncoding("utf8");
+    response.on("data", (chunk) => {
+      if (body.length < 4096) body += chunk;
+    });
+    response.on("end", () => {
+      let error = "셸 연결이 거절되었습니다.";
+      try {
+        error = JSON.parse(body).error || error;
+      } catch {}
+      refuse(socket, response.statusCode || 502, error);
+    });
+  });
+  upstream.on("timeout", () => upstream.destroy(new Error("timeout")));
+  upstream.on("error", () => {
+    if (!socket.destroyed)
+      refuse(
+        socket,
+        502,
+        "farmd에 연결할 수 없습니다. 데몬 주소와 서버 token 설정을 확인하세요.",
+      );
+  });
+  socket.on("close", () => upstream.destroy());
+  upstream.end();
 }

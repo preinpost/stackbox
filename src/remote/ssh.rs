@@ -55,6 +55,8 @@ impl client::Handler for Verify {
 fn config() -> Arc<client::Config> {
     Arc::new(client::Config {
         inactivity_timeout: Some(Duration::from_secs(1500)),
+        // An idle shell sends nothing; keepalives hold the connection and detect a dead host.
+        keepalive_interval: Some(Duration::from_secs(60)),
         ..Default::default()
     })
 }
@@ -156,9 +158,7 @@ impl Session {
         use super::protocol::{Frame, MAX_FRAME, Operation};
         super::artifact::validate_digest(digest)?;
         let seconds = request.operation.seconds();
-        let command = format!(
-            "export PATH=\"$HOME/.microsandbox/bin:$HOME/.local/bin:$PATH\"; export MSB_BACKEND=local; timeout --kill-after=10s {seconds} \"$HOME/.local/share/farm/agents/{digest}/farm-agent\""
-        );
+        let command = agent_command(digest, seconds);
         let payload = serde_json::to_vec(request)?;
         let execute = async {
             let mut channel = self
@@ -196,6 +196,9 @@ impl Session {
                             );
                             match frame {
                                 Frame::Result { result } => terminal = Some(Ok(result)),
+                                Frame::Attached | Frame::Terminal { .. } => {
+                                    bail!("unexpected remote terminal event")
+                                }
                                 Frame::Error { message } => {
                                     terminal = Some(Err(anyhow!("{message}")))
                                 }
@@ -254,6 +257,94 @@ impl Session {
             .map_err(|_| {
                 anyhow!("remote operation timed out; inspect the remote host before retrying")
             })?
+    }
+    /// Relay a shell in a remote farm's VM through its farm-agent until either side ends it.
+    pub async fn terminal(
+        &self,
+        digest: &str,
+        request: &super::protocol::Request,
+        io: crate::farm::TerminalIo,
+    ) -> Result<()> {
+        use super::protocol::{Frame, Reply, TerminalFrame};
+        use crate::farm::TerminalInput;
+        super::artifact::validate_digest(digest)?;
+        let channel = self
+            .handle
+            .channel_open_session()
+            .await
+            .map_err(|_| anyhow!("SSH agent channel failed"))?;
+        channel
+            .exec(true, agent_command(digest, request.operation.seconds()))
+            .await
+            .map_err(|_| anyhow!("SSH agent execution failed"))?;
+        let (mut reader, writer) = channel.split();
+        let writer = &writer;
+        let send = |line: Vec<u8>| async move {
+            writer
+                .data(&line[..])
+                .await
+                .map_err(|_| anyhow!("SSH agent input failed"))
+        };
+        let mut line = serde_json::to_vec(request)?;
+        line.push(b'\n');
+        send(line).await?;
+        let crate::farm::TerminalIo { mut input, output } = io;
+        // An agent from before shell sessions waits for EOF instead of answering.
+        let attach = tokio::time::sleep(TERMINAL_ATTACH_TIMEOUT);
+        tokio::pin!(attach);
+        let mut attached = false;
+        let mut buffer = Vec::new();
+        let mut client_open = true;
+        loop {
+            tokio::select! {
+                _ = &mut attach, if !attached => bail!(
+                    "the farm-agent on this host has no shell sessions; install the agent again"
+                ),
+                // Once the client leaves, the agent hangs the shell up and reports; don't wait forever.
+                _ = tokio::time::sleep(TERMINAL_CLOSE_TIMEOUT), if !client_open => return Ok(()),
+                message = reader.wait() => match message {
+                    Some(ChannelMsg::Data { data }) => {
+                        buffer.extend_from_slice(&data);
+                        for frame in drain_frames(&mut buffer)? {
+                            match frame {
+                                Frame::Attached => attached = true,
+                                Frame::Terminal { data } if attached => {
+                                    let bytes = STANDARD
+                                        .decode(data)
+                                        .map_err(|_| anyhow!("invalid farm-agent terminal output"))?;
+                                    // A departed client also closes `input`, handled below.
+                                    let _ = output.send(bytes).await;
+                                }
+                                Frame::Result { result: Reply::Done } => return Ok(()),
+                                Frame::Error { message } => bail!("{message}"),
+                                _ => bail!("unexpected farm-agent frame in a shell session"),
+                            }
+                        }
+                    }
+                    Some(_) => {}
+                    None => bail!("farm-agent shell session closed without a result"),
+                },
+                message = input.recv(), if client_open => {
+                    let frame = match message {
+                        Some(TerminalInput::Data(data)) => TerminalFrame::Input {
+                            data: STANDARD.encode(data),
+                        },
+                        Some(TerminalInput::Resize(size)) => TerminalFrame::Resize {
+                            rows: size.rows,
+                            cols: size.cols,
+                        },
+                        None => {
+                            client_open = false;
+                            writer.eof().await.ok();
+                            continue;
+                        }
+                    };
+                    let mut line = serde_json::to_vec(&frame)?;
+                    line.push(b'\n');
+                    send(line).await?;
+                }
+            }
+        }
     }
     pub async fn test_connection(request: &super::ConnectionTestRequest) -> Result<String> {
         let host = RemoteHost {
@@ -455,6 +546,31 @@ impl Session {
     }
 }
 
+const TERMINAL_ATTACH_TIMEOUT: Duration = Duration::from_secs(30);
+const TERMINAL_CLOSE_TIMEOUT: Duration = Duration::from_secs(10);
+
+fn agent_command(digest: &str, seconds: u64) -> String {
+    format!(
+        "export PATH=\"$HOME/.microsandbox/bin:$HOME/.local/bin:$PATH\"; export MSB_BACKEND=local; timeout --kill-after=10s {seconds} \"$HOME/.local/share/farm/agents/{digest}/farm-agent\""
+    )
+}
+
+/// Complete newline-delimited frames at the front of `buffer`.
+fn drain_frames(buffer: &mut Vec<u8>) -> Result<Vec<super::protocol::Frame>> {
+    use super::protocol::MAX_FRAME;
+    let mut frames = Vec::new();
+    while let Some(index) = buffer.iter().position(|b| *b == b'\n') {
+        ensure!(index <= MAX_FRAME, "farm-agent frame exceeds limit");
+        let bytes: Vec<u8> = buffer.drain(..=index).collect();
+        frames.push(
+            serde_json::from_slice(&bytes)
+                .map_err(|_| anyhow!("invalid farm-agent protocol frame"))?,
+        );
+    }
+    ensure!(buffer.len() <= MAX_FRAME, "farm-agent frame exceeds limit");
+    Ok(frames)
+}
+
 fn parse_inspection(output: &str) -> Result<HostInspection> {
     let mut values = BTreeMap::new();
     for line in output.lines() {
@@ -638,6 +754,60 @@ mod tests {
         credentials.validate().unwrap();
         let session = Session::connect(&target, credentials).await.unwrap();
         assert!(session.inspect().await.unwrap().kvm_available);
+    }
+    #[tokio::test]
+    async fn shell_session_streams_both_ways_and_ends_when_the_client_leaves() {
+        use crate::farm::{TerminalInput, TerminalIo, TerminalSize};
+        let fixture = Fixture::start().await;
+        let session = Session::connect(&host(&fixture), fixture.registration("unused").credentials)
+            .await
+            .unwrap();
+        let (input, input_rx) = tokio::sync::mpsc::channel(8);
+        let (output_tx, mut output) = tokio::sync::mpsc::channel(8);
+        let request = super::super::protocol::Request {
+            version: super::super::protocol::VERSION,
+            coordinator_id: uuid::Uuid::new_v4().to_string(),
+            operation: super::super::protocol::Operation::Shell {
+                farm_id: "demo".into(),
+                generation: uuid::Uuid::new_v4().to_string(),
+                size: TerminalSize { rows: 24, cols: 80 },
+            },
+        };
+        let digest = "a".repeat(64);
+        let relay = session.terminal(
+            &digest,
+            &request,
+            TerminalIo {
+                input: input_rx,
+                output: output_tx,
+            },
+        );
+        let client = async {
+            input
+                .send(TerminalInput::Data(b"uptime\r".to_vec()))
+                .await
+                .unwrap();
+            assert_eq!(output.recv().await.unwrap(), b"uptime\r");
+            input
+                .send(TerminalInput::Resize(TerminalSize {
+                    rows: 40,
+                    cols: 120,
+                }))
+                .await
+                .unwrap();
+            assert_eq!(output.recv().await.unwrap(), b"40x120");
+            drop(input);
+        };
+        let (result, ()) = tokio::join!(relay, client);
+        result.unwrap();
+        assert!(
+            fixture
+                .observed
+                .calls
+                .lock()
+                .unwrap()
+                .contains(&"rpc:shell".to_owned())
+        );
     }
     #[test]
     fn rejects_incomplete_untrusted_inspection_output() {

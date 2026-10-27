@@ -2494,6 +2494,19 @@ h2 {
   color: #73967e;
   font-size: 13px;
 }
+.terminal-body {
+  height: 480px;
+  padding: 12px 6px 12px 16px;
+  font-family: var(--font-mono);
+}
+.terminal-body .xterm-viewport {
+  scrollbar-color: #3e5945 transparent;
+}
+.terminal-vm {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: #789c81;
+}
 .log-note {
   padding: 8px 17px;
   font-size: 13px;

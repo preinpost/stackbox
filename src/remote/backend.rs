@@ -4,7 +4,7 @@ use super::{
     ssh::Session,
 };
 use crate::{
-    farm::FarmNode,
+    farm::{FarmNode, TerminalIo, TerminalSize},
     kolla::{EventSink, Phase},
     manager::Backend,
     model::{Endpoints, Exposure, Plan},
@@ -132,6 +132,31 @@ impl Backend for RemoteBackend {
                 Reply::Endpoints { endpoints } => Ok(endpoints),
                 _ => bail!("unexpected remote endpoints response"),
             }
+        })
+    }
+    fn terminal(
+        &self,
+        id: String,
+        size: TerminalSize,
+        io: TerminalIo,
+    ) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async move {
+            let session = Session::connect(&self.host, self.credentials.clone()).await?;
+            session
+                .terminal(
+                    &self.sha256,
+                    &Request {
+                        version: VERSION,
+                        coordinator_id: self.coordinator_id.clone(),
+                        operation: Operation::Shell {
+                            farm_id: id,
+                            generation: self.generation.clone(),
+                            size,
+                        },
+                    },
+                    io,
+                )
+                .await
         })
     }
 }

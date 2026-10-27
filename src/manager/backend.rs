@@ -1,5 +1,5 @@
 use crate::{
-    farm::{self, FarmNode, FrozenSnapshot, ImportedSnapshot},
+    farm::{self, FarmNode, FrozenSnapshot, ImportedSnapshot, TerminalIo, TerminalSize},
     kolla::{self, EventSink, Phase},
     model::{Datastore, Endpoints, Exposure, Plan},
 };
@@ -77,6 +77,15 @@ pub trait Backend: Send + Sync + 'static {
     }
     fn remove_snapshot(&self, _reference: String) -> BoxFuture<'_, Result<()>> {
         unsupported()
+    }
+    /// Run an interactive login shell in the farm's VM until it exits or `io.input` closes.
+    fn terminal(
+        &self,
+        _id: String,
+        _size: TerminalSize,
+        _io: TerminalIo,
+    ) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async { Err(anyhow!("this backend has no terminal")) })
     }
 }
 pub struct MicrosandboxBackend;
@@ -208,6 +217,14 @@ PY"#).await;
     }
     fn remove_snapshot(&self, reference: String) -> BoxFuture<'_, Result<()>> {
         Box::pin(async move { farm::remove_snapshot(&reference).await })
+    }
+    fn terminal(
+        &self,
+        id: String,
+        size: TerminalSize,
+        io: TerminalIo,
+    ) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async move { farm::attach_terminal(&id, size, io).await.map(|_| ()) })
     }
 }
 /// Reads the data store credentials from Kolla's generated passwords and the live schemas.

@@ -1,5 +1,5 @@
 import { Tabs } from "@base-ui/react/tabs";
-import { useState } from "react";
+import { lazy, Suspense, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link, useParams } from "@tanstack/react-router";
 import {
@@ -25,6 +25,7 @@ import {
   Server,
   ShieldCheck,
   Snowflake,
+  SquareTerminal,
 } from "lucide-react";
 import {
   api,
@@ -62,6 +63,13 @@ import {
 } from "../lib";
 import { JobRow } from "./jobs";
 
+// xterm is large; load it only when a shell is opened.
+const FarmTerminal = lazy(() =>
+  import("../components/farm-terminal").then((m) => ({
+    default: m.FarmTerminal,
+  })),
+);
+
 export function FarmDetailRoute() {
   const { farmId } = useParams({ from: "/farms/$farmId" });
   return <FarmDetailPage key={farmId} id={farmId} />;
@@ -70,6 +78,9 @@ export function FarmDetailPage({ id }: { id: string }) {
   const query = useQuery(farmQuery(id));
   const jobs = useQuery(jobsQuery());
   const hosts = useQuery(hostsQuery());
+  const [tab, setTab] = useState("overview");
+  // The shell connects when its tab is first opened and stays up across tab changes.
+  const [shellOpened, setShellOpened] = useState(false);
   if (query.isPending) return <Loading label="Farm 정보를 불러오는 중" />;
   if (query.error)
     return (
@@ -269,7 +280,14 @@ export function FarmDetailPage({ id }: { id: string }) {
           </span>
         </div>
       </div>
-      <Tabs.Root defaultValue="overview" className="detail-tabs">
+      <Tabs.Root
+        value={tab}
+        onValueChange={(value: string) => {
+          setTab(value);
+          if (value === "shell") setShellOpened(true);
+        }}
+        className="detail-tabs"
+      >
         <Tabs.List className="tabs-list" aria-label="Farm 상세 메뉴">
           <Tabs.Tab value="overview" className="tab">
             Overview
@@ -279,6 +297,9 @@ export function FarmDetailPage({ id }: { id: string }) {
           </Tabs.Tab>
           <Tabs.Tab value="jobs" className="tab">
             Jobs<span className="count-pill">{history.length}</span>
+          </Tabs.Tab>
+          <Tabs.Tab value="shell" className="tab">
+            Shell
           </Tabs.Tab>
         </Tabs.List>
         <Tabs.Panel value="overview" className="tab-panel">
@@ -313,6 +334,29 @@ export function FarmDetailPage({ id }: { id: string }) {
               />
             )}
           </section>
+        </Tabs.Panel>
+        <Tabs.Panel value="shell" className="tab-panel" keepMounted>
+          {!farm.nodes.some(
+            (node) => node.role === "all-in-one" && node.status === "running",
+          ) ? (
+            <section className="panel">
+              <EmptyState
+                icon={<SquareTerminal size={24} />}
+                title="VM이 실행 중이 아닙니다"
+                description={
+                  isAllInOneFarm(farm)
+                    ? "VM이 실행 중일 때 셸을 열 수 있습니다."
+                    : "셸은 단일 VM farm에서만 지원합니다."
+                }
+              />
+            </section>
+          ) : (
+            shellOpened && (
+              <Suspense fallback={<Loading label="터미널을 불러오는 중" />}>
+                <FarmTerminal farm={farm} active={tab === "shell"} />
+              </Suspense>
+            )
+          )}
         </Tabs.Panel>
       </Tabs.Root>
     </>
