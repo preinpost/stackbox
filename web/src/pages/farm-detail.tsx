@@ -511,10 +511,14 @@ function Endpoints({ farm }: { farm: Farm }) {
                     <span className="endpoint-pending">배포 대기</span>
                   )}
                 </div>
-                <code>{s.url}</code>
+                <div className="endpoint-url">
+                  <code>{s.url}</code>
+                  <CopyText value={s.url} hideValue label={`${s.name} URL`} />
+                </div>
                 {s.name === "Horizon" && showLogin && (
                   <HorizonLogin
                     credentials={login.data?.credentials}
+                    authUrl={services.find((x) => x.name === "Keystone")?.url}
                     pending={login.isPending}
                     error={login.error}
                   />
@@ -703,15 +707,19 @@ export function DatastoreCard({ store }: { store: Datastore }) {
   );
 }
 
-function HorizonLogin({
+/** Horizon sign-in details, each row copyable, plus an `OS_*` block for the CLI. */
+export function HorizonLogin({
   credentials,
+  authUrl,
   pending,
   error,
 }: {
   credentials?: Record<string, string>;
+  authUrl?: string;
   pending: boolean;
   error: unknown;
 }) {
+  const [revealed, setRevealed] = useState(false);
   if (pending)
     return (
       <p className="horizon-login-note">로그인 정보를 불러오는 중입니다.</p>
@@ -722,24 +730,86 @@ function HorizonLogin({
         로그인 정보를 가져오지 못했습니다. 배포가 끝난 뒤 다시 열어 보세요.
       </p>
     );
-  const rows = [
-    ["사용자", credentials.OS_USERNAME || "admin"],
-    ["비밀번호", credentials.OS_PASSWORD],
-    ["도메인", credentials.OS_USER_DOMAIN_NAME || "Default"],
-  ];
+  const username = credentials.OS_USERNAME || "admin";
+  const domain = credentials.OS_USER_DOMAIN_NAME || "Default";
+  const project = credentials.OS_PROJECT_NAME || "admin";
+  const projectDomain = credentials.OS_PROJECT_DOMAIN_NAME || domain;
+  const envBlock = [
+    authUrl && `export OS_AUTH_URL=${authUrl}`,
+    `export OS_USERNAME=${username}`,
+    `export OS_PASSWORD=${credentials.OS_PASSWORD}`,
+    `export OS_PROJECT_NAME=${project}`,
+    `export OS_USER_DOMAIN_NAME=${domain}`,
+    `export OS_PROJECT_DOMAIN_NAME=${projectDomain}`,
+    "export OS_IDENTITY_API_VERSION=3",
+  ]
+    .filter(Boolean)
+    .join("\n");
   return (
-    <dl className="horizon-login">
-      {rows.map(([label, value]) => (
-        <div key={label}>
-          <dt>{label}</dt>
-          <dd>
-            <code>{value}</code>
-          </dd>
-        </div>
-      ))}
-    </dl>
+    <>
+      <dl className="horizon-login">
+        <LoginRow label="사용자" value={username} />
+        <LoginRow
+          label="비밀번호"
+          value={credentials.OS_PASSWORD}
+          secret
+          revealed={revealed}
+          onToggle={() => setRevealed((open) => !open)}
+        />
+        <LoginRow label="도메인" value={domain} />
+        <LoginRow label="프로젝트" value={project} />
+      </dl>
+      <div className="horizon-login-actions">
+        <CopyText
+          value={envBlock}
+          label="OS_ 환경변수 복사"
+          name="OS_ 환경변수"
+        />
+      </div>
+    </>
   );
 }
+
+function LoginRow({
+  label,
+  value,
+  secret = false,
+  revealed = false,
+  onToggle,
+}: {
+  label: string;
+  value: string;
+  secret?: boolean;
+  revealed?: boolean;
+  onToggle?: () => void;
+}) {
+  const shown = !secret || revealed;
+  return (
+    <div>
+      <dt>
+        {label}
+        {secret && (
+          <button
+            type="button"
+            className="secret-toggle"
+            aria-label={shown ? `${label} 가리기` : `${label} 표시`}
+            aria-pressed={shown}
+            onClick={onToggle}
+          >
+            {shown ? "가리기" : "표시"}
+          </button>
+        )}
+      </dt>
+      <dd>
+        <code className={shown ? "" : "masked"}>
+          {shown ? value : "••••••••••••"}
+        </code>
+        <CopyText value={value} hideValue label={label} />
+      </dd>
+    </div>
+  );
+}
+
 function LayersIcon() {
   return <Boxes size={17} />;
 }

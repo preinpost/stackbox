@@ -232,10 +232,13 @@ export function CopyText({
   value,
   hideValue = false,
   label,
+  name,
 }: {
   value: string;
   hideValue?: boolean;
   label?: string;
+  /** Accessible name when `label` already ends in its own wording. */
+  name?: string;
 }) {
   const [copied, setCopied] = useState(false);
   const timeout = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
@@ -245,7 +248,7 @@ export function CopyText({
       type="button"
       className={`copy-text ${hideValue ? "copy-only" : ""}`}
       title={copied ? "복사됨" : "클릭해서 복사"}
-      aria-label={hideValue ? `${label ?? "값"} 복사` : `${value} 복사`}
+      aria-label={`${name ?? label ?? (hideValue ? "값" : value)} 복사`}
       onClick={async (event) => {
         const target = event.currentTarget;
         try {

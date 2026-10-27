@@ -3,7 +3,7 @@ import { afterEach, expect, test } from "vitest";
 import type { Farm } from "../api/client";
 import { userEvent } from "@testing-library/user-event";
 import type { Datastore } from "../api/client";
-import { DatastoreCard, NodeTopology } from "./farm-detail";
+import { DatastoreCard, HorizonLogin, NodeTopology } from "./farm-detail";
 
 afterEach(cleanup);
 const farm: Farm = {
@@ -96,4 +96,41 @@ test("offers copy affordances without printing the secret", () => {
   const copy = screen.getByRole("button", { name: "비밀번호 복사" });
   expect(copy.textContent).not.toContain("database-secret-value");
   expect(screen.getByRole("button", { name: "URL 복사" })).toBeTruthy();
+});
+
+const login = {
+  OS_USERNAME: "admin",
+  OS_PASSWORD: "horizon-secret-value",
+  OS_USER_DOMAIN_NAME: "Default",
+  OS_PROJECT_NAME: "admin",
+};
+
+test("hides the Horizon password until asked and offers a copy for every row", async () => {
+  const user = userEvent.setup();
+  const { container } = render(
+    <HorizonLogin
+      credentials={login}
+      authUrl="http://localhost:15000/v3"
+      pending={false}
+      error={null}
+    />,
+  );
+  // User name and project both read "admin".
+  expect(screen.getAllByText("admin").length).toBeGreaterThanOrEqual(2);
+  expect(container.textContent).not.toContain("horizon-secret-value");
+  for (const label of ["사용자", "비밀번호", "도메인", "프로젝트"]) {
+    expect(screen.getByRole("button", { name: `${label} 복사` })).toBeTruthy();
+  }
+  expect(
+    screen.getByRole("button", { name: "OS_ 환경변수 복사" }),
+  ).toBeTruthy();
+
+  await user.click(screen.getByRole("button", { name: "비밀번호 표시" }));
+  expect(screen.getByText("horizon-secret-value")).toBeTruthy();
+  await user.click(screen.getByRole("button", { name: "비밀번호 가리기" }));
+  expect(container.textContent).not.toContain("horizon-secret-value");
+  // The copy button never carries the secret as text.
+  expect(
+    screen.getByRole("button", { name: "비밀번호 복사" }).textContent,
+  ).toBe("");
 });
