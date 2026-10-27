@@ -327,7 +327,6 @@ fi
 step "kolla-ansible install-deps (컨테이너 런타임 의존성)"
 kolla-ansible install-deps
 step "게스트 커널 호환 패치 적용 (OVS netdev, br_netfilter)"
-python3 - <<'PY' 
 # Retain the guest-kernel compatibility patches for Neutron's userspace OVS.
 python3 - <<'PY'
 from pathlib import Path
@@ -855,6 +854,23 @@ mod tests {
     use std::io::Write;
     use std::process::{Command, Stdio};
 
+    /// Walks `<<'PY'` blocks and rejects an opener inside another block.
+    fn assert_heredocs_do_not_nest(script: &str) {
+        let mut open = false;
+        for line in script.lines() {
+            let trimmed = line.trim();
+            if trimmed == "PY" {
+                open = false;
+                continue;
+            }
+            if trimmed.ends_with("<<'PY'") {
+                assert!(!open, "nested python heredoc in generated script");
+                open = true;
+            }
+        }
+        assert!(!open, "unterminated python heredoc in generated script");
+    }
+
     #[test]
     fn generated_scripts_parse_with_optional_service_verification_local() {
         let components = [
@@ -902,6 +918,17 @@ mod tests {
                 String::from_utf8_lossy(&output.stderr)
             );
         }
+        // A heredoc opener inside another heredoc's body only fails inside the guest,
+        // where nothing points at the generated script.
+        for script in [
+            install_script(),
+            post_deploy_script(&components),
+            verify_script(&components),
+            settle_script(None, &components),
+        ] {
+            assert_heredocs_do_not_nest(&script);
+        }
+
         let verify = verify_script(&components);
         assert!(
             !verify.contains("ssh "),

@@ -450,9 +450,11 @@ function DeploymentPhases({ farm }: { farm: Farm }) {
               <span className="phase-marker">
                 {ready ? <Check size={12} /> : current ? <span /> : null}
               </span>
-              <div>
-                <strong>{phase.label}</strong>
-                <span>{phase.description}</span>
+              <div className="phase-text">
+                <div className="phase-heading">
+                  <strong>{phase.label}</strong>
+                  <span>{phase.description}</span>
+                </div>
                 {current && farm.step && (
                   <span
                     className={`phase-step ${running ? "phase-step-live" : ""}`}
@@ -461,7 +463,7 @@ function DeploymentPhases({ farm }: { farm: Farm }) {
                     {running && (
                       <LoaderCircle size={11} className="animate-spin" />
                     )}
-                    {farm.step}
+                    <span className="phase-step-text">{farm.step}</span>
                   </span>
                 )}
               </div>

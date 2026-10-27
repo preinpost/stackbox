@@ -1602,10 +1602,19 @@ h2 {
 .phase-current .phase-marker {
   border-color: #9dbada;
 }
-.phase-list li > div {
+/* Label and description share a row; the running step always gets its own line. */
+.phase-list li > div.phase-text {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 5px;
+}
+.phase-heading {
   display: flex;
   flex-wrap: wrap;
-  align-items: center;
+  align-items: baseline;
   gap: 10px;
 }
 .phase-list strong {
@@ -3441,9 +3450,10 @@ h2 {
 /* The step inside the running phase: our marker or the current Ansible task. */
 .phase-step {
   display: flex;
+  width: fit-content;
+  max-width: 100%;
   align-items: center;
   gap: 5px;
-  margin-top: 5px;
   padding: 3px 8px;
   border-radius: 4px;
   background: #f4f8f7;
@@ -3452,10 +3462,14 @@ h2 {
   font-size: 11.5px;
   line-height: 1.5;
   color: #5b7264;
+}
+/* Two lines at most, so a long Ansible task name stays readable. */
+.phase-step-text {
+  display: -webkit-box;
   overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  max-width: 100%;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow-wrap: anywhere;
 }
 .phase-step-live {
   background: #eff5fb;
