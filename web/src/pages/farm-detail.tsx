@@ -334,6 +334,7 @@ const roleInfo: Record<string, { label: string; service: string }> = {
 const controlServices = ["placement", "horizon", "neutron", "nova"];
 export function NodeTopology({ farm }: { farm: Farm }) {
   const single = isAllInOneFarm(farm);
+  const components = farmComponents(farm);
   const sources = farm.plan
     ? farm.plan.nodes.map((spec) => ({
         role: spec.role,
@@ -346,20 +347,39 @@ export function NodeTopology({ farm }: { farm: Farm }) {
     label: roleInfo[role]?.label ?? role,
     service:
       role === "control"
-        ? farmComponents(farm)
+        ? components
             .filter((c) => controlServices.includes(c))
             .map(componentLabel)
             .join(" · ")
         : role === "compute"
           ? [
-              farmComponents(farm).includes("nova") && "Hypervisor",
-              farmComponents(farm).includes("neutron") &&
-                "OVS · Neutron agents",
+              components.includes("nova") && "Hypervisor",
+              components.includes("neutron") && "OVS · Neutron agents",
             ]
               .filter(Boolean)
               .join(" · ")
           : (roleInfo[role]?.service ?? ""),
   }));
+  const exposure = farm.status !== "deleted" ? farm.exposure : null;
+  const publicPort = (id: string) =>
+    exposure && publicServices[id]
+      ? exposure.port_base + publicServices[id].offset
+      : null;
+  const ports = components
+    .map(publicPort)
+    .filter((port): port is number => port !== null);
+  const portRange = !ports.length
+    ? "—"
+    : ports.length === 1
+      ? `:${ports[0]}`
+      : `:${Math.min(...ports)}–${Math.max(...ports)}`;
+  const running = farm.nodes.some((node) => node.status === "running");
+  const nodeMemory = (node: Farm["nodes"][number] | undefined) =>
+    node
+      ? memory(node.memory_mib)
+      : farm.status === "deleted"
+        ? "삭제됨"
+        : "생성 대기";
   return (
     <section className="panel topology">
       <div className="panel-toolbar">
@@ -372,51 +392,103 @@ export function NodeTopology({ farm }: { farm: Farm }) {
           <span className="status-dot" />
         </span>
       </div>
-      <div
-        className={`topology-nodes ${single ? "topology-single" : ""}`}
-        style={{ "--node-count": roles.length } as React.CSSProperties}
-      >
-        {roles.map(({ role, node, label, service }, index) => {
-          return (
+      <div className="topology-graph">
+        <div className="topology-box topology-host">
+          <Globe size={16} strokeWidth={1.6} />
+          <div>
+            <small>Host</small>
+            <code>{exposure?.host ?? "public 포트 없음"}</code>
+          </div>
+        </div>
+        <div
+          className={`topology-edge ${running && exposure ? "edge-active" : ""}`}
+        >
+          <code>{portRange}</code>
+          <span className="edge-line" aria-hidden />
+          <small>{exposure ? "port bind · DNAT" : "노출 안 함"}</small>
+        </div>
+        {single ? (
+          roles.map(({ role, node, label, service }) => (
             <div
-              key={node?.name ?? `${role}-${index}`}
-              className={`topology-node ${node?.status === "running" ? "node-running" : ""}`}
+              key={node?.name ?? role}
+              className={`topology-node topology-vm ${node?.status === "running" ? "node-running" : ""}`}
             >
-              <div className="node-top">
-                <Server size={21} strokeWidth={1.5} />
+              <div className="topology-vm-header">
+                <Server size={16} strokeWidth={1.6} />
+                <strong>{label}</strong>
+                <span className="node-name">
+                  {node?.name ?? `${farm.id}-${role}`}
+                </span>
+                <span className="node-memory">{nodeMemory(node)}</span>
                 <span
                   className={`node-status ${node?.status === "running" ? "running" : ""}`}
                   title={node?.status ?? "준비되지 않음"}
                 />
               </div>
-              <strong>{label}</strong>
-              <p>{service}</p>
-              <div className="node-name">
-                {node?.name ?? `${farm.id}-${role}`}
-              </div>
-              {single && (
+              <div className="topology-vm-body">
                 <div
-                  className="node-components"
+                  className="topology-box topology-iface"
+                  title="고정 서비스 주소"
+                >
+                  <Network size={15} strokeWidth={1.6} />
+                  <div>
+                    <small>farm0</small>
+                    <code>10.254.0.2</code>
+                  </div>
+                </div>
+                <div
+                  className="topology-tree"
                   aria-label="같은 VM에서 실행할 서비스"
                 >
-                  {farmComponents(farm).map((id) => (
-                    <span key={id}>{componentLabel(id)}</span>
+                  {components.map((id) => (
+                    <div className="topology-leaf" key={id}>
+                      <span className="topology-box topology-service">
+                        <span>{componentLabel(id)}</span>
+                        {publicPort(id) !== null && (
+                          <code>:{publicPort(id)}</code>
+                        )}
+                      </span>
+                    </div>
                   ))}
                 </div>
-              )}
-              <div className="node-address" title="고정 서비스 주소">
-                {single ? "10.254.0.2" : (node?.ip ?? "—")}
               </div>
-              <div className="node-memory">
-                {node
-                  ? memory(node.memory_mib)
-                  : farm.status === "deleted"
-                    ? "삭제됨"
-                    : "생성 대기"}
+              <div className="topology-vm-footer">
+                <span>기반 서비스</span>
+                {service}
               </div>
             </div>
-          );
-        })}
+          ))
+        ) : (
+          <div className="topology-tree">
+            {roles.map(({ role, node, label, service }, index) => (
+              <div
+                className="topology-leaf"
+                key={node?.name ?? `${role}-${index}`}
+              >
+                <div
+                  className={`topology-node ${node?.status === "running" ? "node-running" : ""}`}
+                >
+                  <div className="node-top">
+                    <Server size={15} strokeWidth={1.6} />
+                    <strong>{label}</strong>
+                    <span
+                      className={`node-status ${node?.status === "running" ? "running" : ""}`}
+                      title={node?.status ?? "준비되지 않음"}
+                    />
+                  </div>
+                  {service && <p>{service}</p>}
+                  <div className="node-name">
+                    {node?.name ?? `${farm.id}-${role}`}
+                  </div>
+                  <div className="node-meta">
+                    <code>{node?.ip ?? "—"}</code>
+                    <span>{nodeMemory(node)}</span>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
       <div className="topology-footer">
         <ShieldCheck size={13} />
