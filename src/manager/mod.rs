@@ -874,18 +874,13 @@ fn apply_inventory(
         if farm.status == FarmStatus::Deleted && nodes.is_empty() {
             continue;
         }
-        let expected: Vec<String> = farm
+        let expected: Vec<Role> = farm
             .plan
             .as_ref()
-            .map(|p| {
-                p.nodes
-                    .iter()
-                    .map(|n| format!("{}-{}", farm.id, n.role))
-                    .collect()
-            })
+            .map(|p| p.nodes.iter().map(|n| n.role).collect())
             .unwrap_or_else(|| {
                 if nodes.iter().any(|node| node.role == Some(Role::AllInOne)) {
-                    return vec![format!("{}-{}", farm.id, Role::AllInOne)];
+                    return vec![Role::AllInOne];
                 }
                 // Imported legacy farms have no recorded plan. Preserve their
                 // known role layout, including optional control/compute nodes.
@@ -902,15 +897,12 @@ fn apply_inventory(
                     }
                 }
                 roles
-                    .iter()
-                    .map(|role| format!("{}-{role}", farm.id))
-                    .collect()
             });
         let intact = nodes.len() == expected.len()
-            && expected.iter().all(|name| {
-                nodes
-                    .iter()
-                    .any(|n| &n.name == name && n.status == "running")
+            && expected.iter().all(|role| {
+                nodes.iter().any(|n| {
+                    crate::farm::is_node_name(&farm.id, *role, &n.name) && n.status == "running"
+                })
             });
         if !intact || farm.status == FarmStatus::Deleted {
             farm.status = FarmStatus::Broken;
@@ -934,7 +926,7 @@ fn apply_inventory(
         }
         let single = nodes.len() == 1
             && nodes[0].role == Some(Role::AllInOne)
-            && nodes[0].name == format!("{id}-all-in-one");
+            && crate::farm::is_node_name(&id, Role::AllInOne, &nodes[0].name);
         let legacy = (5..=7).contains(&nodes.len())
             && [
                 Role::Deployer,

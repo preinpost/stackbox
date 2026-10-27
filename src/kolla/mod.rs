@@ -495,7 +495,7 @@ pub async fn settle(
     components: &[String],
     sink: EventSink,
 ) -> Result<()> {
-    let name = farm::node_name(farm_id, farm::Role::AllInOne);
+    let name = farm::all_in_one_name(farm_id).await?;
     let sandbox = farm::connect(&name).await?;
     let result = async {
         farm::wait_until_booted(&sandbox).await?;

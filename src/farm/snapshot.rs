@@ -10,7 +10,7 @@ use super::node::{
     FARM_LABEL, FarmNode, GUEST_HOSTNAME, IDENTITY_CONF, ROLE_LABEL, connect, node_name,
     wait_until_booted,
 };
-use super::template::{NodeSpec, Role};
+use super::template::NodeSpec;
 use crate::model::Exposure;
 use crate::shell::run;
 
@@ -41,7 +41,7 @@ pub async fn freeze_farm(
     snapshot_id: &str,
     labels: &BTreeMap<String, String>,
 ) -> Result<FrozenSnapshot> {
-    let name = node_name(farm_id, Role::AllInOne);
+    let name = super::all_in_one_name(farm_id).await?;
     let sandbox = connect(&name).await?;
     let identity = run(
         &sandbox,

@@ -286,6 +286,13 @@ fn default_host() -> String {
 impl CreateRequest {
     pub fn validate(&self) -> Result<Plan> {
         validate_id(&self.id)?;
+        // Older all-in-one VMs are named `<farm>-all-in-one`; such an id would read as one of them.
+        if self.id.ends_with(crate::farm::LEGACY_ALL_IN_ONE_SUFFIX) {
+            bail!(
+                "farm id must not end with '{}'",
+                crate::farm::LEGACY_ALL_IN_ONE_SUFFIX
+            );
+        }
         if let Some(id) = &self.host_id {
             validate_id(id)?;
         }
@@ -631,6 +638,16 @@ mod tests {
         for id in ["../escape", "a;true", "UPPER", "", "-a"] {
             assert!(validate_id(id).is_err());
         }
+        let legacy = CreateRequest {
+            id: "dev-all-in-one".into(),
+            host_id: None,
+            components: vec![],
+            external_host: default_host(),
+            owner: None,
+            expires_at: None,
+            snapshot_id: None,
+        };
+        assert!(legacy.validate().is_err());
         for unsupported in ["swift", "cinder"] {
             assert!(
                 plan(&PlanRequest {

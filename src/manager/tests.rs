@@ -50,7 +50,7 @@ impl Backend for Fake {
                 .nodes
                 .iter()
                 .map(|spec| FarmNode {
-                    name: format!("{id}-{}", spec.role),
+                    name: crate::farm::node_name(&id, spec.role),
                     role: Some(spec.role),
                     status: "running".into(),
                     memory_mib: spec.memory_mib,

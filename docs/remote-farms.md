@@ -7,7 +7,7 @@
 1. 호스트 IP·SSH 사용자·비밀번호 또는 키를 등록하고 host key 지문을 확인한다.
 2. 호스트의 msb·KVM·이미지·실행기를 점검하고 필요한 준비 작업을 수행한다.
 3. 컴포넌트 의존성을 계산하고 단일 VM의 메모리·디스크와 호스트 공개 포트를 예약한다.
-4. `<farm>-all-in-one`을 생성하고 VM 안에서 Kolla all-in-one inventory와 로컬 Ansible로 배포한다.
+4. VM `<farm>`을 생성하고 VM 안에서 Kolla all-in-one inventory와 로컬 Ansible로 배포한다.
 5. 선택 서비스의 native 포트를 호스트로 전달하고 인증·API·이미지 왕복을 검증한다.
 
 호스트별 메모리와 포트 예약, SSH 핀 고정, 암호화 인증정보, 작업 로그와 실패 예약은 기존

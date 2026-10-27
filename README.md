@@ -246,7 +246,7 @@ Docker/containerd용 ext4 디스크 두 개가 포함됩니다. sparse disk의 �
 
 `src/lib.rs`가 라이브러리 진입점입니다. `FarmManager`가 계획·상태·예약·작업을 관리하고,
 `src/manager/backend.rs`가 microsandbox VM 로직을 연결합니다. `src/api.rs`와 `src/main.rs`는
-같은 manager를 사용합니다. 새 VM 이름은 `<farm>-all-in-one`입니다.
+같은 manager를 사용합니다. 새 VM 이름은 farm id와 같고(`<farm>`), 이전 버전이 만든 `<farm>-all-in-one` VM도 그대로 인식합니다.
 
 ```bash
 cargo fmt --check

@@ -4,14 +4,15 @@ mod template;
 
 use std::collections::BTreeMap;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use futures::future::try_join_all;
 use microsandbox::Sandbox;
 use microsandbox::sandbox::SandboxHandle;
 
 use node::{FARM_LABEL, create_node, describe_node, destroy_node, label};
 pub use node::{
-    FarmNode, GUEST_ADDRESS, GUEST_INTERFACE, IDENTITY_CONF, connect, node_name, wait_until_booted,
+    FarmNode, GUEST_ADDRESS, GUEST_INTERFACE, IDENTITY_CONF, LEGACY_ALL_IN_ONE_SUFFIX, connect,
+    is_node_name, node_name, wait_until_booted,
 };
 pub use snapshot::{
     FrozenSnapshot, ImportedSnapshot, export_snapshot, freeze_farm, import_snapshot,
@@ -138,12 +139,22 @@ fn farm_of(handle: &SandboxHandle) -> Option<String> {
     )
 }
 
+/// Name of the farm's all-in-one VM, which predates the farm-id naming on older farms.
+pub async fn all_in_one_name(farm_id: &str) -> Result<String> {
+    farm_handles(farm_id)
+        .await?
+        .into_iter()
+        .find(|handle| label(handle, node::ROLE_LABEL).as_deref() == Some(Role::AllInOne.as_str()))
+        .map(|handle| handle.name().to_owned())
+        .with_context(|| format!("farm '{farm_id}' has no all-in-one VM"))
+}
+
 /// A labelled all-in-one VM belongs to the farm in its name, so a snapshot copy can never
 /// join its source farm. Legacy multi-VM nodes are matched by label, and only when their name agrees.
 fn owning_farm(name: &str, farm: Option<&str>, role: Option<&str>) -> Option<String> {
     let farm = farm?;
     if role == Some(Role::AllInOne.as_str()) {
-        let id = name.strip_suffix(&format!("-{}", Role::AllInOne))?;
+        let id = name.strip_suffix(LEGACY_ALL_IN_ONE_SUFFIX).unwrap_or(name);
         return crate::model::validate_id(id).is_ok().then(|| id.to_owned());
     }
     name.strip_prefix(farm)
@@ -178,17 +189,23 @@ mod tests {
     #[test]
     fn restored_vms_belong_to_the_farm_in_their_name_not_their_source_label() {
         let aio = Some("all-in-one");
+        assert_eq!(owning_farm("dev", Some("dev"), aio).as_deref(), Some("dev"));
+        // Restored from dev's snapshot: still labelled farm=dev.
+        assert_eq!(
+            owning_farm("dev2", Some("dev"), aio).as_deref(),
+            Some("dev2")
+        );
+        assert_eq!(owning_farm("dev", None, aio), None);
+        assert_eq!(owning_farm("Bad", Some("dev"), aio), None);
+        // VMs created before all-in-one VMs were named after their farm.
         assert_eq!(
             owning_farm("dev-all-in-one", Some("dev"), aio).as_deref(),
             Some("dev")
         );
-        // Restored from dev's snapshot: still labelled farm=dev.
         assert_eq!(
             owning_farm("dev2-all-in-one", Some("dev"), aio).as_deref(),
             Some("dev2")
         );
-        assert_eq!(owning_farm("dev-all-in-one", None, aio), None);
-        assert_eq!(owning_farm("stray", Some("dev"), aio), None);
         assert_eq!(owning_farm("Bad-all-in-one", Some("dev"), aio), None);
         let lb = Some("lb");
         assert_eq!(

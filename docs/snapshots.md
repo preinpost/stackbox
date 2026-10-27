@@ -23,7 +23,7 @@ farm의 VM을 직접 재시작하거나 호스트가 재부팅하면 farmd는 VM
 farm이 다시 `ready`가 됩니다. 복원한 farm도 이 방법으로 상태를 갱신할 수 있습니다.
 
 ```bash
-msb stop dev-all-in-one && msb start dev-all-in-one   # 종료는 시간이 걸리므로 stop/start를 권장
+msb stop dev && msb start dev   # 종료는 시간이 걸리므로 stop/start를 권장
 farm settle dev
 ```
 
@@ -67,9 +67,9 @@ bind 주소와 RabbitMQ 노드 이름(`rabbit@<hostname>`), nova-compute·Neutro
 `POST /farms`에 `snapshot_id`를 지정하면 `restore` job이 실행됩니다. 서비스 목록과 VM 크기는
 스냅샷의 계획을 사용하므로 `components`는 생략합니다. 메모리·포트 예약은 일반 생성과 같습니다.
 
-1. 스냅샷에서 `<id>-all-in-one` VM을 콜드부팅하고 새 farm의 포트를 publish합니다.
+1. 스냅샷에서 `<id>` VM을 콜드부팅하고 새 farm의 포트를 publish합니다.
 2. 복원한 VM에는 farm 라벨이 없으므로 `farm`·`farm.role` 라벨을 저장합니다(`next_start`, 재시작 없음).
-   all-in-one VM은 이름 `<farm>-all-in-one`으로 farm을 판단하므로 원본 farm에 섞이지 않습니다.
+   all-in-one VM은 이름(`<farm>`, 이전 버전은 `<farm>-all-in-one`)으로 farm을 판단하므로 원본 farm에 섞이지 않습니다.
 3. 배포된 스냅샷이면 Keystone 카탈로그의 public endpoint를 원본의 `host:port`에서 새 farm의
    `host:port`로 바꾸고, `/etc/kolla/globals.yml`도 같이 고친 뒤 서비스 응답을 기다립니다.
 

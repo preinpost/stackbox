@@ -408,17 +408,16 @@ export function NodeTopology({ farm }: { farm: Farm }) {
           <small>{exposure ? "port bind · DNAT" : "노출 안 함"}</small>
         </div>
         {single ? (
-          roles.map(({ role, node, label, service }) => (
+          roles.map(({ role, node, service }) => (
             <div
               key={node?.name ?? role}
               className={`topology-node topology-vm ${node?.status === "running" ? "node-running" : ""}`}
             >
               <div className="topology-vm-header">
                 <Server size={16} strokeWidth={1.6} />
-                <strong>{label}</strong>
-                <span className="node-name">
+                <strong className="font-mono">
                   {node?.name ?? `${farm.id}-${role}`}
-                </span>
+                </strong>
                 <span className="node-memory">{nodeMemory(node)}</span>
                 <span
                   className={`node-status ${node?.status === "running" ? "running" : ""}`}

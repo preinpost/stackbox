@@ -1,6 +1,6 @@
 # Farm당 VM 1대
 
-새 Farm은 `<id>-all-in-one` VM 하나에 Ansible 실행기와 선택한 모든 OpenStack 서비스를
+새 Farm은 farm id와 같은 이름의 VM `<id>` 하나에 Ansible 실행기와 선택한 모든 OpenStack 서비스를
 설치한다. 별도 deployer·LB·infra·control·compute VM과 Farm 관리 VXLAN은 만들지 않는다.
 배포 inventory는 Kolla가 제공하는 all-in-one이며 Ansible 연결은 local이다.
 

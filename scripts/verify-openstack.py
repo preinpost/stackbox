@@ -259,7 +259,7 @@ def main():
             parser.error("--restart-local-vms requires a ready local farm")
         nodes = [node["name"] for node in farm["nodes"]]
         if (len(nodes) != 1 or farm["nodes"][0].get("role") != "all-in-one"
-                or nodes[0] != args.farm_id + "-all-in-one"):
+                or nodes[0] not in (args.farm_id, args.farm_id + "-all-in-one")):
             parser.error("unexpected local farm nodes")
 
         def restart():

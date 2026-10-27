@@ -47,8 +47,20 @@ pub struct FarmNode {
     pub ip: Option<String>,
 }
 
+/// A farm's all-in-one VM is named after the farm; legacy multi-VM nodes carry their role.
 pub fn node_name(farm_id: &str, role: Role) -> String {
-    format!("{farm_id}-{role}")
+    match role {
+        Role::AllInOne => farm_id.to_owned(),
+        role => format!("{farm_id}-{role}"),
+    }
+}
+
+/// All-in-one VMs created before they were named after their farm.
+pub const LEGACY_ALL_IN_ONE_SUFFIX: &str = "-all-in-one";
+
+pub fn is_node_name(farm_id: &str, role: Role, name: &str) -> bool {
+    name == node_name(farm_id, role)
+        || (role == Role::AllInOne && name.strip_suffix(LEGACY_ALL_IN_ONE_SUFFIX) == Some(farm_id))
 }
 
 pub fn label(handle: &SandboxHandle, key: &str) -> Option<String> {
@@ -206,8 +218,19 @@ mod tests {
         crate::model::validate_id(&id).unwrap();
         let name = super::node_name(&id, super::Role::AllInOne);
         assert!(name.len() <= 63);
-        assert_eq!(name.len(), 59);
+        assert_eq!(name, id);
         assert!(crate::model::validate_id(&"a".repeat(49)).is_err());
+    }
+
+    #[test]
+    fn all_in_one_vms_are_named_after_their_farm_and_keep_legacy_names() {
+        use super::{Role, is_node_name, node_name};
+        assert_eq!(node_name("dev", Role::AllInOne), "dev");
+        assert_eq!(node_name("dev", Role::Lb), "dev-lb");
+        assert!(is_node_name("dev", Role::AllInOne, "dev"));
+        assert!(is_node_name("dev", Role::AllInOne, "dev-all-in-one"));
+        assert!(!is_node_name("dev", Role::AllInOne, "dev2"));
+        assert!(!is_node_name("dev", Role::Lb, "dev"));
     }
 
     #[test]
