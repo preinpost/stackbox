@@ -48,6 +48,8 @@ VM 관측 결과는 시작 시와 30초 주기로 갱신되며, 실행 중인 jo
 내보내기(`POST /snapshots/{id}/export`)와 가져오기(`POST /snapshots/import`)는 `202`와 스냅샷 레코드를
 반환합니다. 스냅샷이 `exporting`/`importing` 상태를 벗어날 때까지 `GET /snapshots/{id}`를 polling하고,
 `error`와 `archive.path`를 표시하세요. 경로는 farmd 호스트의 절대 경로이며 상대 경로는 `400`입니다.
+`arch`는 스냅샷을 얼린 CPU 아키텍처입니다. 다른 아키텍처의 스냅샷은 복원(`POST /farms`)과
+가져오기(`POST /snapshots/import`)에서 `409`로 거절합니다.
 `POST /farms/{id}/settle`은 배포를 다시 실행하지 않고 Keystone과 선택 서비스의 응답만 기다립니다.
 farm 상태가 `settling`으로 바뀌고, 성공하면 `ready`, 실패하면 `created`로 돌아갑니다.
 VM을 직접 재시작했거나 host가 재부팅된 뒤에 사용합니다.

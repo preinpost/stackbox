@@ -76,6 +76,19 @@ bind 주소와 RabbitMQ 노드 이름(`rabbit@<hostname>`), nova-compute·Neutro
 배포 전에 얼린 스냅샷은 `created` 상태로 복원되며 일반 farm처럼 배포합니다.
 복원한 farm도 다시 배포할 수 있습니다.
 
+## 아키텍처
+
+스냅샷은 게스트의 부트로더와 커널을 그대로 담으므로 CPU 아키텍처를 넘지 못합니다. 얼릴 때
+아키텍처를 기록하고(`farm.snapshot.arch` label, `SnapshotRecord.arch`), **가져오기와 복원 양쪽에서**
+다른 아키텍처를 거절합니다. 예를 들어 Apple Silicon에서 얼린 `.msb`를 x86_64 Linux 호스트에
+가져오면 `archive was frozen on aarch64; this host is x86_64`로, 상태 파일만 옮겨온 경우에는
+복원 단계에서 `cannot boot on this x86_64 host`로 실패합니다. 상태 파일과 msb 스냅샷 디렉터리를
+서로 다른 아키텍처로 복사하지 마세요.
+
+OpenStack 릴리스는 label(`farm.snapshot.openstack-release`)로만 기록하고 복원을 막지는 않습니다.
+스냅샷은 자기 Kolla 설치를 그대로 담기 때문입니다. 다만 서로 다른 릴리스에서 같은 farm을
+다시 배포하면 서비스 이미지가 섞일 수 있으니, 복원 후에는 재배포 대신 서비스 확인을 쓰세요.
+
 ## 내보내기와 가져오기
 
 내보내기는 golden image까지 포함한 self-contained 아카이브(tar+zstd)를 씁니다. 기본 경로는

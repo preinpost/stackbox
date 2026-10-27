@@ -2551,6 +2551,10 @@
           "updated_at"
         ],
         "properties": {
+          "arch": {
+            "type": "string",
+            "description": "CPU architecture of the frozen guest; its disks cannot boot on another one."
+          },
           "archive": {
             "oneOf": [
               {

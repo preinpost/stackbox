@@ -504,6 +504,11 @@ pub struct ImportRequest {
     #[serde(default)]
     pub id: Option<String>,
 }
+/// Architecture the running daemon and its golden image are built for.
+pub fn current_arch() -> String {
+    std::env::consts::ARCH.into()
+}
+
 pub fn validate_snapshot_id(id: &str) -> Result<()> {
     validate_id(id).map_err(|_| {
         anyhow::anyhow!(
@@ -532,6 +537,9 @@ pub struct SnapshotArchive {
 pub struct SnapshotRecord {
     pub id: String,
     pub status: SnapshotStatus,
+    /// CPU architecture of the frozen guest; its disks cannot boot on another one.
+    #[serde(default = "current_arch")]
+    pub arch: String,
     /// Farm the snapshot was frozen from; `None` when imported from an archive.
     pub source_farm: Option<String>,
     pub plan: Plan,

@@ -794,6 +794,8 @@ export interface components {
       size_bytes: number;
     };
     SnapshotRecord: {
+      /** @description CPU architecture of the frozen guest; its disks cannot boot on another one. */
+      arch?: string;
       archive?: null | components["schemas"]["SnapshotArchive"];
       /** Format: int64 */
       created_at: number;

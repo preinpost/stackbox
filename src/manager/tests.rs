@@ -1301,6 +1301,41 @@ async fn snapshots_freeze_restore_export_import_and_delete() {
     assert_eq!(manager.get("src").unwrap().status, FarmStatus::Ready);
     backend.fail.store(false, Ordering::SeqCst);
 
+    // A guest frozen elsewhere cannot boot here, and an archive records where it was frozen.
+    let mut foreign = manager.snapshot("clean").unwrap();
+    foreign.arch = if current_arch() == "aarch64" {
+        "x86_64".into()
+    } else {
+        "aarch64".into()
+    };
+    manager
+        .update(|state| {
+            state.snapshots.insert("clean".into(), foreign.clone());
+            Ok(())
+        })
+        .unwrap();
+    let mut from_foreign = request("foreign");
+    from_foreign.snapshot_id = Some("clean".into());
+    let error = manager.create(from_foreign).unwrap_err().to_string();
+    assert!(error.contains("cannot boot on this"), "{error}");
+    // Freezing records the architecture the daemon runs on.
+    assert_eq!(manager.snapshot("clean").unwrap().arch, foreign.arch);
+    let local = manager.freeze(
+        "src",
+        SnapshotRequest {
+            id: "local-arch".into(),
+            note: None,
+        },
+    );
+    done(&manager, &local.unwrap()).await;
+    assert_eq!(manager.snapshot("local-arch").unwrap().arch, current_arch());
+    assert_eq!(backend.snapshots.lock().unwrap().len(), 3);
+    let arch_label = backend.snapshots.lock().unwrap()["fake/local-arch"]
+        .get("farm.snapshot.arch")
+        .cloned();
+    assert_eq!(arch_label.as_deref(), Some(current_arch().as_str()));
+    manager.delete_snapshot("local-arch").await.unwrap();
+
     manager.delete_snapshot("moved").await.unwrap();
     assert!(manager.snapshot("moved").unwrap_err().is::<NotFound>());
     assert!(

@@ -35,6 +35,7 @@ pub(super) fn restorable<'a>(state: &'a State, id: &str) -> Result<&'a SnapshotR
     {
         return Err(conflict(format!("snapshot '{id}' is not ready")));
     }
+    ensure_compatible(snapshot)?;
     Ok(snapshot)
 }
 
@@ -64,6 +65,19 @@ pub(super) fn recover_interrupted(state: &mut State) {
         snapshot.error = Some(error.into());
         snapshot.updated_at = now();
     }
+}
+
+/// A frozen guest carries one architecture's bootloader and kernel.
+fn ensure_compatible(snapshot: &SnapshotRecord) -> Result<()> {
+    if snapshot.arch != current_arch() {
+        return Err(conflict(format!(
+            "snapshot '{}' was frozen on {}, so its guest cannot boot on this {} host",
+            snapshot.id,
+            snapshot.arch,
+            current_arch()
+        )));
+    }
+    Ok(())
 }
 
 fn labels(snapshot: &SnapshotRecord) -> BTreeMap<String, String> {
@@ -97,6 +111,7 @@ fn labels(snapshot: &SnapshotRecord) -> BTreeMap<String, String> {
 
 /// Metadata of an imported archive, read back from its labels.
 struct Imported {
+    arch: String,
     plan: Plan,
     deployed: bool,
     source_exposure: Exposure,
@@ -120,6 +135,7 @@ fn parse_labels(labels: &BTreeMap<String, String>) -> Result<Imported> {
         .map(str::to_owned)
         .collect();
     Ok(Imported {
+        arch: arch.clone(),
         plan: plan(&PlanRequest { components })?,
         deployed: get(label::DEPLOYED)? == "true",
         source_exposure: Exposure {
@@ -216,6 +232,7 @@ impl FarmManager {
             let snapshot = SnapshotRecord {
                 id: request.id.clone(),
                 status: SnapshotStatus::Creating,
+                arch: current_arch(),
                 source_farm: Some(farm_id.into()),
                 plan: plan.clone(),
                 deployed: farm.status == FarmStatus::Ready,
@@ -305,6 +322,7 @@ impl FarmManager {
             .clone()
             .context("restored farm has no snapshot")?;
         let snapshot = self.snapshot(&id)?;
+        ensure_compatible(&snapshot)?;
         let reference = snapshot
             .reference
             .clone()
@@ -460,6 +478,7 @@ impl FarmManager {
             let snapshot = SnapshotRecord {
                 id: id.clone(),
                 status: SnapshotStatus::Importing,
+                arch: current_arch(),
                 source_farm: None,
                 plan: plan(&PlanRequest::default())?,
                 deployed: false,
@@ -485,6 +504,7 @@ impl FarmManager {
             let saved = manager.update_snapshot(&id, |s| match result {
                 Ok((imported, reference, size_bytes)) => {
                     s.status = SnapshotStatus::Ready;
+                    s.arch = imported.arch;
                     s.plan = imported.plan;
                     s.deployed = imported.deployed;
                     s.source_exposure = imported.source_exposure;

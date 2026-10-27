@@ -83,6 +83,7 @@ function SnapshotRow({ snapshot }: { snapshot: Snapshot }) {
               {snapshot.deployed ? "OpenStack 배포 완료" : "배포 전 VM"}
             </span>
           )}
+          <span className="muted text-xs">{snapshot.arch}</span>
         </div>
         {snapshot.note && <p className="mt-1.5">{snapshot.note}</p>}
         {known && (

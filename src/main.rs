@@ -332,9 +332,10 @@ async fn main() -> Result<()> {
                 } else {
                     for s in snapshots {
                         println!(
-                            "{:<24} {:?} from {} ({}{})",
+                            "{:<24} {:?} {:<8} from {} ({}{})",
                             s.id,
                             s.status,
+                            s.arch,
                             s.source_farm.as_deref().unwrap_or("archive"),
                             s.plan.components.join(","),
                             if s.deployed { ", deployed" } else { "" }
