@@ -960,25 +960,37 @@ fn farm_components(farm: &FarmRecord) -> Vec<String> {
         |plan| plan.components.clone(),
     )
 }
+/// Whether two `block`-wide port ranges around `a` and `b` share any port.
+fn blocks_overlap(a: u16, b: u16, block: u16) -> bool {
+    a.abs_diff(b) < block
+}
+
 fn allocate_ports(
     state: &State,
     host: String,
     bind: IpAddr,
     host_id: Option<&str>,
 ) -> Result<Exposure> {
-    for base in (15000u16..24000).step_by(10) {
+    let block = PUBLIC_PORT_BLOCK;
+    for base in (15000u16..24000).step_by(usize::from(block)) {
+        // Compare blocks, not just bases, so a widened block cannot overlap an older farm's ports.
         if state.farms.values().any(|f| {
             f.status != FarmStatus::Deleted
                 && f.host_id.as_deref() == host_id
-                && f.exposure.as_ref().is_some_and(|e| e.port_base == base)
+                && f.exposure
+                    .as_ref()
+                    .is_some_and(|e| blocks_overlap(e.port_base, base, block))
         }) {
             continue;
         }
         // Check host sockets as well as durable reservations; actual binding remains the SDK's job.
-        let listeners: std::io::Result<Vec<_>> =
-            (base..if host_id.is_some() { base } else { base + 10 })
-                .map(|p| TcpListener::bind((bind, p)))
-                .collect();
+        let listeners: std::io::Result<Vec<_>> = (base..if host_id.is_some() {
+            base
+        } else {
+            base + block
+        })
+            .map(|p| TcpListener::bind((bind, p)))
+            .collect();
         if host_id.is_some() || listeners.is_ok() {
             return Ok(Exposure {
                 host,

@@ -1444,3 +1444,17 @@ async fn settle_rechecks_a_restored_farm_without_redeploying() {
     assert_eq!(manager.get("copy").unwrap().status, FarmStatus::Created);
     settle(&manager).await;
 }
+
+#[test]
+fn port_blocks_never_overlap_even_when_the_block_width_grows() {
+    // The current grid: ten-apart bases do not share ports.
+    assert!(!blocks_overlap(15000, 15010, 10));
+    assert!(blocks_overlap(15000, 15000, 10));
+    // A base inside another farm's range is rejected, so widening the block is a safe change
+    // as long as the grid and the overlap test agree.
+    assert!(blocks_overlap(15000, 15005, 10));
+    assert!(blocks_overlap(15008, 15000, 10));
+    // A wider block shrinks the grid; neighbours must still stay clear of each other.
+    assert!(blocks_overlap(15000, 15016, 20));
+    assert!(!blocks_overlap(15000, 15020, 20));
+}

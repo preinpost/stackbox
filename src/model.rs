@@ -55,6 +55,14 @@ pub struct PublicPort {
     pub guest_port: u16,
     pub path: &'static str,
 }
+
+/// Host ports reserved per farm: `[port_base, port_base + PUBLIC_PORT_BLOCK)`.
+///
+/// Every [`PublicPort::offset`] must stay below this, and offsets are append-only so an
+/// existing farm's public URLs never move when the catalog grows. Raising the block also
+/// changes the grid of port blocks, so `allocate_ports` rejects any overlap, not just an
+/// equal base.
+pub const PUBLIC_PORT_BLOCK: u16 = 10;
 pub struct ComponentDef {
     pub id: &'static str,
     pub required: bool,
@@ -602,6 +610,32 @@ mod tests {
         assert_eq!(
             exposure.urls(None).keys().collect::<Vec<_>>(),
             ["glance", "keystone"]
+        );
+    }
+
+    #[test]
+    fn public_port_offsets_stay_inside_one_farm_block() {
+        let mut offsets: Vec<u16> = COMPONENTS
+            .iter()
+            .filter_map(|c| c.public.as_ref().map(|p| p.offset))
+            .collect();
+        let published = offsets.len();
+        offsets.sort_unstable();
+        offsets.dedup();
+        assert_eq!(
+            offsets.len(),
+            published,
+            "each service needs its own offset"
+        );
+        let highest = *offsets.last().expect("the catalog publishes keystone");
+        assert!(
+            highest < PUBLIC_PORT_BLOCK,
+            "offset {highest} would spill into the next farm's block of {PUBLIC_PORT_BLOCK} ports; raise PUBLIC_PORT_BLOCK or reuse an offset"
+        );
+        // Room to add services without touching the block size.
+        assert!(
+            u16::try_from(published).unwrap() < PUBLIC_PORT_BLOCK,
+            "the catalog already fills its port block"
         );
     }
 
