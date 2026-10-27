@@ -315,7 +315,12 @@ impl FarmManager {
                 },
                 None,
             )
-            .await?;
+            .await
+            .map_err(|error| {
+                anyhow::anyhow!(
+                    "the agent installed on this host could not run the cleanup ({error:#}); install the current agent from Hosts and remove the host again"
+                )
+            })?;
         let purged = match reply {
             crate::remote::protocol::Reply::Purged { farms } => farms,
             _ => anyhow::bail!("unexpected remote purge response"),

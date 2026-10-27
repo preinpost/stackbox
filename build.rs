@@ -8,13 +8,19 @@ use std::{fs, path::Path};
 
 fn main() {
     println!("cargo:rerun-if-env-changed=FARM_BUILD_ID");
-    for path in ["build.rs", "Cargo.toml", "Cargo.lock", "src", "docker/agent.Dockerfile"] {
+    for path in [
+        "build.rs",
+        "Cargo.toml",
+        "Cargo.lock",
+        "src",
+        "docker/agent.Dockerfile",
+    ] {
         println!("cargo:rerun-if-changed={path}");
     }
     let id = std::env::var("FARM_BUILD_ID")
         .ok()
         .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| source_identity());
+        .unwrap_or_else(source_identity);
     println!("cargo:rustc-env=FARM_BUILD_ID={id}");
 }
 
@@ -45,7 +51,10 @@ fn collect(dir: &Path, files: &mut Vec<String>) {
         let path = entry.path();
         if path.is_dir() {
             collect(&path, files);
-        } else if path.extension().is_some_and(|ext| ext == "rs" || ext == "py") {
+        } else if path
+            .extension()
+            .is_some_and(|ext| ext == "rs" || ext == "py")
+        {
             files.push(path.display().to_string());
         }
     }
