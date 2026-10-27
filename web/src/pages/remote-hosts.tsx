@@ -93,6 +93,10 @@ export function RemoteHostsPage() {
               : api.unregisterHost(id),
     onSuccess: refresh,
   });
+  const agentMismatch = agentBuildMismatch(
+    selected?.agent?.artifact,
+    coordinator.data?.build_id,
+  );
   const hostJobs =
     jobs.data
       ?.filter((j) => j.host_id === selected?.id)
@@ -311,6 +315,7 @@ export function RemoteHostsPage() {
                 인증 변경
               </Button>
               <Button
+                variant={agentMismatch ? "primary" : "default"}
                 disabled={
                   !!selected.active_job ||
                   action.isPending ||
@@ -321,11 +326,18 @@ export function RemoteHostsPage() {
                 onClick={() =>
                   action.mutate({ id: selected.id, kind: "agent" })
                 }
+                title={
+                  agentMismatch
+                    ? "설치된 실행기의 빌드가 coordinator와 다릅니다. 재설치하세요."
+                    : undefined
+                }
               >
                 <Terminal size={14} />
-                {remoteAgentNeedsUpdate(selected)
-                  ? "Farm 실행기 업데이트"
-                  : "Farm 실행기 설치"}
+                {agentMismatch
+                  ? "Farm 실행기 재설치"
+                  : remoteAgentNeedsUpdate(selected)
+                    ? "Farm 실행기 업데이트"
+                    : "Farm 실행기 설치"}
               </Button>
               <Button
                 disabled={!!selected.active_job || action.isPending}
@@ -576,10 +588,36 @@ function HostInspection({
           </li>
         ))}
       </ul>
+      <dl className="build-compare">
+        <div>
+          <dt>msb</dt>
+          <dd className={!i.msb_version ? "build-unknown" : ""}>
+            {i.msb_version ?? "미설치"}
+          </dd>
+        </div>
+        <div>
+          <dt>coordinator</dt>
+          <dd className={!coordinatorBuildId ? "build-unknown" : ""}>
+            {coordinatorBuildId || "미상"}
+          </dd>
+        </div>
+        <div>
+          <dt>remote</dt>
+          <dd
+            className={
+              agentBuildMismatch(host.agent?.artifact, coordinatorBuildId)
+                ? "build-mismatch"
+                : !host.agent
+                  ? "build-unknown"
+                  : ""
+            }
+          >
+            {host.agent?.artifact?.build_id || "설치 안 됨"}
+          </dd>
+        </div>
+      </dl>
       <p className="field-hint">
-        최근 점검 {dateTime(i.checked_at)} · msb {i.msb_version ?? "미설치"} ·
-        실행기 {host.agent?.artifact?.build_id || "버전 미상"} (coordinator{" "}
-        {coordinatorBuildId || "미상"})
+        최근 점검 {dateTime(i.checked_at)}
         {!i.kvm_available &&
           " · VM 위에서 실행한다면 nested virtualization을 먼저 활성화하세요."}
       </p>

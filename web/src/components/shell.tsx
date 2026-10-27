@@ -64,24 +64,24 @@ export function Shell() {
       >
         <Link to="/" className="brand" onClick={() => setMenuOpen(false)}>
           <span className="brand-mark">
-            <Boxes size={23} strokeWidth={1.7} />
+            <Boxes size={19} strokeWidth={1.8} />
           </span>
-          <span>
+          <span className="brand-name">
             farm<span className="brand-period">.</span>
           </span>
           <span className="version-tag">LOCAL</span>
         </Link>
         <div className="workspace">
           <span className="workspace-avatar">
-            <Terminal size={17} />
+            <Terminal size={15} />
+            <span className="online-dot" />
           </span>
-          <div>
+          <div className="workspace-text">
             <strong>Local workspace</strong>
-            <span>OpenStack environments</span>
+            <span>OpenStack VMs</span>
           </div>
-          <span className="online-dot" />
         </div>
-        <p className="nav-label">WORKSPACE</p>
+        <p className="nav-label">Workspace</p>
         <nav aria-label="주 메뉴">
           {navigation.map(({ to, label, icon: Icon }) => (
             <Link
@@ -92,7 +92,7 @@ export function Shell() {
               activeProps={{ className: "nav-item nav-active" }}
               onClick={() => setMenuOpen(false)}
             >
-              <Icon size={18} />
+              <Icon size={17} />
               <span>{label}</span>
               {label === "Jobs" && running > 0 && (
                 <span className="nav-count">{running}</span>
@@ -102,7 +102,7 @@ export function Shell() {
         </nav>
         <div className="sidebar-bottom">
           <div className="host-mini">
-            <div className="flex items-center gap-2">
+            <div className="host-mini-head">
               <span
                 className={`status-dot ${hostReady ? "text-emerald-500" : "text-amber-500"}`}
               />
@@ -116,13 +116,17 @@ export function Shell() {
                       : "Host 설정 확인"}
               </strong>
             </div>
-            <p>
-              {host.data
-                ? `${host.data.arch} · ${host.data.hypervisor.toUpperCase()} · ${memory(host.data.memory_total_mib)}`
-                : "farmd 연결 상태를 확인합니다"}
-            </p>
-            <Link to="/hosts">
-              호스트 상태 보기
+            {host.data ? (
+              <ul className="host-mini-specs">
+                <li>{host.data.arch}</li>
+                <li>{host.data.hypervisor.toUpperCase()}</li>
+                <li>{memory(host.data.memory_total_mib)}</li>
+              </ul>
+            ) : (
+              <p>farmd 연결 상태를 확인합니다</p>
+            )}
+            <Link to="/hosts" onClick={() => setMenuOpen(false)}>
+              <span>호스트 상태 보기</span>
               <ArrowUpRight size={13} />
             </Link>
           </div>
@@ -132,13 +136,13 @@ export function Shell() {
             target="_blank"
             rel="noreferrer"
           >
-            <ExternalLink size={14} />
-            API specification
+            <ExternalLink size={15} />
+            <span>API specification</span>
             <ArrowUpRight size={13} />
           </a>
           <div className="sidebar-footer">
             <span className="operator-avatar">L</span>
-            <div>
+            <div className="sidebar-footer-text">
               <strong>Local operator</strong>
               <span>Host workspace</span>
             </div>
