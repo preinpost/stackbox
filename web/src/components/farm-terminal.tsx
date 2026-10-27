@@ -79,14 +79,19 @@ export function FarmTerminal({
     );
     socket.binaryType = "arraybuffer";
     let ended = false;
+    // A remount (StrictMode, retry) must ignore the handlers of its own stale socket,
+    // or the closed socket reports a disconnect after the new one is already open.
+    let disposed = false;
     const send = (data: string | Uint8Array) => {
       if (socket.readyState === WebSocket.OPEN) socket.send(data);
     };
     socket.onopen = () => {
+      if (disposed) return;
       setConnection("open");
       terminal.focus();
     };
     socket.onmessage = (event: MessageEvent<string | ArrayBuffer>) => {
+      if (disposed) return;
       if (typeof event.data !== "string") {
         terminal.write(new Uint8Array(event.data));
         return;
@@ -99,6 +104,7 @@ export function FarmTerminal({
       );
     };
     socket.onclose = () => {
+      if (disposed) return;
       setConnection("closed");
       if (!ended)
         setNotice(
@@ -118,6 +124,7 @@ export function FarmTerminal({
     const observer = new ResizeObserver(refit);
     observer.observe(element);
     return () => {
+      disposed = true;
       observer.disconnect();
       subscriptions.forEach((subscription) => subscription.dispose());
       socket.close();
