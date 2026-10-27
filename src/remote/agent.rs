@@ -142,6 +142,42 @@ impl Agent {
             limits: Limits::system(),
         }
     }
+    /// Destroys every farm VM this host's agent created, whatever coordinator reserved it,
+    /// and forgets them. Used when the coordinator removes the host.
+    async fn purge(&self, request: &Request) -> Result<Reply> {
+        let reserved: Vec<String> = {
+            let registry = LockedRegistry::open(&self.dir)?;
+            registry.state.farms.keys().cloned().collect()
+        };
+        let mut purged = 0;
+        let mut failed = Vec::new();
+        for id in &reserved {
+            match self.backend.delete(id.clone()).await {
+                Ok(()) => purged += 1,
+                Err(error) => failed.push(format!("{id}: {error:#}")),
+            }
+        }
+        // Forget only what is gone, so a retry still knows what to clean up.
+        let mut registry = LockedRegistry::open(&self.dir)?;
+        for id in &reserved {
+            if !failed
+                .iter()
+                .any(|message| message.starts_with(&format!("{id}:")))
+            {
+                registry.state.farms.remove(id);
+            }
+        }
+        registry.save()?;
+        let _ = request;
+        ensure!(
+            failed.is_empty(),
+            "failed to remove {} reserved farm(s): {}",
+            failed.len(),
+            failed.join("; ")
+        );
+        Ok(Reply::Purged { farms: purged })
+    }
+
     pub async fn execute(&self, request: Request, emit: Emitter) -> Result<Reply> {
         ensure!(
             request.version == VERSION,
@@ -180,7 +216,16 @@ impl Agent {
                 .collect();
             return Ok(Reply::Inventory { farms });
         }
-        let (id, generation) = request.operation.scope().unwrap();
+        // A host-wide cleanup has no farm id, so it runs before the per-farm scope below.
+        if matches!(request.operation, Operation::Purge) {
+            // Serialize with creates so a reservation cannot appear mid-purge.
+            let _create_lock = lock(&self.dir, "create.lock")?;
+            return self.purge(&request).await;
+        }
+        let (id, generation) = request
+            .operation
+            .scope()
+            .context("farm operation without a farm id")?;
         let _farm_lock = lock(&self.dir, &format!("{id}.lock"))?;
         match &request.operation {
             Operation::Create {
@@ -337,45 +382,6 @@ impl Agent {
                 registry.save()?;
                 Ok(Reply::Done)
             }
-            Operation::Purge => {
-                // Only this coordinator's reservations; a user's own sandboxes have no label.
-                let reserved: Vec<String> = {
-                    let registry = LockedRegistry::open(&self.dir)?;
-                    registry
-                        .state
-                        .farms
-                        .iter()
-                        .filter(|(_, entry)| entry.coordinator == request.coordinator_id)
-                        .map(|(id, _)| id.clone())
-                        .collect()
-                };
-                let mut purged = 0;
-                let mut failed = Vec::new();
-                for id in &reserved {
-                    match self.backend.delete(id.clone()).await {
-                        Ok(()) => purged += 1,
-                        Err(error) => failed.push(format!("{id}: {error:#}")),
-                    }
-                }
-                // Forget only what is gone, so a retry still knows what to clean up.
-                let mut registry = LockedRegistry::open(&self.dir)?;
-                for id in &reserved {
-                    if !failed
-                        .iter()
-                        .any(|message| message.starts_with(&format!("{id}:")))
-                    {
-                        registry.state.farms.remove(id);
-                    }
-                }
-                registry.save()?;
-                ensure!(
-                    failed.is_empty(),
-                    "failed to remove {} reserved farm(s): {}",
-                    failed.len(),
-                    failed.join("; ")
-                );
-                Ok(Reply::Purged { farms: purged })
-            }
             Operation::Deploy { .. } | Operation::Endpoints { .. } => {
                 let registry = LockedRegistry::open(&self.dir)?;
                 let entry = registry
@@ -526,6 +532,7 @@ mod tests {
             dir: dir.path().into(),
             backend: backend.clone(),
             limits: Limits {
+                // Enough for one default plan; the second must be refused.
                 memory_budget_mib: 5000,
                 available_mib: 10000,
                 virtualization: true,
@@ -666,5 +673,55 @@ mod tests {
             b"corrupt"
         );
         assert!(!original.is_empty());
+    }
+
+    #[tokio::test]
+    async fn purge_removes_every_reserved_farm_and_forgets_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = Arc::new(Fake::default());
+        let agent = Agent {
+            dir: dir.path().to_path_buf(),
+            backend: backend.clone(),
+            limits: Limits {
+                // Two default plans are 3 GiB each.
+                memory_budget_mib: 20_000,
+                available_mib: 32_000,
+                virtualization: true,
+            },
+        };
+        let owner = uuid::Uuid::new_v4().to_string();
+        let other = uuid::Uuid::new_v4().to_string();
+        let emit: Emitter = Arc::new(|_| Ok(()));
+        for (who, id, base) in [(&owner, "one", 15000), (&other, "two", 15010)] {
+            agent
+                .execute(
+                    request(who, create(id, &uuid::Uuid::new_v4().to_string(), base)),
+                    emit.clone(),
+                )
+                .await
+                .unwrap();
+        }
+        // Both coordinators' VMs are this host's farms, so a purge removes all of them.
+        let reply = agent
+            .execute(request(&owner, Operation::Purge), emit.clone())
+            .await
+            .unwrap();
+        assert!(matches!(reply, Reply::Purged { farms: 2 }), "{reply:?}");
+        assert!(backend.farms.lock().unwrap().is_empty());
+        assert!(matches!(
+            agent
+                .execute(request(&owner, Operation::Scan), emit.clone())
+                .await
+                .unwrap(),
+            Reply::Inventory { farms } if farms.is_empty()
+        ));
+        // A second purge has nothing left and still succeeds.
+        assert!(matches!(
+            agent
+                .execute(request(&owner, Operation::Purge), emit)
+                .await
+                .unwrap(),
+            Reply::Purged { farms: 0 }
+        ));
     }
 }

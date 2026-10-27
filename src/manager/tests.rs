@@ -16,7 +16,7 @@ use tower::ServiceExt;
 #[derive(Default)]
 pub(crate) struct Fake {
     pub(crate) fail_create: AtomicBool,
-    farms: Mutex<BTreeMap<String, Vec<FarmNode>>>,
+    pub(crate) farms: Mutex<BTreeMap<String, Vec<FarmNode>>>,
     /// msb snapshot references and their labels.
     snapshots: Mutex<BTreeMap<String, BTreeMap<String, String>>>,
     /// Exported archive contents: the labels of the snapshot written there.
