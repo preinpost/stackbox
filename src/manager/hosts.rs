@@ -488,6 +488,11 @@ fn check_artifact_build(arch: &str, build_id: &str) -> Result<()> {
     if build_id == crate::BUILD_ID {
         return Ok(());
     }
+    if build_id.is_empty() {
+        return Err(anyhow::anyhow!(
+            "the {arch} farm-agent artifact was built before build stamps existed; rebuild it with `scripts/build-agent.sh {arch}` and install the agent again"
+        ));
+    }
     Err(anyhow::anyhow!(
         "the {arch} farm-agent artifact was built from {build_id} but this coordinator is {daemon}; rebuild it with `scripts/build-agent.sh {arch}` and install the agent again",
         daemon = crate::BUILD_ID

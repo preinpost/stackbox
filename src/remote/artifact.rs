@@ -23,11 +23,10 @@ impl Artifact {
             62 => "x86_64",
             _ => anyhow::bail!("unsupported farm-agent CPU architecture"),
         };
-        let build_id = crate::remote::agent::artifact_build_id(&bytes).ok_or_else(|| {
-            anyhow::anyhow!(
-                "farm-agent artifact has no build marker; rebuild it with `scripts/build-agent.sh {arch}`"
-            )
-        })?;
+        // An artifact from before the marker still loads, but cannot be installed anywhere:
+        // `artifact_built_by_daemon` refuses it with the rebuild command.
+        let build_id =
+            crate::remote::agent::artifact_build_id(&bytes).unwrap_or_default();
         Ok(Self {
             info: AgentArtifactInfo {
                 sha256: format!("{:x}", Sha256::digest(&bytes)),
