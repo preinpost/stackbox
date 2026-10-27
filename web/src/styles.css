@@ -478,22 +478,23 @@ input:focus-visible,
   color: #506256;
   font-weight: 500;
 }
-.topbar-right {
+.breadcrumb {
   display: flex;
   align-items: center;
-  gap: 18px;
-  font-size: 13px;
-  color: #5f6d62;
+  gap: 12px;
+  min-width: 0;
 }
-.topbar-tag {
-  font-size: 12px;
-  letter-spacing: 1px;
-  color: #626e66;
+.breadcrumb a {
+  border-radius: 4px;
+  transition: color 0.15s;
 }
-.topbar-divider {
-  width: 1px;
-  height: 14px;
-  background: #e4e9e5;
+.breadcrumb a:hover {
+  color: #155f43;
+}
+.breadcrumb strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .mobile-menu {
   display: none;
@@ -2642,13 +2643,6 @@ h2 {
   }
   .mobile-menu {
     display: inline-flex;
-  }
-  .topbar-tag,
-  .topbar-divider {
-    display: none;
-  }
-  .topbar-right {
-    font-size: 13px;
   }
   .page-container {
     padding: 27px 18px 32px;

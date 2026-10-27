@@ -12,9 +12,30 @@ import {
   Snowflake,
   Terminal,
 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import { hostQuery, jobsQuery, hostJobsQuery, activeJob } from "../api/client";
 import { memory } from "../lib";
+
+type Crumb = {
+  label: string;
+  to?: "/" | "/hosts" | "/jobs" | "/snapshots";
+};
+
+// The last crumb is the current page and stays plain text.
+function breadcrumb(pathname: string): Crumb[] {
+  if (pathname.startsWith("/hosts")) return [{ label: "Hosts" }];
+  if (pathname === "/host")
+    return [{ label: "Hosts", to: "/hosts" }, { label: "로컬" }];
+  if (pathname.startsWith("/jobs")) return [{ label: "Jobs" }];
+  if (pathname.startsWith("/snapshots")) return [{ label: "Snapshots" }];
+  const farm = pathname.match(/^\/farms\/([^/]+)/);
+  if (farm)
+    return [
+      { label: "Farms", to: "/" },
+      { label: decodeURIComponent(farm[1]) },
+    ];
+  return [{ label: "Farms" }];
+}
 
 export function Shell() {
   const [menuOpen, setMenuOpen] = useState(false);
@@ -162,33 +183,19 @@ export function Shell() {
               {menuOpen ? <PanelLeftClose size={20} /> : <Menu size={20} />}
             </button>
             <Server size={15} />
-            <span>Workspace</span>
-            <span className="text-stone-300">/</span>
-            <strong>
-              {pathname.startsWith("/hosts")
-                ? "Hosts"
-                : pathname === "/host"
-                  ? "Hosts / 로컬"
-                  : pathname.startsWith("/jobs")
-                    ? "Jobs"
-                    : pathname.startsWith("/snapshots")
-                      ? "Snapshots"
-                      : "Farms"}
-            </strong>
-          </div>
-          <div className="topbar-right">
-            <span className="topbar-tag">MICROSANDBOX</span>
-            <span className="topbar-divider" />
-            <span className="flex items-center gap-2">
-              <span
-                className={`status-dot ${hostReady ? "text-emerald-500" : "text-amber-500"}`}
-              />
-              {hostReady
-                ? "시스템 정상"
-                : host.isPending
-                  ? "연결 중"
-                  : "호스트 확인"}
-            </span>
+            <nav aria-label="현재 위치" className="breadcrumb">
+              <Link to="/">Workspace</Link>
+              {breadcrumb(pathname).map(({ label, to }, i) => (
+                <Fragment key={i}>
+                  <span className="text-stone-300">/</span>
+                  {to ? (
+                    <Link to={to}>{label}</Link>
+                  ) : (
+                    <strong aria-current="page">{label}</strong>
+                  )}
+                </Fragment>
+              ))}
+            </nav>
           </div>
         </header>
         <main id="main-content" className="page-container">
