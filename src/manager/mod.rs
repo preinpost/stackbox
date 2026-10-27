@@ -437,6 +437,24 @@ rebuild it with `task agent-build` and install the agent again",
                     "all {expected} farm nodes must be running before deploying"
                 )));
             }
+            // A remote farm keeps the agent it was created with. Move it to the host's current
+            // agent once that agent matches this coordinator, so reinstalling the agent also
+            // repairs existing farms.
+            let mut repinned = None;
+            if let Some(host_id) = farm.host_id.clone()
+                && let Some(stored) = state.hosts.get(&host_id)
+                && let Some(agent) = &stored.host.agent
+                && farm.agent_sha256.as_deref() != Some(agent.artifact.sha256.as_str())
+            {
+                if agent.artifact.build_id != crate::BUILD_ID {
+                    return Err(conflict(format!(
+                        "the agent installed on {host_id} was built from {} but this coordinator is {}; reinstall it from Hosts first",
+                        agent.artifact.build_id, crate::BUILD_ID
+                    )));
+                }
+                repinned = Some(agent.artifact.sha256.clone());
+                farm.agent_sha256 = repinned.clone();
+            }
             let mut job = new_job(id, JobKind::Deploy);
             job.phase = Some(request.from);
             farm.status = FarmStatus::Deploying;
@@ -445,8 +463,21 @@ rebuild it with `task agent-build` and install the agent again",
             farm.phase = Some(request.from);
             farm.updated_at = now();
             state.jobs.insert(job.id.clone(), job.clone());
-            Ok(job)
+            Ok((job, repinned))
         })?;
+        let (job, repinned) = job;
+        if let Some(digest) = repinned {
+            self.log(
+                &job.farm_id,
+                &job.id,
+                None,
+                format!(
+                    "agent: using the host's current agent {}
+",
+                    &digest[..12]
+                ),
+            )?;
+        }
         self.spawn(job.clone(), Some(request));
         Ok(job)
     }

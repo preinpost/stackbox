@@ -1603,3 +1603,91 @@ async fn purging_a_host_deletes_its_farms_and_leftover_vms_then_unregisters_it()
     assert_eq!(jobs[0].status, JobStatus::Succeeded);
     settle(&manager).await;
 }
+
+#[tokio::test]
+async fn deploying_a_remote_farm_moves_it_to_the_hosts_current_agent() {
+    use crate::remote::{AgentArtifactInfo, HostJobKind, InstalledAgent, test_server::Fixture};
+    let fixture = Fixture::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let manager = FarmManager::with_backend(options(dir.path()), Arc::new(Fake::default()))
+        .await
+        .unwrap();
+    manager
+        .register_host(fixture.registration("target"))
+        .unwrap();
+    let prep = manager
+        .start_host_job("target", HostJobKind::Prepare)
+        .unwrap();
+    host_done(&manager, &prep.id).await;
+    let agent = |sha: &str| InstalledAgent {
+        artifact: AgentArtifactInfo {
+            sha256: sha.into(),
+            arch: std::env::consts::ARCH.into(),
+            protocol: 1,
+            supports_single_vm: true,
+            build_id: crate::BUILD_ID.into(),
+        },
+        verified_at: now(),
+    };
+    let old = "a".repeat(64);
+    manager
+        .update(|state| {
+            state.hosts.get_mut("target").unwrap().host.agent = Some(agent(&old));
+            Ok(())
+        })
+        .unwrap();
+    let mut remote = request("remote-farm");
+    remote.host_id = Some("target".into());
+    remote.external_host = "target.example".into();
+    done(&manager, &manager.create(remote).unwrap()).await;
+    assert_eq!(manager.get("remote-farm").unwrap().agent_sha256, Some(old));
+
+    // The operator reinstalls the agent; the next deploy follows the host instead of the pin.
+    let new = "b".repeat(64);
+    manager
+        .update(|state| {
+            state.hosts.get_mut("target").unwrap().host.agent = Some(agent(&new));
+            Ok(())
+        })
+        .unwrap();
+    let deploy = manager
+        .deploy("remote-farm", DeployRequest::default())
+        .unwrap();
+    assert_eq!(done(&manager, &deploy).await.status, JobStatus::Succeeded);
+    assert_eq!(
+        manager.get("remote-farm").unwrap().agent_sha256,
+        Some(new.clone())
+    );
+    assert!(
+        manager
+            .logs("remote-farm", 0, 100)
+            .unwrap()
+            .iter()
+            .any(|entry| entry.message.contains("host's current agent"))
+    );
+
+    // An agent built elsewhere is still refused, so a stale install cannot be pinned silently.
+    let stale = InstalledAgent {
+        artifact: AgentArtifactInfo {
+            sha256: "c".repeat(64),
+            arch: std::env::consts::ARCH.into(),
+            protocol: 1,
+            supports_single_vm: true,
+            build_id: "other-build".into(),
+        },
+        verified_at: now(),
+    };
+    manager
+        .update(|state| {
+            state.hosts.get_mut("target").unwrap().host.agent = Some(stale);
+            Ok(())
+        })
+        .unwrap();
+    let error = manager
+        .deploy("remote-farm", DeployRequest::default())
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("reinstall it from Hosts"), "{error}");
+    assert_eq!(manager.get("remote-farm").unwrap().agent_sha256, Some(new));
+    settle(&manager).await;
+}
