@@ -3,9 +3,19 @@
 use std::process::Command;
 
 fn main() {
-    println!("cargo:rerun-if-changed=build.rs");
+    // Recompute whenever the sources or the checked-out revision change: a plain
+    // `.git/HEAD` watch misses commits, which only touch the branch ref.
+    for path in [
+        "build.rs",
+        "Cargo.toml",
+        "Cargo.lock",
+        "src",
+        ".git/HEAD",
+        ".git/refs",
+    ] {
+        println!("cargo:rerun-if-changed={path}");
+    }
     println!("cargo:rerun-if-env-changed=FARM_BUILD_ID");
-    println!("cargo:rerun-if-changed=.git/HEAD");
     let id = std::env::var("FARM_BUILD_ID")
         .ok()
         .filter(|value| !value.trim().is_empty())
