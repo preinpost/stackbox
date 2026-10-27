@@ -34,6 +34,10 @@ API prefix는 `/api/v1`입니다. token이 설정된 경우 모든 경로에
    삭제 성공 후에도 개별 farm 조회에는 `deleted` tombstone이 남지만 목록에서 제외됩니다.
 
 farm 상태는 `creating`, `created`, `deploying`, `settling`, `ready`, `failed`, `broken`, `deleting`, `deleted`입니다.
+배포 중에는 `phase`와 함께 `step`이 채워집니다. `step`은 그 단계 안에서 지금 실행 중인 작업이며,
+설치·검증 등 farm이 직접 실행하는 구간은 단계 이름을, Kolla-Ansible 구간은 현재 Ansible task 이름을
+담습니다. 단계가 바뀌면 비워지고, 마지막 값은 job이 끝난 뒤에도 남습니다. 포탈은 이 값을 배포 단계
+목록의 현재 단계 아래에 표시합니다.
 `creating`/`deploying`은 job이 큐에서 대기하는 시간도 포함하므로 job 상태를 같이 표시하세요.
 VM 관측 결과는 시작 시와 30초 주기로 갱신되며, 실행 중인 job의 farm은 reconcile에서 건너뜁니다.
 `ready`는 마지막 배포가 성공하고 예상 VM이 실행 중이라는 뜻이며 OpenStack API의 상시 health check는 아닙니다.
