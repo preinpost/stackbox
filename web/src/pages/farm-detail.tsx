@@ -14,6 +14,7 @@ import {
   Database,
   Globe,
   LoaderCircle,
+  RefreshCw,
   KeyRound,
   MessageSquare,
   MonitorDot,
@@ -26,6 +27,7 @@ import {
 import {
   api,
   farmQuery,
+  hostsQuery,
   jobsQuery,
   keys,
   type Datastore,
@@ -65,6 +67,7 @@ export function FarmDetailRoute() {
 export function FarmDetailPage({ id }: { id: string }) {
   const query = useQuery(farmQuery(id));
   const jobs = useQuery(jobsQuery());
+  const hosts = useQuery(hostsQuery());
   if (query.isPending) return <Loading label="Farm 정보를 불러오는 중" />;
   if (query.error)
     return (
@@ -87,6 +90,13 @@ export function FarmDetailPage({ id }: { id: string }) {
     .sort((a, b) => b.created_at - a.created_at);
   const latestDeployment = history.find((j) => j.kind === "deploy");
   const activeJob = history.find((j) => j.id === farm.active_job);
+  // A remote farm keeps the agent digest it was created with; updates need a new farm.
+  const host = hosts.data?.find((h) => h.id === farm.host_id);
+  const staleAgent = Boolean(
+    farm.agent_sha256 &&
+    host?.agent?.artifact?.sha256 &&
+    farm.agent_sha256 !== host.agent.artifact.sha256,
+  );
   // A restored farm was deployed before freezing; its VM starts from disk without a deploy job.
   const deployed =
     history.some((j) => j.kind === "deploy" && j.status === "succeeded") ||
@@ -139,6 +149,16 @@ export function FarmDetailPage({ id }: { id: string }) {
         <div className="warning-notice mb-5">
           기존 다중 VM 구성입니다. 이 Farm의 상태 조회와 삭제는 계속 사용할 수
           있습니다. 배포하려면 단일 VM Farm을 새로 만드세요.
+        </div>
+      )}
+      {staleAgent && (
+        <div className="info-notice">
+          <RefreshCw size={18} />
+          <div>
+            <strong>이 farm은 예전 Farm 실행기에 고정되어 있습니다.</strong>{" "}
+            배포 진행 상황은 그 실행기가 보내는 단계까지만 표시됩니다. 새
+            실행기를 쓰려면 같은 구성으로 farm을 새로 만드세요.
+          </div>
         </div>
       )}
       {farm.observation_error && (
