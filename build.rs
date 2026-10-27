@@ -1,44 +1,52 @@
-//! Bakes the source revision into every binary so a stale farm-agent artifact can be
-//! told apart from the coordinator that uploaded it.
-use std::process::Command;
+//! Bakes an identity of the agent's own sources into every binary, so a stale
+//! farm-agent artifact can be told apart from the coordinator that would use it.
+//!
+//! The identity covers what the protocol depends on (Rust sources and the image
+//! recipe), not the git revision: documentation or portal commits must not force
+//! every host to reinstall its agent.
+use std::{fs, path::Path};
 
 fn main() {
-    // Recompute whenever the sources or the checked-out revision change: a plain
-    // `.git/HEAD` watch misses commits, which only touch the branch ref.
-    for path in [
-        "build.rs",
-        "Cargo.toml",
-        "Cargo.lock",
-        "src",
-        ".git/HEAD",
-        ".git/refs",
-    ] {
+    println!("cargo:rerun-if-env-changed=FARM_BUILD_ID");
+    for path in ["build.rs", "Cargo.toml", "Cargo.lock", "src", "docker/agent.Dockerfile"] {
         println!("cargo:rerun-if-changed={path}");
     }
-    println!("cargo:rerun-if-env-changed=FARM_BUILD_ID");
     let id = std::env::var("FARM_BUILD_ID")
         .ok()
         .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(from_git);
+        .unwrap_or_else(|| source_identity());
     println!("cargo:rustc-env=FARM_BUILD_ID={id}");
 }
 
-/// Docker builds copy only the working tree, so the caller can pass the revision in.
-fn from_git() -> String {
-    let git = |args: &[&str]| {
-        Command::new("git")
-            .args(args)
-            .output()
-            .ok()
-            .filter(|out| out.status.success())
-            .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_owned())
+/// FNV-1a over every source file, so the id changes only when they do.
+fn source_identity() -> String {
+    let mut files = Vec::new();
+    collect(Path::new("src"), &mut files);
+    files.push("Cargo.toml".into());
+    files.push("Cargo.lock".into());
+    files.push("docker/agent.Dockerfile".into());
+    files.sort();
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for file in files {
+        let bytes = fs::read(&file).unwrap_or_default();
+        for chunk in file.as_bytes().iter().chain(bytes.iter()) {
+            hash ^= u64::from(*chunk);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+    format!("{hash:016x}")
+}
+
+fn collect(dir: &Path, files: &mut Vec<String>) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
     };
-    let Some(head) = git(&["rev-parse", "--short=12", "HEAD"]) else {
-        return "unknown".into();
-    };
-    match git(&["status", "--porcelain"]) {
-        Some(status) if !status.is_empty() => format!("{head}-dirty"),
-        Some(_) => head,
-        None => head,
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect(&path, files);
+        } else if path.extension().is_some_and(|ext| ext == "rs" || ext == "py") {
+            files.push(path.display().to_string());
+        }
     }
 }
