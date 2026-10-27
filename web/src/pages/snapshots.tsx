@@ -1,7 +1,12 @@
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
-import { Snowflake } from "lucide-react";
-import { farmsQuery, snapshotsQuery, type Snapshot } from "../api/client";
+import { Cpu, Snowflake } from "lucide-react";
+import {
+  farmsQuery,
+  hostQuery,
+  snapshotsQuery,
+  type Snapshot,
+} from "../api/client";
 import {
   DeleteSnapshotDialog,
   ExportSnapshotDialog,
@@ -16,10 +21,11 @@ import {
   PageHeading,
   StatusBadge,
 } from "../components/ui";
-import { bytes, componentLabel, dateTime, memory } from "../lib";
+import { bytes, componentLabel, dateTime, memory, snapshotHost } from "../lib";
 
 export function SnapshotsPage() {
   const snapshots = useQuery(snapshotsQuery());
+  const host = useQuery(hostQuery());
   const sorted = [...(snapshots.data ?? [])].sort(
     (a, b) => b.created_at - a.created_at,
   );
@@ -56,7 +62,11 @@ export function SnapshotsPage() {
           />
         ) : (
           sorted.map((snapshot) => (
-            <SnapshotRow snapshot={snapshot} key={snapshot.id} />
+            <SnapshotRow
+              snapshot={snapshot}
+              localArch={host.data?.arch}
+              key={snapshot.id}
+            />
           ))
         )}
       </section>
@@ -64,8 +74,16 @@ export function SnapshotsPage() {
   );
 }
 
-function SnapshotRow({ snapshot }: { snapshot: Snapshot }) {
+function SnapshotRow({
+  snapshot,
+  localArch,
+}: {
+  snapshot: Snapshot;
+  localArch?: string;
+}) {
   const farms = useQuery(farmsQuery());
+  // Architecture alone decides whether the guest can boot here; the label says where it came from.
+  const foreignArch = Boolean(localArch && snapshot.arch !== localArch);
   const sourceExists = farms.data?.some((f) => f.id === snapshot.source_farm);
   // An import learns its services from the archive only when it completes.
   const known = snapshot.status !== "importing" && snapshot.status !== "failed";
@@ -83,7 +101,17 @@ function SnapshotRow({ snapshot }: { snapshot: Snapshot }) {
               {snapshot.deployed ? "OpenStack 배포 완료" : "배포 전 VM"}
             </span>
           )}
-          <span className="muted text-xs">{snapshot.arch}</span>
+          <span
+            className={`snapshot-host ${foreignArch ? "snapshot-host-foreign" : ""}`}
+            title={
+              foreignArch
+                ? `이 호스트는 ${localArch}이므로 복원할 수 없습니다`
+                : "이 스냅샷을 얼린 호스트"
+            }
+          >
+            <Cpu size={12} />
+            {snapshotHost(snapshot)}
+          </span>
         </div>
         {snapshot.note && <p className="mt-1.5">{snapshot.note}</p>}
         {known && (
@@ -133,7 +161,7 @@ function SnapshotRow({ snapshot }: { snapshot: Snapshot }) {
         {snapshot.error && <p className="job-error">{snapshot.error}</p>}
       </div>
       <div className="flex shrink-0 flex-wrap items-center gap-2">
-        <RestoreSnapshotDialog snapshot={snapshot} />
+        <RestoreSnapshotDialog snapshot={snapshot} foreignArch={foreignArch} />
         <ExportSnapshotDialog snapshot={snapshot} />
         <DeleteSnapshotDialog snapshot={snapshot} />
       </div>

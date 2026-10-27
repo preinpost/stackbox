@@ -21,7 +21,7 @@ import {
   type Farm,
   type Snapshot,
 } from "../api/client";
-import { componentLabel, isAllInOneFarm, memory } from "../lib";
+import { componentLabel, isAllInOneFarm, memory, snapshotHost } from "../lib";
 import { Button, CopyText, ErrorNotice, Modal } from "./ui";
 
 const idPattern = "[a-z0-9]([a-z0-9\\-]{0,46}[a-z0-9])?";
@@ -59,6 +59,7 @@ export const canFreeze = (farm: Farm) =>
 
 export function FreezeFarmDialog({ farm }: { farm: Farm }) {
   const client = useQueryClient();
+  const host = useQuery(hostQuery());
   const snapshots = useQuery(snapshotsQuery());
   const suggested = `${farm.id.slice(0, 42)}-${farm.status === "ready" ? "clean" : "base"}`;
   const [id, setId] = useState(suggested);
@@ -150,7 +151,13 @@ export function FreezeFarmDialog({ farm }: { farm: Farm }) {
             </label>
             <div className="warning-notice">
               데이터베이스를 깨끗하게 저장하기 위해 VM을 잠시 정지했다가 다시
-              시작합니다. 서비스가 다시 응답할 때까지 몇 분 정도 걸립니다.
+              시작합니다. 서비스가 다시 응답할 때까지 몇 분 정도 걸립니다. 이
+              스냅샷은{" "}
+              {snapshotHost({
+                arch: host.data?.arch ?? undefined,
+                platform: host.data?.os,
+              })}
+              에서만 복원할 수 있습니다.
             </div>
             {mutation.error && <ErrorNotice error={mutation.error} />}
           </div>
@@ -177,7 +184,13 @@ export function FreezeFarmDialog({ farm }: { farm: Farm }) {
   );
 }
 
-export function RestoreSnapshotDialog({ snapshot }: { snapshot: Snapshot }) {
+export function RestoreSnapshotDialog({
+  snapshot,
+  foreignArch = false,
+}: {
+  snapshot: Snapshot;
+  foreignArch?: boolean;
+}) {
   const client = useQueryClient();
   const navigate = useNavigate();
   const farms = useQuery(farmsQuery());
@@ -210,7 +223,8 @@ export function RestoreSnapshotDialog({ snapshot }: { snapshot: Snapshot }) {
     ? host.data.memory_budget_mib - host.data.memory_reserved_mib
     : null;
   const overBudget = remaining !== null && snapshot.plan.memory_mib > remaining;
-  const ready = ["ready", "exporting"].includes(snapshot.status);
+  const ready =
+    ["ready", "exporting"].includes(snapshot.status) && !foreignArch;
   return (
     <Dialog.Root open={dialog.open} onOpenChange={dialog.onOpenChange}>
       <Dialog.Trigger render={<Button variant="primary" disabled={!ready} />}>
@@ -237,6 +251,10 @@ export function RestoreSnapshotDialog({ snapshot }: { snapshot: Snapshot }) {
                   {snapshot.plan.components.map(componentLabel).join(" · ")} ·{" "}
                   {memory(snapshot.plan.memory_mib)}
                   {snapshot.deployed ? " · 배포 완료" : " · 배포 전"}
+                </p>
+                <p>
+                  {snapshotHost(snapshot)}에서 얼린 게스트 · 이 호스트의
+                  아키텍처와 같아야 복원됩니다
                 </p>
               </div>
             </div>
@@ -291,6 +309,12 @@ export function RestoreSnapshotDialog({ snapshot }: { snapshot: Snapshot }) {
                 등록합니다.
               </small>
             </label>
+            {foreignArch && (
+              <div className="warning-notice">
+                이 스냅샷은 다른 아키텍처({snapshot.arch})에서 얼렸습니다. 이
+                호스트에서는 복원할 수 없습니다.
+              </div>
+            )}
             {overBudget && (
               <div className="warning-notice">
                 예약 가능한 메모리가 부족합니다. 현재 여유:{" "}

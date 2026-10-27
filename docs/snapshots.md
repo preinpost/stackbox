@@ -76,14 +76,19 @@ bind 주소와 RabbitMQ 노드 이름(`rabbit@<hostname>`), nova-compute·Neutro
 배포 전에 얼린 스냅샷은 `created` 상태로 복원되며 일반 farm처럼 배포합니다.
 복원한 farm도 다시 배포할 수 있습니다.
 
-## 아키텍처
+## 아키텍처와 플랫폼
 
 스냅샷은 게스트의 부트로더와 커널을 그대로 담으므로 CPU 아키텍처를 넘지 못합니다. 얼릴 때
-아키텍처를 기록하고(`farm.snapshot.arch` label, `SnapshotRecord.arch`), **가져오기와 복원 양쪽에서**
-다른 아키텍처를 거절합니다. 예를 들어 Apple Silicon에서 얼린 `.msb`를 x86_64 Linux 호스트에
-가져오면 `archive was frozen on aarch64; this host is x86_64`로, 상태 파일만 옮겨온 경우에는
-복원 단계에서 `cannot boot on this x86_64 host`로 실패합니다. 상태 파일과 msb 스냅샷 디렉터리를
-서로 다른 아키텍처로 복사하지 마세요.
+아키텍처(`arch`)와 그 호스트의 OS(`platform`)를 기록하고, **가져오기와 복원 양쪽에서** 다른
+아키텍처를 거절합니다. Apple Silicon에서 얼린 `.msb`를 x86_64 Linux 호스트로 옮기면
+`archive was frozen on aarch64; this host is x86_64`로, 상태 파일만 옮겨온 경우에는 복원 단계에서
+`cannot boot on this x86_64 host`로 실패합니다. 상태 파일과 msb 스냅샷 디렉터리를 서로 다른
+아키텍처로 복사하지 마세요.
+
+`platform`은 복원 가능 여부를 막지는 않고, 포탈 스냅샷 카드에 `aarch64 · macOS`처럼 표시됩니다.
+같은 아키텍처라면 macOS에서 얼린 게스트를 Linux의 microsandbox로 복원할 수 있지만, 서버 간
+이동이 잦다면 대상 플랫폼에서 얼리는 편이 안전합니다. 현재 호스트의 아키텍처와 다른 스냅샷은
+카드에서 경고색으로 표시되고 복원 버튼이 비활성화됩니다.
 
 OpenStack 릴리스는 label(`farm.snapshot.openstack-release`)로만 기록하고 복원을 막지는 않습니다.
 스냅샷은 자기 Kolla 설치를 그대로 담기 때문입니다. 다만 서로 다른 릴리스에서 같은 farm을

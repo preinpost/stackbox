@@ -805,6 +805,8 @@ export interface components {
       id: string;
       note?: string | null;
       plan: components["schemas"]["Plan"];
+      /** @description Host OS that froze it (`macos`, `linux`); recorded for the operator, not enforced. */
+      platform?: string | null;
       /** @description msb snapshot reference; set once captured or imported. */
       reference?: string | null;
       /** Format: int64 */

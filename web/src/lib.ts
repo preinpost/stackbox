@@ -38,6 +38,16 @@ export const phases: { id: Phase; label: string; description: string }[] = [
   { id: "verify", label: "Verify", description: "Token과 이미지 API 검증" },
 ];
 export const memory = (mib: number) => `${Number((mib / 1024).toFixed(1))} GiB`;
+/** Where a snapshot can be restored: its guest boots only on the same architecture. */
+export const snapshotHost = (snapshot: {
+  arch?: string | null;
+  platform?: string | null;
+}) =>
+  snapshot.platform
+    ? `${snapshot.arch ?? "unknown"} · ${platformName(snapshot.platform)}`
+    : (snapshot.arch ?? "unknown");
+export const platformName = (os: string) =>
+  ({ macos: "macOS", linux: "Linux", windows: "Windows" })[os] ?? os;
 export const bytes = (value: number) =>
   value >= 1024 ** 3
     ? `${Number((value / 1024 ** 3).toFixed(1))} GiB`

@@ -1334,6 +1334,16 @@ async fn snapshots_freeze_restore_export_import_and_delete() {
         .get("farm.snapshot.arch")
         .cloned();
     assert_eq!(arch_label.as_deref(), Some(current_arch().as_str()));
+    // The host platform travels with the archive and is shown to the operator.
+    let frozen = manager.snapshot("local-arch").unwrap();
+    assert_eq!(
+        frozen.platform.as_deref(),
+        Some(current_platform().as_str())
+    );
+    let platform_label = backend.snapshots.lock().unwrap()["fake/local-arch"]
+        .get("farm.snapshot.platform")
+        .cloned();
+    assert_eq!(platform_label.as_deref(), Some(current_platform().as_str()));
     manager.delete_snapshot("local-arch").await.unwrap();
 
     manager.delete_snapshot("moved").await.unwrap();

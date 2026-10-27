@@ -3386,3 +3386,20 @@ h2 {
     grid-template-columns: minmax(0, 1fr);
   }
 }
+.snapshot-host {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid #e8efe8;
+  border-radius: 4px;
+  background: #fafcfa;
+  padding: 1px 6px;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 11.5px;
+  color: #597260;
+}
+.snapshot-host-foreign {
+  border-color: #f1e0d6;
+  background: #fdf7f3;
+  color: #9a6248;
+}

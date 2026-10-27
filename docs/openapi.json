@@ -2593,6 +2593,13 @@
           "plan": {
             "$ref": "#/components/schemas/Plan"
           },
+          "platform": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Host OS that froze it (`macos`, `linux`); recorded for the operator, not enforced."
+          },
           "reference": {
             "type": [
               "string",

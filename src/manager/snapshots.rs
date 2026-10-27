@@ -98,7 +98,8 @@ fn labels(snapshot: &SnapshotRecord) -> BTreeMap<String, String> {
             crate::kolla::OPENSTACK_RELEASE.into(),
         ),
         // The guest image is built for the host architecture.
-        (label::ARCH.into(), std::env::consts::ARCH.into()),
+        (label::ARCH.into(), current_arch()),
+        (label::PLATFORM.into(), current_platform()),
     ]);
     if let Some(source) = &snapshot.source_farm {
         labels.insert(label::SOURCE.into(), source.clone());
@@ -112,6 +113,7 @@ fn labels(snapshot: &SnapshotRecord) -> BTreeMap<String, String> {
 /// Metadata of an imported archive, read back from its labels.
 struct Imported {
     arch: String,
+    platform: Option<String>,
     plan: Plan,
     deployed: bool,
     source_exposure: Exposure,
@@ -136,6 +138,7 @@ fn parse_labels(labels: &BTreeMap<String, String>) -> Result<Imported> {
         .collect();
     Ok(Imported {
         arch: arch.clone(),
+        platform: labels.get(label::PLATFORM).cloned(),
         plan: plan(&PlanRequest { components })?,
         deployed: get(label::DEPLOYED)? == "true",
         source_exposure: Exposure {
@@ -233,6 +236,7 @@ impl FarmManager {
                 id: request.id.clone(),
                 status: SnapshotStatus::Creating,
                 arch: current_arch(),
+                platform: Some(current_platform()),
                 source_farm: Some(farm_id.into()),
                 plan: plan.clone(),
                 deployed: farm.status == FarmStatus::Ready,
@@ -479,6 +483,7 @@ impl FarmManager {
                 id: id.clone(),
                 status: SnapshotStatus::Importing,
                 arch: current_arch(),
+                platform: None,
                 source_farm: None,
                 plan: plan(&PlanRequest::default())?,
                 deployed: false,
@@ -505,6 +510,7 @@ impl FarmManager {
                 Ok((imported, reference, size_bytes)) => {
                     s.status = SnapshotStatus::Ready;
                     s.arch = imported.arch;
+                    s.platform = imported.platform;
                     s.plan = imported.plan;
                     s.deployed = imported.deployed;
                     s.source_exposure = imported.source_exposure;

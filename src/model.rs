@@ -509,6 +509,11 @@ pub fn current_arch() -> String {
     std::env::consts::ARCH.into()
 }
 
+/// Host OS of the running daemon; a farm frozen elsewhere says where it came from.
+pub fn current_platform() -> String {
+    std::env::consts::OS.into()
+}
+
 pub fn validate_snapshot_id(id: &str) -> Result<()> {
     validate_id(id).map_err(|_| {
         anyhow::anyhow!(
@@ -540,6 +545,9 @@ pub struct SnapshotRecord {
     /// CPU architecture of the frozen guest; its disks cannot boot on another one.
     #[serde(default = "current_arch")]
     pub arch: String,
+    /// Host OS that froze it (`macos`, `linux`); recorded for the operator, not enforced.
+    #[serde(default)]
+    pub platform: Option<String>,
     /// Farm the snapshot was frozen from; `None` when imported from an archive.
     pub source_farm: Option<String>,
     pub plan: Plan,
@@ -568,6 +576,7 @@ pub mod snapshot_labels {
     pub const EXPOSURE_PORT_BASE: &str = "farm.snapshot.exposure.port-base";
     pub const RELEASE: &str = "farm.snapshot.openstack-release";
     pub const ARCH: &str = "farm.snapshot.arch";
+    pub const PLATFORM: &str = "farm.snapshot.platform";
     pub const NOTE: &str = "farm.snapshot.note";
 }
 
