@@ -142,6 +142,60 @@ test("registers this machine as a host and checks it right away", async () => {
   client.clear();
 });
 
+test("can delete the local host's snapshots along with its farms", async () => {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+  });
+  const deletes: string[] = [];
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (path: string, options?: RequestInit) => {
+      if (options?.method === "DELETE") {
+        deletes.push(path);
+        return Response.json(
+          { id: "job", host_id: "local", events: [] },
+          { status: 202 },
+        );
+      }
+      if (path.endsWith("/hosts"))
+        return Response.json([
+          {
+            id: "local",
+            kind: "local",
+            address: "localhost",
+            port: 0,
+            status: "ready",
+          },
+        ]);
+      if (path.endsWith("/snapshots"))
+        return Response.json([{ id: "clean", status: "ready" }]);
+      if (path.endsWith("/host")) return Response.json({ build_id: "x" });
+      return Response.json([]);
+    }),
+  );
+  render(
+    <QueryClientProvider client={client}>
+      <RemoteHostsPage />
+    </QueryClientProvider>,
+  );
+  const user = userEvent.setup();
+  await user.click(await screen.findByRole("button", { name: "등록 해제" }));
+  const snapshots = await screen.findByRole("checkbox", {
+    name: /스냅샷 1개도 삭제/,
+  });
+  expect(snapshots.getAttribute("aria-checked")).toBe("false");
+  await user.click(snapshots);
+  const dialog = screen.getByRole("dialog");
+  const buttons = dialog.querySelectorAll("button");
+  await user.click(
+    [...buttons].find((b) => b.textContent === "등록 해제") as HTMLElement,
+  );
+  await waitFor(() =>
+    expect(deletes).toEqual(["/api/v1/hosts/local?purge=true&snapshots=true"]),
+  );
+  client.clear();
+});
+
 test("shows a dial-in host's token once, in the command to run on it", async () => {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },

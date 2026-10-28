@@ -858,6 +858,7 @@ async fn remote_host_restart_recovers_interrupted_jobs_and_missing_key_never_rep
                     error: None,
                     created_at: now(),
                     finished_at: None,
+                    delete_snapshots: false,
                 },
             );
             Ok(())
@@ -1757,6 +1758,68 @@ async fn purging_a_host_deletes_its_farms_and_leftover_vms_then_unregisters_it()
         jobs[0].events
     );
     assert_eq!(jobs[0].status, JobStatus::Succeeded);
+    settle(&manager).await;
+}
+
+#[tokio::test]
+async fn purging_the_local_host_can_also_delete_its_snapshots() {
+    use crate::remote::{HostJobKind, test_server::Fixture};
+    let fixture = Fixture::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let backend = Arc::new(Fake::default());
+    let manager = open_with(options(dir.path()), backend.clone()).await;
+    done(&manager, &manager.create(request("src")).unwrap()).await;
+    done(
+        &manager,
+        &manager.deploy("src", DeployRequest::default()).unwrap(),
+    )
+    .await;
+    let freeze = manager
+        .freeze(
+            "src",
+            SnapshotRequest {
+                id: "clean".into(),
+                note: None,
+            },
+        )
+        .unwrap();
+    assert_eq!(done(&manager, &freeze).await.status, JobStatus::Succeeded);
+
+    // Only the local host keeps snapshots, so a remote purge cannot take them.
+    manager
+        .register_host(fixture.registration("target"))
+        .unwrap();
+    assert!(
+        manager
+            .start_purge("target", true)
+            .unwrap_err()
+            .is::<BadRequest>()
+    );
+    manager.unregister_host("target").unwrap();
+
+    let purge = manager.start_purge("local", true).unwrap();
+    assert!(purge.delete_snapshots);
+    let finished = host_done(&manager, &purge.id).await;
+    assert_eq!(
+        finished.status,
+        JobStatus::Succeeded,
+        "{:?} {:?}",
+        finished.error,
+        finished.events
+    );
+    assert!(matches!(finished.kind, HostJobKind::Purge));
+    assert!(manager.host("local").is_err());
+    assert_eq!(manager.get("src").unwrap().status, FarmStatus::Deleted);
+    assert!(manager.snapshot("clean").unwrap_err().is::<NotFound>());
+    assert!(!backend.snapshots.lock().unwrap().contains_key("fake/clean"));
+    assert!(
+        finished
+            .events
+            .iter()
+            .any(|event| event.message == "Deleting 1 snapshot(s)"),
+        "{:?}",
+        finished.events
+    );
     settle(&manager).await;
 }
 

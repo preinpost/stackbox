@@ -28,6 +28,7 @@ import {
   hostJobsQuery,
   keys,
   hostQuery,
+  snapshotsQuery,
   type HostCapacity,
   type HostJob,
   type RemoteHost,
@@ -57,6 +58,7 @@ export function RemoteHostsPage() {
   const jobs = useQuery(hostJobsQuery());
   const coordinator = useQuery(hostQuery());
   const farms = useQuery(farmsQuery());
+  const snapshots = useQuery(snapshotsQuery());
   const client = useQueryClient();
   const buildId = coordinator.data?.build_id;
   // Unset selects the first host.
@@ -85,9 +87,11 @@ export function RemoteHostsPage() {
     mutationFn: ({
       id,
       kind,
+      snapshots = false,
     }: {
       id: string;
       kind: "check" | "prepare" | "remove" | "purge" | "agent";
+      snapshots?: boolean;
     }) =>
       kind === "check"
         ? api.checkHost(id)
@@ -96,7 +100,7 @@ export function RemoteHostsPage() {
           : kind === "agent"
             ? api.installHostAgent(id)
             : kind === "purge"
-              ? api.purgeHost(id)
+              ? api.purgeHost(id, snapshots)
               : api.unregisterHost(id),
     onSuccess: refresh,
   });
@@ -406,11 +410,13 @@ export function RemoteHostsPage() {
                 kind="remove"
                 disabled={!!selected.active_job || action.isPending}
                 farms={farmCount(selected.id)}
+                snapshots={local ? (snapshots.data?.length ?? 0) : 0}
                 coordinatorBuildId={buildId}
-                run={(purge) =>
+                run={(purge, deleteSnapshots) =>
                   action.mutateAsync({
                     id: selected.id,
                     kind: purge ? "purge" : "remove",
+                    snapshots: deleteSnapshots,
                   })
                 }
               />
@@ -763,6 +769,7 @@ function HostActionDialog({
   kind,
   disabled,
   farms,
+  snapshots = 0,
   coordinatorBuildId,
   run,
 }: {
@@ -770,8 +777,10 @@ function HostActionDialog({
   kind: "prepare" | "remove";
   disabled: boolean;
   farms: number;
+  /** Snapshots kept on this host; only the local host keeps any. */
+  snapshots?: number;
   coordinatorBuildId?: string;
-  run: (purge: boolean) => Promise<unknown>;
+  run: (purge: boolean, deleteSnapshots: boolean) => Promise<unknown>;
 }) {
   const [open, setOpen] = useState(false);
   const [pending, setPending] = useState(false);
@@ -781,8 +790,12 @@ function HostActionDialog({
   const local = host.kind !== "ssh";
   const place = host.kind === "local" ? "로컬 호스트" : "이 호스트";
   const [purge, setPurge] = useState(true);
+  // Off by default: a snapshot that was never exported cannot be recovered.
+  const [deleteSnapshots, setDeleteSnapshots] = useState(false);
   const mismatch =
     !prepare && agentBuildMismatch(host.agent?.artifact, coordinatorBuildId);
+  // A mismatched agent cannot clean up, so the disabled box also means records only.
+  const purging = purge && !mismatch;
   return (
     <Dialog.Root
       open={open}
@@ -853,7 +866,7 @@ function HostActionDialog({
                 )}
                 <label className="checkbox-row">
                   <Checkbox.Root
-                    checked={purge && !mismatch}
+                    checked={purging}
                     disabled={mismatch}
                     onCheckedChange={(checked) => setPurge(checked === true)}
                     className="checkbox"
@@ -871,8 +884,32 @@ function HostActionDialog({
                     </small>
                   </span>
                 </label>
+                {snapshots > 0 && (
+                  <label className="checkbox-row">
+                    <Checkbox.Root
+                      checked={purging && deleteSnapshots}
+                      disabled={!purging}
+                      onCheckedChange={(checked) =>
+                        setDeleteSnapshots(checked === true)
+                      }
+                      className="checkbox"
+                    >
+                      <Checkbox.Indicator>
+                        <Check size={12} strokeWidth={3} />
+                      </Checkbox.Indicator>
+                    </Checkbox.Root>
+                    <span>
+                      스냅샷 {snapshots}개도 삭제
+                      <small>
+                        {purging && deleteSnapshots
+                          ? "내보내지 않은 스냅샷은 되돌릴 수 없습니다."
+                          : `스냅샷은 ${place}에 남고, 지우려면 ${place}를 다시 등록해야 합니다.`}
+                      </small>
+                    </span>
+                  </label>
+                )}
                 <p className="field-hint">
-                  {purge
+                  {purging
                     ? `farm이 만든 VM과 디스크만 지웁니다. ${local ? place : "이 서버"}에서 직접 만든 msb 샌드박스는 그대로 둡니다.`
                     : local
                       ? `호스트 기록만 지웁니다. ${place}의 VM·디스크는 남습니다.`
@@ -893,7 +930,10 @@ function HostActionDialog({
                 setPending(true);
                 setError(undefined);
                 try {
-                  await run(prepare ? false : purge);
+                  await run(
+                    !prepare && purging,
+                    !prepare && purging && deleteSnapshots,
+                  );
                   setOpen(false);
                 } catch (e) {
                   setError(e);

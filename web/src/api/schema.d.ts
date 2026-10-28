@@ -678,6 +678,8 @@ export interface components {
     HostJob: {
       /** Format: int64 */
       created_at: number;
+      /** @description A purge that also deletes the snapshots this host keeps. */
+      delete_snapshots?: boolean;
       error?: string | null;
       events: components["schemas"]["HostJobEvent"][];
       /** Format: int64 */
@@ -1544,6 +1546,8 @@ export interface operations {
         id: string;
         /** @description Also delete this coordinator's farms and leftover VMs on the host, then unregister it. */
         purge: boolean;
+        /** @description With purge, also delete the snapshots kept on the host. Only the local host keeps them. */
+        snapshots: boolean;
       };
       cookie?: never;
     };
@@ -1558,13 +1562,21 @@ export interface operations {
           "application/json": components["schemas"]["RemovedHost"];
         };
       };
-      /** @description purge=true: host job that deletes the farms, their VMs and then the host */
+      /** @description purge=true: host job that deletes the farms, their VMs, with snapshots=true the snapshots, and then the host */
       202: {
         headers: {
           [name: string]: unknown;
         };
         content: {
           "application/json": components["schemas"]["HostJob"];
+        };
+      };
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorBody"];
         };
       };
       409: {

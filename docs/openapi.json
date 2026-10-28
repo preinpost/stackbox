@@ -848,6 +848,15 @@
             "schema": {
               "type": "boolean"
             }
+          },
+          {
+            "name": "snapshots",
+            "in": "path",
+            "description": "With purge, also delete the snapshots kept on the host. Only the local host keeps them.",
+            "required": true,
+            "schema": {
+              "type": "boolean"
+            }
           }
         ],
         "responses": {
@@ -862,11 +871,21 @@
             }
           },
           "202": {
-            "description": "purge=true: host job that deletes the farms, their VMs and then the host",
+            "description": "purge=true: host job that deletes the farms, their VMs, with snapshots=true the snapshots, and then the host",
             "content": {
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/HostJob"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
                 }
               }
             }
@@ -2147,6 +2166,10 @@
             "type": "integer",
             "format": "int64",
             "minimum": 0
+          },
+          "delete_snapshots": {
+            "type": "boolean",
+            "description": "A purge that also deletes the snapshots this host keeps."
           },
           "error": {
             "type": [

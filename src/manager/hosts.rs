@@ -358,6 +358,14 @@ impl FarmManager {
             .ok_or_else(|| NotFound(format!("host job '{id}'")).into())
     }
     pub fn start_host_job(&self, id: &str, kind: HostJobKind) -> Result<HostJob> {
+        self.start_job(id, kind, false)
+    }
+    /// Purges the host; `delete_snapshots` also deletes the snapshots, which only the local
+    /// host keeps.
+    pub fn start_purge(&self, id: &str, delete_snapshots: bool) -> Result<HostJob> {
+        self.start_job(id, HostJobKind::Purge, delete_snapshots)
+    }
+    fn start_job(&self, id: &str, kind: HostJobKind, delete_snapshots: bool) -> Result<HostJob> {
         let job = self.update(|state| {
             if !self.is_accepting() {
                 return Err(conflict("daemon is draining"));
@@ -382,6 +390,9 @@ impl FarmManager {
                     "only SSH hosts get an agent installed; this host runs its own",
                 ));
             }
+            if delete_snapshots && host.kind != HostKind::Local {
+                return Err(bad_request("only the local host keeps snapshots"));
+            }
             let job = HostJob {
                 id: uuid::Uuid::new_v4().to_string(),
                 host_id: id.into(),
@@ -391,6 +402,7 @@ impl FarmManager {
                 error: None,
                 created_at: now(),
                 finished_at: None,
+                delete_snapshots,
             };
             host.active_job = Some(job.id.clone());
             host.error = None;
@@ -450,6 +462,23 @@ impl FarmManager {
                     "deleting farm {farm} failed: {}; the host was left registered",
                     outcome.error.unwrap_or_else(|| "unknown error".into())
                 );
+            }
+        }
+        if job.delete_snapshots {
+            let snapshots = self.snapshots()?;
+            if !snapshots.is_empty() {
+                self.host_event(
+                    &job.id,
+                    &format!("Deleting {} snapshot(s)", snapshots.len()),
+                )?;
+            }
+            for snapshot in &snapshots {
+                self.delete_snapshot(&snapshot.id).await.map_err(|error| {
+                    anyhow::anyhow!(
+                        "deleting snapshot {} failed: {error:#}; the host was left registered",
+                        snapshot.id
+                    )
+                })?;
             }
         }
 

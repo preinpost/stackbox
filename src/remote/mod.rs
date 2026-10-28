@@ -370,4 +370,7 @@ pub struct HostJob {
     pub error: Option<String>,
     pub created_at: u64,
     pub finished_at: Option<u64>,
+    /// A purge that also deletes the snapshots this host keeps.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub delete_snapshots: bool,
 }

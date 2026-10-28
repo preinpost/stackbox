@@ -187,9 +187,13 @@ export const api = {
     request<HostJob>(`/hosts/${encode(id)}/prepare`, { method: "POST" }),
   unregisterHost: (id: string) =>
     request<{ id: string }>(`/hosts/${encode(id)}`, { method: "DELETE" }),
-  /** Delete this coordinator's farms and leftover VMs on the host, then unregister it. */
-  purgeHost: (id: string) =>
-    request<HostJob>(`/hosts/${encode(id)}?purge=true`, { method: "DELETE" }),
+  /** Delete this coordinator's farms and leftover VMs on the host, then unregister it.
+   * `snapshots` also deletes the snapshots, which only the local host keeps. */
+  purgeHost: (id: string, snapshots = false) =>
+    request<HostJob>(
+      `/hosts/${encode(id)}?purge=true${snapshots ? "&snapshots=true" : ""}`,
+      { method: "DELETE" },
+    ),
   create: (body: CreateRequest) =>
     request<Job>("/farms", { method: "POST", body: JSON.stringify(body) }),
   deploy: (id: string, from: Phase) =>

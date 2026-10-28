@@ -458,8 +458,11 @@ struct UnregisterQuery {
     /// Also delete this coordinator's farms and leftover VMs on the host, then unregister it.
     #[serde(default)]
     purge: bool,
+    /// With purge, also delete the snapshots kept on the host. Only the local host keeps them.
+    #[serde(default)]
+    snapshots: bool,
 }
-#[utoipa::path(delete, path="/api/v1/hosts/{id}", params(("id"=String, Path), UnregisterQuery), responses((status=200, description="Unregistered; records and credentials only", body=RemovedHost), (status=202, description="purge=true: host job that deletes the farms, their VMs and then the host", body=HostJob), (status=409, body=ErrorBody)))]
+#[utoipa::path(delete, path="/api/v1/hosts/{id}", params(("id"=String, Path), UnregisterQuery), responses((status=200, description="Unregistered; records and credentials only", body=RemovedHost), (status=202, description="purge=true: host job that deletes the farms, their VMs, with snapshots=true the snapshots, and then the host", body=HostJob), (status=400, body=ErrorBody), (status=409, body=ErrorBody)))]
 async fn unregister_host(
     State(app): State<App>,
     Path(id): Path<String>,
@@ -467,7 +470,13 @@ async fn unregister_host(
 ) -> Result<Response, ApiError> {
     if query.purge {
         return Ok(accepted_host(
-            app.manager.start_host_job(&id, HostJobKind::Purge)?,
+            app.manager.start_purge(&id, query.snapshots)?,
+        ));
+    }
+    if query.snapshots {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "snapshots=true needs purge=true".into(),
         ));
     }
     app.manager.unregister_host(&id)?;
