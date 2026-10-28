@@ -70,9 +70,7 @@ enum Command {
         from: Phase,
     },
     /// Check that a deployed farm's services answer again after its VM started from disk
-    Settle {
-        id: String,
-    },
+    Settle { id: String },
     Status {
         id: String,
         #[arg(long)]
@@ -84,6 +82,9 @@ enum Command {
     },
     Delete {
         id: String,
+        /// Remove only the record, without asking the host; a VM it left there stays
+        #[arg(long)]
+        forget: bool,
     },
     Endpoints {
         id: String,
@@ -166,6 +167,9 @@ enum SnapshotCommand {
     },
     Delete {
         id: String,
+        /// Remove only the record, without asking the host; a disk left there stays
+        #[arg(long)]
+        forget: bool,
     },
 }
 fn print_json(value: &impl serde::Serialize) -> Result<()> {
@@ -341,8 +345,13 @@ async fn main() -> Result<()> {
             wait(&manager, manager.settle(&id)?).await?;
             println!("{id}: services answer again");
         }
-        Command::Delete { id } => {
-            wait(&manager, manager.delete(&id)?).await?;
+        Command::Delete { id, forget } => {
+            let job = if forget {
+                manager.forget(&id)?
+            } else {
+                manager.delete(&id)?
+            };
+            wait(&manager, job).await?;
             println!("deleted farm '{id}'");
         }
         Command::Status { id, json } => {
@@ -458,8 +467,12 @@ async fn main() -> Result<()> {
                 })?;
                 print_json(&wait_snapshot(&manager, &record.id).await?)?;
             }
-            SnapshotCommand::Delete { id } => {
-                manager.delete_snapshot(&id).await?;
+            SnapshotCommand::Delete { id, forget } => {
+                if forget {
+                    manager.forget_snapshot(&id).await?;
+                } else {
+                    manager.delete_snapshot(&id).await?;
+                }
                 println!("deleted snapshot '{id}'");
             }
         },

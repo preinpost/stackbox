@@ -192,7 +192,9 @@ pub async fn import_snapshot(archive: &Path, snapshot_id: &str) -> Result<Import
 }
 
 pub async fn remove_snapshot(reference: &str) -> Result<()> {
-    Snapshot::remove_ref(SnapshotReference::auto(reference), false)
-        .await
-        .with_context(|| format!("remove snapshot {reference}"))
+    match Snapshot::remove_ref(SnapshotReference::auto(reference), false).await {
+        // Already removed, e.g. with `msb snapshot rm`: only the coordinator's record is left.
+        Err(microsandbox::MicrosandboxError::SnapshotNotFound(_)) => Ok(()),
+        result => result.with_context(|| format!("remove snapshot {reference}")),
+    }
 }

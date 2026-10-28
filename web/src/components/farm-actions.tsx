@@ -46,6 +46,7 @@ import {
   Button,
   CopyText,
   ErrorNotice,
+  ForgetOption,
   Loading,
   Modal,
   SelectInput,
@@ -553,9 +554,10 @@ export function DeployFarmDialog({
 export function DeleteFarmDialog({ farm }: { farm: Farm }) {
   const [open, setOpen] = useState(false);
   const [confirm, setConfirm] = useState("");
+  const [forget, setForget] = useState(false);
   const client = useQueryClient();
   const mutation = useMutation({
-    mutationFn: () => api.delete(farm.id),
+    mutationFn: () => api.delete(farm.id, forget),
     onSuccess: async () => {
       await refresh(client);
       setOpen(false);
@@ -569,6 +571,7 @@ export function DeleteFarmDialog({ farm }: { farm: Farm }) {
           setOpen(v);
           if (v) {
             setConfirm("");
+            setForget(false);
             mutation.reset();
           }
         }
@@ -588,7 +591,11 @@ export function DeleteFarmDialog({ farm }: { farm: Farm }) {
       </Dialog.Trigger>
       <Modal
         title="Farm을 삭제할까요?"
-        description="이 farm의 모든 VM과 연결된 디스크가 삭제됩니다."
+        description={
+          forget
+            ? "이 farm의 coordinator 기록만 삭제합니다."
+            : "이 farm의 모든 VM과 연결된 디스크가 삭제됩니다."
+        }
         closeDisabled={mutation.isPending}
       >
         <form
@@ -602,6 +609,12 @@ export function DeleteFarmDialog({ farm }: { farm: Farm }) {
               이 작업은 되돌릴 수 없습니다. 필요한 이미지나 데이터를 먼저
               보관하세요.
             </div>
+            <ForgetOption
+              checked={forget}
+              onChange={setForget}
+              disabled={mutation.isPending}
+              left="VM과 디스크"
+            />
             <div className="field">
               <span>
                 확인을 위해 <CopyText value={farm.id} /> 입력
@@ -632,7 +645,7 @@ export function DeleteFarmDialog({ farm }: { farm: Farm }) {
               ) : (
                 <Trash2 size={15} />
               )}
-              Farm 삭제
+              {forget ? "기록만 삭제" : "Farm 삭제"}
             </Button>
           </div>
         </form>

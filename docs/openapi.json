@@ -190,6 +190,15 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "forget",
+            "in": "path",
+            "description": "Remove only the coordinator's record, without asking the host. Whatever the host\nstill keeps stays there; use it when the host is gone or unreachable.",
+            "required": true,
+            "schema": {
+              "type": "boolean"
+            }
           }
         ],
         "responses": {
@@ -1279,6 +1288,15 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "forget",
+            "in": "path",
+            "description": "Remove only the coordinator's record, without asking the host. Whatever the host\nstill keeps stays there; use it when the host is gone or unreachable.",
+            "required": true,
+            "schema": {
+              "type": "boolean"
+            }
           }
         ],
         "responses": {
@@ -2335,6 +2353,10 @@
             ],
             "format": "int64",
             "minimum": 0
+          },
+          "forget": {
+            "type": "boolean",
+            "description": "A delete that removes only the coordinator's record and leaves any VM on the host."
           },
           "id": {
             "type": "string"

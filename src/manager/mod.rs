@@ -675,11 +675,16 @@ impl FarmManager {
         Ok(job)
     }
     pub fn delete(&self, id: &str) -> Result<Job> {
-        self.delete_farm(id, false)
+        self.delete_farm(id, false, false)
+    }
+    /// Removes the farm's record without asking its host, for a host that is gone or
+    /// unreachable. A VM it left on the host stays until the host is purged.
+    pub fn forget(&self, id: &str) -> Result<Job> {
+        self.delete_farm(id, false, true)
     }
 
     /// `own_host_job` lets a purge delete the farms of the host whose job it already holds.
-    pub(crate) fn delete_farm(&self, id: &str, own_host_job: bool) -> Result<Job> {
+    pub(crate) fn delete_farm(&self, id: &str, own_host_job: bool, forget: bool) -> Result<Job> {
         let job = self.update(|state| {
             self.ensure_accepting()?;
             let farm = state
@@ -699,7 +704,8 @@ impl FarmManager {
             if farm.status == FarmStatus::Deleted {
                 return Err(conflict("farm is already deleted"));
             }
-            let job = new_job(id, JobKind::Delete);
+            let mut job = new_job(id, JobKind::Delete);
+            job.forget = forget;
             farm.status = FarmStatus::Deleting;
             farm.active_job = Some(job.id.clone());
             farm.error = None;
@@ -725,10 +731,12 @@ impl FarmManager {
                 .catch_unwind()
                 .await
                 .unwrap_or_else(|_| Err(anyhow!("job panicked")));
-            // Refresh partial VM results even if creation or deletion failed.
-            if let Ok(backend) = manager
-                .get(&job.farm_id)
-                .and_then(|farm| manager.backend_for(&farm))
+            // Refresh partial VM results even if creation or deletion failed. A forgotten
+            // farm's host is not asked; it may be the reason the farm is being forgotten.
+            if !job.forget
+                && let Ok(backend) = manager
+                    .get(&job.farm_id)
+                    .and_then(|farm| manager.backend_for(&farm))
                 && let Ok(mut observed) = backend.scan().await
             {
                 let nodes = observed.remove(&job.farm_id).unwrap_or_default();
@@ -800,6 +808,15 @@ impl FarmManager {
                     )
                     .await?;
             }
+            JobKind::Delete if job.forget => self.log(
+                &farm.id,
+                &job.id,
+                None,
+                format!(
+                    "removing this farm's record only; a VM it left on host {} stays until the host is purged\n",
+                    farm.host_id.as_deref().unwrap_or("(none)")
+                ),
+            )?,
             // A farm from before host registration has no agent to remove its VM; drop the record.
             JobKind::Delete if farm.host_id.is_none() => self.log(
                 &farm.id,
@@ -1077,6 +1094,7 @@ fn new_job(farm: &str, kind: JobKind) -> Job {
         started_at: None,
         finished_at: None,
         snapshot_id: None,
+        forget: false,
     }
 }
 fn farm_components(farm: &FarmRecord) -> Vec<String> {

@@ -455,7 +455,7 @@ impl FarmManager {
         }
         for farm in &farms {
             // This job owns the host's active_job slot, so bypass that guard.
-            let delete = self.delete_farm(farm, true)?;
+            let delete = self.delete_farm(farm, true, false)?;
             let outcome = self.wait(&delete.id).await?;
             if outcome.status != crate::model::JobStatus::Succeeded {
                 anyhow::bail!(

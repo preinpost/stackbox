@@ -551,6 +551,14 @@ impl FarmManager {
     }
 
     pub async fn delete_snapshot(&self, id: &str) -> Result<()> {
+        self.remove_snapshot(id, false).await
+    }
+    /// Removes the snapshot's record without asking the host that keeps its disk, for a host
+    /// that is gone. The disk, if any is left, stays on that host.
+    pub async fn forget_snapshot(&self, id: &str) -> Result<()> {
+        self.remove_snapshot(id, true).await
+    }
+    async fn remove_snapshot(&self, id: &str, forget: bool) -> Result<()> {
         let (reference, previous) = self.update(|state| {
             self.ensure_accepting()?;
             if state
@@ -574,7 +582,7 @@ impl FarmManager {
             snapshot.updated_at = now();
             Ok((snapshot.reference.clone(), previous))
         })?;
-        if let Some(reference) = reference
+        if let Some(reference) = reference.filter(|_| !forget)
             && let Err(error) = match self.local_backend() {
                 Ok(backend) => backend.remove_snapshot(reference).await,
                 Err(error) => Err(error),

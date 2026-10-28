@@ -3,8 +3,13 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, cleanup, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, test, vi } from "vitest";
-import { keys, type Farm, type Plan } from "../api/client";
-import { CreateFarmForm, DeployFarmDialog } from "./farm-actions";
+import { keys, type Farm, type Plan, type Snapshot } from "../api/client";
+import {
+  CreateFarmForm,
+  DeleteFarmDialog,
+  DeployFarmDialog,
+} from "./farm-actions";
+import { DeleteSnapshotDialog } from "./snapshot-actions";
 
 const { navigate } = vi.hoisted(() => ({
   navigate: vi.fn().mockResolvedValue(undefined),
@@ -434,5 +439,58 @@ test("allows deployment only for a running all-in-one VM and preserves legacy fa
   }) as HTMLButtonElement;
   expect(trigger.disabled).toBe(true);
   expect(trigger.title).toContain("단일 VM Farm을 새로 만드세요");
+  client.clear();
+});
+
+test("deletes only the records when asked, without the host", async () => {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+  });
+  const deletes: string[] = [];
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (path: string, options?: RequestInit) => {
+      if (options?.method === "DELETE") {
+        deletes.push(path);
+        return Response.json({ id: "x" }, { status: 202 });
+      }
+      return Response.json([]);
+    }),
+  );
+  render(
+    <QueryClientProvider client={client}>
+      <DeleteFarmDialog
+        farm={{ id: "dev", status: "failed", host_id: "gone" } as Farm}
+      />
+      <DeleteSnapshotDialog
+        snapshot={{ id: "clean", status: "ready" } as Snapshot}
+      />
+    </QueryClientProvider>,
+  );
+  const user = userEvent.setup();
+
+  await user.click(screen.getByRole("button", { name: "Farm 삭제" }));
+  await user.click(screen.getByRole("checkbox", { name: /기록만 삭제/ }));
+  await user.type(screen.getByLabelText("확인을 위해 dev 입력"), "dev");
+  await user.click(screen.getByRole("button", { name: "기록만 삭제" }));
+  await waitFor(() =>
+    expect(deletes).toEqual(["/api/v1/farms/dev?forget=true"]),
+  );
+
+  await user.click(screen.getByRole("button", { name: "clean 스냅샷 삭제" }));
+  // The option starts off each time a dialog opens.
+  const forget = screen.getByRole("checkbox", { name: /기록만 삭제/ });
+  expect(forget.getAttribute("aria-checked")).toBe("false");
+  await user.click(screen.getByRole("button", { name: "스냅샷 삭제" }));
+  await user.click(screen.getByRole("button", { name: "clean 스냅샷 삭제" }));
+  await user.click(screen.getByRole("checkbox", { name: /기록만 삭제/ }));
+  await user.click(screen.getByRole("button", { name: "기록만 삭제" }));
+  await waitFor(() =>
+    expect(deletes).toEqual([
+      "/api/v1/farms/dev?forget=true",
+      "/api/v1/snapshots/clean",
+      "/api/v1/snapshots/clean?forget=true",
+    ]),
+  );
   client.clear();
 });

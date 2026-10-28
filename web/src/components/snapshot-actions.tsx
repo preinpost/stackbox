@@ -30,7 +30,7 @@ import {
   memory,
   snapshotHost,
 } from "../lib";
-import { Button, CopyText, ErrorNotice, Modal } from "./ui";
+import { Button, CopyText, ErrorNotice, ForgetOption, Modal } from "./ui";
 
 const idPattern = "[a-z0-9]([a-z0-9\\-]{0,46}[a-z0-9])?";
 
@@ -547,14 +547,18 @@ export function ImportSnapshotDialog() {
 
 export function DeleteSnapshotDialog({ snapshot }: { snapshot: Snapshot }) {
   const client = useQueryClient();
+  const [forget, setForget] = useState(false);
   const mutation = useMutation({
-    mutationFn: () => api.deleteSnapshot(snapshot.id),
+    mutationFn: () => api.deleteSnapshot(snapshot.id, forget),
     onSuccess: async () => {
       await refresh(client);
       dialog.setOpen(false);
     },
   });
-  const dialog = useDialog(mutation.isPending, () => mutation.reset());
+  const dialog = useDialog(mutation.isPending, () => {
+    setForget(false);
+    mutation.reset();
+  });
   return (
     <Dialog.Root open={dialog.open} onOpenChange={dialog.onOpenChange}>
       <Dialog.Trigger
@@ -571,7 +575,11 @@ export function DeleteSnapshotDialog({ snapshot }: { snapshot: Snapshot }) {
       </Dialog.Trigger>
       <Modal
         title="스냅샷을 삭제할까요?"
-        description="이 호스트에 저장된 스냅샷 디스크를 삭제합니다. 이 스냅샷으로 만든 farm에는 영향이 없습니다."
+        description={
+          forget
+            ? "이 스냅샷의 coordinator 기록만 삭제합니다. 이 스냅샷으로 만든 farm에는 영향이 없습니다."
+            : "이 호스트에 저장된 스냅샷 디스크를 삭제합니다. 이 스냅샷으로 만든 farm에는 영향이 없습니다."
+        }
         closeDisabled={mutation.isPending}
       >
         <div className="modal-body space-y-5">
@@ -587,6 +595,12 @@ export function DeleteSnapshotDialog({ snapshot }: { snapshot: Snapshot }) {
               {snapshot.archive && <CopyText value={snapshot.archive.path} />}
             </div>
           </div>
+          <ForgetOption
+            checked={forget}
+            onChange={setForget}
+            disabled={mutation.isPending}
+            left="스냅샷 디스크"
+          />
           {mutation.error && <ErrorNotice error={mutation.error} />}
         </div>
         <div className="modal-footer justify-end">
@@ -603,7 +617,7 @@ export function DeleteSnapshotDialog({ snapshot }: { snapshot: Snapshot }) {
             ) : (
               <Trash2 size={15} />
             )}
-            스냅샷 삭제
+            {forget ? "기록만 삭제" : "스냅샷 삭제"}
           </Button>
         </div>
       </Modal>

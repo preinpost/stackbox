@@ -478,6 +478,9 @@ pub struct Job {
     /// Snapshot captured by a snapshot job, or restored by a restore job.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub snapshot_id: Option<String>,
+    /// A delete that removes only the coordinator's record and leaves any VM on the host.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub forget: bool,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, ToSchema)]

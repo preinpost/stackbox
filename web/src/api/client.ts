@@ -201,8 +201,11 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ from }),
     }),
-  delete: (id: string) =>
-    request<Job>(`/farms/${encode(id)}`, { method: "DELETE" }),
+  /** `forget` removes only the record, without asking the farm's host. */
+  delete: (id: string, forget = false) =>
+    request<Job>(`/farms/${encode(id)}${forget ? "?forget=true" : ""}`, {
+      method: "DELETE",
+    }),
   plan: (components: string[], signal?: AbortSignal) =>
     request<Plan>("/plans", {
       method: "POST",
@@ -228,6 +231,10 @@ export const api = {
       method: "POST",
       body: JSON.stringify(body),
     }),
-  deleteSnapshot: (id: string) =>
-    request<{ id: string }>(`/snapshots/${encode(id)}`, { method: "DELETE" }),
+  /** `forget` removes only the record, without asking the host that keeps the disk. */
+  deleteSnapshot: (id: string, forget = false) =>
+    request<{ id: string }>(
+      `/snapshots/${encode(id)}${forget ? "?forget=true" : ""}`,
+      { method: "DELETE" },
+    ),
 };

@@ -732,6 +732,8 @@ export interface components {
       farm_id: string;
       /** Format: int64 */
       finished_at?: number | null;
+      /** @description A delete that removes only the coordinator's record and leaves any VM on the host. */
+      forget?: boolean;
       id: string;
       kind: components["schemas"]["JobKind"];
       phase?: null | components["schemas"]["Phase"];
@@ -1061,6 +1063,11 @@ export interface operations {
       header?: never;
       path: {
         id: string;
+        /**
+         * @description Remove only the coordinator's record, without asking the host. Whatever the host
+         *     still keeps stays there; use it when the host is gone or unreachable.
+         */
+        forget: boolean;
       };
       cookie?: never;
     };
@@ -1888,6 +1895,11 @@ export interface operations {
       header?: never;
       path: {
         id: string;
+        /**
+         * @description Remove only the coordinator's record, without asking the host. Whatever the host
+         *     still keeps stays there; use it when the host is gone or unreachable.
+         */
+        forget: boolean;
       };
       cookie?: never;
     };

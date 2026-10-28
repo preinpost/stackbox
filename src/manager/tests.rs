@@ -1762,6 +1762,58 @@ async fn purging_a_host_deletes_its_farms_and_leftover_vms_then_unregisters_it()
 }
 
 #[tokio::test]
+async fn forgetting_removes_records_without_asking_the_host() {
+    let dir = tempfile::tempdir().unwrap();
+    let backend = Arc::new(Fake::default());
+    let manager = open_with(options(dir.path()), backend.clone()).await;
+    done(&manager, &manager.create(request("src")).unwrap()).await;
+    done(
+        &manager,
+        &manager.deploy("src", DeployRequest::default()).unwrap(),
+    )
+    .await;
+    let freeze = manager
+        .freeze(
+            "src",
+            SnapshotRequest {
+                id: "clean".into(),
+                note: None,
+            },
+        )
+        .unwrap();
+    assert_eq!(done(&manager, &freeze).await.status, JobStatus::Succeeded);
+
+    let forget = manager.forget("src").unwrap();
+    assert!(forget.forget);
+    assert_eq!(done(&manager, &forget).await.status, JobStatus::Succeeded);
+    assert_eq!(manager.get("src").unwrap().status, FarmStatus::Deleted);
+    // The host was not asked, so its VM is still there.
+    assert!(backend.farms.lock().unwrap().contains_key("src"));
+    assert!(
+        manager
+            .logs("src", 0, 1000)
+            .unwrap()
+            .iter()
+            .any(|line| line.message.contains("record only"))
+    );
+
+    // Without its host, a snapshot can only be forgotten.
+    manager.unregister_host("local").unwrap();
+    assert!(
+        manager
+            .delete_snapshot("clean")
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("register the local host")
+    );
+    manager.forget_snapshot("clean").await.unwrap();
+    assert!(manager.snapshot("clean").unwrap_err().is::<NotFound>());
+    assert!(backend.snapshots.lock().unwrap().contains_key("fake/clean"));
+    settle(&manager).await;
+}
+
+#[tokio::test]
 async fn purging_the_local_host_can_also_delete_its_snapshots() {
     use crate::remote::{HostJobKind, test_server::Fixture};
     let fixture = Fixture::start().await;

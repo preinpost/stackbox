@@ -1,4 +1,5 @@
 import { Button as BaseButton } from "@base-ui/react/button";
+import { Checkbox } from "@base-ui/react/checkbox";
 import { Dialog } from "@base-ui/react/dialog";
 import { Select } from "@base-ui/react/select";
 import {
@@ -264,5 +265,41 @@ export function CopyText({
       {!hideValue && <span>{label ?? value}</span>}
       {copied ? <Check size={12} /> : <Copy size={12} />}
     </button>
+  );
+}
+
+/** Opts a delete out of asking the host, for a host that is gone or unreachable. */
+export function ForgetOption({
+  checked,
+  onChange,
+  disabled,
+  left,
+}: {
+  checked: boolean;
+  onChange: (checked: boolean) => void;
+  disabled?: boolean;
+  /** What stays on the host, e.g. "VM과 디스크". */
+  left: string;
+}) {
+  return (
+    <label className="checkbox-row">
+      <Checkbox.Root
+        checked={checked}
+        disabled={disabled}
+        onCheckedChange={(next) => onChange(next === true)}
+        className="checkbox"
+      >
+        <Checkbox.Indicator>
+          <Check size={12} strokeWidth={3} />
+        </Checkbox.Indicator>
+      </Checkbox.Root>
+      <span>
+        기록만 삭제
+        <small>
+          호스트에 묻지 않고 coordinator 기록만 지웁니다. 호스트에 남은 {left}는
+          그대로 두니, 호스트가 없어졌거나 접속되지 않을 때만 쓰세요.
+        </small>
+      </span>
+    </label>
   );
 }

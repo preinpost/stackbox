@@ -108,7 +108,11 @@ msb 스냅샷 label로 저장되며 아카이브 안에 함께 들어갑니다. 
 
 내보내기와 가져오기는 job이 아니라 스냅샷 상태(`exporting`, `importing`)로 진행됩니다.
 데몬이 중간에 종료되었을 때 다시 시도할 수 있는 상태로 바꿉니다.
-스냅샷 삭제는 내보낸 파일을 지우지 않습니다.
+스냅샷 삭제는 내보낸 파일을 지우지 않습니다. `msb snapshot rm`으로 디스크를 먼저 지웠다면 호스트
+에이전트가 이미 없는 스냅샷으로 보고 삭제를 성공으로 처리하므로, 기록도 함께 지워집니다.
+스냅샷을 보관하던 호스트가 없어졌거나 접속되지 않으면 `DELETE /snapshots/{id}?forget=true`
+(`farm snapshot delete <id> --forget`, 포탈의 **기록만 삭제**)로 coordinator 기록만 지울 수 있습니다.
+이때 호스트에 남은 디스크는 지우지 않습니다.
 
 ## API
 
@@ -116,7 +120,7 @@ msb 스냅샷 label로 저장되며 아카이브 안에 함께 들어갑니다. 
 |---|---|---|
 | POST | `/farms/{id}/snapshots` | `{"id","note"}` → snapshot job (202) |
 | GET | `/snapshots`, `/snapshots/{id}` | 스냅샷 목록 / 상세 |
-| DELETE | `/snapshots/{id}` | 스냅샷 삭제 |
+| DELETE | `/snapshots/{id}` | 스냅샷 삭제 (`?forget=true`: 기록만 삭제) |
 | POST | `/snapshots/{id}/export` | `{"path"}` 선택 → 내보내기 시작 (202) |
 | POST | `/snapshots/import` | `{"path","id"}` → 가져오기 시작 (202) |
 | POST | `/farms` | `{"id","snapshot_id",...}` → restore job (202) |

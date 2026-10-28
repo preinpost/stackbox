@@ -35,6 +35,8 @@ API prefix는 `/api/v1`입니다. token이 설정된 경우 모든 경로에
    `POST /farms/{id}/deploy`, body `{"from":"prechecks"}`.
 7. 삭제는 `DELETE /farms/{id}`로 요청하고 동일하게 job 완료를 기다립니다.
    삭제 성공 후에도 개별 farm 조회에는 `deleted` tombstone이 남지만 목록에서 제외됩니다.
+   호스트가 없어졌거나 접속되지 않으면 `DELETE /farms/{id}?forget=true`로 호스트에 묻지 않고
+   기록만 지웁니다. 호스트에 남은 VM은 그대로이며, 호스트를 purge할 때 정리됩니다.
 
 farm 상태는 `creating`, `created`, `deploying`, `settling`, `ready`, `failed`, `broken`, `deleting`, `deleted`입니다.
 배포 중에는 `phase`와 함께 `step`이 채워집니다. `step`은 그 단계 안에서 지금 실행 중인 작업이며,

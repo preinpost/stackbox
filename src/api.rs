@@ -575,9 +575,24 @@ async fn deploy(
 async fn settle(State(app): State<App>, Path(id): Path<String>) -> Result<Response, ApiError> {
     Ok(accepted(app.manager.settle(&id)?))
 }
-#[utoipa::path(delete, path="/api/v1/farms/{id}", params(("id"=String, Path)), responses((status=202, body=Job), (status=409, body=ErrorBody)))]
-async fn delete(State(app): State<App>, Path(id): Path<String>) -> Result<Response, ApiError> {
-    Ok(accepted(app.manager.delete(&id)?))
+#[derive(Deserialize, utoipa::IntoParams)]
+struct ForgetQuery {
+    /// Remove only the coordinator's record, without asking the host. Whatever the host
+    /// still keeps stays there; use it when the host is gone or unreachable.
+    #[serde(default)]
+    forget: bool,
+}
+#[utoipa::path(delete, path="/api/v1/farms/{id}", params(("id"=String, Path), ForgetQuery), responses((status=202, body=Job), (status=409, body=ErrorBody)))]
+async fn delete(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    Query(query): Query<ForgetQuery>,
+) -> Result<Response, ApiError> {
+    Ok(accepted(if query.forget {
+        app.manager.forget(&id)?
+    } else {
+        app.manager.delete(&id)?
+    }))
 }
 #[utoipa::path(get, path="/api/v1/jobs", responses((status=200, body=Vec<Job>)))]
 async fn jobs(State(app): State<App>) -> Result<Json<Vec<Job>>, ApiError> {
@@ -617,12 +632,17 @@ async fn snapshot(
 struct RemovedSnapshot {
     id: String,
 }
-#[utoipa::path(delete, path="/api/v1/snapshots/{id}", params(("id"=String, Path)), responses((status=200, body=RemovedSnapshot), (status=404, body=ErrorBody), (status=409, body=ErrorBody)))]
+#[utoipa::path(delete, path="/api/v1/snapshots/{id}", params(("id"=String, Path), ForgetQuery), responses((status=200, body=RemovedSnapshot), (status=404, body=ErrorBody), (status=409, body=ErrorBody)))]
 async fn delete_snapshot(
     State(app): State<App>,
     Path(id): Path<String>,
+    Query(query): Query<ForgetQuery>,
 ) -> Result<Json<RemovedSnapshot>, ApiError> {
-    app.manager.delete_snapshot(&id).await?;
+    if query.forget {
+        app.manager.forget_snapshot(&id).await?;
+    } else {
+        app.manager.delete_snapshot(&id).await?;
+    }
     Ok(Json(RemovedSnapshot { id }))
 }
 fn accepted_snapshot(snapshot: SnapshotRecord) -> Response {
