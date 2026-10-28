@@ -67,15 +67,35 @@ pub async fn fingerprint(target: &SshTarget) -> Result<HostKey> {
         expected: None,
         observed: observed.clone(),
     };
-    let _ = tokio::time::timeout(
+    let connected = tokio::time::timeout(
         CONNECT_TIMEOUT,
         client::connect(config(), (target.address.as_str(), target.port), handler),
     )
     .await;
     let key = observed.lock().unwrap().take();
     key.ok_or_else(|| {
-        anyhow!("SSH handshake failed or timed out; check the address, port and firewall")
+        anyhow!(
+            "{}; check the address, port and firewall",
+            handshake_failure(connected.map(|r| r.map(drop)))
+        )
     })
+}
+
+/// Names why a handshake failed without echoing server-supplied text such as algorithm lists.
+fn handshake_failure(
+    connected: Result<Result<(), russh::Error>, tokio::time::error::Elapsed>,
+) -> String {
+    match connected {
+        Err(_) => format!(
+            "SSH handshake timed out after {}s",
+            CONNECT_TIMEOUT.as_secs()
+        ),
+        Ok(Ok(())) => "SSH handshake failed".into(),
+        Ok(Err(russh::Error::NoCommonAlgo { kind, .. })) => {
+            format!("SSH handshake failed: no common {kind:?} algorithm")
+        }
+        Ok(Err(error)) => format!("SSH handshake failed: {error}"),
+    }
 }
 
 pub struct Session {
@@ -344,7 +364,7 @@ impl Session {
         .await;
         let mut handle = match connected {
             Ok(Ok(handle)) => handle,
-            _ => {
+            failed => {
                 if observed
                     .lock()
                     .unwrap()
@@ -356,7 +376,8 @@ impl Session {
                     );
                 }
                 bail!(
-                    "SSH handshake failed or timed out; check the server identity, address, port and firewall"
+                    "{}; check the server identity, address, port and firewall",
+                    handshake_failure(failed.map(|r| r.map(drop)))
                 );
             }
         };
@@ -639,6 +660,29 @@ mod tests {
             std::fs::read_dir(dir.path().join(digest)).unwrap().count(),
             1
         );
+    }
+    #[tokio::test]
+    async fn handshake_errors_name_the_local_cause_but_not_server_text() {
+        let closed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = closed.local_addr().unwrap().port();
+        drop(closed);
+        let error = fingerprint(&SshTarget {
+            address: "127.0.0.1".into(),
+            port,
+        })
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.starts_with("SSH handshake failed: Connection refused"),
+            "{error}"
+        );
+        let error = handshake_failure(Ok(Err(russh::Error::NoCommonAlgo {
+            kind: russh::AlgorithmKind::Kex,
+            ours: vec!["curve25519-sha256".into()],
+            theirs: vec!["server-chosen-text".into()],
+        })));
+        assert_eq!(error, "SSH handshake failed: no common Kex algorithm");
     }
     fn host(fixture: &Fixture) -> RemoteHost {
         RemoteHost {
