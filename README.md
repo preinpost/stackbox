@@ -321,7 +321,13 @@ Ansible의 `no_log` 작업은 이 파일에서도 내용을 숨깁니다.
   릴리스합니다.
 - 버전 커밋은 `Cargo.toml`을 바꾸므로 릴리스마다 `FARM_BUILD_ID`도 바뀝니다. 새 릴리스를 배포하면
   원격 호스트의 agent를 다시 설치해야 합니다.
-- 릴리스 커밋에서 `scripts/build-agent.sh`로 x86_64·aarch64 farm-agent를 빌드해
-  `farm-agent-<arch>.gz`와 `SHA256SUMS`(압축 전 바이너리)를 릴리스에 첨부합니다. 같은 태그로 빌드한
-  coordinator는 이 agent를 그대로 받아들이므로, 압축을 풀어 `dist/agent/<arch>/farm-agent`에 두면
-  `task agent-build`가 필요 없습니다. 두 agent의 build id가 다르거나 빌드가 실패하면 아무것도 push하지 않습니다.
+- 릴리스 커밋에서 `scripts/build-agent.sh`로 linux x86_64·aarch64, macOS aarch64, Windows x86_64
+  farm-agent를 빌드해 R2 `public-bucket`의 `farm-agent/<build_id>/<os>-<arch>/`에 올리고, 플랫폼별 sha256을
+  담은 `manifest.json`과 `farm-agent/v<version>.json`·`latest.json`(버전 → build id)도 올립니다.
+  릴리스 노트에는 `https://public-bucket.preinpost.in/farm-agent/...` 링크가 들어갑니다. 같은 태그로 빌드한
+  coordinator는 이 agent를 그대로 받아들입니다. 빌드가 실패하거나 agent들의 build id가 다르면 아무것도
+  push하지 않습니다.
+- macOS와 Windows agent는 `docker/agent-cross.Dockerfile`(cargo-zigbuild, zig 0.16)로 Linux에서 cross 빌드합니다.
+  macOS 링크에는 MacOSX.sdk의 `.tbd` 파일이 필요해 로컬에서는 Xcode SDK를 쓰고(`MACOS_SDK`로 바꿀 수 있음),
+  CI는 비공개 Forgejo 패키지 `macos-sdk`에서 받습니다. 시크릿: `CLOUDFLARE_API_TOKEN`·`CLOUDFLARE_ACCOUNT_ID`(R2 업로드),
+  `PACKAGE_TOKEN`(`read:package` 권한, SDK 다운로드).
