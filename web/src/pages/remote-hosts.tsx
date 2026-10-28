@@ -364,9 +364,7 @@ export function RemoteHostsPage() {
                   disabled={
                     !!selected.active_job ||
                     action.isPending ||
-                    !coordinator.data?.agent_artifacts?.some(
-                      (artifact) => artifact.arch === selected.inspection?.arch,
-                    )
+                    !hasAgent(coordinator.data?.agent_artifacts, selected)
                   }
                   onClick={() =>
                     action.mutate({ id: selected.id, kind: "agent" })
@@ -426,12 +424,11 @@ export function RemoteHostsPage() {
             )}
             {ssh &&
               selected.inspection &&
-              !coordinator.data?.agent_artifacts?.some(
-                (artifact) => artifact.arch === selected.inspection?.arch,
-              ) && (
+              !hasAgent(coordinator.data?.agent_artifacts, selected) && (
                 <p className="field-hint mt-3">
-                  {selected.inspection.arch} 실행기가 없습니다. task
-                  agent-build로 빌드한 뒤 Coordinator를 재시작하세요.
+                  {selected.inspection.os}-{selected.inspection.arch} 실행기가
+                  없습니다. 이 빌드가 릴리스되지 않았다면 task agent-build로
+                  빌드한 뒤 Coordinator를 재시작하세요.
                 </p>
               )}
             {selected.active_job && (
@@ -578,6 +575,18 @@ export function RegisterAgentHostDialog({
         </Modal>
       )}
     </Dialog.Root>
+  );
+}
+
+/** Whether the coordinator has (or can download) an agent for the host's OS and CPU. */
+function hasAgent(
+  artifacts: { os?: string; arch: string }[] | undefined,
+  host: RemoteHost,
+) {
+  return !!artifacts?.some(
+    (artifact) =>
+      (artifact.os ?? "linux") === host.inspection?.os &&
+      artifact.arch === host.inspection?.arch,
   );
 }
 

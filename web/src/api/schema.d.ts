@@ -460,6 +460,8 @@ export interface components {
       arch: string;
       /** @description Revision the artifact was built from; empty for artifacts older than this field. */
       build_id?: string;
+      /** @description `linux`, `macos` or `windows`; agents recorded before this field are Linux ones. */
+      os?: string;
       /** Format: int32 */
       protocol: number;
       sha256: string;

@@ -192,6 +192,18 @@ async fn wait_snapshot(manager: &FarmManager, id: &str) -> Result<SnapshotRecord
 fn absolute(path: PathBuf) -> Result<String> {
     Ok(std::path::absolute(path)?.display().to_string())
 }
+/// A coordinator without Docker still installs agents when its build was released.
+async fn load_published_agents(manager: &FarmManager) {
+    match manager.load_published_agents().await {
+        Ok(0) => {}
+        Ok(count) => eprintln!(
+            "{count} published farm-agent(s) of build {} available",
+            farm::BUILD_ID
+        ),
+        Err(error) => eprintln!("cannot read the published farm-agents: {error:#}"),
+    }
+}
+
 async fn wait_host(manager: &FarmManager, id: &str, kind: HostJobKind) -> Result<()> {
     let job = manager.start_host_job(id, kind)?;
     loop {
@@ -317,6 +329,7 @@ async fn main() -> Result<()> {
     let manager = FarmManager::open(options).await?;
     match cli.command {
         Command::Serve { bind, .. } => {
+            load_published_agents(&manager).await;
             for job in manager.upgrade_stale_agents()? {
                 eprintln!(
                     "reinstalling the farm-agent on {} (host job {})",
@@ -422,7 +435,10 @@ async fn main() -> Result<()> {
                 }
             }
             HostCommand::Check { id } => wait_host(&manager, &id, HostJobKind::Check).await?,
-            HostCommand::Prepare { id } => wait_host(&manager, &id, HostJobKind::Prepare).await?,
+            HostCommand::Prepare { id } => {
+                load_published_agents(&manager).await;
+                wait_host(&manager, &id, HostJobKind::Prepare).await?
+            }
         },
         Command::Snapshot(command) => match command {
             SnapshotCommand::Create { farm, id, note } => {

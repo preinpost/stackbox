@@ -715,16 +715,26 @@ const fn build_stamp() -> [u8; BUILD_STAMP_LEN] {
     stamp
 }
 
-/// Build id written into an ELF artifact, or `None` when it predates the marker.
+/// Build id written into an artifact, or `None` when it predates the marker. The prefix can
+/// also sit in the binary on its own, as the PE linker leaves it, so the first occurrence
+/// followed by an id counts.
 pub(crate) fn artifact_build_id(bytes: &[u8]) -> Option<String> {
     let prefix = BUILD_STAMP_PREFIX.as_bytes();
-    let start = bytes
+    bytes
         .windows(prefix.len())
-        .position(|window| window == prefix)?;
-    let rest = &bytes[start + prefix.len()..];
-    let end = rest.iter().position(|byte| *byte == 0)?;
-    let id = std::str::from_utf8(&rest[..end]).ok()?;
-    (!id.is_empty() && id.len() <= 40).then(|| id.to_owned())
+        .enumerate()
+        .filter(|(_, window)| *window == prefix)
+        .find_map(|(start, _)| {
+            let rest = &bytes[start + prefix.len()..];
+            let end = rest.iter().position(|byte| *byte == 0)?;
+            let id = std::str::from_utf8(&rest[..end]).ok()?;
+            (!id.is_empty()
+                && id.len() <= 40
+                && id
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'))
+            .then(|| id.to_owned())
+        })
 }
 
 /// The request is the first line of stdin, or all of it. Only a shell keeps reading after it.

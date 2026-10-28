@@ -29,6 +29,8 @@ pub struct ManagerOptions {
     pub public_bind: IpAddr,
     pub memory_budget_mib: u64,
     pub agent_binary: Option<PathBuf>,
+    /// Release bucket to fetch this build's agents from, for platforms no local artifact covers.
+    pub agent_url: Option<String>,
 }
 impl ManagerOptions {
     pub fn local(state_dir: PathBuf) -> Self {
@@ -38,6 +40,11 @@ impl ManagerOptions {
             public_bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
             memory_budget_mib: sys.total_memory() / (1024 * 1024) * 80 / 100,
             agent_binary: std::env::var_os("FARM_AGENT_PATH").map(PathBuf::from),
+            // An empty FARM_AGENT_URL turns published agents off.
+            agent_url: match std::env::var("FARM_AGENT_URL") {
+                Ok(url) => Some(url).filter(|url| !url.trim().is_empty()),
+                Err(_) => Some(crate::remote::artifact::RELEASE_URL.into()),
+            },
         }
     }
 }
@@ -67,7 +74,12 @@ struct Inner {
     accepting: AtomicBool,
     vault: crate::remote::Vault,
     host_gate: Semaphore,
+    /// Agent binaries loaded at startup, by platform.
     artifacts: std::collections::BTreeMap<String, Arc<crate::remote::artifact::Artifact>>,
+    /// This build's released agents for the other platforms, by platform.
+    published: std::sync::RwLock<
+        std::collections::BTreeMap<String, Arc<crate::remote::artifact::Published>>,
+    >,
 }
 #[derive(Debug)]
 pub struct NotFound(pub String);
@@ -139,13 +151,11 @@ impl FarmManager {
                 }
             });
         if let Some(agent_dir) = agent_dir {
-            for arch in ["aarch64", "x86_64"] {
-                agent_paths.push(agent_dir.join(arch).join("farm-agent"));
-            }
+            agent_paths.extend(crate::remote::artifact::binaries_in(&agent_dir));
         }
         let artifacts = crate::remote::artifact::load_all(&agent_paths)?
             .into_iter()
-            .map(|(arch, artifact)| (arch, Arc::new(artifact)))
+            .map(|(platform, artifact)| (platform, Arc::new(artifact)))
             .collect();
         let store = Store::open(&options.state_dir)?;
         let vault = crate::remote::Vault::open(
@@ -172,6 +182,7 @@ impl FarmManager {
             vault,
             host_gate: Semaphore::new(2),
             artifacts,
+            published: Default::default(),
         }));
         manager.update(|state| {
             for job in state.host_jobs.values_mut().filter(|j| j.status.active()) {
@@ -351,17 +362,70 @@ impl FarmManager {
     pub fn agent_artifact(&self) -> Option<crate::remote::AgentArtifactInfo> {
         self.agent_artifacts().into_iter().next()
     }
+    /// Loaded agents first, then the published ones for the remaining platforms.
     pub fn agent_artifacts(&self) -> Vec<crate::remote::AgentArtifactInfo> {
-        self.0
+        let mut infos: Vec<_> = self
+            .0
             .artifacts
             .values()
             .map(|artifact| artifact.info.clone())
-            .collect()
+            .collect();
+        if let Ok(published) = self.0.published.read() {
+            infos.extend(published.values().map(|agent| agent.info.clone()));
+        }
+        infos
     }
-    pub fn artifact_for(&self, arch: &str) -> Result<Arc<crate::remote::artifact::Artifact>> {
-        self.0.artifacts.get(arch).cloned().ok_or_else(|| {
+    /// Looks up this build's released agents in the release bucket, for every platform no
+    /// loaded artifact of this build covers, and returns how many it found. A build that was never
+    /// released has none. Hosts that need one download it on first use.
+    pub async fn load_published_agents(&self) -> Result<usize> {
+        let Some(url) = &self.0.options.agent_url else {
+            return Ok(0);
+        };
+        let found: std::collections::BTreeMap<_, _> = crate::remote::artifact::fetch_published(url)
+            .await?
+            .into_iter()
+            .filter(|(platform, _)| self.loaded_current(platform).is_none())
+            .map(|(platform, agent)| (platform, Arc::new(agent)))
+            .collect();
+        let count = found.len();
+        *self
+            .0
+            .published
+            .write()
+            .map_err(|_| anyhow!("agent mutex poisoned"))? = found;
+        Ok(count)
+    }
+    /// Whether an agent of this build can be installed on a `platform` host.
+    pub fn has_current_agent(&self, platform: &str) -> bool {
+        self.loaded_current(platform).is_some() || self.published_agent(platform).is_some()
+    }
+    fn loaded_current(&self, platform: &str) -> Option<&Arc<crate::remote::artifact::Artifact>> {
+        self.0
+            .artifacts
+            .get(platform)
+            .filter(|artifact| artifact.info.build_id == crate::BUILD_ID)
+    }
+    fn published_agent(&self, platform: &str) -> Option<Arc<crate::remote::artifact::Published>> {
+        self.0.published.read().ok()?.get(platform).cloned()
+    }
+    /// The agent for a `platform` host: a loaded one of this build, else this build's
+    /// published one, downloaded into the state directory the first time. A loaded agent of
+    /// another build is returned last, for the caller to refuse with the rebuild command.
+    pub async fn artifact_for(
+        &self,
+        platform: &str,
+    ) -> Result<Arc<crate::remote::artifact::Artifact>> {
+        if let Some(artifact) = self.loaded_current(platform) {
+            return Ok(artifact.clone());
+        }
+        if let Some(published) = self.published_agent(platform) {
+            return published.get(&self.state_dir().join("agents")).await;
+        }
+        self.0.artifacts.get(platform).cloned().ok_or_else(|| {
             anyhow!(
-                "no {arch} farm-agent is loaded; build it with scripts/build-agent.sh {arch} and restart the coordinator"
+                "no {platform} farm-agent is loaded and build {} published none; build it with scripts/build-agent.sh and restart the coordinator",
+                crate::BUILD_ID
             )
         })
     }

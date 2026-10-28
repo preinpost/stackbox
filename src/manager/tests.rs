@@ -251,6 +251,7 @@ fn options(dir: &Path) -> ManagerOptions {
         state_dir: dir.into(),
         memory_budget_mib: 50_000,
         agent_binary: None,
+        agent_url: None,
         public_bind: "127.0.0.1".parse().unwrap(),
     }
 }
@@ -336,6 +337,7 @@ async fn remote_farms_route_over_ssh_with_separate_budgets_ports_streams_and_off
             state.hosts.get_mut("target").unwrap().host.agent = Some(InstalledAgent {
                 artifact: AgentArtifactInfo {
                     sha256: "a".repeat(64),
+                    os: "linux".into(),
                     arch: std::env::consts::ARCH.into(),
                     protocol: 1,
                     supports_single_vm: true,
@@ -1697,6 +1699,7 @@ async fn purging_a_host_deletes_its_farms_and_leftover_vms_then_unregisters_it()
             state.hosts.get_mut("target").unwrap().host.agent = Some(InstalledAgent {
                 artifact: AgentArtifactInfo {
                     sha256: "a".repeat(64),
+                    os: "linux".into(),
                     arch: std::env::consts::ARCH.into(),
                     protocol: 1,
                     supports_single_vm: true,
@@ -1910,6 +1913,7 @@ async fn a_restarted_daemon_reinstalls_agents_another_build_installed() {
     let installed = |build_id: &str| InstalledAgent {
         artifact: AgentArtifactInfo {
             sha256: "a".repeat(64),
+            os: "linux".into(),
             arch: std::env::consts::ARCH.into(),
             protocol: 1,
             supports_single_vm: true,
@@ -1950,6 +1954,7 @@ async fn deploying_a_remote_farm_moves_it_to_the_hosts_current_agent() {
     let agent = |sha: &str| InstalledAgent {
         artifact: AgentArtifactInfo {
             sha256: sha.into(),
+            os: "linux".into(),
             arch: std::env::consts::ARCH.into(),
             protocol: 1,
             supports_single_vm: true,
@@ -1998,6 +2003,7 @@ async fn deploying_a_remote_farm_moves_it_to_the_hosts_current_agent() {
     let stale = InstalledAgent {
         artifact: AgentArtifactInfo {
             sha256: "c".repeat(64),
+            os: "linux".into(),
             arch: std::env::consts::ARCH.into(),
             protocol: 1,
             supports_single_vm: true,
@@ -2185,4 +2191,114 @@ async fn a_dial_in_host_runs_farms_and_shells_over_its_own_connection() {
     assert!(manager.create(later).unwrap_err().is::<Conflict>());
     server.abort();
     settle(&manager).await;
+}
+
+#[tokio::test]
+async fn a_released_build_installs_agents_it_never_loaded() {
+    use sha2::{Digest, Sha256};
+    // A Windows PE header stamped with this build: no local artifact covers it.
+    let mut agent = b"MZ".to_vec();
+    agent.resize(0x40, 0);
+    agent[0x3c..0x40].copy_from_slice(&0x40u32.to_le_bytes());
+    agent.extend(b"PE\0\0");
+    agent.extend(0x8664u16.to_le_bytes());
+    agent.extend(
+        format!(
+            "{}{}\0",
+            crate::remote::agent::BUILD_STAMP_PREFIX,
+            crate::BUILD_ID
+        )
+        .bytes(),
+    );
+    let sha256 = format!("{:x}", Sha256::digest(&agent));
+    let path = format!("{}/windows-x86_64/farm-agent.exe", crate::BUILD_ID);
+    let manifest = serde_json::json!({
+        "build_id": crate::BUILD_ID,
+        "version": "0.0.0",
+        "agents": {"windows-x86_64": {"path": path, "sha256": sha256, "size": agent.len()}},
+    });
+    let served = Arc::new(Mutex::new(agent.clone()));
+    let downloads = Arc::new(AtomicUsize::new(0));
+    let app = axum::Router::new()
+        .route(
+            &format!("/farm-agent/{}/manifest.json", crate::BUILD_ID),
+            axum::routing::get(move || async move { axum::Json(manifest) }),
+        )
+        .route(
+            &format!("/farm-agent/{path}"),
+            axum::routing::get({
+                let (served, downloads) = (served.clone(), downloads.clone());
+                move || async move {
+                    downloads.fetch_add(1, Ordering::SeqCst);
+                    served.lock().unwrap().clone()
+                }
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/farm-agent", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, app).await });
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut released = options(dir.path());
+    released.agent_url = Some(url.clone());
+    // A local agent of another build does not hide the published one.
+    let stale = dir.path().join("stale.exe");
+    let marker = agent.len() - crate::BUILD_ID.len() - 1;
+    let mut stale_agent = agent[..marker].to_vec();
+    stale_agent.extend(b"old-build\0");
+    std::fs::write(&stale, stale_agent).unwrap();
+    let mut with_stale = released.clone();
+    with_stale.agent_binary = Some(stale);
+    let manager = open_with(with_stale, Arc::new(Fake::default())).await;
+    assert!(!manager.has_current_agent("windows-x86_64"));
+    assert_eq!(manager.load_published_agents().await.unwrap(), 1);
+    assert!(manager.has_current_agent("windows-x86_64"));
+    assert!(!manager.has_current_agent("linux-x86_64"));
+    assert!(
+        manager
+            .agent_artifacts()
+            .iter()
+            .any(|info| info.platform() == "windows-x86_64" && info.sha256 == sha256)
+    );
+    let fetched = manager.artifact_for("windows-x86_64").await.unwrap();
+    assert_eq!(&fetched.bytes[..], &agent[..]);
+    manager.artifact_for("windows-x86_64").await.unwrap();
+    assert_eq!(downloads.load(Ordering::SeqCst), 1);
+    let cached = dir
+        .path()
+        .join("agents")
+        .join(&sha256)
+        .join("farm-agent.exe");
+    assert_eq!(std::fs::read(&cached).unwrap(), agent);
+
+    settle(&manager).await;
+    drop(manager);
+
+    // A restarted coordinator reuses the download; a tampered one is fetched again and refused.
+    let restarted = open_with(released.clone(), Arc::new(Fake::default())).await;
+    restarted.load_published_agents().await.unwrap();
+    restarted.artifact_for("windows-x86_64").await.unwrap();
+    assert_eq!(downloads.load(Ordering::SeqCst), 1);
+    settle(&restarted).await;
+    drop(restarted);
+    std::fs::write(&cached, b"tampered").unwrap();
+    served.lock().unwrap().push(0);
+    let other = open_with(released.clone(), Arc::new(Fake::default())).await;
+    other.load_published_agents().await.unwrap();
+    let error = other.artifact_for("windows-x86_64").await.err().unwrap();
+    assert!(
+        format!("{error:#}").contains("published size and sha256"),
+        "{error:#}"
+    );
+    assert_eq!(downloads.load(Ordering::SeqCst), 2);
+    assert!(other.artifact_for("macos-aarch64").await.is_err());
+
+    settle(&other).await;
+    drop(other);
+
+    // A build that was never released publishes nothing.
+    released.agent_url = Some(format!("{url}/missing"));
+    let unreleased = open_with(released, Arc::new(Fake::default())).await;
+    assert_eq!(unreleased.load_published_agents().await.unwrap(), 0);
+    settle(&unreleased).await;
 }

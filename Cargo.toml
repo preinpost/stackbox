@@ -28,6 +28,8 @@ sha2 = "0.10"
 # Hosts that dial in to the coordinator; ring matches russh's crypto backend.
 tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+# Published agents; already in the tree through microsandbox's registry client.
+reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 
 [dev-dependencies]
 http-body-util = "0.1"

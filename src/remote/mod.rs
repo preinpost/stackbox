@@ -229,6 +229,10 @@ pub struct HostInspection {
     pub checked_at: u64,
 }
 impl HostInspection {
+    /// The farm-agent platform this host needs, as in [`AgentArtifactInfo::platform`].
+    pub fn platform(&self) -> String {
+        format!("{}-{}", self.os, self.arch)
+    }
     pub fn runtime_ready(&self) -> bool {
         self.compatible && self.kvm_available && self.msb_compatible
     }
@@ -335,6 +339,9 @@ pub enum HostJobKind {
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
 pub struct AgentArtifactInfo {
     pub sha256: String,
+    /// `linux`, `macos` or `windows`; agents recorded before this field are Linux ones.
+    #[serde(default = "linux")]
+    pub os: String,
     pub arch: String,
     pub protocol: u32,
     /// Old installed agents remain usable for legacy inventory and deletion.
@@ -343,6 +350,15 @@ pub struct AgentArtifactInfo {
     /// Revision the artifact was built from; empty for artifacts older than this field.
     #[serde(default)]
     pub build_id: String,
+}
+fn linux() -> String {
+    "linux".into()
+}
+impl AgentArtifactInfo {
+    /// `<os>-<arch>`, such as `linux-x86_64` or `macos-aarch64`.
+    pub fn platform(&self) -> String {
+        format!("{}-{}", self.os, self.arch)
+    }
 }
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
 pub struct InstalledAgent {

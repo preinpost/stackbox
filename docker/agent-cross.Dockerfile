@@ -20,7 +20,7 @@ RUN --mount=type=bind,from=sdk,target=/sdk \
     --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/build/target \
     case "$TARGET" in \
-        darwin-aarch64) triple=aarch64-apple-darwin exe=farm-agent; export SDKROOT=/sdk \
+        macos-aarch64) triple=aarch64-apple-darwin exe=farm-agent; export SDKROOT=/sdk \
             CARGO_TARGET_AARCH64_APPLE_DARWIN_RUSTFLAGS="-C link-arg=-L/usr/lib -C link-arg=-F/System/Library/Frameworks" ;; \
         windows-x86_64) triple=x86_64-pc-windows-gnu exe=farm-agent.exe ;; \
         *) echo "unknown TARGET $TARGET" >&2; exit 2 ;; \

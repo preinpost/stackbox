@@ -122,20 +122,29 @@ Farm이 남아 있는 호스트의 등록 해제는 거절한다. 먼저 해당 
 
 ## 단일 원격 Farm 실행
 
-Coordinator는 `dist/agent/aarch64/farm-agent`와 `dist/agent/x86_64/farm-agent`를 자동으로 읽는다. `FARM_AGENT_PATH`로 파일을 하나 더 지정할 수 있다. macOS에서 빌드한 native binary는 업로드할 수 없다.
-다음 스크립트는 공식 Rust 1.99.1 Bookworm 이미지와 잠금 파일을 사용해 Linux 실행기만 출력한다.
-첫 빌드에는 Docker/BuildKit과 인터넷이 필요하며 타겟은 glibc 2.36+ 환경을 사용한다 (Ubuntu 24.04/Rocky 10 등).
+Coordinator는 `dist/agent/<target>/` 디렉터리마다 `farm-agent`(Windows는 `farm-agent.exe`)를 읽고, 실행 파일
+헤더(ELF·Mach-O·PE)로 플랫폼(`linux-x86_64`, `linux-aarch64`, `macos-aarch64`, `windows-x86_64` 등)을 정한다.
+`FARM_AGENT_PATH`로 파일을 하나 더 지정할 수 있다. 같은 플랫폼에 서로 다른 binary가 있으면 시작하지 않는다.
+다음 스크립트는 공식 Rust 1.99.1 Bookworm 이미지와 잠금 파일로 실행기를 빌드한다. Linux 실행기는 glibc 2.36+
+환경(Ubuntu 24.04/Rocky 10 등)용이고, macOS·Windows 실행기는 cargo-zigbuild로 cross 빌드한다.
+첫 빌드에는 Docker/BuildKit과 인터넷이 필요하다.
 
 ```bash
-sh scripts/build-agent.sh          # 현재 아키텍처; aarch64/x86_64 인자로 명시 가능
-FARM_AGENT_PATH="$PWD/dist/agent/aarch64/farm-agent" cargo run -- serve
+sh scripts/build-agent.sh          # 현재 아키텍처의 Linux 실행기; aarch64/x86_64 인자로 명시 가능
+sh scripts/build-agent.sh macos-aarch64   # MACOS_SDK 또는 Xcode SDK 필요
+sh scripts/build-agent.sh windows-x86_64
+cargo run -- serve
 ```
 
-`FARM_AGENT_PATH`는 daemon 시작 시 로드하며 ELF 형식·아키텍처·크기를 검사한다. 변경 시 daemon을 재시작한다.
+실행기는 daemon 시작 시 로드하며 형식·아키텍처·크기를 검사한다. 변경 시 daemon을 재시작한다.
+로드한 실행기가 없는 플랫폼은 `FARM_AGENT_URL`(기본 `https://public-bucket.preinpost.in/farm-agent`)에 이 빌드의
+`<build id>/manifest.json`이 있으면 그 실행기를 쓴다. 호스트에 처음 설치할 때 받아 크기·sha256·플랫폼·build id를
+확인하고 `<state-dir>/agents/<sha256>/`에 보관한다. 릴리스 태그로 빌드한 coordinator만 해당하며, 빈 값이면 끈다.
+SSH 설치는 아직 Linux 호스트만 지원한다.
 `task dev`는 `task agent-build`(기본 `ARCHS="x86_64 aarch64"`, 소스가 그대로면 건너뜀)로 실행기를 함께 빌드한다.
 `farm serve`는 시작할 때, 다른 빌드의 실행기가 설치돼 있고 작업 중이 아닌 SSH 호스트마다 현재 빌드의 실행기가
 로드돼 있으면 `install_agent` host job을 시작한다. 그래서 coordinator를 다시 빌드해도 호스트를 손으로 재설치할 필요가 없다.
-`GET /host`의 `agent_artifact`는 설정된 파일의 SHA256·아키텍처·프로토콜·`supports_single_vm` 기능 정보를 반환한다. 경로와 binary는 노출하지 않는다.
+`GET /host`의 `agent_artifacts`는 로드했거나 받을 수 있는 실행기마다 SHA256·OS·아키텍처·프로토콜·`supports_single_vm` 기능 정보를 반환한다. 경로와 binary는 노출하지 않는다.
 Hosts의 `환경 준비`는 설정된 실행기가 있으면 함께 설치하며, `Farm 실행기 설치` 버튼으로 따로 설치할 수도 있다.
 실행기 설치 자체는 KVM이 없어도 버전 확인까지 가능하지만 Farm 생성에는 KVM·이미지·시험 VM 준비 성공이 필요하다.
 

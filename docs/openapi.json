@@ -6,7 +6,7 @@
     "license": {
       "name": ""
     },
-    "version": "0.1.0"
+    "version": "0.1.1"
   },
   "paths": {
     "/api/v1/agent-hosts": {
@@ -1408,6 +1408,10 @@
           "build_id": {
             "type": "string",
             "description": "Revision the artifact was built from; empty for artifacts older than this field."
+          },
+          "os": {
+            "type": "string",
+            "description": "`linux`, `macos` or `windows`; agents recorded before this field are Linux ones."
           },
           "protocol": {
             "type": "integer",

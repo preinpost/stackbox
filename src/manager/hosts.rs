@@ -385,8 +385,7 @@ impl FarmManager {
                 let current = host
                     .inspection
                     .as_ref()
-                    .and_then(|inspection| self.0.artifacts.get(&inspection.arch))
-                    .is_some_and(|artifact| artifact.info.build_id == crate::BUILD_ID);
+                    .is_some_and(|inspection| self.has_current_agent(&inspection.platform()));
                 if current {
                     stale.push(host.id.clone());
                 } else {
@@ -753,14 +752,14 @@ impl FarmManager {
         );
         inspection.vm_boot_verified = true;
         self.host_event(id, "VM boot, command execution and cleanup verified")?;
-        if self.0.artifacts.contains_key(&inspection.arch) {
+        if self.has_current_agent(&inspection.platform()) {
             self.install_host_agent(&ssh, &job).await?;
         } else {
             self.host_event(
                 id,
                 &format!(
-                    "No {} farm-agent is loaded; preparation finished without installing the execution agent",
-                    inspection.arch
+                    "No {} farm-agent of this build is loaded or published; preparation finished without installing the execution agent",
+                    inspection.platform()
                 ),
             )?;
         }
@@ -850,15 +849,20 @@ impl FarmManager {
         Ok(inspection)
     }
     async fn install_host_agent(&self, ssh: &Session, job: &HostJob) -> Result<()> {
-        let arch = self
+        let platform = self
             .stored_host(&job.host_id)?
             .host
             .inspection
             .as_ref()
             .context("host has no inspection")?
-            .arch
-            .clone();
-        let artifact = self.artifact_for(&arch)?;
+            .platform();
+        if self.loaded_current(&platform).is_none() && self.has_current_agent(&platform) {
+            self.host_event(
+                &job.id,
+                &format!("Fetching the published {platform} farm-agent"),
+            )?;
+        }
+        let artifact = self.artifact_for(&platform).await?;
         // A stale artifact would install an agent that cannot parse this daemon's requests.
         artifact_built_by_daemon(&artifact)?;
         let coordinator = self
@@ -941,7 +945,7 @@ impl FarmManager {
 
 /// Rejects an artifact that was built from other sources than the running coordinator.
 pub(crate) fn artifact_built_by_daemon(artifact: &crate::remote::artifact::Artifact) -> Result<()> {
-    check_artifact_build(&artifact.info.arch, &artifact.info.build_id)
+    check_artifact_build(&artifact.info.platform(), &artifact.info.build_id)
 }
 
 fn check_artifact_build(arch: &str, build_id: &str) -> Result<()> {

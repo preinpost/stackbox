@@ -83,12 +83,14 @@ npm run dev                     # http://127.0.0.1:5180
 API 주소와 token은 `web/.env`의 `FARM_API_URL`, `FARM_API_TOKEN`으로 설정합니다.
 개발·운영 서버가 API를 프록시하고 token과 관리자 인증정보를 브라우저에서 제외합니다.
 자세한 실행 방법과 서버 구성은 [web/README.md](web/README.md)를 참고하세요.
-원격 실행을 사용하려면 Coordinator와 같은 CPU 아키텍처의 Linux 실행기를 한 번 빌드하세요.
+원격 실행에는 호스트 플랫폼(`linux-x86_64`·`linux-aarch64`·`macos-aarch64`·`windows-x86_64`)의 실행기가 필요합니다.
+릴리스 태그로 빌드한 coordinator는 릴리스가 R2에 올린 같은 build id의 실행기를 쓰므로 따로 빌드할 필요가 없습니다.
+그 밖의 빌드는 실행기를 직접 빌드하세요.
 
 ```bash
-sh scripts/build-agent.sh       # Docker/BuildKit 필요; dist/agent/<arch>/farm-agent
-FARM_AGENT_PATH="$PWD/dist/agent/aarch64/farm-agent" cargo run -- serve
-# x86_64 호스트는 aarch64 대신 x86_64 경로 사용
+sh scripts/build-agent.sh       # Docker/BuildKit 필요; 현재 아키텍처의 dist/agent/<arch>/farm-agent
+sh scripts/build-agent.sh macos-aarch64    # 또는 x86_64, aarch64, windows-x86_64
+cargo run -- serve              # dist/agent 아래 모든 실행기를 읽음
 ```
 
 Hosts에서 환경 준비를 완료하면 실행기도 설치합니다. 이미 준비한 호스트는 `Farm 실행기 설치`를 누르세요.
@@ -327,6 +329,10 @@ Ansible의 `no_log` 작업은 이 파일에서도 내용을 숨깁니다.
   릴리스 노트에는 `https://public-bucket.preinpost.in/farm-agent/...` 링크가 들어갑니다. 같은 태그로 빌드한
   coordinator는 이 agent를 그대로 받아들입니다. 빌드가 실패하거나 agent들의 build id가 다르면 아무것도
   push하지 않습니다.
+- coordinator는 `farm serve`와 `farm host prepare`를 시작할 때 `FARM_AGENT_URL`(기본
+  `https://public-bucket.preinpost.in/farm-agent`)에서 자기 build id의 `manifest.json`을 읽고, `dist/agent`에 없는
+  플랫폼의 실행기를 호스트에 처음 설치할 때 받아 sha256과 build id를 확인한 뒤 `<state-dir>/agents/<sha256>/`에
+  보관합니다. 릴리스되지 않은 빌드는 manifest가 없어 건너뜁니다. `FARM_AGENT_URL=`(빈 값)이면 끕니다.
 - macOS와 Windows agent는 `docker/agent-cross.Dockerfile`(cargo-zigbuild, zig 0.16)로 Linux에서 cross 빌드합니다.
   macOS 링크에는 MacOSX.sdk의 `.tbd` 파일이 필요해 로컬에서는 Xcode SDK를 쓰고(`MACOS_SDK`로 바꿀 수 있음),
   CI는 비공개 Forgejo 패키지 `macos-sdk`에서 받습니다. 시크릿: `CLOUDFLARE_API_TOKEN`·`CLOUDFLARE_ACCOUNT_ID`(R2 업로드),

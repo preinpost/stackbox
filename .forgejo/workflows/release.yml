@@ -35,7 +35,7 @@ jobs:
     env:
       TOKEN: ${{ secrets.RELEASE_TOKEN || github.token }}
       # scripts/build-agent.sh targets; the bare arches are Linux.
-      TARGETS: x86_64 aarch64 darwin-aarch64 windows-x86_64
+      TARGETS: x86_64 aarch64 macos-aarch64 windows-x86_64
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       R2_BUCKET: public-bucket
