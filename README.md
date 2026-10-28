@@ -306,3 +306,18 @@ Ansible의 `no_log` 작업은 이 파일에서도 내용을 숨깁니다.
 
 단일 VM 전환의 구조와 호환성은 [docs/single-vm.md](docs/single-vm.md), 이전 다중 VM 실배포 기록은
 [docs/local-validation.md](docs/local-validation.md)에 있습니다.
+
+## 릴리스
+
+작업은 `dev`(기본 브랜치)에서 하고, `main`에 push될 때마다
+[`.forgejo/workflows/release.yml`](.forgejo/workflows/release.yml)이 릴리스를 만듭니다.
+
+- 기본은 patch입니다. 직전 태그 이후 커밋 메시지에 `#minor`/`[minor]`나 `#major`/`[major]`가
+  있으면 그만큼 올립니다. Actions의 수동 실행(`workflow_dispatch`)에서도 bump를 고를 수 있습니다.
+- `scripts/set-version.sh`로 `Cargo.toml`·`Cargo.lock`·`web/package.json`·`web/package-lock.json`의
+  버전을 바꿔 `Release vX.Y.Z` 커밋을 `main`에 올리고, `vX.Y.Z` 태그와 Forgejo 릴리스(직전 태그 이후
+  커밋 목록)를 만든 뒤 `main`을 `dev`에 다시 merge합니다.
+- `Cargo.toml`의 버전에 아직 태그가 없으면(첫 릴리스나 `dev`에서 직접 올린 경우) 올리지 않고 그 버전으로
+  릴리스합니다.
+- 버전 커밋은 `Cargo.toml`을 바꾸므로 릴리스마다 `FARM_BUILD_ID`도 바뀝니다. 새 릴리스를 배포하면
+  원격 호스트의 agent를 다시 설치해야 합니다.
