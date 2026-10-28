@@ -1,6 +1,7 @@
 # Cuts a release for every push to main: bumps the version (patch unless a commit
 # since the last release says #minor/[minor] or #major/[major]), commits it to main,
-# tags it, publishes a release, and merges the result back into dev.
+# tags it, builds the Linux farm-agent for x86_64 and aarch64, publishes a release
+# with the agents attached, and merges the result back into dev.
 name: release
 
 on:
@@ -14,12 +15,21 @@ on:
         options: [patch, minor, major]
         default: patch
 
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 jobs:
   release:
     # The release commit is pushed with the job token, which starts no runs; the
     # message check still stops a loop if RELEASE_TOKEN is a user token that would.
     if: ${{ github.ref == 'refs/heads/main' && !startsWith(github.event.head_commit.message, 'Release v') }}
     runs-on: docker
+    container:
+      # docker CLI + buildx + node + jq; the runner's dind daemon builds both arches
+      # (x86_64 under QEMU) and keeps the Dockerfile's cargo cache mounts between runs.
+      image: catthehacker/ubuntu:act-24.04
+    timeout-minutes: 60
     env:
       TOKEN: ${{ secrets.RELEASE_TOKEN || github.token }}
     steps:
@@ -74,24 +84,61 @@ jobs:
             git commit -am "Release v$VERSION"
           fi
           git tag -a "v$VERSION" -m "v$VERSION"
-          git push --atomic origin HEAD:refs/heads/main "refs/tags/v$VERSION"
+
+      # Built from the release commit, since the version bump changes FARM_BUILD_ID: a
+      # coordinator built from the tag then accepts these agents. Nothing is pushed
+      # until both build, so a failed build leaves no tag behind.
+      - name: Build the agents
+        run: |
+          set -eu
+          assets=${RUNNER_TEMP:-/tmp}/assets
+          mkdir -p "$assets"
+          for arch in x86_64 aarch64; do
+            sh scripts/build-agent.sh "$arch"
+            gzip -9c "dist/agent/$arch/farm-agent" >"$assets/farm-agent-$arch.gz"
+          done
+          (cd dist/agent && sha256sum */farm-agent) >"$assets/SHA256SUMS"
+          ids=$(grep -haoE 'farm-agent-build:[0-9a-f]+' dist/agent/*/farm-agent | sort -u)
+          if [ "$(printf '%s\n' "$ids" | wc -l)" -ne 1 ]; then
+            echo "the agents disagree on their build id: $ids" >&2
+            exit 1
+          fi
+          echo "BUILD_ID=${ids#farm-agent-build:}" >>"$GITHUB_ENV"
+          echo "ASSETS=$assets" >>"$GITHUB_ENV"
+          cat "$assets/SHA256SUMS"
+
+      - name: Push
+        run: git push --atomic origin HEAD:refs/heads/main "refs/tags/v$VERSION"
 
       - name: Publish the release
         run: |
           set -eu
           notes=${RUNNER_TEMP:-/tmp}/notes.md body=${RUNNER_TEMP:-/tmp}/release.json
-          git log --no-merges --format='- %s (%h)' "${PREV:+$PREV..}v$VERSION" \
-            | grep -v '^- Release v' >"$notes" || true
+          {
+            git log --no-merges --format='- %s (%h)' "${PREV:+$PREV..}v$VERSION" \
+              | grep -v '^- Release v' || true
+            printf '\n### farm-agent\n\nBuild id `%s`. A coordinator built from this tag accepts these agents; gunzip each one to `dist/agent/<arch>/farm-agent`.\n\n' "$BUILD_ID"
+            printf '```\n'
+            cat "$ASSETS/SHA256SUMS"
+            printf '```\n'
+          } >"$notes"
           node -e '
             const fs = require("fs");
             const [tag, notes] = process.argv.slice(1);
             process.stdout.write(JSON.stringify({ tag_name: tag, name: tag, body: fs.readFileSync(notes, "utf8") }));
           ' "v$VERSION" "$notes" >"$body"
-          curl -fsS -X POST \
+          api=$GITHUB_SERVER_URL/api/v1/repos/$GITHUB_REPOSITORY/releases
+          id=$(curl -fsS -X POST \
             -H "Authorization: token $TOKEN" \
             -H 'Content-Type: application/json' \
             --data @"$body" \
-            "$GITHUB_SERVER_URL/api/v1/repos/$GITHUB_REPOSITORY/releases" >/dev/null
+            "$api" | jq -r .id)
+          for file in "$ASSETS"/*; do
+            curl -fsS -X POST \
+              -H "Authorization: token $TOKEN" \
+              -F "attachment=@$file" \
+              "$api/$id/assets?name=$(basename "$file")" >/dev/null
+          done
 
       - name: Merge back into dev
         run: |
