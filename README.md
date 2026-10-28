@@ -95,7 +95,8 @@ cargo run -- serve              # dist/agent 아래 모든 실행기를 읽음
 
 Hosts에서 환경 준비를 완료하면 실행기도 설치합니다. 이미 준비한 호스트는 `Farm 실행기 설치`를 누르세요.
 실행기에는 빌드 리비전이 박혀 있어서 coordinator와 같은 소스로 빌드한 실행기만 설치합니다.
-`task dev`는 coordinator와 함께 `task agent-build`로 실행기 아티팩트도 만들고(소스가 그대로면 건너뜀),
+`task dev`는 coordinator를 빌드한 뒤 그 build id가 릴리스되지 않았으면 `task agent-build`로 실행기 아티팩트도 만들고
+(소스가 그대로면 건너뜀, 릴리스된 build id면 R2의 실행기를 받으므로 빌드하지 않음),
 `farm serve`는 시작할 때 다른 빌드의 실행기가 설치된 SSH 호스트에 현재 실행기를 자동으로 다시 설치합니다.
 `task dev` 없이 coordinator만 다시 빌드했다면 `task agent-build` 후 재시작하세요. 버전이 다르면 Hosts
 체크리스트의 **Farm 실행기 버전**에 표시되고, 설치와 Farm 생성이 그 리비전을 안내하며 거절됩니다.

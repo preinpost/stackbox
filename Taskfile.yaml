@@ -57,11 +57,15 @@ tasks:
   dev:
     desc: Run the farm API daemon and the local web portal together
     # The coordinator only installs agents built from its own sources, so build them together.
-    deps: [build, dev-agents]
+    deps: [build]
     cmds:
+      - task: dev-agents
       - task: dev-run
   dev-agents:
     internal: true
+    # A released build's coordinator downloads its agents from the release bucket instead.
+    status:
+      - sh scripts/agents-published.sh target/release/farm
     cmds:
       - task: agent-build
         # Without Docker, local farms still work; only remote hosts need these artifacts.

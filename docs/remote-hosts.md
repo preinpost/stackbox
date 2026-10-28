@@ -141,7 +141,9 @@ cargo run -- serve
 `<build id>/manifest.json`이 있으면 그 실행기를 쓴다. 호스트에 처음 설치할 때 받아 크기·sha256·플랫폼·build id를
 확인하고 `<state-dir>/agents/<sha256>/`에 보관한다. 릴리스 태그로 빌드한 coordinator만 해당하며, 빈 값이면 끈다.
 SSH 설치는 아직 Linux 호스트만 지원한다.
-`task dev`는 `task agent-build`(기본 `ARCHS="x86_64 aarch64"`, 소스가 그대로면 건너뜀)로 실행기를 함께 빌드한다.
+`task dev`는 coordinator를 빌드한 뒤 `task agent-build`(기본 `ARCHS="x86_64 aarch64"`, 소스가 그대로면 건너뜀)로 실행기를
+함께 빌드한다. 빌드한 coordinator의 build id로 릴리스된 manifest가 있으면(`scripts/agents-published.sh`) 실행기는 R2에서
+받으므로 빌드하지 않는다.
 `farm serve`는 시작할 때, 다른 빌드의 실행기가 설치돼 있고 작업 중이 아닌 SSH 호스트마다 현재 빌드의 실행기가
 로드돼 있으면 `install_agent` host job을 시작한다. 그래서 coordinator를 다시 빌드해도 호스트를 손으로 재설치할 필요가 없다.
 `GET /host`의 `agent_artifacts`는 로드했거나 받을 수 있는 실행기마다 SHA256·OS·아키텍처·프로토콜·`supports_single_vm` 기능 정보를 반환한다. 경로와 binary는 노출하지 않는다.
