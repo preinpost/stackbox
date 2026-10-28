@@ -360,6 +360,52 @@ impl FarmManager {
     pub fn start_host_job(&self, id: &str, kind: HostJobKind) -> Result<HostJob> {
         self.start_job(id, kind, false)
     }
+    /// Reinstalls the agent on every idle SSH host that runs another build's agent, when this
+    /// build's artifact for the host is loaded. The daemon runs it at startup, so rebuilding
+    /// the coordinator does not leave its hosts on an agent it refuses to use.
+    pub fn upgrade_stale_agents(&self) -> Result<Vec<HostJob>> {
+        let mut stale = Vec::new();
+        {
+            let store = self
+                .0
+                .store
+                .lock()
+                .map_err(|_| anyhow!("state mutex poisoned"))?;
+            for stored in store.state.hosts.values() {
+                let host = &stored.host;
+                if host.kind != HostKind::Ssh
+                    || host.active_job.is_some()
+                    || host
+                        .agent
+                        .as_ref()
+                        .is_none_or(|agent| agent.artifact.build_id == crate::BUILD_ID)
+                {
+                    continue;
+                }
+                let current = host
+                    .inspection
+                    .as_ref()
+                    .and_then(|inspection| self.0.artifacts.get(&inspection.arch))
+                    .is_some_and(|artifact| artifact.info.build_id == crate::BUILD_ID);
+                if current {
+                    stale.push(host.id.clone());
+                } else {
+                    eprintln!(
+                        "host {} runs another build's farm-agent and no current artifact is loaded for it; run `task agent-build` and restart",
+                        host.id
+                    );
+                }
+            }
+        }
+        let mut jobs = Vec::new();
+        for id in stale {
+            match self.start_host_job(&id, HostJobKind::InstallAgent) {
+                Ok(job) => jobs.push(job),
+                Err(error) => eprintln!("cannot reinstall the farm-agent on {id}: {error:#}"),
+            }
+        }
+        Ok(jobs)
+    }
     /// Purges the host; `delete_snapshots` also deletes the snapshots, which only the local
     /// host keeps.
     pub fn start_purge(&self, id: &str, delete_snapshots: bool) -> Result<HostJob> {
@@ -904,11 +950,11 @@ fn check_artifact_build(arch: &str, build_id: &str) -> Result<()> {
     }
     if build_id.is_empty() {
         return Err(anyhow::anyhow!(
-            "the {arch} farm-agent artifact was built before build stamps existed; rebuild it with `scripts/build-agent.sh {arch}` and install the agent again"
+            "the {arch} farm-agent artifact was built before build stamps existed; rebuild it with `task agent-build` and restart the coordinator, which reinstalls the agent"
         ));
     }
     Err(anyhow::anyhow!(
-        "the {arch} farm-agent artifact was built from {build_id} but this coordinator is {daemon}; rebuild it with `scripts/build-agent.sh {arch}` and install the agent again",
+        "the {arch} farm-agent artifact was built from {build_id} but this coordinator is {daemon}; rebuild it with `task agent-build` and restart the coordinator, which reinstalls the agent",
         daemon = crate::BUILD_ID
     ))
 }

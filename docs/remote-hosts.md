@@ -132,6 +132,9 @@ FARM_AGENT_PATH="$PWD/dist/agent/aarch64/farm-agent" cargo run -- serve
 ```
 
 `FARM_AGENT_PATH`는 daemon 시작 시 로드하며 ELF 형식·아키텍처·크기를 검사한다. 변경 시 daemon을 재시작한다.
+`task dev`는 `task agent-build`(기본 `ARCHS="x86_64 aarch64"`, 소스가 그대로면 건너뜀)로 실행기를 함께 빌드한다.
+`farm serve`는 시작할 때, 다른 빌드의 실행기가 설치돼 있고 작업 중이 아닌 SSH 호스트마다 현재 빌드의 실행기가
+로드돼 있으면 `install_agent` host job을 시작한다. 그래서 coordinator를 다시 빌드해도 호스트를 손으로 재설치할 필요가 없다.
 `GET /host`의 `agent_artifact`는 설정된 파일의 SHA256·아키텍처·프로토콜·`supports_single_vm` 기능 정보를 반환한다. 경로와 binary는 노출하지 않는다.
 Hosts의 `환경 준비`는 설정된 실행기가 있으면 함께 설치하며, `Farm 실행기 설치` 버튼으로 따로 설치할 수도 있다.
 실행기 설치 자체는 KVM이 없어도 버전 확인까지 가능하지만 Farm 생성에는 KVM·이미지·시험 VM 준비 성공이 필요하다.

@@ -2,9 +2,22 @@ version: '3'
 
 tasks:
   agent-build:
-    desc: Build a Linux farm-agent binary for the host architecture
+    desc: Build the Linux farm-agent artifacts (ARCHS="x86_64 aarch64"); skipped while their sources are unchanged
+    vars:
+      ARCHS: '{{.ARCHS | default "x86_64 aarch64"}}'
+    # The same inputs build.rs hashes into the build id, so a skip never leaves a stale artifact.
+    sources:
+      - build.rs
+      - Cargo.toml
+      - Cargo.lock
+      - src/**/*.rs
+      - src/**/*.py
+      - docker/agent.Dockerfile
+    generates:
+      - dist/agent/*/farm-agent
     cmds:
-      - sh scripts/build-agent.sh
+      - for: { var: ARCHS }
+        cmd: sh scripts/build-agent.sh {{.ITEM}}
   docker-build:
     desc: Build farm-golden:rocky10 image
     cmds:
@@ -43,9 +56,16 @@ tasks:
       - cargo run --release -- serve {{.CLI_ARGS}}
   dev:
     desc: Run the farm API daemon and the local web portal together
+    # The coordinator only installs agents built from its own sources, so build them together.
+    deps: [build, dev-agents]
     cmds:
-      - task: build
       - task: dev-run
+  dev-agents:
+    internal: true
+    cmds:
+      - task: agent-build
+        # Without Docker, local farms still work; only remote hosts need these artifacts.
+        ignore_error: true
   dev-run:
     internal: true
     deps: [serve, portal-dev]

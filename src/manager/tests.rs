@@ -1876,6 +1876,65 @@ async fn purging_the_local_host_can_also_delete_its_snapshots() {
 }
 
 #[tokio::test]
+async fn a_restarted_daemon_reinstalls_agents_another_build_installed() {
+    use crate::remote::{AgentArtifactInfo, HostJobKind, InstalledAgent, test_server::Fixture};
+    let fixtures = [Fixture::start().await, Fixture::start().await];
+    let dir = tempfile::tempdir().unwrap();
+    // A Linux ELF header for this machine's architecture, stamped with this build.
+    let mut elf = vec![0u8; 64];
+    elf[..6].copy_from_slice(b"\x7fELF\x02\x01");
+    let machine: u16 = if std::env::consts::ARCH == "aarch64" {
+        183
+    } else {
+        62
+    };
+    elf[18..20].copy_from_slice(&machine.to_le_bytes());
+    elf.extend(
+        format!(
+            "{}{}\0",
+            crate::remote::agent::BUILD_STAMP_PREFIX,
+            crate::BUILD_ID
+        )
+        .bytes(),
+    );
+    let artifact = dir.path().join("farm-agent");
+    std::fs::write(&artifact, elf).unwrap();
+    let mut options = options(&dir.path().join("state"));
+    options.agent_binary = Some(artifact);
+    let manager = open_with(options, Arc::new(Fake::default())).await;
+    for (fixture, id) in fixtures.iter().zip(["stale", "current"]) {
+        manager.register_host(fixture.registration(id)).unwrap();
+        let prep = manager.start_host_job(id, HostJobKind::Prepare).unwrap();
+        host_done(&manager, &prep.id).await;
+    }
+    let installed = |build_id: &str| InstalledAgent {
+        artifact: AgentArtifactInfo {
+            sha256: "a".repeat(64),
+            arch: std::env::consts::ARCH.into(),
+            protocol: 1,
+            supports_single_vm: true,
+            build_id: build_id.into(),
+        },
+        verified_at: now(),
+    };
+    manager
+        .update(|state| {
+            state.hosts.get_mut("stale").unwrap().host.agent = Some(installed("older-build"));
+            state.hosts.get_mut("current").unwrap().host.agent = Some(installed(crate::BUILD_ID));
+            Ok(())
+        })
+        .unwrap();
+
+    let jobs = manager.upgrade_stale_agents().unwrap();
+    // Neither the up-to-date host nor the local host, which runs the coordinator itself.
+    assert_eq!(jobs.len(), 1);
+    assert_eq!(jobs[0].host_id, "stale");
+    assert!(matches!(jobs[0].kind, HostJobKind::InstallAgent));
+    host_done(&manager, &jobs[0].id).await;
+    settle(&manager).await;
+}
+
+#[tokio::test]
 async fn deploying_a_remote_farm_moves_it_to_the_hosts_current_agent() {
     use crate::remote::{AgentArtifactInfo, HostJobKind, InstalledAgent, test_server::Fixture};
     let fixture = Fixture::start().await;

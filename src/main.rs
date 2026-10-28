@@ -316,7 +316,15 @@ async fn main() -> Result<()> {
     }
     let manager = FarmManager::open(options).await?;
     match cli.command {
-        Command::Serve { bind, .. } => api::serve(manager, bind, token).await?,
+        Command::Serve { bind, .. } => {
+            for job in manager.upgrade_stale_agents()? {
+                eprintln!(
+                    "reinstalling the farm-agent on {} (host job {})",
+                    job.host_id, job.id
+                );
+            }
+            api::serve(manager, bind, token).await?
+        }
         Command::Create {
             id,
             host_id,

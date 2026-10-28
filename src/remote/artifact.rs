@@ -97,6 +97,6 @@ mod tests {
             crate::manager::hosts::artifact_built_by_daemon_for_test("aarch64", "old-build");
         let error = stale.unwrap_err().to_string();
         assert!(error.contains("built from old-build"), "{error}");
-        assert!(error.contains("scripts/build-agent.sh aarch64"), "{error}");
+        assert!(error.contains("task agent-build"), "{error}");
     }
 }

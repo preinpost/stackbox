@@ -430,9 +430,8 @@ export function RemoteHostsPage() {
                 (artifact) => artifact.arch === selected.inspection?.arch,
               ) && (
                 <p className="field-hint mt-3">
-                  {selected.inspection.arch} 실행기가 없습니다.
-                  scripts/build-agent.sh {selected.inspection.arch}로 빌드한 뒤
-                  Coordinator를 재시작하세요.
+                  {selected.inspection.arch} 실행기가 없습니다. task
+                  agent-build로 빌드한 뒤 Coordinator를 재시작하세요.
                 </p>
               )}
             {selected.active_job && (
