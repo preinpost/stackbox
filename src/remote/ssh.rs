@@ -468,9 +468,12 @@ impl Session {
     }
     pub async fn install(&self) -> Result<()> {
         self.run(
-            include_str!("install.sh"),
+            &install_script(),
             600,
-            "Pinned msb 0.7.8 installation (curl, tar, sha256sum and flock required)",
+            &format!(
+                "Pinned msb {} installation (curl, tar, sha256sum and flock required)",
+                super::MSB_VERSION
+            ),
         )
         .await?;
         Ok(())
@@ -522,6 +525,11 @@ impl Session {
         .await?;
         Ok(())
     }
+}
+
+/// Install msb and libkrunfw at [`super::MSB_VERSION`], or upgrade an older msb to it.
+pub(crate) fn install_script() -> String {
+    include_str!("install.sh").replace("@MSB_VERSION@", super::MSB_VERSION)
 }
 
 /// Boot a small VM from the golden image, run a command in it and remove it.
@@ -606,7 +614,7 @@ fn parse_inspection(output: &str) -> Result<HostInspection> {
         memory_total_mib: integer("memory_total")?,
         memory_available_mib: integer("memory_available")?,
         disk_available_mib: integer("disk_available")?,
-        msb_compatible: version.as_deref() == Some("0.7.8"),
+        msb_compatible: version.as_deref() == Some(super::MSB_VERSION),
         msb_version: version,
         docker_available: field("docker")? == "1",
         golden_image_available: field("golden")? == "1",

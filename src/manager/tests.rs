@@ -276,7 +276,7 @@ fn local_host(manager: &FarmManager) {
                 memory_total_mib: 65536,
                 memory_available_mib: 65536,
                 disk_available_mib: 500_000,
-                msb_version: Some("0.7.8".into()),
+                msb_version: Some("0.7.13".into()),
                 msb_compatible: true,
                 docker_available: true,
                 golden_image_available: true,
@@ -834,6 +834,173 @@ async fn remote_host_preparation_is_serialized_idempotent_and_secrets_never_reac
             .unwrap_err()
             .is::<Conflict>()
     );
+}
+
+#[tokio::test]
+async fn preparation_upgrades_an_older_msb_and_refuses_a_newer_one() {
+    use crate::remote::{HostJobKind, MSB_VERSION, test_server::Fixture};
+    let fixture = Fixture::start().await;
+    *fixture.observed.msb.lock().unwrap() = Some("0.7.8".into());
+    let dir = tempfile::tempdir().unwrap();
+    let manager = open_with(options(dir.path()), Arc::new(Fake::default())).await;
+    manager
+        .register_host(fixture.registration("target"))
+        .unwrap();
+    let job = manager
+        .start_host_job("target", HostJobKind::Prepare)
+        .unwrap();
+    let finished = host_done(&manager, &job.id).await;
+    assert_eq!(
+        finished.status,
+        JobStatus::Succeeded,
+        "{:?}",
+        finished.error
+    );
+    assert!(finished.events.iter().any(|e| {
+        e.message
+            .starts_with(&format!("Upgrading msb 0.7.8 to {MSB_VERSION}"))
+    }));
+    let inspection = manager.host("target").unwrap().inspection.unwrap();
+    assert_eq!(inspection.msb_version.as_deref(), Some(MSB_VERSION));
+    assert!(inspection.vm_boot_verified);
+
+    *fixture.observed.msb.lock().unwrap() = Some("99.0.0".into());
+    fixture.observed.calls.lock().unwrap().clear();
+    let job = manager
+        .start_host_job("target", HostJobKind::Prepare)
+        .unwrap();
+    let finished = host_done(&manager, &job.id).await;
+    assert_eq!(finished.status, JobStatus::Failed);
+    assert!(finished.error.unwrap().contains("does not downgrade msb"));
+    assert!(
+        !fixture
+            .observed
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|c| c == "install")
+    );
+    settle(&manager).await;
+}
+
+/// A local farm-agent that reports `msb` as its installed version and installs on request.
+#[derive(Default)]
+struct MsbLink {
+    msb: std::sync::Mutex<Option<String>>,
+    calls: std::sync::Mutex<Vec<&'static str>>,
+}
+impl crate::remote::link::AgentLink for MsbLink {
+    fn call(
+        &self,
+        request: crate::remote::protocol::Request,
+        _: Option<crate::kolla::EventSink>,
+    ) -> BoxFuture<'_, Result<crate::remote::protocol::Reply>> {
+        use crate::remote::protocol::{Operation, Reply};
+        Box::pin(async move {
+            Ok(match request.operation {
+                Operation::Hello => Reply::Hello {
+                    version: crate::remote::protocol::VERSION,
+                    arch: std::env::consts::ARCH.into(),
+                    supports_single_vm: true,
+                    build_id: crate::BUILD_ID.into(),
+                },
+                Operation::Inspect => {
+                    let msb_version = self.msb.lock().unwrap().clone();
+                    Reply::Inspection {
+                        inspection: crate::remote::HostInspection {
+                            os: "macos".into(),
+                            arch: "aarch64".into(),
+                            compatible: true,
+                            kvm_available: true,
+                            sudo_available: false,
+                            memory_total_mib: 65536,
+                            memory_available_mib: 65536,
+                            disk_available_mib: 500_000,
+                            msb_compatible: msb_version.as_deref()
+                                == Some(crate::remote::MSB_VERSION),
+                            msb_version,
+                            docker_available: true,
+                            golden_image_available: true,
+                            vm_boot_verified: false,
+                            checked_at: now(),
+                        },
+                    }
+                }
+                Operation::InstallMsb => {
+                    self.calls.lock().unwrap().push("install");
+                    *self.msb.lock().unwrap() = Some(crate::remote::MSB_VERSION.into());
+                    Reply::Done
+                }
+                Operation::VerifyVm => {
+                    self.calls.lock().unwrap().push("verify");
+                    Reply::Done
+                }
+                operation => anyhow::bail!("unexpected {operation:?}"),
+            })
+        })
+    }
+    fn terminal(
+        &self,
+        _: crate::remote::protocol::Request,
+        _: crate::farm::TerminalIo,
+    ) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async { anyhow::bail!("no terminal") })
+    }
+}
+
+#[tokio::test]
+async fn agent_host_preparation_upgrades_an_older_msb_and_refuses_a_newer_one() {
+    use crate::remote::{HostJobKind, MSB_VERSION};
+    let dir = tempfile::tempdir().unwrap();
+    let link = Arc::new(MsbLink::default());
+    *link.msb.lock().unwrap() = Some("0.7.8".into());
+    let manager = FarmManager::with_link(options(dir.path()), link.clone())
+        .await
+        .unwrap();
+    manager
+        .register_local_host(crate::remote::RegisterLocalHost { id: "local".into() })
+        .unwrap();
+    let job = manager
+        .start_host_job("local", HostJobKind::Prepare)
+        .unwrap();
+    let finished = host_done(&manager, &job.id).await;
+    assert_eq!(
+        finished.status,
+        JobStatus::Succeeded,
+        "{:?}",
+        finished.error
+    );
+    assert!(finished.events.iter().any(|e| {
+        e.message
+            .starts_with(&format!("Upgrading msb 0.7.8 to {MSB_VERSION}"))
+    }));
+    assert_eq!(*link.calls.lock().unwrap(), ["install", "verify"]);
+    let inspection = manager.host("local").unwrap().inspection.unwrap();
+    assert_eq!(inspection.msb_version.as_deref(), Some(MSB_VERSION));
+    assert!(inspection.vm_boot_verified);
+
+    // The current msb is left alone.
+    link.calls.lock().unwrap().clear();
+    let job = manager
+        .start_host_job("local", HostJobKind::Prepare)
+        .unwrap();
+    assert_eq!(
+        host_done(&manager, &job.id).await.status,
+        JobStatus::Succeeded
+    );
+    assert_eq!(*link.calls.lock().unwrap(), ["verify"]);
+
+    link.calls.lock().unwrap().clear();
+    *link.msb.lock().unwrap() = Some("99.0.0".into());
+    let job = manager
+        .start_host_job("local", HostJobKind::Prepare)
+        .unwrap();
+    let finished = host_done(&manager, &job.id).await;
+    assert_eq!(finished.status, JobStatus::Failed);
+    assert!(finished.error.unwrap().contains("does not downgrade msb"));
+    assert!(link.calls.lock().unwrap().is_empty());
+    settle(&manager).await;
 }
 
 #[tokio::test]

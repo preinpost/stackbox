@@ -102,13 +102,42 @@ pub async fn inspect() -> HostInspection {
         memory_total_mib: total,
         memory_available_mib: available,
         disk_available_mib: disk,
-        msb_compatible: version.as_deref() == Some("0.7.8"),
+        msb_compatible: version.as_deref() == Some(super::MSB_VERSION),
         msb_version: version,
         docker_available: docker,
         golden_image_available: golden,
         vm_boot_verified: false,
         checked_at: crate::model::now(),
     }
+}
+
+/// Install or upgrade msb on this machine with the script SSH preparation runs.
+pub async fn install_msb() -> Result<()> {
+    ensure!(
+        cfg!(any(
+            target_os = "linux",
+            all(target_os = "macos", target_arch = "aarch64")
+        )),
+        "msb installation is supported on Linux and Apple Silicon macOS; install msb {} by hand",
+        super::MSB_VERSION
+    );
+    let mut command = tokio::process::Command::new("bash");
+    command
+        .args(["-c", &super::ssh::install_script()])
+        .env("PATH", search_path())
+        .stdin(std::process::Stdio::null())
+        .kill_on_drop(true);
+    let output = tokio::time::timeout(Duration::from_secs(600), command.output())
+        .await
+        .context("msb installation timed out")?
+        .context("cannot run bash")?;
+    ensure!(
+        output.status.success(),
+        "msb {} installation failed (curl and tar required): {}",
+        super::MSB_VERSION,
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    Ok(())
 }
 
 /// Boot, use and remove a small VM on this machine, as a remote host's preparation does.

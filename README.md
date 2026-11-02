@@ -64,7 +64,7 @@ SSH 정보 등록·점검·msb/이미지 준비·실행기 설치를 거칩니�
 farm-agent에게만 VM 작업을 맡깁니다(원격은 SSH, 로컬 호스트는 같은 바이너리를 `farm agent`로 실행).
 준비된 호스트의 **이 호스트에 Farm 만들기**를 누르거나 Farm 생성 시 실행 호스트를 선택하면
 VM 1대의 생성·조회·Kolla 배포·삭제를 해당 호스트에서 실행합니다. Farm 안의 컴포넌트는 같은 VM을 공유합니다.
-로컬 호스트의 환경 준비는 msb 0.7.8과 golden image(`task docker-build`)를 확인하고 시험 VM을 부팅합니다.
+로컬 호스트의 환경 준비는 msb 0.7.13을 설치하거나 낮은 버전을 업그레이드하고, golden image(`task docker-build`)를 확인한 뒤 시험 VM을 부팅합니다.
 **에이전트 호스트 등록**은 호스트의 agent가 coordinator로 먼저 접속하는 방식입니다. 등록하면 받는 토큰으로
 호스트에서 `FARM_AGENT_TOKEN=<token> farm agent connect https://<coordinator>`(Linux 서버는 `farm-agent connect`)를
 실행해 두면, SSH나 열린 포트 없이 NAT 뒤의 머신이나 외부에 둔 coordinator에서도 같은 방식으로 Farm을 실행합니다.
@@ -247,7 +247,7 @@ msb 게스트 커널에는 모듈 로딩이 없고 openvswitch datapath, `xt_con
   Nova가 요구하는 `br_netfilter` 모듈 로드도 건너뜁니다. bridge netfilter는 커널에 내장되어 있습니다.
 - Nova compute는 게스트에 `/dev/kvm`이 있으면 `virt_type=kvm`과 `cpu_mode=host-passthrough`로,
   없으면 `virt_type=qemu`(TCG)와 `cpu_mode=none`으로 실행합니다. TCG 인스턴스 부팅은 KVM보다 느립니다.
-  `/dev/kvm`은 msb 0.7.8 nested 빌드(`nested_virt_auto` 기본 켜짐)에서 노출됩니다.
+  farm은 VM을 `nested_virt(true)`로 만들고, 호스트가 nesting을 지원하지 않으면 nesting 없이 다시 만듭니다.
   콘솔 프록시는 켜지 않습니다.
 - 보안 그룹은 hybrid iptables 대신 `openvswitch` firewall driver를 사용합니다.
 - L3 agent는 address scope용 CONNMARK 규칙만 빼고 실행합니다(`src/kolla/neutron_sitecustomize.py`).

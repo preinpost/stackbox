@@ -1,8 +1,9 @@
 use super::*;
 use crate::remote::{
     AgentHostToken, HostInspection, HostJob, HostJobEvent, HostJobKind, HostKind, HostStatus,
-    RegisterAgentHost, RegisterHost, RegisterLocalHost, RemoteHost, StoredHost,
+    MSB_VERSION, RegisterAgentHost, RegisterHost, RegisterLocalHost, RemoteHost, StoredHost,
     link::AgentLink,
+    msb_outdated,
     protocol::{Operation, Reply, Request, VERSION},
     ssh::Session,
 };
@@ -711,16 +712,7 @@ impl FarmManager {
             inspection.disk_available_mib >= 8192,
             "at least 8 GiB free space is required for runtime and image preparation"
         );
-        if let Some(version) = &inspection.msb_version {
-            anyhow::ensure!(
-                version == "0.7.8",
-                "an incompatible msb is already installed; migrate it to 0.7.8 explicitly before preparing this host"
-            );
-        }
-        self.host_event(
-            id,
-            "Installing or verifying msb 0.7.8 and libkrunfw (release checksum verified)",
-        )?;
+        self.host_event(id, &msb_install_step(inspection.msb_version.as_deref())?)?;
         ssh.install().await?;
         inspection = ssh.inspect().await?;
         self.host_inspection(&job.host_id, inspection.clone())?;
@@ -766,8 +758,9 @@ impl FarmManager {
         Ok(inspection)
     }
     /// Check or prepare a host whose agent needs no installation: this machine, or a host
-    /// that dials in. Its agent inspects the host and boots the test VM. msb and the golden
-    /// image are installed by hand there (`task docker-build`).
+    /// that dials in. Its agent inspects the host, installs or upgrades msb (Linux and Apple
+    /// Silicon macOS) and boots the test VM. The golden image is built by hand there
+    /// (`task docker-build`).
     async fn run_agent_host_job(
         &self,
         job: &HostJob,
@@ -824,11 +817,17 @@ impl FarmManager {
             inspection.kvm_available,
             "the host has no usable hypervisor (/dev/kvm on Linux)"
         );
-        anyhow::ensure!(
-            inspection.msb_compatible,
-            "install msb 0.7.8 on the host first (found {})",
-            inspection.msb_version.as_deref().unwrap_or("none")
-        );
+        if !inspection.msb_compatible {
+            self.host_event(id, &msb_install_step(inspection.msb_version.as_deref())?)?;
+            call(Operation::InstallMsb).await?;
+            inspection = inspect().await?;
+            self.host_inspection(&job.host_id, inspection.clone())?;
+            anyhow::ensure!(
+                inspection.msb_compatible,
+                "msb {MSB_VERSION} was installed, but the host still runs {}",
+                inspection.msb_version.as_deref().unwrap_or("no msb")
+            );
+        }
         anyhow::ensure!(
             inspection.golden_image_available,
             "build {} on the host first with `task docker-build`",
@@ -975,4 +974,20 @@ fn token_digest(token: &str) -> String {
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect()
+}
+
+/// The preparation step for the msb a host reports. A newer msb is refused: going back
+/// needs msb's own state downgrade.
+fn msb_install_step(found: Option<&str>) -> Result<String> {
+    Ok(match found {
+        Some(version) if msb_outdated(version) => format!(
+            "Upgrading msb {version} to {MSB_VERSION} and libkrunfw (release checksum verified)"
+        ),
+        Some(version) if version != MSB_VERSION => anyhow::bail!(
+            "msb {version} is newer than {MSB_VERSION}, which this coordinator runs; Farm does not downgrade msb"
+        ),
+        _ => format!(
+            "Installing or verifying msb {MSB_VERSION} and libkrunfw (release checksum verified)"
+        ),
+    })
 }

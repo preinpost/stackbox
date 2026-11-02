@@ -7,8 +7,8 @@ use microsandbox::snapshot::{LoadOpts, SaveOpts, Snapshot, SnapshotReference};
 use microsandbox::{NetworkPolicy, NetworkProfile, Sandbox};
 
 use super::node::{
-    FARM_LABEL, FarmNode, GUEST_HOSTNAME, IDENTITY_CONF, ROLE_LABEL, connect, node_name,
-    wait_until_booted,
+    FARM_LABEL, FarmNode, GUEST_HOSTNAME, IDENTITY_CONF, ROLE_LABEL, connect, create_nested,
+    node_name, wait_until_booted,
 };
 use super::template::NodeSpec;
 use crate::model::Exposure;
@@ -117,28 +117,29 @@ pub async fn restore_farm(
     // labels, so the guest never reaches systemd. The creation builder accepts a snapshot
     // source through `override_snapshot` (public, though doc-hidden), with the same init,
     // hostname and labels as a created VM. The snapshot supplies the root and container disks.
-    let sandbox = Sandbox::builder(&name)
-        .override_snapshot(reference)
-        .cpus(spec.cpus)
-        .memory(spec.memory_mib)
-        .init("/sbin/init")
-        .hostname(GUEST_HOSTNAME)
-        .network(|n| {
-            let mut n = n.policy(NetworkPolicy::from_profiles([
-                NetworkProfile::Public,
-                NetworkProfile::Host,
-            ]));
-            for (offset, guest_port) in super::public_ports(components) {
-                n = n.port_bind(exposure.bind, exposure.port_base + offset, guest_port);
-            }
-            n
-        })
-        .label(FARM_LABEL, farm_id)
-        .label(ROLE_LABEL, spec.role.as_str())
-        .detached(true)
-        .create()
-        .await
-        .with_context(|| format!("restore {name}"))?;
+    let sandbox = create_nested(|| {
+        Sandbox::builder(&name)
+            .override_snapshot(reference)
+            .cpus(spec.cpus)
+            .memory(spec.memory_mib)
+            .init("/sbin/init")
+            .hostname(GUEST_HOSTNAME)
+            .network(|n| {
+                let mut n = n.policy(NetworkPolicy::from_profiles([
+                    NetworkProfile::Public,
+                    NetworkProfile::Host,
+                ]));
+                for (offset, guest_port) in super::public_ports(components) {
+                    n = n.port_bind(exposure.bind, exposure.port_base + offset, guest_port);
+                }
+                n
+            })
+            .label(FARM_LABEL, farm_id)
+            .label(ROLE_LABEL, spec.role.as_str())
+            .detached(true)
+    })
+    .await
+    .with_context(|| format!("restore {name}"))?;
     let boot = async {
         wait_until_booted(&sandbox).await?;
         let ip = run(&sandbox, "ip -4 -o addr show dev eth0 scope global | awk 'NR==1 { split($4, a, \"/\"); print a[1] }'").await?;

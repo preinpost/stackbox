@@ -658,7 +658,7 @@ function HostInspection({
       label: i.os === "macos" ? "HVF 가상화" : "KVM 접근",
       ready: i.kvm_available,
     },
-    { label: "msb 0.7.8", ready: i.msb_compatible },
+    { label: "msb 0.7.13", ready: i.msb_compatible },
     // A hand-prepared golden image needs no Docker access from the agent.
     ...(local ? [] : [{ label: "Docker 접근", ready: i.docker_available }]),
     { label: "Golden image", ready: i.golden_image_available },
@@ -794,7 +794,7 @@ function HostActionDialog({
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<unknown>();
   const prepare = kind === "prepare";
-  // The local and dial-in hosts run their own agent and prepare msb by hand.
+  // The local and dial-in hosts run their own agent; their golden image is built by hand.
   const local = host.kind !== "ssh";
   const place = host.kind === "local" ? "로컬 호스트" : "이 호스트";
   const [purge, setPurge] = useState(true);
@@ -837,19 +837,19 @@ function HostActionDialog({
             {prepare && local ? (
               <>
                 <ol className="remote-prepare-list">
-                  <li>msb 0.7.8·가상화·golden image 확인</li>
+                  <li>msb 0.7.13 설치, 낮은 버전이면 업그레이드</li>
+                  <li>가상화·golden image 확인</li>
                   <li>512 MiB 시험 VM 부팅 → 명령 실행 → 시험 VM 삭제</li>
                 </ol>
                 <p className="field-hint">
-                  {place}에는 msb 0.7.8과 golden image를 직접 준비합니다.
-                  이미지가 없다면 먼저 <code>task docker-build</code>를
-                  실행하세요.
+                  {place}에는 golden image를 직접 준비합니다. 이미지가 없다면
+                  먼저 <code>task docker-build</code>를 실행하세요.
                 </p>
               </>
             ) : prepare ? (
               <>
                 <ol className="remote-prepare-list">
-                  <li>msb 0.7.8과 libkrunfw 설치 또는 기존 버전 확인</li>
+                  <li>msb 0.7.13과 libkrunfw 설치, 낮은 버전이면 업그레이드</li>
                   <li>golden image가 없으면 Docker로 빌드하고 msb에 로드</li>
                   <li>512 MiB 시험 VM 부팅 → 명령 실행 → 시험 VM 삭제</li>
                 </ol>

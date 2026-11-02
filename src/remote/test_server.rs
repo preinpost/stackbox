@@ -13,7 +13,8 @@ use std::sync::{
 #[derive(Default)]
 pub struct Observed {
     pub auth_attempts: AtomicUsize,
-    pub installed: AtomicBool,
+    /// The `msb --version` the host reports; None until something is installed.
+    pub msb: Mutex<Option<String>>,
     pub golden: AtomicBool,
     pub fail_smoke: AtomicBool,
     pub calls: Mutex<Vec<String>>,
@@ -298,6 +299,7 @@ impl server::Handler for Handler {
                 }
                 Operation::Shell { .. }
                 | Operation::VerifyVm
+                | Operation::InstallMsb
                 | Operation::Settle { .. }
                 | Operation::ExportSnapshot { .. }
                 | Operation::RemoveSnapshot { .. } => Reply::Done,
@@ -337,16 +339,17 @@ impl server::Handler for Handler {
             format!(
                 "FARM\tos\tLinux\nFARM\tarch\t{}\nFARM\tkvm\t1\nFARM\tsudo\t0\nFARM\tmemory_total\t32768\nFARM\tmemory_available\t24000\nFARM\tdisk_available\t200000\nFARM\tmsb\t{}\nFARM\tdocker\t1\nFARM\tgolden\t{}\n",
                 std::env::consts::ARCH,
-                if self.observed.installed.load(Ordering::SeqCst) {
-                    "msb 0.7.8"
-                } else {
-                    ""
-                },
+                self.observed
+                    .msb
+                    .lock()
+                    .unwrap()
+                    .as_deref()
+                    .map_or(String::new(), |version| format!("msb {version}")),
                 u8::from(self.observed.golden.load(Ordering::SeqCst))
             )
         } else if script.contains("base=https://github.com") {
             self.observed.calls.lock().unwrap().push("install".into());
-            self.observed.installed.store(true, Ordering::SeqCst);
+            *self.observed.msb.lock().unwrap() = Some(MSB_VERSION.into());
             String::new()
         } else if script.contains("docker build") {
             self.observed.calls.lock().unwrap().push("golden".into());

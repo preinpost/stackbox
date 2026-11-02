@@ -39,10 +39,11 @@ keyboard-interactive/MFA, 호스트 인증서/CA, sudo 비밀번호 입력은 �
 준비 작업은 다음 순서다.
 
 1. 등록한 지문으로 SSH 인증 후 조건을 다시 점검한다.
-2. msb가 없으면 공식 `v0.7.8` Linux 릴리스 번들과 `checksums.sha256`을 HTTPS로 내려받고,
+2. msb가 없거나 0.7.13보다 낮으면 공식 `v0.7.13` Linux 릴리스 번들과 `checksums.sha256`을 HTTPS로 내려받고,
    정확한 번들 항목의 SHA256을 확인한 후 msb와 libkrunfw를 사용자 홈의 `~/.microsandbox/bin`,
    `~/.microsandbox/lib`에 설치한다. 이후 명령은 해당 bin 경로를 사용한다.
-   이미 0.7.8이면 재사용하며 다른 버전은 자동 업그레이드/덮어쓰기 없이 실패한다.
+   이미 0.7.13이면 재사용한다. 낮은 버전은 msb 공식 설치기처럼 그 자리에서 교체하며,
+   실행 중인 sandbox는 기존 런타임으로 계속 돈다. 더 높은 버전은 다운그레이드하지 않고 실패한다.
 3. `farm-golden:rocky10` 캐시가 없으면 바이너리에 포함한 `docker/` 빌드 파일로 이미지를 만들고
    `docker save` → `msb load`로 로드한다. 작업 디렉터리는 종료 시 제거한다.
    개발자의 `docker/authorized_keys`는 전송하지 않고 빈 파일을 사용한다.
@@ -116,7 +117,7 @@ Farm이 남아 있는 호스트의 등록 해제는 거절한다. 먼저 해당 
   실제 KVM 호스트를 제공하면 이 경로를 추가 확인해야 한다.
 
 참고: [microsandbox Quickstart](https://docs.microsandbox.dev/getting-started/quickstart),
-[공식 v0.7.8 릴리스](https://github.com/superradcompany/microsandbox/releases/tag/v0.7.8),
+[공식 v0.7.13 릴리스](https://github.com/superradcompany/microsandbox/releases/tag/v0.7.13),
 [russh](https://github.com/warp-tech/russh).
 
 
@@ -251,8 +252,9 @@ coordinator) 사용한다.
    coordinator는 토큰의 SHA-256만 저장한다.
 2. 호스트에서 `FARM_AGENT_TOKEN=<token> farm agent connect https://<coordinator>`를 실행한다
    (Linux 실행기는 `farm-agent connect <url>`). 끊기면 1초부터 30초까지 늘려 가며 다시 접속한다.
-3. 연결되면 점검·환경 준비를 실행한다. 점검과 시험 VM 부팅은 그 호스트의 agent가 직접 한다.
-   msb 0.7.8과 golden image(`task docker-build`)는 호스트에 직접 준비한다.
+3. 연결되면 점검·환경 준비를 실행한다. 점검, msb 설치와 시험 VM 부팅은 그 호스트의 agent가 직접 한다.
+   msb가 없거나 0.7.13보다 낮으면 SSH 호스트와 같은 설치 스크립트로 공식 릴리스를 설치·업그레이드한다
+   (Linux, Apple Silicon macOS. 그 외 플랫폼은 직접 설치). golden image(`task docker-build`)는 호스트에 직접 준비한다.
 
 요청·진행·결과는 SSH 실행기와 같은 프로토콜을 세션 번호로 나눠 한 소켓에 싣는다. 접속에는 API token이 아니라
 호스트 토큰을 `Authorization: Bearer`로 쓴다. 연결이 끊기면 그 소켓의 진행 중인 작업은 실패로 끝나고,

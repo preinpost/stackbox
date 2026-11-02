@@ -1,6 +1,9 @@
 use anyhow::{Context, Result};
-use microsandbox::sandbox::{DestroyOptions, SandboxHandle};
-use microsandbox::{NetworkPolicy, NetworkProfile, Sandbox};
+use microsandbox::sandbox::{DestroyOptions, SandboxBuilder, SandboxHandle};
+use microsandbox::{
+    MicrosandboxError, MicrosandboxResult, NetworkPolicy, NetworkProfile, Operation, Sandbox,
+    UnsupportedReason,
+};
 
 use super::template::{BASE_IMAGE, NodeSpec, Role};
 use crate::shell::run;
@@ -74,68 +77,70 @@ pub async fn create_node(
     public_ports: &[(u16, u16)],
 ) -> Result<FarmNode> {
     let name = node_name(farm_id, spec.role);
-    let mut builder = Sandbox::builder(&name)
-        .image(BASE_IMAGE)
-        .cpus(spec.cpus)
-        .memory(spec.memory_mib)
-        .root_disk(spec.disk_mib)
-        .init("/sbin/init")
-        .hostname(GUEST_HOSTNAME)
-        .network(|n| {
-            let mut n = n.policy(NetworkPolicy::from_profiles([
-                NetworkProfile::Public,
-                NetworkProfile::Host,
-            ]));
-            if let Some(exposure) = exposure {
-                for (offset, guest_port) in public_ports {
-                    n = n.port_bind(exposure.bind, exposure.port_base + offset, *guest_port);
+    let build = || {
+        let mut builder = Sandbox::builder(&name)
+            .image(BASE_IMAGE)
+            .cpus(spec.cpus)
+            .memory(spec.memory_mib)
+            .root_disk(spec.disk_mib)
+            .init("/sbin/init")
+            .hostname(GUEST_HOSTNAME)
+            .network(|n| {
+                let mut n = n.policy(NetworkPolicy::from_profiles([
+                    NetworkProfile::Public,
+                    NetworkProfile::Host,
+                ]));
+                if let Some(exposure) = exposure {
+                    for (offset, guest_port) in public_ports {
+                        n = n.port_bind(exposure.bind, exposure.port_base + offset, *guest_port);
+                    }
                 }
+                n
+            })
+            .patch(|p| p.text(IDENTITY_CONF, identity_conf(), Some(0o644), true))
+            .patch(|p| {
+                p.text(
+                    "/usr/local/sbin/farm-identity",
+                    include_str!("../../docker/farm-identity"),
+                    Some(0o755),
+                    true,
+                )
+            })
+            .patch(|p| {
+                p.text(
+                    "/etc/systemd/system/farm-identity.service",
+                    include_str!("../../docker/farm-identity.service"),
+                    Some(0o644),
+                    true,
+                )
+            })
+            .patch(|p| {
+                p.text(
+                    "/usr/local/sbin/farm-hostname",
+                    include_str!("../../docker/farm-hostname"),
+                    Some(0o755),
+                    true,
+                )
+            })
+            .patch(|p| {
+                p.text(
+                    "/etc/systemd/system/farm-hostname.service",
+                    include_str!("../../docker/farm-hostname.service"),
+                    Some(0o644),
+                    true,
+                )
+            })
+            .label(FARM_LABEL, farm_id)
+            .label(ROLE_LABEL, spec.role.as_str())
+            .detached(true);
+        if let Some(size) = spec.container_disk_mib {
+            for dir in CONTAINER_DIRS {
+                builder = builder.volume(*dir, |m| m.owned_with(|v| v.disk().size(size)));
             }
-            n
-        })
-        .patch(|p| p.text(IDENTITY_CONF, identity_conf(), Some(0o644), true))
-        .patch(|p| {
-            p.text(
-                "/usr/local/sbin/farm-identity",
-                include_str!("../../docker/farm-identity"),
-                Some(0o755),
-                true,
-            )
-        })
-        .patch(|p| {
-            p.text(
-                "/etc/systemd/system/farm-identity.service",
-                include_str!("../../docker/farm-identity.service"),
-                Some(0o644),
-                true,
-            )
-        })
-        .patch(|p| {
-            p.text(
-                "/usr/local/sbin/farm-hostname",
-                include_str!("../../docker/farm-hostname"),
-                Some(0o755),
-                true,
-            )
-        })
-        .patch(|p| {
-            p.text(
-                "/etc/systemd/system/farm-hostname.service",
-                include_str!("../../docker/farm-hostname.service"),
-                Some(0o644),
-                true,
-            )
-        })
-        .label(FARM_LABEL, farm_id)
-        .label(ROLE_LABEL, spec.role.as_str())
-        .detached(true);
-    if let Some(size) = spec.container_disk_mib {
-        for dir in CONTAINER_DIRS {
-            builder = builder.volume(*dir, |m| m.owned_with(|v| v.disk().size(size)));
         }
-    }
-    let sandbox = builder
-        .create()
+        builder
+    };
+    let sandbox = create_nested(build)
         .await
         .with_context(|| format!("create {name}"))?;
     let boot = async {
@@ -157,6 +162,19 @@ pub async fn create_node(
         memory_mib: spec.memory_mib,
         ip: Some(ip),
     })
+}
+
+/// msb leaves nested virtualization off unless asked. Nova uses the guest's `/dev/kvm`
+/// when the host can nest; otherwise the guest boots without it and Nova falls back to TCG.
+pub async fn create_nested(build: impl Fn() -> SandboxBuilder) -> MicrosandboxResult<Sandbox> {
+    match build().nested_virt(true).create().await {
+        // Host support is checked before anything is created, so a plain retry is safe.
+        Err(MicrosandboxError::Unsupported {
+            op: Operation::SandboxStart,
+            reason: UnsupportedReason::NotAvailable(_),
+        }) => build().nested_virt(false).create().await,
+        result => result,
+    }
 }
 
 pub fn describe_node(handle: &SandboxHandle) -> FarmNode {

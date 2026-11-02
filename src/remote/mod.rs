@@ -17,6 +17,19 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
+/// The msb release hosts run. The `microsandbox` crate in Cargo.toml is pinned to the same version.
+pub const MSB_VERSION: &str = "0.7.13";
+
+/// Whether an installed msb predates [`MSB_VERSION`], so preparation upgrades it in place.
+pub fn msb_outdated(version: &str) -> bool {
+    let parse = |v: &str| {
+        v.split('.')
+            .map(|part| part.parse::<u64>().ok())
+            .collect::<Option<Vec<_>>>()
+    };
+    matches!((parse(version), parse(MSB_VERSION)), (Some(have), Some(want)) if have < want)
+}
+
 #[derive(Clone, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SshTarget {
@@ -389,4 +402,27 @@ pub struct HostJob {
     /// A purge that also deletes the snapshots this host keeps.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub delete_snapshots: bool,
+}
+
+#[cfg(test)]
+mod msb_version_tests {
+    use super::*;
+
+    #[test]
+    fn only_older_releases_are_outdated() {
+        assert!(msb_outdated("0.7.8"));
+        assert!(msb_outdated("0.6.99"));
+        assert!(!msb_outdated(MSB_VERSION));
+        assert!(!msb_outdated("0.7.14"));
+        assert!(!msb_outdated("1.0.0"));
+        assert!(!msb_outdated("0.7.x"));
+    }
+
+    #[test]
+    fn hosts_run_the_msb_the_crate_is_built_against() {
+        assert!(
+            include_str!("../../Cargo.toml")
+                .contains(&format!("microsandbox = {{ version = \"={MSB_VERSION}\""))
+        );
+    }
 }

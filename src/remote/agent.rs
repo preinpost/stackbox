@@ -517,6 +517,12 @@ impl Agent {
             crate::remote::host::smoke(&uuid::Uuid::new_v4().to_string()).await?;
             return Ok(Reply::Done);
         }
+        if matches!(request.operation, Operation::InstallMsb) {
+            // Stands in for flock(1), which macOS lacks; Linux installs also take it in the script.
+            let _install_lock = lock(&self.dir, "msb-install.lock")?;
+            crate::remote::host::install_msb().await?;
+            return Ok(Reply::Done);
+        }
         // A host-wide cleanup has no farm id, so it runs before the per-farm scope below.
         if matches!(request.operation, Operation::Purge) {
             // Serialize with creates so a reservation cannot appear mid-purge.

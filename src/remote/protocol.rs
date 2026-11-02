@@ -86,6 +86,8 @@ pub enum Operation {
     Inspect,
     /// Boot a small VM from the golden image, run a command in it and remove it.
     VerifyVm,
+    /// Install the coordinator's msb release, upgrading an older one; a newer one fails.
+    InstallMsb,
     /// Destroy every VM this coordinator reserved on the host, then forget them.
     /// The coordinator runs this only when removing the host.
     Purge,
@@ -147,6 +149,8 @@ impl Operation {
             Self::ExportSnapshot { .. } | Self::ImportSnapshot { .. } => 7200,
             Self::RemoveSnapshot { .. } => 300,
             Self::VerifyVm => 300,
+            // Downloads the release bundle; the script itself stops after 600 s.
+            Self::InstallMsb => 660,
             _ => 60,
         }
     }
