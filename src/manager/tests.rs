@@ -19,8 +19,6 @@ pub(crate) struct Fake {
     pub(crate) farms: Mutex<BTreeMap<String, Vec<FarmNode>>>,
     /// msb snapshot references and their labels.
     snapshots: Mutex<BTreeMap<String, BTreeMap<String, String>>>,
-    /// Exported archive contents: the labels of the snapshot written there.
-    archives: Mutex<BTreeMap<std::path::PathBuf, BTreeMap<String, String>>>,
     /// `(from, to)` of each settle call.
     settled: Mutex<Vec<Option<(Exposure, Exposure)>>>,
     deploys: AtomicUsize,
@@ -176,15 +174,9 @@ impl Backend for Fake {
         output: std::path::PathBuf,
     ) -> BoxFuture<'_, Result<()>> {
         Box::pin(async move {
+            // An archive carries its snapshot's labels, wherever it is moved.
             let labels = self.snapshots.lock().unwrap()[&reference].clone();
-            std::fs::write(&output, b"archive")?;
-            // The manager renames the partial file; the labels travel with it.
-            let published = output.display().to_string();
-            let published = published.strip_suffix(".partial").unwrap_or(&published);
-            self.archives
-                .lock()
-                .unwrap()
-                .insert(published.into(), labels);
+            std::fs::write(&output, serde_json::to_vec(&labels)?)?;
             Ok(())
         })
     }
@@ -194,13 +186,8 @@ impl Backend for Fake {
         snapshot_id: String,
     ) -> BoxFuture<'_, Result<crate::farm::ImportedSnapshot>> {
         Box::pin(async move {
-            let labels = self
-                .archives
-                .lock()
-                .unwrap()
-                .get(&archive)
-                .cloned()
-                .unwrap_or_default();
+            let labels: BTreeMap<String, String> =
+                serde_json::from_slice(&std::fs::read(&archive)?).unwrap_or_default();
             let reference = format!("fake/imported/{snapshot_id}");
             self.snapshots
                 .lock()
@@ -1563,7 +1550,8 @@ async fn snapshots_freeze_restore_export_import_and_delete() {
             .export_snapshot(
                 "clean",
                 ExportRequest {
-                    path: Some("relative.msb".into())
+                    path: Some("relative.msb".into()),
+                    ..Default::default()
                 }
             )
             .unwrap_err()
@@ -1578,7 +1566,7 @@ async fn snapshots_freeze_restore_export_import_and_delete() {
     let archive = exported.archive.unwrap();
     let path = dir.path().join("exports/clean.msb");
     assert_eq!(archive.path, path.display().to_string());
-    assert_eq!(archive.size_bytes, 7);
+    assert_eq!(archive.size_bytes, std::fs::metadata(&path).unwrap().len());
     assert!(!dir.path().join("exports/clean.msb.partial").exists());
     assert!(
         manager
@@ -1590,8 +1578,9 @@ async fn snapshots_freeze_restore_export_import_and_delete() {
     // Import reads the plan back from the archive's labels.
     let import = |path: &std::path::Path, id: Option<&str>| {
         manager.import_snapshot(ImportRequest {
-            path: path.display().to_string(),
+            path: Some(path.display().to_string()),
             id: id.map(Into::into),
+            ..Default::default()
         })
     };
     assert!(import(&path, None).unwrap_err().is::<Conflict>());
@@ -1774,6 +1763,252 @@ async fn snapshots_freeze_restore_export_import_and_delete() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    settle(&manager).await;
+}
+
+#[tokio::test]
+async fn snapshots_move_through_registered_buckets_with_sealed_keys() {
+    use crate::s3::{RegisterBucket, fake::FakeS3};
+    let s3 = Arc::new(FakeS3::default());
+    let endpoint = s3.start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let backend = Arc::new(Fake::default());
+    let manager = open_with(options(dir.path()), backend.clone()).await;
+    let registration = |secret: Option<&str>| RegisterBucket {
+        id: "minio".into(),
+        endpoint: Some(endpoint.clone()),
+        region: None,
+        name: "farm".into(),
+        prefix: Some("snapshots".into()),
+        path_style: None,
+        ca_pem: None,
+        access_key_id: "admin".into(),
+        secret_access_key: secret.map(Into::into),
+    };
+    assert!(
+        manager
+            .register_bucket(registration(None))
+            .unwrap_err()
+            .is::<BadRequest>()
+    );
+    assert!(
+        manager
+            .test_bucket(registration(Some("unique-test-secret")))
+            .await
+            .unwrap()
+            .contains("s3://farm/snapshots/")
+    );
+    assert!(s3.objects.lock().unwrap().is_empty());
+    let bucket = manager
+        .register_bucket(registration(Some("unique-test-secret")))
+        .unwrap();
+    assert_eq!(bucket.prefix, "snapshots/");
+    assert!(bucket.path_style);
+    assert!(
+        manager
+            .register_bucket(registration(Some("x")))
+            .unwrap_err()
+            .is::<Conflict>()
+    );
+    // The secret is sealed: neither the state file nor the API shows it.
+    let state = std::fs::read_to_string(dir.path().join("state.json")).unwrap();
+    assert!(!state.contains("unique-test-secret"));
+    // An update may keep the secret, but not when it would be sent somewhere else.
+    let mut moved = registration(None);
+    moved.endpoint = Some("http://elsewhere:9000".into());
+    assert!(manager.update_bucket(moved).unwrap_err().is::<BadRequest>());
+    let mut renamed = registration(None);
+    renamed.prefix = Some("farm/".into());
+    assert_eq!(manager.update_bucket(renamed).unwrap().prefix, "farm/");
+    manager.check_bucket("minio").await.unwrap();
+
+    done(&manager, &manager.create(request("src")).unwrap()).await;
+    let freeze = manager
+        .freeze(
+            "src",
+            SnapshotRequest {
+                id: "clean".into(),
+                note: Some("via s3".into()),
+            },
+        )
+        .unwrap();
+    done(&manager, &freeze).await;
+    let export = |bucket: &str, key: Option<&str>| {
+        manager.export_snapshot(
+            "clean",
+            ExportRequest {
+                bucket: Some(bucket.into()),
+                key: key.map(Into::into),
+                ..Default::default()
+            },
+        )
+    };
+    assert!(export("nope", None).unwrap_err().is::<BadRequest>());
+    assert!(
+        export("minio", Some("/abs"))
+            .unwrap_err()
+            .is::<BadRequest>()
+    );
+    let exporting = export("minio", None).unwrap();
+    let transfer = exporting.transfer.unwrap();
+    assert_eq!(transfer.key, "farm/clean.msb");
+    // A running transfer keeps its bucket registered.
+    assert!(
+        manager
+            .unregister_bucket("minio")
+            .unwrap_err()
+            .is::<Conflict>()
+    );
+    let exported = manager.wait_snapshot("clean").await.unwrap();
+    assert_eq!(exported.error, None);
+    assert!(exported.transfer.is_none());
+    let archive = exported.archive.unwrap();
+    assert_eq!(archive.path, "s3://farm/farm/clean.msb");
+    assert_eq!(archive.bucket.as_deref(), Some("minio"));
+    let uploaded = s3.objects.lock().unwrap()["farm/clean.msb"].clone();
+    assert_eq!(archive.size_bytes, uploaded.len() as u64);
+    // The local copy is gone once uploaded.
+    assert_eq!(
+        std::fs::read_dir(dir.path().join("transfers"))
+            .unwrap()
+            .count(),
+        0
+    );
+    // An existing object is not replaced.
+    export("minio", None).unwrap();
+    let again = manager.wait_snapshot("clean").await.unwrap();
+    assert!(
+        again.error.unwrap().contains("already exists"),
+        "export over an object"
+    );
+    assert_eq!(again.archive.unwrap().exported_at, archive.exported_at);
+    // A failed upload is aborted rather than left billed.
+    *s3.fail_parts.lock().unwrap() = Some(StatusCode::FORBIDDEN);
+    export("minio", Some("farm/failed.msb")).unwrap();
+    let failed = manager.wait_snapshot("clean").await.unwrap();
+    assert!(failed.error.unwrap().contains("upload part 1"));
+    assert!(s3.uploads.lock().unwrap().is_empty());
+    assert!(
+        manager
+            .update(|state| Ok(state.uploads.is_empty()))
+            .unwrap()
+    );
+    *s3.fail_parts.lock().unwrap() = None;
+
+    let objects = manager.bucket_objects("minio").await.unwrap();
+    assert_eq!(
+        objects.iter().map(|o| o.key.as_str()).collect::<Vec<_>>(),
+        ["farm/clean.msb"]
+    );
+    let import = |key: Option<&str>, id: Option<&str>| {
+        manager.import_snapshot(ImportRequest {
+            bucket: Some("minio".into()),
+            key: key.map(Into::into),
+            id: id.map(Into::into),
+            ..Default::default()
+        })
+    };
+    assert!(import(None, Some("x")).unwrap_err().is::<BadRequest>());
+    assert!(
+        import(Some("farm/clean.msb"), None)
+            .unwrap_err()
+            .is::<Conflict>()
+    );
+    let importing = import(Some("farm/clean.msb"), Some("moved")).unwrap();
+    assert_eq!(importing.transfer.unwrap().key, "farm/clean.msb");
+    let moved = manager.wait_snapshot("moved").await.unwrap();
+    assert_eq!(moved.status, SnapshotStatus::Ready, "{:?}", moved.error);
+    assert_eq!(moved.note.as_deref(), Some("via s3"));
+    assert_eq!(moved.source_farm.as_deref(), Some("src"));
+    assert!(moved.transfer.is_none());
+    import(Some("farm/absent.msb"), None).unwrap();
+    let absent = manager.wait_snapshot("absent").await.unwrap();
+    assert_eq!(absent.status, SnapshotStatus::Failed);
+    assert!(absent.error.unwrap().contains("NoSuchKey"));
+
+    // Uploads a stopped daemon left are aborted at the next start; the key still unseals.
+    s3.uploads
+        .lock()
+        .unwrap()
+        .insert("left".into(), Default::default());
+    manager
+        .update(|state| {
+            state.uploads.insert(
+                "left".into(),
+                crate::s3::PendingUpload {
+                    bucket: "minio".into(),
+                    key: "farm/left.msb".into(),
+                },
+            );
+            Ok(())
+        })
+        .unwrap();
+    settle(&manager).await;
+    drop(manager);
+    let manager = open_with(options(dir.path()), backend.clone()).await;
+    for _ in 0..50 {
+        if s3.uploads.lock().unwrap().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(s3.uploads.lock().unwrap().is_empty());
+    manager.check_bucket("minio").await.unwrap();
+
+    let app = api::router(manager.clone(), None);
+    let call = |method: &str, uri: &str, payload: &str| {
+        Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("content-type", "application/json")
+            .body(Body::from(payload.to_string()))
+            .unwrap()
+    };
+    let response = app
+        .clone()
+        .oneshot(call("GET", "/api/v1/buckets", ""))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), 1_000_000).await.unwrap();
+    let text = String::from_utf8_lossy(&body);
+    assert!(text.contains("\"access_key_id\":\"admin\"") && !text.contains("unique-test-secret"));
+    let response = app
+        .clone()
+        .oneshot(call("GET", "/api/v1/buckets/minio/objects", ""))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let response = app
+        .clone()
+        .oneshot(call(
+            "PUT",
+            "/api/v1/buckets/minio",
+            r#"{"id":"other","name":"farm","access_key_id":"a"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let response = app
+        .clone()
+        .oneshot(call("DELETE", "/api/v1/buckets/minio", ""))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(
+        manager
+            .export_snapshot(
+                "clean",
+                ExportRequest {
+                    bucket: Some("minio".into()),
+                    ..Default::default()
+                }
+            )
+            .unwrap_err()
+            .is::<BadRequest>()
+    );
+    // Objects stay in the bucket.
+    assert!(s3.objects.lock().unwrap().contains_key("farm/clean.msb"));
     settle(&manager).await;
 }
 

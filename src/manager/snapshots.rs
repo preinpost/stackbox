@@ -61,6 +61,7 @@ pub(super) fn recover_interrupted(state: &mut State) {
             ),
             SnapshotStatus::Ready | SnapshotStatus::Failed => continue,
         };
+        snapshot.transfer = None;
         snapshot.status = status;
         snapshot.error = Some(error.into());
         snapshot.updated_at = now();
@@ -108,6 +109,22 @@ fn labels(snapshot: &SnapshotRecord) -> BTreeMap<String, String> {
         labels.insert(label::NOTE.into(), note.clone());
     }
     labels
+}
+
+enum Target {
+    File(PathBuf),
+    /// `key` is resolved against the bucket's prefix when the export is accepted.
+    Bucket {
+        bucket: String,
+        key: Option<String>,
+    },
+}
+enum Source {
+    File(PathBuf),
+    Bucket { bucket: String, key: String },
+}
+fn given(value: Option<String>) -> Option<String> {
+    value.filter(|v| !v.trim().is_empty())
 }
 
 /// Metadata of an imported archive, read back from its labels.
@@ -252,6 +269,7 @@ impl FarmManager {
                 reference: None,
                 size_bytes: None,
                 archive: None,
+                transfer: None,
                 error: None,
                 created_at: now(),
                 updated_at: now(),
@@ -371,9 +389,93 @@ impl FarmManager {
         Ok(())
     }
 
-    /// Write the snapshot to an archive in the background. `path` may name a file or an existing directory.
+    /// Write the snapshot to an archive in the background, as a file or an object in a
+    /// registered bucket. `path` may name a file or an existing directory.
     pub fn export_snapshot(&self, id: &str, request: ExportRequest) -> Result<SnapshotRecord> {
-        let output = match request.path.filter(|p| !p.trim().is_empty()) {
+        let target = match (given(request.path), given(request.bucket)) {
+            (Some(_), Some(_)) => {
+                return Err(bad_request("export to either a path or a bucket"));
+            }
+            (None, Some(bucket)) => {
+                let key = given(request.key);
+                if let Some(key) = &key {
+                    crate::s3::validate_key(key).map_err(|e| bad_request(e.to_string()))?;
+                }
+                Target::Bucket { bucket, key }
+            }
+            (path, None) => {
+                if given(request.key).is_some() {
+                    return Err(bad_request("an object key needs a bucket"));
+                }
+                Target::File(self.export_path(id, path)?)
+            }
+        };
+        let (snapshot, reference, target) = self.update(|state| {
+            self.ensure_accepting()?;
+            let target = match target {
+                Target::Bucket { bucket, key } => {
+                    let stored = state.buckets.get(&bucket).ok_or_else(|| {
+                        bad_request(format!("bucket '{bucket}' is not registered"))
+                    })?;
+                    let key = key.unwrap_or_else(|| format!("{}{id}.msb", stored.bucket.prefix));
+                    Target::Bucket {
+                        bucket,
+                        key: Some(key),
+                    }
+                }
+                file => file,
+            };
+            let snapshot = state
+                .snapshots
+                .get_mut(id)
+                .ok_or_else(|| NotFound(format!("snapshot '{id}'")))?;
+            let reference = match (&snapshot.status, &snapshot.reference) {
+                (SnapshotStatus::Ready, Some(reference)) => reference.clone(),
+                _ => return Err(conflict(format!("snapshot '{id}' is not ready"))),
+            };
+            snapshot.status = SnapshotStatus::Exporting;
+            snapshot.error = None;
+            snapshot.transfer = match &target {
+                Target::Bucket {
+                    bucket,
+                    key: Some(key),
+                } => Some(SnapshotTransfer {
+                    bucket: bucket.clone(),
+                    key: key.clone(),
+                    done_bytes: 0,
+                    total_bytes: None,
+                }),
+                _ => None,
+            };
+            snapshot.updated_at = now();
+            Ok((snapshot.clone(), reference, target))
+        })?;
+        let manager = self.clone();
+        let id = id.to_owned();
+        tokio::spawn(async move {
+            let result = match target {
+                Target::File(output) => manager.run_export(reference, &output).await,
+                Target::Bucket { bucket, key } => {
+                    let key = key.unwrap_or_default();
+                    manager.run_upload(&id, reference, &bucket, &key).await
+                }
+            };
+            let saved = manager.update_snapshot(&id, |s| {
+                s.status = SnapshotStatus::Ready;
+                s.transfer = None;
+                match result {
+                    Ok(archive) => s.archive = Some(archive),
+                    Err(error) => s.error = Some(format!("export failed: {error:#}")),
+                }
+            });
+            if let Err(error) = saved {
+                eprintln!("cannot record export of snapshot {id}: {error:#}");
+            }
+        });
+        Ok(snapshot)
+    }
+    fn export_path(&self, id: &str, path: Option<String>) -> Result<PathBuf> {
+        let output = match path {
             None => self.state_dir().join("exports").join(format!("{id}.msb")),
             Some(path) => {
                 let path = PathBuf::from(path);
@@ -396,37 +498,7 @@ impl FarmManager {
         if output.exists() {
             return Err(conflict(format!("{} already exists", output.display())));
         }
-        let (snapshot, reference) = self.update(|state| {
-            self.ensure_accepting()?;
-            let snapshot = state
-                .snapshots
-                .get_mut(id)
-                .ok_or_else(|| NotFound(format!("snapshot '{id}'")))?;
-            let reference = match (&snapshot.status, &snapshot.reference) {
-                (SnapshotStatus::Ready, Some(reference)) => reference.clone(),
-                _ => return Err(conflict(format!("snapshot '{id}' is not ready"))),
-            };
-            snapshot.status = SnapshotStatus::Exporting;
-            snapshot.error = None;
-            snapshot.updated_at = now();
-            Ok((snapshot.clone(), reference))
-        })?;
-        let manager = self.clone();
-        let id = id.to_owned();
-        tokio::spawn(async move {
-            let result = manager.run_export(reference, &output).await;
-            let saved = manager.update_snapshot(&id, |s| {
-                s.status = SnapshotStatus::Ready;
-                match result {
-                    Ok(archive) => s.archive = Some(archive),
-                    Err(error) => s.error = Some(format!("export failed: {error:#}")),
-                }
-            });
-            if let Err(error) = saved {
-                eprintln!("cannot record export of snapshot {id}: {error:#}");
-            }
-        });
-        Ok(snapshot)
+        Ok(output)
     }
     async fn run_export(&self, reference: String, output: &Path) -> Result<SnapshotArchive> {
         let _permit = self.0.snapshot_gate.acquire().await?;
@@ -449,30 +521,143 @@ impl FarmManager {
             path: output.display().to_string(),
             size_bytes: std::fs::metadata(output)?.len(),
             exported_at: now(),
+            bucket: None,
+            key: None,
         })
     }
+    /// Where an archive passing through the coordinator is kept until its transfer ends.
+    fn transfer_path(&self, id: &str, kind: &str) -> Result<PathBuf> {
+        let dir = self.state_dir().join("transfers");
+        std::fs::create_dir_all(&dir)?;
+        let path = dir.join(format!("{id}.{kind}.msb"));
+        let _ = std::fs::remove_file(&path);
+        Ok(path)
+    }
+    /// Write the archive locally, upload it, then delete the local copy.
+    async fn run_upload(
+        &self,
+        id: &str,
+        reference: String,
+        bucket_id: &str,
+        key: &str,
+    ) -> Result<SnapshotArchive> {
+        let _permit = self.0.snapshot_gate.acquire().await?;
+        let (bucket, client) = self.s3_client(bucket_id)?;
+        let location = format!("s3://{}/{key}", bucket.name);
+        // Like a file export, never replace what is there.
+        if client.head(key).await?.is_some() {
+            return Err(anyhow!("{location} already exists"));
+        }
+        let archive = self.transfer_path(id, "export")?;
+        let uploaded = async {
+            self.local_backend()?
+                .export_snapshot(reference, archive.clone())
+                .await?;
+            let upload_id = client.start_upload(key).await?;
+            self.update(|state| {
+                state.uploads.insert(
+                    upload_id.clone(),
+                    crate::s3::PendingUpload {
+                        bucket: bucket_id.into(),
+                        key: key.into(),
+                    },
+                );
+                Ok(())
+            })?;
+            let mut reported = None;
+            let uploaded = client
+                .upload(&archive, key, &upload_id, |done, total| {
+                    self.report(id, &mut reported, done, Some(total))
+                })
+                .await;
+            match &uploaded {
+                Err(_) => {
+                    // Left unaborted, the parts would stay billed.
+                    match client.abort_upload(key, &upload_id).await {
+                        Ok(()) => self.forget_upload(&upload_id),
+                        Err(error) => eprintln!(
+                            "cannot abort the upload of {location}; it is retried at the next start: {error:#}"
+                        ),
+                    }
+                }
+                Ok(_) => self.forget_upload(&upload_id),
+            }
+            uploaded
+        }
+        .await;
+        let _ = std::fs::remove_file(&archive);
+        Ok(SnapshotArchive {
+            path: location,
+            size_bytes: uploaded?,
+            exported_at: now(),
+            bucket: Some(bucket_id.into()),
+            key: Some(key.into()),
+        })
+    }
+    /// Record transfer progress, at most once per 64 MiB so the state file is not rewritten per chunk.
+    fn report(&self, id: &str, reported: &mut Option<u64>, done: u64, total: Option<u64>) {
+        const STEP: u64 = 64 * 1024 * 1024;
+        if reported.is_some_and(|last| done < last + STEP && Some(done) != total) {
+            return;
+        }
+        *reported = Some(done);
+        let saved = self.update_snapshot(id, |s| {
+            if let Some(transfer) = &mut s.transfer {
+                transfer.done_bytes = done;
+                transfer.total_bytes = total;
+            }
+        });
+        if let Err(error) = saved {
+            eprintln!("cannot record transfer progress of snapshot {id}: {error:#}");
+        }
+    }
 
-    /// Import an archive in the background. The ID defaults to the archive's file name.
+    /// Import an archive file, or an object in a registered bucket, in the background.
+    /// The ID defaults to the archive's file name.
     pub fn import_snapshot(&self, request: ImportRequest) -> Result<SnapshotRecord> {
-        let path = PathBuf::from(&request.path);
-        if !path.is_absolute() {
-            return Err(bad_request("archive path must be absolute"));
-        }
-        if !path.is_file() {
-            return Err(bad_request(format!("{} is not a file", path.display())));
-        }
-        let id = match request.id.filter(|id| !id.trim().is_empty()) {
+        let source = match (given(request.path), given(request.bucket)) {
+            (Some(_), Some(_)) => {
+                return Err(bad_request("import from either a path or a bucket"));
+            }
+            (Some(path), None) => {
+                if given(request.key).is_some() {
+                    return Err(bad_request("an object key needs a bucket"));
+                }
+                let path = PathBuf::from(path);
+                if !path.is_absolute() {
+                    return Err(bad_request("archive path must be absolute"));
+                }
+                if !path.is_file() {
+                    return Err(bad_request(format!("{} is not a file", path.display())));
+                }
+                Source::File(path)
+            }
+            (None, Some(bucket)) => {
+                let key = given(request.key)
+                    .ok_or_else(|| bad_request("give the object key to import"))?;
+                crate::s3::validate_key(&key).map_err(|e| bad_request(e.to_string()))?;
+                Source::Bucket { bucket, key }
+            }
+            (None, None) => {
+                return Err(bad_request(
+                    "give an archive path, or a bucket and object key",
+                ));
+            }
+        };
+        let name = match &source {
+            Source::File(path) => path.display().to_string(),
+            Source::Bucket { key, .. } => key.clone(),
+        };
+        let id = match given(request.id) {
             Some(id) => id,
-            None => path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .map(|name| name.strip_suffix(".msb").unwrap_or(name).to_owned())
-                .unwrap_or_default(),
+            None => {
+                let file = name.rsplit('/').next().unwrap_or_default();
+                file.strip_suffix(".msb").unwrap_or(file).to_owned()
+            }
         };
         validate_snapshot_id(&id).map_err(|e| {
             bad_request(format!(
-                "{e}; choose an ID for this archive (file name '{}')",
-                path.display()
+                "{e}; choose an ID for this archive (file name '{name}')"
             ))
         })?;
         let snapshot = self.update(|state| {
@@ -480,6 +665,20 @@ impl FarmManager {
             if state.snapshots.contains_key(&id) {
                 return Err(conflict(format!("snapshot '{id}' already exists")));
             }
+            let transfer = match &source {
+                Source::Bucket { bucket, key } => {
+                    if !state.buckets.contains_key(bucket) {
+                        return Err(bad_request(format!("bucket '{bucket}' is not registered")));
+                    }
+                    Some(SnapshotTransfer {
+                        bucket: bucket.clone(),
+                        key: key.clone(),
+                        done_bytes: 0,
+                        total_bytes: None,
+                    })
+                }
+                Source::File(_) => None,
+            };
             // Placeholders until the archive's labels are read.
             let snapshot = SnapshotRecord {
                 id: id.clone(),
@@ -498,6 +697,7 @@ impl FarmManager {
                 reference: None,
                 size_bytes: None,
                 archive: None,
+                transfer,
                 error: None,
                 created_at: now(),
                 updated_at: now(),
@@ -507,23 +707,29 @@ impl FarmManager {
         })?;
         let manager = self.clone();
         tokio::spawn(async move {
-            let result = manager.run_import(&path, &id).await;
-            let saved = manager.update_snapshot(&id, |s| match result {
-                Ok((imported, reference, size_bytes)) => {
-                    s.status = SnapshotStatus::Ready;
-                    s.arch = imported.arch;
-                    s.platform = imported.platform;
-                    s.plan = imported.plan;
-                    s.deployed = imported.deployed;
-                    s.source_exposure = imported.source_exposure;
-                    s.source_farm = imported.source_farm;
-                    s.note = imported.note;
-                    s.reference = Some(reference);
-                    s.size_bytes = size_bytes;
-                }
-                Err(error) => {
-                    s.status = SnapshotStatus::Failed;
-                    s.error = Some(format!("import failed: {error:#}"));
+            let result = match source {
+                Source::File(path) => manager.run_import(&path, &id).await,
+                Source::Bucket { bucket, key } => manager.run_download(&id, &bucket, &key).await,
+            };
+            let saved = manager.update_snapshot(&id, |s| {
+                s.transfer = None;
+                match result {
+                    Ok((imported, reference, size_bytes)) => {
+                        s.status = SnapshotStatus::Ready;
+                        s.arch = imported.arch;
+                        s.platform = imported.platform;
+                        s.plan = imported.plan;
+                        s.deployed = imported.deployed;
+                        s.source_exposure = imported.source_exposure;
+                        s.source_farm = imported.source_farm;
+                        s.note = imported.note;
+                        s.reference = Some(reference);
+                        s.size_bytes = size_bytes;
+                    }
+                    Err(error) => {
+                        s.status = SnapshotStatus::Failed;
+                        s.error = Some(format!("import failed: {error:#}"));
+                    }
                 }
             });
             if let Err(error) = saved {
@@ -534,6 +740,38 @@ impl FarmManager {
     }
     async fn run_import(&self, path: &Path, id: &str) -> Result<(Imported, String, Option<u64>)> {
         let _permit = self.0.snapshot_gate.acquire().await?;
+        self.import_archive(path, id).await
+    }
+    /// Download the object, import it, then delete the downloaded copy.
+    async fn run_download(
+        &self,
+        id: &str,
+        bucket: &str,
+        key: &str,
+    ) -> Result<(Imported, String, Option<u64>)> {
+        let _permit = self.0.snapshot_gate.acquire().await?;
+        // Fail before a long download that could not be imported.
+        self.local_backend()?;
+        let (_, client) = self.s3_client(bucket)?;
+        let archive = self.transfer_path(id, "import")?;
+        let imported = async {
+            let mut reported = None;
+            client
+                .download(key, &archive, |done, total| {
+                    self.report(id, &mut reported, done, total)
+                })
+                .await?;
+            self.import_archive(&archive, id).await
+        }
+        .await;
+        let _ = std::fs::remove_file(&archive);
+        imported
+    }
+    async fn import_archive(
+        &self,
+        path: &Path,
+        id: &str,
+    ) -> Result<(Imported, String, Option<u64>)> {
         let backend = self.local_backend()?;
         let imported = backend
             .import_snapshot(path.to_owned(), id.to_owned())

@@ -5,6 +5,7 @@ use crate::remote::{
 use crate::{
     manager::{BadRequest, Conflict, FarmManager, NotFound},
     model::*,
+    s3::{Bucket, BucketCheck, BucketObject, RegisterBucket},
 };
 use axum::{
     Json, Router,
@@ -117,6 +118,14 @@ pub fn router(manager: FarmManager, token: Option<String>) -> Router {
             get(snapshot).delete(delete_snapshot),
         )
         .route("/api/v1/snapshots/{id}/export", post(export_snapshot))
+        .route("/api/v1/buckets", get(buckets).post(register_bucket))
+        .route("/api/v1/buckets/test-connection", post(test_bucket))
+        .route(
+            "/api/v1/buckets/{id}",
+            get(bucket).put(update_bucket).delete(unregister_bucket),
+        )
+        .route("/api/v1/buckets/{id}/check", post(check_bucket))
+        .route("/api/v1/buckets/{id}/objects", get(bucket_objects))
         .route("/api/v1/jobs", get(jobs))
         .route("/api/v1/jobs/{id}", get(job))
         .route("/api/v1/openapi.json", get(openapi))
@@ -675,6 +684,78 @@ async fn import_snapshot(
         app.manager.import_snapshot(body(value)?)?,
     ))
 }
+#[utoipa::path(get, path="/api/v1/buckets", responses((status=200, body=Vec<Bucket>)))]
+async fn buckets(State(app): State<App>) -> Result<Json<Vec<Bucket>>, ApiError> {
+    Ok(Json(app.manager.buckets()?))
+}
+#[utoipa::path(get, path="/api/v1/buckets/{id}", params(("id"=String, Path)), responses((status=200, body=Bucket), (status=404, body=ErrorBody)))]
+async fn bucket(State(app): State<App>, Path(id): Path<String>) -> Result<Json<Bucket>, ApiError> {
+    Ok(Json(app.manager.bucket(&id)?))
+}
+#[utoipa::path(post, path="/api/v1/buckets", request_body=RegisterBucket, responses((status=201, description="Registered; the secret key is stored encrypted and not returned", body=Bucket), (status=400, body=ErrorBody), (status=409, body=ErrorBody)))]
+async fn register_bucket(
+    State(app): State<App>,
+    value: Result<Json<RegisterBucket>, JsonRejection>,
+) -> Result<Response, ApiError> {
+    let bucket = app.manager.register_bucket(body(value)?)?;
+    Ok((
+        StatusCode::CREATED,
+        [(header::LOCATION, format!("/api/v1/buckets/{}", bucket.id))],
+        Json(bucket),
+    )
+        .into_response())
+}
+#[utoipa::path(put, path="/api/v1/buckets/{id}", params(("id"=String, Path)), request_body=RegisterBucket, responses((status=200, body=Bucket), (status=400, body=ErrorBody), (status=404, body=ErrorBody), (status=409, body=ErrorBody)))]
+async fn update_bucket(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    value: Result<Json<RegisterBucket>, JsonRejection>,
+) -> Result<Json<Bucket>, ApiError> {
+    let request = body(value)?;
+    if id != request.id {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "bucket id cannot be changed".into(),
+        ));
+    }
+    Ok(Json(app.manager.update_bucket(request)?))
+}
+#[derive(Serialize, ToSchema)]
+struct RemovedBucket {
+    id: String,
+}
+#[utoipa::path(delete, path="/api/v1/buckets/{id}", params(("id"=String, Path)), responses((status=200, description="Unregistered; objects in the bucket are kept", body=RemovedBucket), (status=404, body=ErrorBody), (status=409, body=ErrorBody)))]
+async fn unregister_bucket(
+    State(app): State<App>,
+    Path(id): Path<String>,
+) -> Result<Json<RemovedBucket>, ApiError> {
+    app.manager.unregister_bucket(&id)?;
+    Ok(Json(RemovedBucket { id }))
+}
+#[utoipa::path(post, path="/api/v1/buckets/test-connection", request_body=RegisterBucket, responses((status=200, description="Lists, writes and deletes a test object under the prefix; nothing is saved. Without a secret key, the registered bucket's is used", body=BucketCheck), (status=400, body=ErrorBody)))]
+async fn test_bucket(
+    State(app): State<App>,
+    value: Result<Json<RegisterBucket>, JsonRejection>,
+) -> Result<Json<BucketCheck>, ApiError> {
+    let message = app.manager.test_bucket(body(value)?).await?;
+    Ok(Json(BucketCheck { message }))
+}
+#[utoipa::path(post, path="/api/v1/buckets/{id}/check", params(("id"=String, Path)), responses((status=200, description="Lists, writes and deletes a test object under the prefix", body=BucketCheck), (status=400, body=ErrorBody), (status=404, body=ErrorBody)))]
+async fn check_bucket(
+    State(app): State<App>,
+    Path(id): Path<String>,
+) -> Result<Json<BucketCheck>, ApiError> {
+    let message = app.manager.check_bucket(&id).await?;
+    Ok(Json(BucketCheck { message }))
+}
+#[utoipa::path(get, path="/api/v1/buckets/{id}/objects", params(("id"=String, Path)), responses((status=200, description="`.msb` objects under the bucket's prefix, newest first", body=Vec<BucketObject>), (status=400, body=ErrorBody), (status=404, body=ErrorBody)))]
+async fn bucket_objects(
+    State(app): State<App>,
+    Path(id): Path<String>,
+) -> Result<Json<Vec<BucketObject>>, ApiError> {
+    Ok(Json(app.manager.bucket_objects(&id).await?))
+}
+
 #[derive(Deserialize, utoipa::IntoParams)]
 struct LogQuery {
     #[serde(default)]
@@ -850,7 +931,7 @@ async fn relay_shell(
 }
 
 #[derive(OpenApi)]
-#[openapi(paths(host, remote_hosts, remote_host, host_fingerprint, test_connection, register_host, register_local_host, register_agent_host, update_host_credentials, unregister_host, check_host, prepare_host, install_agent, host_jobs, host_job, catalog_handler, plan_handler, list, detail, create, deploy, settle, delete, endpoints, logs, log_stream, freeze, snapshots, snapshot, delete_snapshot, export_snapshot, import_snapshot, jobs, job), components(schemas(ErrorBody)), modifiers(&Security))]
+#[openapi(paths(host, remote_hosts, remote_host, host_fingerprint, test_connection, register_host, register_local_host, register_agent_host, update_host_credentials, unregister_host, check_host, prepare_host, install_agent, host_jobs, host_job, catalog_handler, plan_handler, list, detail, create, deploy, settle, delete, endpoints, logs, log_stream, freeze, snapshots, snapshot, delete_snapshot, export_snapshot, import_snapshot, buckets, bucket, register_bucket, update_bucket, unregister_bucket, test_bucket, check_bucket, bucket_objects, jobs, job), components(schemas(ErrorBody)), modifiers(&Security))]
 struct ApiDoc;
 struct Security;
 impl utoipa::Modify for Security {

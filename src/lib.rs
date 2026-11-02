@@ -4,6 +4,7 @@ pub mod kolla;
 pub mod manager;
 pub mod model;
 pub mod remote;
+pub mod s3;
 mod shell;
 
 /// Revision this binary was built from, baked in by `build.rs`.

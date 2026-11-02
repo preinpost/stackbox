@@ -3,9 +3,14 @@ import { Input } from "@base-ui/react/input";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "@tanstack/react-router";
 import {
+  Cloud,
+  CloudDownload,
+  CloudUpload,
   CopyPlus,
   Download,
+  HardDrive,
   LoaderCircle,
+  RefreshCw,
   Snowflake,
   Trash2,
   Upload,
@@ -13,6 +18,8 @@ import {
 import { useState } from "react";
 import {
   api,
+  bucketObjectsQuery,
+  bucketsQuery,
   busySnapshot,
   farmsQuery,
   hostQuery,
@@ -23,14 +30,25 @@ import {
   type Snapshot,
 } from "../api/client";
 import {
+  bytes,
   componentLabel,
+  dateTime,
   hostNotice,
   hostReady,
   isAllInOneFarm,
   memory,
   snapshotHost,
 } from "../lib";
-import { Button, CopyText, ErrorNotice, ForgetOption, Modal } from "./ui";
+import { bucketLocation } from "./bucket-actions";
+import {
+  Button,
+  CopyText,
+  ErrorNotice,
+  ForgetOption,
+  Loading,
+  Modal,
+  SelectInput,
+} from "./ui";
 
 const idPattern = "[a-z0-9]([a-z0-9\\-]{0,46}[a-z0-9])?";
 
@@ -374,24 +392,85 @@ export function RestoreSnapshotDialog({
   );
 }
 
+/** Where an archive goes to, or comes from. */
+function TransferMode({
+  value,
+  onChange,
+  fileLabel,
+  hasBuckets,
+  disabled,
+}: {
+  value: "file" | "bucket";
+  onChange: (value: "file" | "bucket") => void;
+  fileLabel: string;
+  hasBuckets: boolean;
+  disabled?: boolean;
+}) {
+  return (
+    <div className="segmented-control" role="radiogroup">
+      {(
+        [
+          { value: "bucket", label: "S3 버킷", icon: <Cloud size={14} /> },
+          { value: "file", label: fileLabel, icon: <HardDrive size={14} /> },
+        ] as const
+      ).map((item) => (
+        <button
+          key={item.value}
+          type="button"
+          role="radio"
+          aria-checked={value === item.value}
+          className={`flex flex-1 items-center justify-center gap-1.5 ${value === item.value ? "selected" : ""}`}
+          disabled={disabled || (item.value === "bucket" && !hasBuckets)}
+          title={
+            item.value === "bucket" && !hasBuckets
+              ? "Snapshots 화면 아래에서 S3 버킷을 먼저 등록하세요."
+              : undefined
+          }
+          onClick={() => onChange(item.value)}
+        >
+          {item.icon}
+          {item.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 export function ExportSnapshotDialog({ snapshot }: { snapshot: Snapshot }) {
   const client = useQueryClient();
   const host = useQuery(hostQuery());
+  const buckets = useQuery(bucketsQuery()).data ?? [];
+  const [mode, setMode] = useState<"file" | "bucket">("file");
   const [path, setPath] = useState("");
+  const [bucketId, setBucketId] = useState("");
+  const [key, setKey] = useState("");
+  const bucket = buckets.find((b) => b.id === bucketId);
   const mutation = useMutation({
-    mutationFn: () => api.exportSnapshot(snapshot.id, path.trim() || undefined),
+    mutationFn: () =>
+      api.exportSnapshot(
+        snapshot.id,
+        mode === "bucket"
+          ? { bucket: bucketId, ...(key.trim() ? { key: key.trim() } : {}) }
+          : path.trim()
+            ? { path: path.trim() }
+            : {},
+      ),
     onSuccess: async () => {
       await refresh(client);
       dialog.setOpen(false);
     },
   });
   const dialog = useDialog(mutation.isPending, () => {
+    setMode(buckets.length ? "bucket" : "file");
     setPath("");
+    setBucketId(buckets[0]?.id ?? "");
+    setKey("");
     mutation.reset();
   });
   const defaultPath = host.data
     ? `${host.data.state_dir}/exports/${snapshot.id}.msb`
     : `exports/${snapshot.id}.msb`;
+  const defaultKey = `${bucket?.prefix ?? ""}${snapshot.id}.msb`;
   return (
     <Dialog.Root open={dialog.open} onOpenChange={dialog.onOpenChange}>
       <Dialog.Trigger
@@ -402,7 +481,7 @@ export function ExportSnapshotDialog({ snapshot }: { snapshot: Snapshot }) {
       </Dialog.Trigger>
       <Modal
         title="스냅샷 내보내기"
-        description="golden image까지 포함한 .msb 파일 하나로 저장합니다. 다른 호스트에서 가져오기로 불러올 수 있습니다."
+        description="golden image까지 포함한 .msb 아카이브 하나로 저장합니다. 다른 호스트에서 가져오기로 불러올 수 있습니다."
         closeDisabled={mutation.isPending}
       >
         <form
@@ -412,23 +491,69 @@ export function ExportSnapshotDialog({ snapshot }: { snapshot: Snapshot }) {
           }}
         >
           <div className="modal-body space-y-5">
-            <label className="field">
-              <span>
-                저장 경로 <span className="optional">선택</span>
-              </span>
-              <Input
-                autoFocus
-                value={path}
-                onValueChange={setPath}
-                className="input font-mono"
-                placeholder={defaultPath}
-                disabled={mutation.isPending}
-              />
-              <small>
-                farmd 호스트의 절대 경로입니다. 폴더를 지정하면 그 안에{" "}
-                {snapshot.id}.msb로 저장합니다.
-              </small>
-            </label>
+            <TransferMode
+              value={mode}
+              onChange={setMode}
+              fileLabel="이 호스트의 파일"
+              hasBuckets={buckets.length > 0}
+              disabled={mutation.isPending}
+            />
+            {mode === "bucket" ? (
+              <>
+                <div className="field">
+                  <span>버킷</span>
+                  <SelectInput
+                    label="버킷"
+                    value={bucketId}
+                    onChange={setBucketId}
+                    disabled={mutation.isPending}
+                    items={buckets.map((b) => ({
+                      value: b.id,
+                      label: `${b.id} · ${bucketLocation(b)}`,
+                    }))}
+                  />
+                </div>
+                <label className="field">
+                  <span>
+                    객체 키 <span className="optional">선택</span>
+                  </span>
+                  <Input
+                    autoFocus
+                    value={key}
+                    onValueChange={setKey}
+                    className="input font-mono"
+                    placeholder={defaultKey}
+                    disabled={mutation.isPending}
+                  />
+                  <small>
+                    s3://{bucket?.name}/{key.trim() || defaultKey}에 올립니다.
+                    같은 키의 객체가 있으면 덮어쓰지 않습니다.
+                  </small>
+                </label>
+                <div className="info-notice">
+                  farmd 호스트에 아카이브를 잠시 만든 뒤 올리고, 다 올리면
+                  지웁니다. 그동안 스냅샷 크기만큼의 디스크 공간이 필요합니다.
+                </div>
+              </>
+            ) : (
+              <label className="field">
+                <span>
+                  저장 경로 <span className="optional">선택</span>
+                </span>
+                <Input
+                  autoFocus
+                  value={path}
+                  onValueChange={setPath}
+                  className="input font-mono"
+                  placeholder={defaultPath}
+                  disabled={mutation.isPending}
+                />
+                <small>
+                  farmd 호스트의 절대 경로입니다. 폴더를 지정하면 그 안에{" "}
+                  {snapshot.id}.msb로 저장합니다.
+                </small>
+              </label>
+            )}
             {mutation.error && <ErrorNotice error={mutation.error} />}
           </div>
           <div className="modal-footer justify-end">
@@ -438,10 +563,12 @@ export function ExportSnapshotDialog({ snapshot }: { snapshot: Snapshot }) {
             <Button
               type="submit"
               variant="primary"
-              disabled={mutation.isPending}
+              disabled={mutation.isPending || (mode === "bucket" && !bucket)}
             >
               {mutation.isPending ? (
                 <LoaderCircle size={15} className="animate-spin" />
+              ) : mode === "bucket" ? (
+                <CloudUpload size={15} />
               ) : (
                 <Download size={15} />
               )}
@@ -456,22 +583,40 @@ export function ExportSnapshotDialog({ snapshot }: { snapshot: Snapshot }) {
 
 export function ImportSnapshotDialog() {
   const client = useQueryClient();
+  const buckets = useQuery(bucketsQuery()).data ?? [];
+  const [mode, setMode] = useState<"file" | "bucket">("file");
   const [path, setPath] = useState("");
+  const [bucketId, setBucketId] = useState("");
+  const [key, setKey] = useState("");
   const [id, setId] = useState("");
   const mutation = useMutation({
     mutationFn: () =>
-      api.importSnapshot({ path: path.trim(), ...(id ? { id } : {}) }),
+      api.importSnapshot({
+        ...(mode === "bucket"
+          ? { bucket: bucketId, key }
+          : { path: path.trim() }),
+        ...(id ? { id } : {}),
+      }),
     onSuccess: async () => {
       await refresh(client);
       dialog.setOpen(false);
     },
   });
   const dialog = useDialog(mutation.isPending, () => {
+    setMode(buckets.length ? "bucket" : "file");
     setPath("");
+    setBucketId(buckets[0]?.id ?? "");
+    setKey("");
     setId("");
     mutation.reset();
   });
-  const fileId = (path.split("/").pop() ?? "").replace(/\.msb$/, "");
+  const objects = useQuery({
+    ...bucketObjectsQuery(bucketId),
+    enabled: dialog.open && mode === "bucket" && Boolean(bucketId),
+  });
+  const bucket = buckets.find((b) => b.id === bucketId);
+  const source = mode === "bucket" ? key : path;
+  const fileId = (source.split("/").pop() ?? "").replace(/\.msb$/, "");
   return (
     <Dialog.Root open={dialog.open} onOpenChange={dialog.onOpenChange}>
       <Dialog.Trigger render={<Button />}>
@@ -480,7 +625,7 @@ export function ImportSnapshotDialog() {
       </Dialog.Trigger>
       <Modal
         title="스냅샷 가져오기"
-        description="내보낸 .msb 파일을 이 호스트의 스냅샷으로 등록합니다."
+        description="내보낸 .msb 아카이브를 이 호스트의 스냅샷으로 등록합니다."
         closeDisabled={mutation.isPending}
       >
         <form
@@ -490,21 +635,102 @@ export function ImportSnapshotDialog() {
           }}
         >
           <div className="modal-body space-y-5">
-            <label className="field">
-              <span>
-                파일 경로 <span className="text-emerald-600">*</span>
-              </span>
-              <Input
-                autoFocus
-                value={path}
-                onValueChange={setPath}
-                className="input font-mono"
-                placeholder="/Users/me/farm-snapshots/dev-clean.msb"
-                required
-                disabled={mutation.isPending}
-              />
-              <small>farmd 호스트의 절대 경로</small>
-            </label>
+            <TransferMode
+              value={mode}
+              onChange={(next) => {
+                setMode(next);
+                setId("");
+              }}
+              fileLabel="이 호스트의 파일"
+              hasBuckets={buckets.length > 0}
+              disabled={mutation.isPending}
+            />
+            {mode === "bucket" ? (
+              <>
+                <div className="field">
+                  <span>버킷</span>
+                  <SelectInput
+                    label="버킷"
+                    value={bucketId}
+                    onChange={(next) => {
+                      setBucketId(next);
+                      setKey("");
+                    }}
+                    disabled={mutation.isPending}
+                    items={buckets.map((b) => ({
+                      value: b.id,
+                      label: `${b.id} · ${bucketLocation(b)}`,
+                    }))}
+                  />
+                </div>
+                <div className="field">
+                  <span className="flex items-center justify-between gap-2">
+                    아카이브
+                    <button
+                      type="button"
+                      className="text-link"
+                      disabled={objects.isFetching}
+                      onClick={() => void objects.refetch()}
+                    >
+                      <RefreshCw size={13} />
+                      새로 고침
+                    </button>
+                  </span>
+                  {objects.isPending ? (
+                    <Loading label="버킷을 읽는 중" />
+                  ) : objects.error ? (
+                    <ErrorNotice error={objects.error} />
+                  ) : !objects.data.length ? (
+                    <p className="field-hint">
+                      {bucket && bucketLocation(bucket)} 아래에 .msb 파일이
+                      없습니다.
+                    </p>
+                  ) : (
+                    <div
+                      className="bucket-objects"
+                      role="radiogroup"
+                      aria-label="아카이브"
+                    >
+                      {objects.data.map((object) => (
+                        <button
+                          type="button"
+                          role="radio"
+                          aria-checked={key === object.key}
+                          key={object.key}
+                          className={key === object.key ? "selected" : ""}
+                          disabled={mutation.isPending}
+                          onClick={() => setKey(object.key)}
+                        >
+                          <span className="font-mono">{object.key}</span>
+                          <small>
+                            {bytes(object.size_bytes)}
+                            {object.modified_at
+                              ? ` · ${dateTime(object.modified_at)}`
+                              : ""}
+                          </small>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </>
+            ) : (
+              <label className="field">
+                <span>
+                  파일 경로 <span className="text-emerald-600">*</span>
+                </span>
+                <Input
+                  autoFocus
+                  value={path}
+                  onValueChange={setPath}
+                  className="input font-mono"
+                  placeholder="/Users/me/farm-snapshots/dev-clean.msb"
+                  required
+                  disabled={mutation.isPending}
+                />
+                <small>farmd 호스트의 절대 경로</small>
+              </label>
+            )}
             <label className="field">
               <span>
                 스냅샷 ID <span className="optional">선택</span>
@@ -520,6 +746,11 @@ export function ImportSnapshotDialog() {
               />
               <small>비워 두면 파일 이름을 ID로 사용합니다.</small>
             </label>
+            {mode === "bucket" && (
+              <div className="info-notice">
+                farmd 호스트로 내려받아 등록한 뒤, 내려받은 파일은 지웁니다.
+              </div>
+            )}
             {mutation.error && <ErrorNotice error={mutation.error} />}
           </div>
           <div className="modal-footer justify-end">
@@ -529,10 +760,12 @@ export function ImportSnapshotDialog() {
             <Button
               type="submit"
               variant="primary"
-              disabled={mutation.isPending || !path.trim()}
+              disabled={mutation.isPending || !source.trim()}
             >
               {mutation.isPending ? (
                 <LoaderCircle size={15} className="animate-spin" />
+              ) : mode === "bucket" ? (
+                <CloudDownload size={15} />
               ) : (
                 <Upload size={15} />
               )}
@@ -589,8 +822,8 @@ export function DeleteSnapshotDialog({ snapshot }: { snapshot: Snapshot }) {
               <strong className="font-mono">{snapshot.id}</strong>
               <p>
                 {snapshot.archive
-                  ? "내보낸 파일은 삭제하지 않습니다."
-                  : "내보낸 파일이 없습니다. 삭제하면 되돌릴 수 없습니다."}
+                  ? "내보낸 아카이브는 삭제하지 않습니다."
+                  : "내보낸 아카이브가 없습니다. 삭제하면 되돌릴 수 없습니다."}
               </p>
               {snapshot.archive && <CopyText value={snapshot.archive.path} />}
             </div>

@@ -24,6 +24,10 @@ export type AgentHostToken = Schema["AgentHostToken"];
 export type Snapshot = Schema["SnapshotRecord"];
 export type SnapshotRequest = Schema["SnapshotRequest"];
 export type ImportRequest = Schema["ImportRequest"];
+export type ExportRequest = Schema["ExportRequest"];
+export type Bucket = Schema["Bucket"];
+export type RegisterBucket = Schema["RegisterBucket"];
+export type BucketObject = Schema["BucketObject"];
 
 export class ApiError extends Error {
   constructor(
@@ -76,6 +80,8 @@ export const keys = {
   hosts: ["remote-hosts"] as const,
   hostJobs: ["host-jobs"] as const,
   snapshots: ["snapshots"] as const,
+  buckets: ["buckets"] as const,
+  bucketObjects: (id: string) => ["buckets", id, "objects"] as const,
   farm: (id: string) => ["farms", id] as const,
   logs: (id: string) => ["logs", id] as const,
   endpoints: (id: string) => ["endpoints", id] as const,
@@ -120,6 +126,20 @@ export const snapshotsQuery = () =>
     queryKey: keys.snapshots,
     queryFn: ({ signal }) => request<Snapshot[]>("/snapshots", { signal }),
     refetchInterval: (q) => (q.state.data?.some(busySnapshot) ? 1500 : 10_000),
+  });
+export const bucketsQuery = () =>
+  queryOptions({
+    queryKey: keys.buckets,
+    queryFn: ({ signal }) => request<Bucket[]>("/buckets", { signal }),
+  });
+/** Archives in a bucket, read from the object store on each open. */
+export const bucketObjectsQuery = (id: string) =>
+  queryOptions({
+    queryKey: keys.bucketObjects(id),
+    queryFn: ({ signal }) =>
+      request<BucketObject[]>(`/buckets/${encode(id)}/objects`, { signal }),
+    staleTime: 0,
+    retry: false,
   });
 export const catalogQuery = () =>
   queryOptions({
@@ -221,10 +241,10 @@ export const api = {
       method: "POST",
       body: JSON.stringify(body),
     }),
-  exportSnapshot: (id: string, path?: string) =>
+  exportSnapshot: (id: string, body: ExportRequest = {}) =>
     request<Snapshot>(`/snapshots/${encode(id)}/export`, {
       method: "POST",
-      body: JSON.stringify(path ? { path } : {}),
+      body: JSON.stringify(body),
     }),
   importSnapshot: (body: ImportRequest) =>
     request<Snapshot>("/snapshots/import", {
@@ -237,4 +257,27 @@ export const api = {
       `/snapshots/${encode(id)}${forget ? "?forget=true" : ""}`,
       { method: "DELETE" },
     ),
+  registerBucket: (body: RegisterBucket) =>
+    request<Bucket>("/buckets", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  /** Without `secret_access_key`, the stored key is kept. */
+  updateBucket: (body: RegisterBucket) =>
+    request<Bucket>(`/buckets/${encode(body.id)}`, {
+      method: "PUT",
+      body: JSON.stringify(body),
+    }),
+  unregisterBucket: (id: string) =>
+    request<{ id: string }>(`/buckets/${encode(id)}`, { method: "DELETE" }),
+  /** Try settings before saving them; nothing is stored. */
+  testBucket: (body: RegisterBucket) =>
+    request<{ message: string }>("/buckets/test-connection", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  checkBucket: (id: string) =>
+    request<{ message: string }>(`/buckets/${encode(id)}/check`, {
+      method: "POST",
+    }),
 };

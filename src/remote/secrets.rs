@@ -1,11 +1,10 @@
-use super::Credentials;
 use anyhow::{Context, Result, anyhow, ensure};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use chacha20poly1305::{
     XChaCha20Poly1305, XNonce,
     aead::{Aead, KeyInit, Payload},
 };
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::{
     fs::{self, OpenOptions},
     io::Write,
@@ -71,7 +70,7 @@ impl Vault {
         );
         Ok(Self { key })
     }
-    pub fn seal(&self, credentials: &Credentials, aad: &str) -> Result<SealedCredentials> {
+    pub fn seal<T: Serialize>(&self, credentials: &T, aad: &str) -> Result<SealedCredentials> {
         let cipher = XChaCha20Poly1305::new_from_slice(&self.key).unwrap();
         let plain = Zeroizing::new(serde_json::to_vec(credentials)?);
         let mut nonce = [0u8; 24];
@@ -91,7 +90,7 @@ impl Vault {
             ciphertext: STANDARD.encode(ciphertext),
         })
     }
-    pub fn unseal(&self, sealed: &SealedCredentials, aad: &str) -> Result<Credentials> {
+    pub fn unseal<T: DeserializeOwned>(&self, sealed: &SealedCredentials, aad: &str) -> Result<T> {
         let nonce = STANDARD
             .decode(&sealed.nonce)
             .context("invalid credential nonce")?;
@@ -123,6 +122,7 @@ impl Vault {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::remote::Credentials;
     #[test]
     fn secrets_survive_restart_but_reject_tampering_wrong_identity_and_wrong_key() {
         let dir = tempfile::tempdir().unwrap();
@@ -143,19 +143,29 @@ mod tests {
         drop(vault);
         let vault = Vault::open(dir.path(), true).unwrap();
         assert!(matches!(
-            vault.unseal(&encrypted, "host-a-identity").unwrap(),
+            vault
+                .unseal::<Credentials>(&encrypted, "host-a-identity")
+                .unwrap(),
             Credentials::Password { .. }
         ));
-        assert!(vault.unseal(&encrypted, "host-b-identity").is_err());
+        assert!(
+            vault
+                .unseal::<Credentials>(&encrypted, "host-b-identity")
+                .is_err()
+        );
         let other = tempfile::tempdir().unwrap();
         assert!(
             Vault::open(other.path(), false)
                 .unwrap()
-                .unseal(&encrypted, "host-a-identity")
+                .unseal::<Credentials>(&encrypted, "host-a-identity")
                 .is_err()
         );
         encrypted.ciphertext.replace_range(0..1, "!");
-        assert!(vault.unseal(&encrypted, "host-a-identity").is_err());
+        assert!(
+            vault
+                .unseal::<Credentials>(&encrypted, "host-a-identity")
+                .is_err()
+        );
         std::fs::remove_file(dir.path().join("credentials.key")).unwrap();
         assert!(Vault::open(dir.path(), true).is_err());
         assert!(!dir.path().join("credentials.key").exists());

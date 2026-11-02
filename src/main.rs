@@ -155,15 +155,28 @@ enum SnapshotCommand {
         #[arg(long)]
         json: bool,
     },
-    /// Write a self-contained .msb archive (default: <state dir>/exports/<id>.msb)
+    /// Write a self-contained .msb archive (default: <state dir>/exports/<id>.msb),
+    /// or upload it to a bucket registered in the portal or API
     Export {
         id: String,
         /// Archive file or existing directory
-        #[arg(long, short)]
+        #[arg(long, short, conflicts_with = "bucket")]
         output: Option<PathBuf>,
+        /// Registered bucket to upload to
+        #[arg(long)]
+        bucket: Option<String>,
+        /// Object key; defaults to <bucket prefix><id>.msb
+        #[arg(long, requires = "bucket")]
+        key: Option<String>,
     },
+    /// Import an archive file, or an object of a registered bucket (--bucket and --key)
     Import {
-        archive: PathBuf,
+        #[arg(required_unless_present = "bucket", conflicts_with = "bucket")]
+        archive: Option<PathBuf>,
+        #[arg(long, requires = "key")]
+        bucket: Option<String>,
+        #[arg(long, requires = "bucket")]
+        key: Option<String>,
         /// Defaults to the archive's file name
         #[arg(long)]
         id: Option<String>,
@@ -485,20 +498,34 @@ async fn main() -> Result<()> {
                     }
                 }
             }
-            SnapshotCommand::Export { id, output } => {
+            SnapshotCommand::Export {
+                id,
+                output,
+                bucket,
+                key,
+            } => {
                 manager.export_snapshot(
                     &id,
                     ExportRequest {
                         path: output.map(absolute).transpose()?,
+                        bucket,
+                        key,
                     },
                 )?;
                 let snapshot = wait_snapshot(&manager, &id).await?;
                 let archive = snapshot.archive.expect("export records its archive");
                 println!("{} ({} bytes)", archive.path, archive.size_bytes);
             }
-            SnapshotCommand::Import { archive, id } => {
+            SnapshotCommand::Import {
+                archive,
+                bucket,
+                key,
+                id,
+            } => {
                 let record = manager.import_snapshot(ImportRequest {
-                    path: absolute(archive)?,
+                    path: archive.map(absolute).transpose()?,
+                    bucket,
+                    key,
                     id,
                 })?;
                 print_json(&wait_snapshot(&manager, &record.id).await?)?;

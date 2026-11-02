@@ -44,6 +44,7 @@ farm snapshot create demo demo-clean     # VM을 얼려두기 (잠시 정지 후
 farm create demo2 --host-id local --snapshot demo-clean  # 다시 설치하지 않고 불러오기
 farm snapshot export demo-clean -o ~/farm-snapshots/
 farm snapshot import ~/farm-snapshots/demo-clean.msb
+farm snapshot export demo-clean --bucket team-r2   # 등록한 S3 호환 버킷(AWS·R2·MinIO·RustFS)으로
 farm settle demo                         # VM 재시작 뒤 배포 없이 서비스 응답만 확인
 ```
 
@@ -142,7 +143,8 @@ curl -N http://127.0.0.1:8080/api/v1/farms/demo/logs/stream
 | GET (WebSocket) | `/farms/{id}/shell?rows=24&cols=80` | VM의 root 로그인 셸 |
 | POST | `/farms/{id}/snapshots` | VM을 스냅샷으로 얼리는 job |
 | GET / DELETE | `/snapshots`, `/snapshots/{id}` | 스냅샷 목록·상세 / 삭제 |
-| POST | `/snapshots/{id}/export`, `/snapshots/import` | `.msb` 아카이브 내보내기 / 가져오기 |
+| POST | `/snapshots/{id}/export`, `/snapshots/import` | `.msb` 아카이브 내보내기 / 가져오기 (파일 또는 S3 버킷) |
+| GET / POST / PUT / DELETE | `/buckets`, `/buckets/{id}` | 스냅샷을 옮길 S3 호환 버킷 등록·관리 |
 | GET | `/jobs`, `/jobs/{id}` | 작업 상태·phase·오류 |
 | GET | `/openapi.json` | 생성된 OpenAPI 스키마 |
 

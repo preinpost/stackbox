@@ -10,6 +10,8 @@ farm snapshot create dev dev-clean --note "Nova·Neutron clean 설치"
 farm create dev2 --host-id local --snapshot dev-clean      # 배포된 스냅샷이면 바로 ready
 farm snapshot export dev-clean -o ~/farm-snapshots/
 farm snapshot import ~/farm-snapshots/dev-clean.msb --id dev-clean
+farm snapshot export dev-clean --bucket team-r2                 # 등록한 S3 버킷으로
+farm snapshot import --bucket team-r2 --key farm/dev-clean.msb  # 다른 호스트에서
 farm snapshot list
 farm snapshot delete dev-clean
 ```
@@ -106,6 +108,8 @@ msb 스냅샷 label로 저장되며 아카이브 안에 함께 들어갑니다. 
 등록하고, label이 없거나 아키텍처가 다른 아카이브는 거절하고 정리합니다. ID를 생략하면 파일 이름을
 사용합니다. 경로는 모두 farmd 호스트의 절대 경로입니다.
 
+S3 버킷으로 옮기는 방법은 [S3 버킷](#s3-버킷)을 참고하세요.
+
 내보내기와 가져오기는 job이 아니라 스냅샷 상태(`exporting`, `importing`)로 진행됩니다.
 데몬이 중간에 종료되었을 때 다시 시도할 수 있는 상태로 바꿉니다.
 스냅샷 삭제는 내보낸 파일을 지우지 않습니다. `msb snapshot rm`으로 디스크를 먼저 지웠다면 호스트
@@ -114,6 +118,46 @@ msb 스냅샷 label로 저장되며 아카이브 안에 함께 들어갑니다. 
 (`farm snapshot delete <id> --forget`, 포탈의 **기록만 삭제**)로 coordinator 기록만 지울 수 있습니다.
 이때 호스트에 남은 디스크는 지우지 않습니다.
 
+## S3 버킷
+
+아카이브는 S3 API를 쓰는 저장소로 바로 올리고 가져올 수 있습니다. AWS S3, Cloudflare R2, MinIO,
+RustFS에서 확인했습니다. 버킷은 `Snapshots` 화면 아래의 **S3 버킷**(`POST /buckets`)에서 미리
+등록합니다.
+
+| 항목 | 설명 |
+|---|---|
+| Endpoint | `https://<account-id>.r2.cloudflarestorage.com`, `http://minio:9000`처럼 scheme·호스트·포트만. AWS S3는 비웁니다. |
+| Region | 서명에 쓰입니다. 기본값 `us-east-1`, R2는 `auto`, AWS는 버킷의 리전 |
+| Prefix | 내보내기 기본 키는 `<prefix><id>.msb`, 가져오기 목록은 이 prefix 아래의 `.msb` |
+| Path-style | `endpoint/버킷/키`. endpoint를 지정하면 기본으로 켜집니다(MinIO·RustFS). |
+| 사설 CA | PEM 인증서. 시스템 인증서와 함께 신뢰합니다. |
+
+Secret key는 호스트 SSH 자격 증명과 같은 `credentials.key`(XChaCha20-Poly1305)로 암호화해
+`state.json`에 저장하고, API로 다시 돌려주지 않습니다. 암호문은 endpoint·버킷·access key에 묶여
+있어 상태 파일에서 endpoint만 바꾸면 복호화되지 않습니다. 설정을 고칠 때 secret을 비워 두면 저장된
+키를 유지하지만, endpoint·버킷·access key를 바꿀 때는 다시 입력해야 합니다. **연결 확인**
+(`POST /buckets/test-connection`, `POST /buckets/{id}/check`)은 prefix 아래에서 목록 조회, 작은
+객체 쓰기와 삭제를 해 봅니다.
+
+내보내기는 `<state dir>/transfers`에 아카이브를 만든 뒤 multipart로 올리고, 다 올리면 로컬
+파일을 지웁니다. 그동안 스냅샷 크기만큼 디스크가 필요합니다. 같은 키의 객체가 있으면 덮어쓰지
+않습니다. 가져오기는 같은 디렉터리로 내려받아(끊기면 Range로 이어받음) 등록한 뒤 지웁니다. 진행
+상황은 스냅샷의 `transfer`(`done_bytes`/`total_bytes`)로 보입니다.
+
+S3 호환 서버마다 다른 동작을 피하려고 다음처럼 요청합니다.
+
+- SigV4 서명, 본문은 SHA-256으로 서명합니다(`aws-chunked`·`x-amz-checksum-*` 헤더 없음).
+- part는 마지막을 빼고 모두 같은 크기입니다(최소 64 MiB, 10,000개 안에 들어가게). R2가 요구합니다.
+- 실패한 업로드는 abort합니다. abort하지 못했거나 데몬이 업로드 중에 멈췄다면 업로드 ID를
+  기록해 두었다가 다음 시작 때 abort하므로, 미완료 part가 요금으로 남지 않습니다.
+- redirect를 따라가지 않습니다. 리전이 틀리면 서버 오류 메시지가 그대로 스냅샷 오류에 남습니다.
+
+버킷 등록을 해제해도 버킷에 올린 아카이브는 남습니다. 진행 중인 전송이 쓰는 버킷은 수정하거나
+해제할 수 없습니다(`409`). 실제 서비스로 클라이언트를 확인하려면
+`FARM_S3_BUCKET`, `FARM_S3_ACCESS_KEY`, `FARM_S3_SECRET_KEY`(필요하면 `FARM_S3_ENDPOINT`,
+`FARM_S3_REGION`, `FARM_S3_PREFIX`, `FARM_S3_PATH_STYLE`, `FARM_S3_CA_FILE`)를 지정하고
+`cargo test s3_live -- --ignored`를 실행합니다.
+
 ## API
 
 | Method | Path (`/api/v1` 기준) | 반환 |
@@ -121,8 +165,12 @@ msb 스냅샷 label로 저장되며 아카이브 안에 함께 들어갑니다. 
 | POST | `/farms/{id}/snapshots` | `{"id","note"}` → snapshot job (202) |
 | GET | `/snapshots`, `/snapshots/{id}` | 스냅샷 목록 / 상세 |
 | DELETE | `/snapshots/{id}` | 스냅샷 삭제 (`?forget=true`: 기록만 삭제) |
-| POST | `/snapshots/{id}/export` | `{"path"}` 선택 → 내보내기 시작 (202) |
-| POST | `/snapshots/import` | `{"path","id"}` → 가져오기 시작 (202) |
+| POST | `/snapshots/{id}/export` | `{"path"}` 또는 `{"bucket","key"}` 선택 → 내보내기 시작 (202) |
+| POST | `/snapshots/import` | `{"path","id"}` 또는 `{"bucket","key","id"}` → 가져오기 시작 (202) |
+| GET / POST | `/buckets` | S3 버킷 목록 / 등록 (secret은 응답에 없음) |
+| GET / PUT / DELETE | `/buckets/{id}` | 버킷 상세 / 수정 / 등록 해제 |
+| POST | `/buckets/test-connection`, `/buckets/{id}/check` | 저장 전 / 등록된 버킷 연결 확인 |
+| GET | `/buckets/{id}/objects` | prefix 아래의 `.msb` 객체 (최신순) |
 | POST | `/farms` | `{"id","snapshot_id",...}` → restore job (202) |
 | POST | `/farms/{id}/settle` | 서비스 응답 확인 job (배포 재실행 없음) |
 

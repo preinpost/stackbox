@@ -20,6 +20,86 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/v1/buckets": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get: operations["buckets"];
+    put?: never;
+    post: operations["register_bucket"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/v1/buckets/test-connection": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    post: operations["test_bucket"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/v1/buckets/{id}": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get: operations["bucket"];
+    put: operations["update_bucket"];
+    post?: never;
+    delete: operations["unregister_bucket"];
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/v1/buckets/{id}/check": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    post: operations["check_bucket"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/v1/buckets/{id}/objects": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get: operations["bucket_objects"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/v1/catalog": {
     parameters: {
       query?: never;
@@ -475,6 +555,37 @@ export interface components {
     };
     /** @enum {string} */
     AuthMethod: "password" | "private_key";
+    /** @description A registered bucket. Its secret key is stored encrypted and never returned. */
+    Bucket: {
+      access_key_id: string;
+      /** @description PEM certificates trusted in addition to the system's, for a private CA. */
+      ca_pem?: string | null;
+      /** Format: int64 */
+      created_at: number;
+      /** @description `None` for AWS S3, whose endpoint follows from the region. */
+      endpoint?: string | null;
+      id: string;
+      /** @description Bucket name in the object store. */
+      name: string;
+      /** @description `https://endpoint/bucket/key` instead of `https://bucket.endpoint/key`. */
+      path_style: boolean;
+      /** @description Key prefix archives go under by default; empty or ending in `/`. */
+      prefix: string;
+      region: string;
+      /** Format: int64 */
+      updated_at: number;
+    };
+    BucketCheck: {
+      /** @description What was verified: listing, writing and deleting under the prefix. */
+      message: string;
+    };
+    BucketObject: {
+      key: string;
+      /** Format: int64 */
+      modified_at?: number | null;
+      /** Format: int64 */
+      size_bytes: number;
+    };
     Catalog: {
       components: components["schemas"]["Component"][];
       constraints: string[];
@@ -568,11 +679,12 @@ export interface components {
       error: string;
     };
     ExportRequest: {
-      /**
-       * @description Absolute archive path on the coordinator; defaults to `<state dir>/exports/<id>.msb`.
-       * @default null
-       */
-      path: string | null;
+      /** @description Registered bucket to upload the archive to instead of keeping it on the coordinator. */
+      bucket?: string | null;
+      /** @description Object key in `bucket`; defaults to `<prefix><id>.msb`. An existing object is not replaced. */
+      key?: string | null;
+      /** @description Absolute archive path on the coordinator; defaults to `<state dir>/exports/<id>.msb`. */
+      path?: string | null;
     };
     Exposure: {
       bind: string;
@@ -716,11 +828,15 @@ export interface components {
       | "runtime_ready"
       | "ready"
       | "failed";
+    /** @description Import from an archive file, or from an object in a registered bucket. */
     ImportRequest: {
-      /** @description Snapshot ID to import as; defaults to the ID recorded in the archive. */
+      /** @description Registered bucket holding the archive; requires `key`. */
+      bucket?: string | null;
+      /** @description Snapshot ID to import as; defaults to the archive's file name. */
       id?: string | null;
+      key?: string | null;
       /** @description Absolute path of a `.msb` archive on the coordinator. */
-      path: string;
+      path?: string | null;
     };
     InstalledAgent: {
       artifact: components["schemas"]["AgentArtifactInfo"];
@@ -812,6 +928,28 @@ export interface components {
     RegisterAgentHost: {
       id: string;
     };
+    /** @description Register a bucket, or replace a registered one's settings. */
+    RegisterBucket: {
+      access_key_id: string;
+      ca_pem?: string | null;
+      /**
+       * @description Origin of an S3-compatible service, such as `https://<account>.r2.cloudflarestorage.com`
+       *     or `http://minio:9000`. Omit for AWS S3.
+       */
+      endpoint?: string | null;
+      id: string;
+      name: string;
+      /** @description Defaults to `true` with a custom endpoint and `false` for AWS S3. */
+      path_style?: boolean | null;
+      prefix?: string | null;
+      /** @description Signing region; defaults to `us-east-1`. R2 uses `auto`. */
+      region?: string | null;
+      /**
+       * @description Required to register. An update without it keeps the stored key, unless the
+       *     endpoint, bucket or access key changes.
+       */
+      secret_access_key?: string | null;
+    };
     RegisterHost: {
       address: string;
       credentials: components["schemas"]["Credentials"];
@@ -852,6 +990,9 @@ export interface components {
       updated_at: number;
       username: string;
     };
+    RemovedBucket: {
+      id: string;
+    };
     RemovedHost: {
       id: string;
     };
@@ -869,8 +1010,12 @@ export interface components {
       | "control"
       | "compute";
     SnapshotArchive: {
+      /** @description Registered bucket it was uploaded to. */
+      bucket?: string | null;
       /** Format: int64 */
       exported_at: number;
+      key?: string | null;
+      /** @description File path on the coordinator, or `s3://<bucket name>/<key>`. */
       path: string;
       /** Format: int64 */
       size_bytes: number;
@@ -898,6 +1043,7 @@ export interface components {
       /** @description Farm the snapshot was frozen from; `None` when imported from an archive. */
       source_farm?: string | null;
       status: components["schemas"]["SnapshotStatus"];
+      transfer?: null | components["schemas"]["SnapshotTransfer"];
       /** Format: int64 */
       updated_at: number;
     };
@@ -909,6 +1055,21 @@ export interface components {
     /** @enum {string} */
     SnapshotStatus:
       "creating" | "ready" | "exporting" | "importing" | "deleting" | "failed";
+    /** @description An export to, or import from, a bucket in progress. */
+    SnapshotTransfer: {
+      bucket: string;
+      /**
+       * Format: int64
+       * @description Bytes uploaded or downloaded so far.
+       */
+      done_bytes: number;
+      key: string;
+      /**
+       * Format: int64
+       * @description Archive size; `None` while an export is still writing the archive.
+       */
+      total_bytes?: number | null;
+    };
     SshTarget: {
       address: string;
       /** Format: int32 */
@@ -954,6 +1115,289 @@ export interface operations {
         };
       };
       409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorBody"];
+        };
+      };
+    };
+  };
+  buckets: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["Bucket"][];
+        };
+      };
+    };
+  };
+  register_bucket: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["RegisterBucket"];
+      };
+    };
+    responses: {
+      /** @description Registered; the secret key is stored encrypted and not returned */
+      201: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["Bucket"];
+        };
+      };
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorBody"];
+        };
+      };
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorBody"];
+        };
+      };
+    };
+  };
+  test_bucket: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["RegisterBucket"];
+      };
+    };
+    responses: {
+      /** @description Lists, writes and deletes a test object under the prefix; nothing is saved. Without a secret key, the registered bucket's is used */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["BucketCheck"];
+        };
+      };
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorBody"];
+        };
+      };
+    };
+  };
+  bucket: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["Bucket"];
+        };
+      };
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorBody"];
+        };
+      };
+    };
+  };
+  update_bucket: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["RegisterBucket"];
+      };
+    };
+    responses: {
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["Bucket"];
+        };
+      };
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorBody"];
+        };
+      };
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorBody"];
+        };
+      };
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorBody"];
+        };
+      };
+    };
+  };
+  unregister_bucket: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Unregistered; objects in the bucket are kept */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["RemovedBucket"];
+        };
+      };
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorBody"];
+        };
+      };
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorBody"];
+        };
+      };
+    };
+  };
+  check_bucket: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Lists, writes and deletes a test object under the prefix */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["BucketCheck"];
+        };
+      };
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorBody"];
+        };
+      };
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorBody"];
+        };
+      };
+    };
+  };
+  bucket_objects: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description `.msb` objects under the bucket's prefix, newest first */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["BucketObject"][];
+        };
+      };
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorBody"];
+        };
+      };
+      404: {
         headers: {
           [name: string]: unknown;
         };

@@ -1,4 +1,5 @@
 mod backend;
+mod buckets;
 pub(crate) mod hosts;
 mod logs;
 mod snapshots;
@@ -173,14 +174,20 @@ impl FarmManager {
         let store = Store::open(&options.state_dir)?;
         let vault = crate::remote::Vault::open(
             &options.state_dir,
-            store.state.hosts.values().any(|h| h.credentials.is_some()),
+            store.state.hosts.values().any(|h| h.credentials.is_some())
+                || !store.state.buckets.is_empty(),
         )?;
         for host in store.state.hosts.values() {
             // A missing/wrong key must never silently discard or replace existing credentials.
             if let Some(credentials) = &host.credentials {
-                vault.unseal(credentials, &host.aad())?;
+                vault.unseal::<crate::remote::Credentials>(credentials, &host.aad())?;
             }
         }
+        for stored in store.state.buckets.values() {
+            vault.unseal::<crate::s3::BucketSecret>(&stored.secret, &stored.aad())?;
+        }
+        // Archives of transfers a stopped daemon left; holding the state lock, none is running.
+        let _ = std::fs::remove_dir_all(options.state_dir.join("transfers"));
         let logs = logs::Logs::new(&options.state_dir)?;
         let manager = Self(Arc::new(Inner {
             store: Mutex::new(store),
@@ -244,6 +251,7 @@ impl FarmManager {
             manager.log(&job.farm_id, &job.id, job.phase, format!("{REATTACHING}\n"))?;
             manager.spawn(job, None);
         }
+        manager.abort_pending_uploads();
         Ok(manager)
     }
     fn update<T>(&self, f: impl FnOnce(&mut State) -> Result<T>) -> Result<T> {

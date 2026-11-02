@@ -3793,6 +3793,40 @@ h2 {
   font-size: 11.5px;
   color: #597260;
 }
+.bucket-objects {
+  display: flex;
+  flex-direction: column;
+  max-height: 220px;
+  overflow-y: auto;
+  border: 1px solid #e4ece4;
+  border-radius: 8px;
+}
+.bucket-objects button {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  padding: 9px 12px;
+  text-align: left;
+  font-size: 13px;
+  color: #3d5343;
+  border-bottom: 1px solid #eef2ee;
+  overflow-wrap: anywhere;
+}
+.bucket-objects button:last-child {
+  border-bottom: 0;
+}
+.bucket-objects button:hover {
+  background: #f8fbf8;
+}
+.bucket-objects button.selected {
+  background: #eef6ef;
+  box-shadow: inset 3px 0 #3c8a62;
+}
+.bucket-objects small {
+  font-size: 12px;
+  color: #7c8b80;
+}
 .snapshot-host-foreign {
   border-color: #f1e0d6;
   background: #fdf7f3;

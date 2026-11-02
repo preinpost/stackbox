@@ -1,12 +1,13 @@
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
-import { Cpu, Snowflake } from "lucide-react";
+import { Cloud, Cpu, Snowflake } from "lucide-react";
 import {
   farmsQuery,
   hostQuery,
   snapshotsQuery,
   type Snapshot,
 } from "../api/client";
+import { BucketsPanel } from "../components/bucket-actions";
 import {
   DeleteSnapshotDialog,
   ExportSnapshotDialog,
@@ -34,7 +35,7 @@ export function SnapshotsPage() {
       <PageHeading
         eyebrow="FROZEN ENVIRONMENTS"
         title="Snapshots"
-        description="설치가 끝난 farm을 얼려두고, 같은 환경을 다시 설치하지 않고 새 farm으로 불러오세요."
+        description="설치가 끝난 farm을 얼려두고, 같은 환경을 다시 설치하지 않고 새 farm으로 불러오세요. S3 버킷으로 올려 다른 호스트로 옮길 수도 있습니다."
         actions={<ImportSnapshotDialog />}
       />
       {snapshots.error && (
@@ -58,7 +59,7 @@ export function SnapshotsPage() {
           <EmptyState
             icon={<Snowflake size={24} />}
             title="얼려둔 환경이 없습니다"
-            description="Farm 상세 화면의 얼리기로 배포가 끝난 VM을 저장하거나, 내보낸 .msb 파일을 가져오세요."
+            description="Farm 상세 화면의 얼리기로 배포가 끝난 VM을 저장하거나, 내보낸 .msb 파일을 파일 경로나 S3 버킷에서 가져오세요."
           />
         ) : (
           sorted.map((snapshot) => (
@@ -70,7 +71,42 @@ export function SnapshotsPage() {
           ))
         )}
       </section>
+      <BucketsPanel />
     </>
+  );
+}
+
+/** Progress of an export to, or import from, a bucket. */
+function TransferProgress({ snapshot }: { snapshot: Snapshot }) {
+  const transfer = snapshot.transfer;
+  if (!transfer) return null;
+  const exporting = snapshot.status === "exporting";
+  const total = transfer.total_bytes;
+  const percent = total ? Math.floor((transfer.done_bytes / total) * 100) : 0;
+  const label =
+    total == null
+      ? exporting
+        ? "아카이브 만드는 중"
+        : "S3에 연결하는 중"
+      : transfer.done_bytes >= total && !exporting
+        ? "내려받음 · 스냅샷 등록 중"
+        : `${exporting ? "S3에 올리는 중" : "S3에서 내려받는 중"} · ${percent}% (${bytes(transfer.done_bytes)} / ${bytes(total)})`;
+  return (
+    <div className="mt-2.5 max-w-xl">
+      <div className="job-meta mt-0 flex-wrap">
+        <Cloud size={13} />
+        <span>{label}</span>
+        <span>·</span>
+        <span className="font-mono">
+          {transfer.bucket}:{transfer.key}
+        </span>
+      </div>
+      {total != null && (
+        <div className="meter mt-2" aria-hidden>
+          <span style={{ width: `${percent}%` }} />
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -149,10 +185,14 @@ function SnapshotRow({
             </>
           )}
         </div>
+        <TransferProgress snapshot={snapshot} />
         {snapshot.archive && (
           <div className="job-meta flex-wrap">
             <span>
-              내보낸 파일 · {bytes(snapshot.archive.size_bytes)} ·{" "}
+              {snapshot.archive.bucket
+                ? `S3(${snapshot.archive.bucket})에 올림`
+                : "내보낸 파일"}{" "}
+              · {bytes(snapshot.archive.size_bytes)} ·{" "}
               {dateTime(snapshot.archive.exported_at)}
             </span>
             <CopyText value={snapshot.archive.path} />

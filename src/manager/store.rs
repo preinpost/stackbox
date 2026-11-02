@@ -23,6 +23,11 @@ pub struct State {
     pub host_jobs: BTreeMap<String, crate::remote::HostJob>,
     #[serde(default)]
     pub snapshots: BTreeMap<String, SnapshotRecord>,
+    #[serde(default)]
+    pub buckets: BTreeMap<String, crate::s3::StoredBucket>,
+    /// Multipart uploads to abort, by upload ID.
+    #[serde(default)]
+    pub uploads: BTreeMap<String, crate::s3::PendingUpload>,
 }
 impl Default for State {
     fn default() -> Self {
@@ -34,6 +39,8 @@ impl Default for State {
             hosts: BTreeMap::new(),
             host_jobs: BTreeMap::new(),
             snapshots: BTreeMap::new(),
+            buckets: BTreeMap::new(),
+            uploads: BTreeMap::new(),
         }
     }
 }

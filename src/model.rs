@@ -511,17 +511,31 @@ impl SnapshotRequest {
     }
 }
 #[derive(Clone, Debug, Default, Serialize, Deserialize, ToSchema)]
-#[serde(default, deny_unknown_fields)]
+#[serde(deny_unknown_fields)]
 pub struct ExportRequest {
     /// Absolute archive path on the coordinator; defaults to `<state dir>/exports/<id>.msb`.
+    #[serde(default)]
     pub path: Option<String>,
+    /// Registered bucket to upload the archive to instead of keeping it on the coordinator.
+    #[serde(default)]
+    pub bucket: Option<String>,
+    /// Object key in `bucket`; defaults to `<prefix><id>.msb`. An existing object is not replaced.
+    #[serde(default)]
+    pub key: Option<String>,
 }
-#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
+/// Import from an archive file, or from an object in a registered bucket.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ImportRequest {
     /// Absolute path of a `.msb` archive on the coordinator.
-    pub path: String,
-    /// Snapshot ID to import as; defaults to the ID recorded in the archive.
+    #[serde(default)]
+    pub path: Option<String>,
+    /// Registered bucket holding the archive; requires `key`.
+    #[serde(default)]
+    pub bucket: Option<String>,
+    #[serde(default)]
+    pub key: Option<String>,
+    /// Snapshot ID to import as; defaults to the archive's file name.
     #[serde(default)]
     pub id: Option<String>,
 }
@@ -555,9 +569,25 @@ pub enum SnapshotStatus {
 }
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
 pub struct SnapshotArchive {
+    /// File path on the coordinator, or `s3://<bucket name>/<key>`.
     pub path: String,
     pub size_bytes: u64,
     pub exported_at: u64,
+    /// Registered bucket it was uploaded to.
+    #[serde(default)]
+    pub bucket: Option<String>,
+    #[serde(default)]
+    pub key: Option<String>,
+}
+/// An export to, or import from, a bucket in progress.
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
+pub struct SnapshotTransfer {
+    pub bucket: String,
+    pub key: String,
+    /// Bytes uploaded or downloaded so far.
+    pub done_bytes: u64,
+    /// Archive size; `None` while an export is still writing the archive.
+    pub total_bytes: Option<u64>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
 pub struct SnapshotRecord {
@@ -582,6 +612,8 @@ pub struct SnapshotRecord {
     pub size_bytes: Option<u64>,
     /// Most recent export.
     pub archive: Option<SnapshotArchive>,
+    #[serde(default)]
+    pub transfer: Option<SnapshotTransfer>,
     pub error: Option<String>,
     pub created_at: u64,
     pub updated_at: u64,
