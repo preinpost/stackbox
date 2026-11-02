@@ -48,7 +48,74 @@ Apple M5 Pro, msb 0.7.13, VM 2대(2 vCPU, 1 GiB).
 
 ## 판단
 
-OpenStack 내부망(RabbitMQ, DB, API, Neutron VXLAN 터널, 이미지 전송)으로 충분하다. 다음 단계는
-control VM과 compute VM으로 Kolla multinode를 배포해 evacuate를 해 보는 것이다.
-남은 일: 스위치를 farm-agent 안으로 옮기기, VM별 인증 토큰, 프레임 일괄 전송, golden image에
-`farm-link` 넣기, 호스트 간 중계.
+OpenStack 내부망(RabbitMQ, DB, API, Neutron VXLAN 터널, 이미지 전송)으로 충분하다.
+
+# 진행 상황 (2026-11-02 기준)
+
+## 목표
+
+테스트용 OpenStack 클러스터에서 host evacuate 같은 장애 대응을 시험한다. 지금 farm은 VM 1대에
+all-in-one으로 배포하므로 compute가 하나뿐이라 evacuate를 할 수 없다.
+
+## 정한 설계
+
+- **역할별 VM**: farm을 control VM과 compute VM 여러 대로 나눈다. 첫 구성은 control 1 + compute 2.
+  control 2대는 Galera·RabbitMQ 과반수가 안 돼 HA가 아니므로, HA가 필요하면 3대로 간다.
+- **L2는 farm-link**: VM 안의 TAP(`farm0`)을 WebSocket으로 스위치에 잇는다. `farm0`는 지금의
+  고정 서비스 주소용 dummy를 대신하고, VM마다 `10.254.0.x`를 받는다. Kolla 내부망과 Neutron
+  터널망이 이 위에 올라간다. MTU는 9000을 기본으로 한다.
+- **스위치는 각 호스트의 farm-agent 안에** 둔다. 같은 호스트의 VM끼리는 coordinator를 거치지 않는다.
+  coordinator는 토폴로지, 인증, 장애 주입 같은 제어만 맡는다. coordinator가 재시작해도 farm의
+  네트워크가 끊기면 안 된다(`bc0704e`의 방향과 같다).
+- **호스트 간 연결**: 처음에는 기존 agent WebSocket으로 coordinator가 중계한다. 다음에 agent끼리
+  UDP 직접 연결(QUIC datagram이나 WireGuard 방식)과 NAT hole punching을 붙이고, 실패하면
+  중계로 돌아간다. 대륙 간에는 TCP 위 TCP를 피해 UDP로 보내고, MTU를 1380 정도로 낮추며
+  `global_physnet_mtu`도 맞춘다.
+- **배치 규칙**: control은 한 지역에 모은다. Galera·RabbitMQ 클러스터는 대륙 간 지연을 못 견딘다.
+  compute만 멀리 둘 수 있다(OpenStack Edge/DCN 패턴).
+- **장애 주입**: 스위치의 링크별 지연·손실·분리를 포탈과 API에서 다룬다. 대륙 간 환경도 로컬에서
+  지연과 손실로 흉내 낸다.
+- **공유 스토리지는 생성 시 선택 항목**으로 둔다(Horizon, Neutron처럼). 선택지:
+  1. 공유 인스턴스 스토리지: compute들의 `/var/lib/nova/instances`를 같이 쓴다. evacuate 뒤에도
+     디스크가 남고 live migration도 된다. VM이 나뉘므로 control VM의 NFS 서버를 farm L2로 마운트하는
+     방식이 된다(게스트 커널의 NFS 클라이언트 지원 확인 필요).
+  2. Cinder(LVM): 볼륨 기반 evacuate. msb 커널의 iSCSI 지원 확인 필요.
+  3. Ceph: 운영과 가장 비슷하지만 무겁고 cephadm이 따로 필요하다. 나중에.
+- **스냅샷**: 여러 VM을 한 세트로 멈추고 얼리고, 복원할 때 MAC·IP·hostname을 같이 맞춰야 한다.
+  지금의 VM 1대 얼리기를 확장한다.
+
+검토하고 미룬 대안: VM 하나 안에 privileged 시스템 컨테이너로 노드를 나누는 방식. 같은 커널이라
+네트워크와 스냅샷이 쉽지만, 장애가 커널 단위로 재현되지 않고 호스트를 넘을 수 없다.
+
+## 다음 단계
+
+1. **control 1 + compute 2 multinode 배포 (다음 할 일)**
+   - PoC 스위치를 그대로 쓰고, VM 3대를 `farm-link`로 잇는다. 필요한 메모리는 약 10~12 GiB이다
+     (control 약 6 GiB, compute 각 1.5~2 GiB + 인스턴스). 24 GiB 머신에서는 다른 farm과 같이 띄우기
+     어려워 더 큰 머신에서 한다.
+   - VM은 `farm-identity`의 hostname과 서비스 주소를 VM마다 다르게 주고, Kolla multinode inventory로
+     control VM에서 compute VM으로 SSH 배포한다.
+   - Nova, Neutron, Placement를 배포하고 Cirros 인스턴스를 compute 양쪽에 띄운다.
+   - compute 하나를 분리 주입으로 고립시키고, `compute service set --down` 후 다른 compute로
+     evacuate한다. evacuate 후 인스턴스 상태와 ping을 확인한다.
+2. 스위치를 farm-agent로 옮기고, VM별 토큰으로 링크를 인증한다. 프레임을 묶어 보내 MTU 1500의
+   처리량을 높인다. golden image에 `farm-link`와 systemd unit을 넣는다.
+3. farm 모델에 노드 구성(control/compute 수)과 공유 스토리지 선택을 넣는다. plan, 메모리 예산,
+   배포 단계, 포탈의 노드·토폴로지 화면을 바꾼다.
+4. 여러 VM 스냅샷.
+5. 호스트 간 중계, 이어서 UDP 직접 연결.
+
+## 다른 머신에서 이어가기
+
+```bash
+git fetch origin && git switch poc/l2-link
+task docker-build                 # farm-golden:rocky10을 Docker로 만들고 msb에 load
+sh scripts/poc-l2-link.sh up      # farm-link 빌드, VM 2대, 스위치와 링크
+sh scripts/poc-l2-link.sh bench   # 위 표와 비교
+sh scripts/poc-l2-link.sh down
+```
+
+- 필요한 것: msb 0.7.13, Docker(게스트용 Linux 바이너리 빌드), Rust, 여유 메모리.
+- 스크립트는 aarch64 게스트를 가정한다(`--platform linux/arm64`). x86_64 Linux 호스트라면
+  `linux/amd64`로 바꾼다.
+- 결과 숫자는 Apple M5 Pro 기준이다. 다른 머신에서는 기준 측정(`sink`/`send`)부터 다시 잰다.
