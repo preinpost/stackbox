@@ -281,10 +281,29 @@ FARM_GUEST_AGENT=$PWD/dist/agent/aarch64/farm-agent \
 - multinode farm을 **원격 Linux 호스트**에서 만들고 배포하는 것은 아직 돌려보지 않았다(로컬 macOS 호스트만 확인).
 - **nested KVM**이 있는 머신(M5 Pro, Linux/KVM)에서 compute VM의 Nova가 `virt_type=kvm`으로 도는지 확인하지 않았다.
   M1 Max는 TCG였다.
-- multinode farm의 **삭제**(VM 3대와 스위치 포트 정리)와 **VM 재시작 뒤 settle**을 실제 VM으로 돌려보지 않았다.
-  fake backend 테스트만 있다.
+- multinode farm의 **VM 재시작 뒤 settle**을 실제 VM으로 돌려보지 않았다. fake backend 테스트만 있다.
+  **삭제**는 실제 `mn` farm으로 확인했다: `farm delete mn`이 2초 만에 VM 3대와 스위치 포트 6개를 정리했다.
 - Horizon을 넣은 multinode farm은 배포해 보지 않았다.
 - 3단계 변경 뒤 Linux 컨테이너에서 clippy를 다시 돌리지 않았다(Linux 전용 TAP 코드는 바꾸지 않았다).
+
+## 다른 머신에서 이어가기 (회사 Apple M5 Pro)
+
+```bash
+git fetch origin && git switch poc/l2-link && git pull
+task dev        # farm·Linux farm-agent(Docker 필요)·포털을 빌드하고 daemon과 포털을 띄운다
+```
+
+- `task dev`의 agent 빌드가 `dist/agent/aarch64/farm-agent`를 만든다. macOS coordinator는 시작할 때 이것을
+  multinode 게스트용으로 넘기므로, agent를 다시 빌드했으면 coordinator도 다시 띄운다.
+- golden image는 예전 `farm-golden:rocky10`이 아니라 msb 스냅샷 `farm-golden-rocky10:<해시>`를 쓴다. 첫 farm을
+  만들 때 자동으로 빌드되고(약 35초), `task golden`으로 미리 만들 수 있다. 예전 이미지로 만든 farm은 그대로 동작한다.
+- 메모리: control 1 + compute 1은 약 9.5 GiB, compute 2는 약 12.5 GiB다. 24 GiB 머신의 기본 예약 한도(80%,
+  약 19 GiB)에서는 다른 farm을 끄고 만드는 편이 안전하다.
+- M5 Pro는 msb nested virtualization이 되므로 "남은 검증"의 nested KVM 항목(compute VM의 `virt_type=kvm`)을
+  여기서 확인할 수 있다. 배포 로그의 configure 단계와 compute VM의 `/dev/kvm`을 본다.
+- 포털: **Farm 만들기 → VM 구성**에서 Control 1 + Compute N을 고르고, 배포 뒤 상세 화면 topology의
+  고립·복구 버튼으로 evacuate를 시험한다. evacuate 명령 자체는 control VM 셸(Shell 탭)에서
+  `compute service set --down`, `server evacuate --host farm-compute-2`로 한다.
 
 ## PoC 재현
 
