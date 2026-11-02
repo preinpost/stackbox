@@ -137,17 +137,20 @@ impl FarmManager {
     /// Check settings before saving them; a missing secret reuses the registered one.
     pub async fn test_bucket(&self, request: RegisterBucket) -> Result<String> {
         let (bucket, secret) = self.resolve_bucket(&request)?;
-        let client = Client::new(&bucket, &secret.secret_access_key).map_err(bad)?;
+        let client = Client::new(&bucket, &secret.secret_access_key)
+            .map_err(bad)?
+            .interactive();
         check(&client, &bucket).await
     }
     pub async fn check_bucket(&self, id: &str) -> Result<String> {
         let (bucket, client) = self.s3_client(id)?;
-        check(&client, &bucket).await
+        check(&client.interactive(), &bucket).await
     }
     /// Snapshot archives under the bucket's prefix, newest first.
     pub async fn bucket_objects(&self, id: &str) -> Result<Vec<BucketObject>> {
         let (bucket, client) = self.s3_client(id)?;
         let mut objects: Vec<_> = client
+            .interactive()
             .list(&bucket.prefix, LIST_LIMIT)
             .await
             .map_err(bad)?

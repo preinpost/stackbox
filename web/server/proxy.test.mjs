@@ -211,6 +211,36 @@ test("forwards snapshot routes and keeps others closed", async (t) => {
   }
   assert.equal(seen.length, 5);
 });
+test("forwards bucket routes and keeps others closed", async (t) => {
+  const seen = [];
+  const address = await setup(t, (req, res) => {
+    seen.push(`${req.method} ${req.url}`);
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end("{}");
+  });
+  const allowed = [
+    ["GET", "/api/v1/buckets"],
+    ["POST", "/api/v1/buckets"],
+    ["POST", "/api/v1/buckets/test-connection"],
+    ["PUT", "/api/v1/buckets/team-r2"],
+    ["DELETE", "/api/v1/buckets/team-r2"],
+    ["POST", "/api/v1/buckets/team-r2/check"],
+    ["GET", "/api/v1/buckets/team-r2/objects"],
+  ];
+  for (const [method, path] of allowed) {
+    const response = await fetch(address + path, { method });
+    assert.equal(response.status, 200, `${method} ${path}`);
+  }
+  assert.equal(seen.length, allowed.length);
+  for (const path of [
+    "/api/v1/buckets/team-r2/secret",
+    "/api/v1/buckets/Team",
+    "/api/v1/buckets/team-r2/objects/x",
+  ]) {
+    assert.equal((await fetch(address + path)).status, 404, path);
+  }
+  assert.equal(seen.length, allowed.length);
+});
 test("forwards local host registration and service checks", async (t) => {
   const seen = [];
   const address = await setup(t, (req, res) => {

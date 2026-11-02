@@ -84,6 +84,9 @@ pub struct Client {
     secret: Zeroizing<String>,
     /// Size of every part but the last. R2 requires them to be equal.
     min_part: u64,
+    attempts: u32,
+    /// Cap on each request's time, for answers someone is waiting on.
+    limit: Option<Duration>,
 }
 
 impl Client {
@@ -117,7 +120,16 @@ impl Client {
             access_key_id: bucket.access_key_id.clone(),
             secret: Zeroizing::new(secret_access_key.to_owned()),
             min_part: 64 * MIB,
+            attempts: ATTEMPTS,
+            limit: None,
         })
+    }
+    /// One quick attempt per request, so a person checking settings gets the error while
+    /// the portal still waits; transfers keep retrying.
+    pub fn interactive(mut self) -> Self {
+        self.attempts = 1;
+        self.limit = Some(Duration::from_secs(20));
+        self
     }
     #[cfg(test)]
     pub fn with_min_part(mut self, bytes: u64) -> Self {
@@ -377,7 +389,10 @@ impl Client {
                 .request(call.method.clone(), url.clone())
                 .header(header::AUTHORIZATION, authorization)
                 .body(call.body.clone());
-            if let Some(timeout) = call.timeout {
+            if let Some(timeout) = match (call.timeout, self.limit) {
+                (Some(timeout), Some(limit)) => Some(timeout.min(limit)),
+                (timeout, limit) => timeout.or(limit),
+            } {
                 request = request.timeout(timeout);
             }
             for (name, value) in headers.iter().filter(|(name, _)| name != "host") {
@@ -391,7 +406,7 @@ impl Client {
                 }
                 Err(error) => !error.is_builder(),
             };
-            if !transient || attempt == ATTEMPTS {
+            if !transient || attempt >= self.attempts {
                 return result.with_context(|| format!("{} {}", call.method, url.path()));
             }
             tokio::time::sleep(Duration::from_secs(1 << attempt)).await;

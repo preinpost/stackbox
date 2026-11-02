@@ -102,7 +102,7 @@ export function BucketsPanel() {
           />
         </div>
       )}
-      {buckets.isPending ? (
+      {buckets.error ? null : buckets.isPending ? (
         <Loading label="버킷을 불러오는 중" />
       ) : !sorted.length ? (
         <EmptyState
