@@ -16,16 +16,21 @@ pub const ROLE_LABEL: &str = "farm.role";
 pub const OVERLAY_IP_LABEL: &str = "farm.overlay.ip";
 /// Guest distribution (`GuestOs::id`) of VMs made from a golden snapshot.
 pub const OS_LABEL: &str = "farm.os";
+/// A multi-node compute VM's position (`NodeSpec::index`).
+pub const INDEX_LABEL: &str = "farm.node.index";
 
-/// Every farm guest gets the same hostname and service address, so a snapshot
-/// restores into another farm (and a restart into a new msb slot) unchanged.
+/// Every all-in-one guest gets the same hostname and service address, so a snapshot
+/// restores into another farm (and a restart into a new msb slot) unchanged. Multi-node
+/// farms' VMs get theirs from `template::hostname` and `template::address` the same way.
 pub const GUEST_HOSTNAME: &str = "farm-aio";
 pub const GUEST_ADDRESS: &str = "10.254.0.2";
 pub const GUEST_INTERFACE: &str = "farm0";
 pub const IDENTITY_CONF: &str = "/etc/farm/identity.conf";
 
-/// Guest ports DNATed from eth0 to the service address: every port the host publishes.
-pub fn identity_conf() -> String {
+/// The guest's fixed hostname and address. A VM that serves the farm's APIs (`publish`)
+/// DNATs every port the host publishes from eth0 to that address; `peers` are the farm's
+/// other VMs as (address, hostname), kept in /etc/hosts.
+pub fn identity_conf(spec: &NodeSpec, publish: bool, peers: &[(String, String)]) -> String {
     let ports: Vec<String> = crate::model::COMPONENTS
         .iter()
         .filter_map(|c| c.public.as_ref().map(|p| p.guest_port.to_string()))
@@ -34,11 +39,30 @@ pub fn identity_conf() -> String {
                 .iter()
                 .map(|p| p.guest_port.to_string()),
         )
+        .filter(|_| publish)
+        .collect();
+    let peers: Vec<String> = peers
+        .iter()
+        .map(|(address, hostname)| format!("{address}={hostname}"))
         .collect();
     format!(
-        "FARM_HOSTNAME={GUEST_HOSTNAME}\nFARM_ADDRESS={GUEST_ADDRESS}\nFARM_PREFIX=24\nFARM_PORTS=\"{}\"\n",
-        ports.join(" ")
+        "FARM_HOSTNAME={}\nFARM_ADDRESS={}\nFARM_PREFIX=24\nFARM_PORTS=\"{}\"\nFARM_PEERS=\"{}\"\n",
+        spec.hostname(),
+        spec.address(),
+        ports.join(" "),
+        peers.join(" ")
     )
+}
+
+/// What a new VM gets besides its spec.
+#[derive(Default)]
+pub struct NodeSetup<'a> {
+    pub exposure: Option<&'a crate::model::Exposure>,
+    /// `(port_base offset, guest port)` to publish; only the VM serving the APIs has any.
+    pub public_ports: Vec<(u16, u16)>,
+    /// The farm's other VMs, as (address, hostname).
+    pub peers: Vec<(String, String)>,
+    pub links: Vec<LinkConf>,
 }
 
 // msb's default root is an overlay; Docker's overlayfs cannot nest on it,
@@ -115,25 +139,29 @@ pub async fn install_guest_files(sandbox: &Sandbox) -> Result<()> {
 pub struct FarmNode {
     pub name: String,
     pub role: Option<Role>,
+    /// A multi-node compute VM's position, from 1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index: Option<u8>,
     pub status: String,
     pub memory_mib: u32,
     /// Live eth0 IPv4 for new all-in-one guests; legacy nodes may retain an overlay address.
     pub ip: Option<String>,
 }
 
-/// A farm's all-in-one VM is named after the farm; legacy multi-VM nodes carry their role.
-pub fn node_name(farm_id: &str, role: Role) -> String {
-    match role {
-        Role::AllInOne => farm_id.to_owned(),
-        role => format!("{farm_id}-{role}"),
+/// A farm's all-in-one VM is named after the farm; other VMs carry their role and index
+/// (`<farm>-control`, `<farm>-compute-2`), as legacy multi-VM nodes carry their role.
+pub fn node_name(farm_id: &str, role: Role, index: Option<u8>) -> String {
+    match super::template::suffix(role, index) {
+        None => farm_id.to_owned(),
+        Some(suffix) => format!("{farm_id}-{suffix}"),
     }
 }
 
 /// All-in-one VMs created before they were named after their farm.
 pub const LEGACY_ALL_IN_ONE_SUFFIX: &str = "-all-in-one";
 
-pub fn is_node_name(farm_id: &str, role: Role, name: &str) -> bool {
-    name == node_name(farm_id, role)
+pub fn is_node_name(farm_id: &str, role: Role, index: Option<u8>, name: &str) -> bool {
+    name == node_name(farm_id, role, index)
         || (role == Role::AllInOne && name.strip_suffix(LEGACY_ALL_IN_ONE_SUFFIX) == Some(farm_id))
 }
 
@@ -185,37 +213,32 @@ done"#,
     Ok(())
 }
 
-pub async fn create_node(
-    farm_id: &str,
-    spec: NodeSpec,
-    exposure: Option<&crate::model::Exposure>,
-    public_ports: &[(u16, u16)],
-    links: &[LinkConf],
-) -> Result<FarmNode> {
+pub async fn create_node(farm_id: &str, spec: NodeSpec, setup: &NodeSetup<'_>) -> Result<FarmNode> {
     // Fail before creating anything when the guests' link binary is missing.
-    let guest_agent = if links.is_empty() {
+    let guest_agent = if setup.links.is_empty() {
         None
     } else {
         Some(crate::link::host::guest_agent()?)
     };
-    let name = node_name(farm_id, spec.role);
+    let name = node_name(farm_id, spec.role, spec.index);
+    let hostname = spec.hostname();
     let os = golden::DEFAULT_OS;
     // The golden snapshot supplies the root and container disks.
     let image = golden::ensure(os, &spec).await?;
     let build = || {
-        Sandbox::builder(&name)
+        let builder = Sandbox::builder(&name)
             .override_snapshot(&image)
             .cpus(spec.cpus)
             .memory(spec.memory_mib)
             .init("/sbin/init")
-            .hostname(GUEST_HOSTNAME)
+            .hostname(&hostname)
             .network(|n| {
                 let mut n = n.policy(NetworkPolicy::from_profiles([
                     NetworkProfile::Public,
                     NetworkProfile::Host,
                 ]));
-                if let Some(exposure) = exposure {
-                    for (offset, guest_port) in public_ports {
+                if let Some(exposure) = setup.exposure {
+                    for (offset, guest_port) in &setup.public_ports {
                         n = n.port_bind(exposure.bind, exposure.port_base + offset, *guest_port);
                     }
                 }
@@ -223,8 +246,12 @@ pub async fn create_node(
             })
             .label(FARM_LABEL, farm_id)
             .label(ROLE_LABEL, spec.role.as_str())
-            .label(OS_LABEL, os.id)
-            .detached(true)
+            .label(OS_LABEL, os.id);
+        let builder = match spec.index {
+            Some(index) => builder.label(INDEX_LABEL, index.to_string()),
+            None => builder,
+        };
+        builder.detached(true)
     };
     let sandbox = create_nested(build)
         .await
@@ -232,10 +259,11 @@ pub async fn create_node(
     let boot = async {
         wait_until_booted(&sandbox).await?;
         // msb cannot patch files into a VM made from a snapshot, so they follow the boot.
-        sandbox.fs().write(IDENTITY_CONF, identity_conf()).await?;
+        let identity = identity_conf(&spec, !setup.public_ports.is_empty(), &setup.peers);
+        sandbox.fs().write(IDENTITY_CONF, identity).await?;
         install_guest_files(&sandbox).await?;
         if let Some(binary) = &guest_agent {
-            install_links(&sandbox, binary, links).await?;
+            install_links(&sandbox, binary, &setup.links).await?;
         }
         run(&sandbox, "systemctl restart farm-identity farm-hostname").await?;
         let ip = run(&sandbox, "ip -4 -o addr show dev eth0 scope global | awk 'NR==1 { split($4, a, \"/\"); print a[1] }'").await?;
@@ -249,6 +277,7 @@ pub async fn create_node(
     Ok(FarmNode {
         name,
         role: Some(spec.role),
+        index: spec.index,
         status: "running".into(),
         memory_mib: spec.memory_mib,
         ip: Some(ip),
@@ -272,6 +301,7 @@ pub fn describe_node(handle: &SandboxHandle) -> FarmNode {
     FarmNode {
         name: handle.name().to_owned(),
         role: label(handle, ROLE_LABEL).and_then(|r| r.parse().ok()),
+        index: label(handle, INDEX_LABEL).and_then(|i| i.parse().ok()),
         status: format!("{:?}", handle.status_snapshot()).to_lowercase(),
         memory_mib: handle
             .config()
@@ -325,7 +355,7 @@ mod tests {
     fn longest_valid_farm_id_fits_the_hostname_label_limit() {
         let id = "a".repeat(48);
         crate::model::validate_id(&id).unwrap();
-        let name = super::node_name(&id, super::Role::AllInOne);
+        let name = super::node_name(&id, super::Role::AllInOne, None);
         assert!(name.len() <= 63);
         assert_eq!(name, id);
         assert!(crate::model::validate_id(&"a".repeat(49)).is_err());
@@ -334,12 +364,21 @@ mod tests {
     #[test]
     fn all_in_one_vms_are_named_after_their_farm_and_keep_legacy_names() {
         use super::{Role, is_node_name, node_name};
-        assert_eq!(node_name("dev", Role::AllInOne), "dev");
-        assert_eq!(node_name("dev", Role::Lb), "dev-lb");
-        assert!(is_node_name("dev", Role::AllInOne, "dev"));
-        assert!(is_node_name("dev", Role::AllInOne, "dev-all-in-one"));
-        assert!(!is_node_name("dev", Role::AllInOne, "dev2"));
-        assert!(!is_node_name("dev", Role::Lb, "dev"));
+        assert_eq!(node_name("dev", Role::AllInOne, None), "dev");
+        assert_eq!(node_name("dev", Role::Lb, None), "dev-lb");
+        assert_eq!(node_name("dev", Role::Control, None), "dev-control");
+        assert_eq!(node_name("dev", Role::Compute, Some(2)), "dev-compute-2");
+        assert!(is_node_name("dev", Role::AllInOne, None, "dev"));
+        assert!(is_node_name("dev", Role::AllInOne, None, "dev-all-in-one"));
+        assert!(!is_node_name("dev", Role::AllInOne, None, "dev2"));
+        assert!(!is_node_name("dev", Role::Lb, None, "dev"));
+        assert!(is_node_name("dev", Role::Compute, Some(1), "dev-compute-1"));
+        assert!(!is_node_name(
+            "dev",
+            Role::Compute,
+            Some(1),
+            "dev-compute-2"
+        ));
     }
 
     #[test]
@@ -392,7 +431,12 @@ mod tests {
             assert_eq!(observed, text);
         }
         // With a fixed identity the hostname maps to the service address, whatever eth0 holds.
-        std::fs::write(dir.path().join("hosts.identity"), identity_conf()).unwrap();
+        let peers = [("10.254.0.11".to_string(), "farm-compute-1".to_string())];
+        std::fs::write(
+            dir.path().join("hosts.identity"),
+            identity_conf(&super::super::ALL_IN_ONE, true, &peers),
+        )
+        .unwrap();
         let output = std::process::Command::new("bash")
             .args(["-c", &format!("hostname() {{ echo {GUEST_HOSTNAME}; }}\nip() {{ echo '2: eth0 inet 172.16.0.14/30 scope global eth0'; }}\n{script}")])
             .env("FARM_TEST_HOSTS", &hosts)
@@ -404,13 +448,15 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
         let text = std::fs::read_to_string(&hosts).unwrap();
-        assert!(text.contains(&format!("{GUEST_ADDRESS} {GUEST_HOSTNAME}\n")));
+        assert!(text.contains(&format!(
+            "{GUEST_ADDRESS} {GUEST_HOSTNAME}\n10.254.0.11 farm-compute-1\n"
+        )));
         assert!(!text.contains("172.16.0.14"));
     }
 
     #[test]
     fn identity_dnats_every_published_guest_port() {
-        let conf = identity_conf();
+        let conf = identity_conf(&super::super::ALL_IN_ONE, true, &[]);
         assert!(conf.contains("FARM_ADDRESS=10.254.0.2\n"));
         assert!(conf.contains("FARM_PORTS=\"5000 9292 8780 80 9696 8774 3306 5672 15672\"\n"));
         // The nft set is rendered from FARM_PORTS by bash substitution.
@@ -424,6 +470,19 @@ mod tests {
         assert_eq!(
             String::from_utf8_lossy(&output.stdout),
             "{ 5000, 9292, 8780, 80, 9696, 8774, 3306, 5672, 15672 }\n"
+        );
+        // A compute VM publishes nothing; farm-identity then skips the DNAT table.
+        let compute = super::super::NodeSpec {
+            index: Some(1),
+            ..super::super::COMPUTE
+        };
+        let conf = identity_conf(&compute, false, &[]);
+        assert!(conf.contains("FARM_HOSTNAME=farm-compute-1\n"));
+        assert!(conf.contains("FARM_ADDRESS=10.254.0.11\n"));
+        assert!(conf.contains("FARM_PORTS=\"\"\n"));
+        assert!(
+            include_str!("../../guest/farm/farm-identity")
+                .contains("[ -n \"${FARM_PORTS:-}\" ] || exit 0")
         );
     }
 }

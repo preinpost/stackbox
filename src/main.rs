@@ -43,6 +43,9 @@ enum Command {
     Plan {
         #[arg(long, value_delimiter = ',')]
         components: Vec<String>,
+        /// Compute VMs beside a control VM (0-3); 0 is one all-in-one VM
+        #[arg(long, default_value_t = 0)]
+        computes: u8,
         #[arg(long)]
         json: bool,
     },
@@ -53,6 +56,9 @@ enum Command {
         host_id: String,
         #[arg(long, value_delimiter = ',')]
         components: Vec<String>,
+        /// Compute VMs beside a control VM (0-3); 0 is one all-in-one VM. Adds Nova.
+        #[arg(long, default_value_t = 0, conflicts_with = "snapshot")]
+        computes: u8,
         #[arg(long, default_value = "localhost")]
         external_host: String,
         #[arg(long)]
@@ -297,9 +303,14 @@ async fn main() -> Result<()> {
             }
             return Ok(());
         }
-        Command::Plan { components, json } => {
+        Command::Plan {
+            components,
+            computes,
+            json,
+        } => {
             let p = model::plan(&PlanRequest {
                 components: components.clone(),
+                computes: *computes,
             })?;
             if *json {
                 return print_json(&p);
@@ -313,7 +324,9 @@ async fn main() -> Result<()> {
             for node in p.nodes {
                 println!(
                     "{:<12} {} MiB, {} vCPUs",
-                    node.role, node.memory_mib, node.cpus
+                    node.hostname(),
+                    node.memory_mib,
+                    node.cpus
                 );
             }
             for warning in p.warnings {
@@ -408,6 +421,7 @@ async fn main() -> Result<()> {
             id,
             host_id,
             components,
+            computes,
             external_host,
             owner,
             expires_at,
@@ -417,6 +431,7 @@ async fn main() -> Result<()> {
                 id: id.clone(),
                 host_id: Some(host_id),
                 components,
+                computes,
                 external_host,
                 owner,
                 expires_at,

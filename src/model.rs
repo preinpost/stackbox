@@ -1,5 +1,5 @@
 use crate::{
-    farm::{ALL_IN_ONE, FarmNode, NodeSpec},
+    farm::{ALL_IN_ONE, COMPUTE, CONTROL, FarmNode, MAX_COMPUTES, NodeSpec},
     kolla::Phase,
 };
 use anyhow::{Result, bail};
@@ -22,11 +22,17 @@ pub fn now() -> u64 {
 #[serde(default, deny_unknown_fields)]
 pub struct PlanRequest {
     pub components: Vec<String>,
+    /// Compute VMs beside a control VM, up to 3; 0 runs everything in one all-in-one VM.
+    /// A multi-node farm always runs Nova and Neutron.
+    pub computes: u8,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
 pub struct Plan {
     pub components: Vec<String>,
+    /// Compute VMs beside the control VM; 0 for an all-in-one farm.
+    #[serde(default)]
+    pub computes: u8,
     pub nodes: Vec<NodeSpec>,
     pub memory_mib: u64,
     /// Includes both container disks for each container host. Sparse disks consume less initially.
@@ -243,20 +249,53 @@ pub fn resolve_components(requested: &[String]) -> Result<Vec<&'static Component
     Ok(resolved)
 }
 
+/// Of Nova's footprint, what nova-compute, libvirt and a small guest take; on a multi-node
+/// farm the compute VMs carry it.
+const NOVA_COMPUTE_MIB: u32 = 1024;
+
 pub fn plan(request: &PlanRequest) -> Result<Plan> {
-    let components = resolve_components(&request.components)?;
-    let mut node = ALL_IN_ONE;
-    node.memory_mib += components.iter().map(|c| c.footprint_mib).sum::<u32>();
-    let nodes = vec![node];
+    if request.computes > MAX_COMPUTES {
+        bail!("a farm has at most {MAX_COMPUTES} compute VMs");
+    }
+    let mut requested = request.components.clone();
+    if request.computes > 0 && !requested.iter().any(|c| c == "nova") {
+        // Compute VMs exist to run instances; Nova brings Neutron and Placement along.
+        requested.push("nova".into());
+    }
+    let components = resolve_components(&requested)?;
+    let footprint = components.iter().map(|c| c.footprint_mib).sum::<u32>();
+    let nodes = if request.computes == 0 {
+        let mut node = ALL_IN_ONE;
+        node.memory_mib += footprint;
+        vec![node]
+    } else {
+        let mut control = CONTROL;
+        control.memory_mib += footprint - NOVA_COMPUTE_MIB;
+        std::iter::once(control)
+            .chain((1..=request.computes).map(|index| NodeSpec {
+                index: Some(index),
+                ..COMPUTE
+            }))
+            .collect()
+    };
+    let mut warnings = catalog().constraints;
+    if request.computes > 0 {
+        warnings[0] = format!(
+            "The farm runs its control plane, network node and Kolla on one control VM and Nova instances on {} compute VM(s), joined by the host's link switch.",
+            request.computes
+        );
+        warnings.push("Multi-node farms cannot be frozen into snapshots yet.".into());
+    }
     Ok(Plan {
         components: components.iter().map(|c| c.id.to_owned()).collect(),
+        computes: request.computes,
         memory_mib: nodes.iter().map(|n| u64::from(n.memory_mib)).sum(),
         disk_mib: nodes
             .iter()
             .map(|n| u64::from(n.disk_mib) + 2 * u64::from(n.container_disk_mib.unwrap_or(0)))
             .sum(),
         nodes,
-        warnings: catalog().constraints,
+        warnings,
     })
 }
 
@@ -270,6 +309,9 @@ pub struct CreateRequest {
     pub host_id: Option<String>,
     #[serde(default)]
     pub components: Vec<String>,
+    /// Compute VMs beside a control VM (see [`PlanRequest::computes`]).
+    #[serde(default)]
+    pub computes: u8,
     #[serde(default = "default_host")]
     pub external_host: String,
     #[serde(default)]
@@ -306,9 +348,9 @@ impl CreateRequest {
         }
         if let Some(snapshot) = &self.snapshot_id {
             validate_id(snapshot)?;
-            if !self.components.is_empty() {
+            if !self.components.is_empty() || self.computes > 0 {
                 bail!(
-                    "a farm restored from a snapshot runs the snapshot's services; omit components"
+                    "a farm restored from a snapshot runs the snapshot's services and layout; omit components and computes"
                 );
             }
         }
@@ -326,6 +368,7 @@ impl CreateRequest {
         }
         plan(&PlanRequest {
             components: self.components.clone(),
+            computes: self.computes,
         })
     }
 }
@@ -686,6 +729,7 @@ mod tests {
             id: "dev-all-in-one".into(),
             host_id: None,
             components: vec![],
+            computes: 0,
             external_host: default_host(),
             owner: None,
             expires_at: None,
@@ -696,6 +740,7 @@ mod tests {
             assert!(
                 plan(&PlanRequest {
                     components: vec![unsupported.into()],
+                    computes: 0,
                 })
                 .is_err()
             );
@@ -711,6 +756,7 @@ mod tests {
     fn optional_services_share_the_single_guest_and_public_ports_stay_stable() {
         let request = |components: &[&str]| PlanRequest {
             components: components.iter().map(|c| (*c).into()).collect(),
+            computes: 0,
         };
         let both = plan(&request(&["placement", "horizon", "keystone"])).unwrap();
         assert_eq!(
@@ -747,6 +793,54 @@ mod tests {
             exposure.urls(None).keys().collect::<Vec<_>>(),
             ["glance", "keystone"]
         );
+    }
+
+    #[test]
+    fn multi_node_farms_split_nova_between_control_and_computes() {
+        let request = |components: &[&str], computes| PlanRequest {
+            components: components.iter().map(|c| (*c).into()).collect(),
+            computes,
+        };
+        // Compute VMs bring Nova, and Nova its dependencies.
+        let two = plan(&request(&[], 2)).unwrap();
+        assert_eq!(two.computes, 2);
+        assert_eq!(
+            two.components,
+            ["keystone", "glance", "placement", "neutron", "nova"]
+        );
+        let roles: Vec<_> = two.nodes.iter().map(|n| (n.role, n.index)).collect();
+        assert_eq!(
+            roles,
+            [
+                (Role::Control, None),
+                (Role::Compute, Some(1)),
+                (Role::Compute, Some(2))
+            ]
+        );
+        assert_eq!(two.nodes[0].memory_mib, 3072 + 256 + 2304 + 2048 - 1024);
+        assert_eq!(two.nodes[1].memory_mib, 3072);
+        assert_eq!(two.memory_mib, 6656 + 2 * 3072);
+        assert_eq!(two.disk_mib, 3 * (20480 + 2 * 32768));
+        assert!(two.warnings.iter().any(|w| w.contains("2 compute VM")));
+        crate::farm::layout(&two.nodes).unwrap();
+        let horizon = plan(&request(&["horizon"], 1)).unwrap();
+        assert_eq!(horizon.nodes[0].memory_mib, 6656 + 512);
+        assert!(plan(&request(&[], 4)).is_err());
+        // Old plans have no layout and read as all-in-one.
+        let mut old = serde_json::to_value(plan(&PlanRequest::default()).unwrap()).unwrap();
+        old.as_object_mut().unwrap().remove("computes");
+        assert_eq!(serde_json::from_value::<Plan>(old).unwrap().computes, 0);
+        let restore = CreateRequest {
+            id: "dev".into(),
+            host_id: None,
+            components: vec![],
+            computes: 1,
+            external_host: default_host(),
+            owner: None,
+            expires_at: None,
+            snapshot_id: Some("snap".into()),
+        };
+        assert!(restore.validate().is_err());
     }
 
     #[test]

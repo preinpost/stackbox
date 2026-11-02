@@ -9,7 +9,7 @@ use crate::farm;
 use crate::model::Exposure;
 use crate::shell::{run, stream};
 pub use config::OPENSTACK_RELEASE;
-use config::Topology;
+use config::{Compute, Topology};
 use std::{collections::BTreeMap, sync::Arc};
 
 #[derive(Clone, Debug)]
@@ -117,7 +117,11 @@ pub async fn deploy_with(
 ) -> Result<()> {
     let mut topology = Topology::from_nodes(&farm::get_farm(farm_id).await?)?;
     let deployer = farm::connect(&topology.name).await?;
+    let mut computes = Vec::new();
     let result = async {
+        for compute in &topology.computes {
+            computes.push((compute.clone(), farm::connect(&compute.name).await?));
+        }
         farm::wait_until_booted(&deployer).await?;
         // Farms created with a fixed guest identity bind every service to it; older farms use eth0.
         let identity = run(
@@ -139,6 +143,7 @@ pub async fn deploy_with(
             farm_id,
             from,
             &deployer,
+            &computes,
             &topology,
             exposure.as_ref(),
             components,
@@ -148,6 +153,9 @@ pub async fn deploy_with(
     }
     .await;
     deployer.detach().await;
+    for (_, sandbox) in computes {
+        sandbox.detach().await;
+    }
     result
 }
 
@@ -156,10 +164,12 @@ fn step(sink: &EventSink, text: impl Into<String>) -> Result<()> {
     sink(DeployEvent::Step(text.into()))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn deploy_phases(
     farm_id: &str,
     from: Phase,
     deployer: &Sandbox,
+    computes: &[(Compute, Sandbox)],
     topology: &Topology,
     exposure: Option<&Exposure>,
     components: &[String],
@@ -170,9 +180,11 @@ async fn deploy_phases(
         eprintln!("\n==> [{farm_id}] {phase}");
         let log = format!("{LOG_DIR}/{phase}.log");
         match phase {
-            Phase::Prepare => prepare(deployer, components, sink).await,
+            Phase::Prepare => prepare(deployer, computes, components, sink).await,
             Phase::Install => stream(deployer, &install_script(), &log, sink).await,
-            Phase::Configure => configure(deployer, topology, exposure, components, sink).await,
+            Phase::Configure => {
+                configure(deployer, computes, topology, exposure, components, sink).await
+            }
             Phase::Bootstrap => {
                 step(
                     sink,
@@ -190,11 +202,13 @@ async fn deploy_phases(
             }
             Phase::PostDeploy => {
                 step(sink, "kolla-ansible post-deploy (admin-openrc.sh 생성)")?;
-                stream(deployer, &post_deploy_script(components), &log, sink).await
+                let script = post_deploy_script(components, topology.multinode());
+                stream(deployer, &script, &log, sink).await
             }
             Phase::Verify => {
                 step(sink, "배포 검증 시작")?;
-                stream(deployer, &verify_script(components), &log, sink).await
+                let script = verify_script(components, topology.computes.len());
+                stream(deployer, &script, &log, sink).await
             }
         }
         .with_context(|| {
@@ -214,7 +228,57 @@ async fn deploy_phases(
     Ok(())
 }
 
-async fn prepare(sandbox: &Sandbox, components: &[String], sink: &EventSink) -> Result<()> {
+/// Ready every VM for Kolla. The deployer (all-in-one or control VM) also hosts Neutron's
+/// external network; a multi-node farm's computes only run OVS, Nova and Docker.
+async fn prepare(
+    deployer: &Sandbox,
+    computes: &[(Compute, Sandbox)],
+    components: &[String],
+    sink: &EventSink,
+) -> Result<()> {
+    let neutron = components.iter().any(|c| c == "neutron");
+    prepare_host(deployer, neutron, sink).await?;
+    for (compute, sandbox) in computes {
+        step(sink, format!("{} 준비", compute.hostname))?;
+        prepare_host(sandbox, neutron, sink).await?;
+    }
+    if neutron {
+        step(sink, "Neutron 외부 네트워크(veth·nftables) 준비")?;
+        deployer
+            .fs()
+            .write(
+                "/etc/farm/external.conf",
+                format!(
+                    "EXTERNAL_NETWORK={EXTERNAL_NETWORK}\nEXTERNAL_GATEWAY={EXTERNAL_GATEWAY}/24\n"
+                ),
+            )
+            .await?;
+        deployer
+            .fs()
+            .write(
+                "/etc/farm/neutron-sitecustomize.py",
+                include_str!("neutron_sitecustomize.py"),
+            )
+            .await?;
+        // Golden images now install nftables; farms made from the former Docker-built
+        // image may predate it.
+        run(deployer, "command -v nft >/dev/null || dnf install -y -q nftables; systemctl restart farm-external.service").await?;
+    }
+    if !computes.is_empty() {
+        step(sink, "control VM의 시스템 Python에 docker 모듈 설치")?;
+        // Tasks the computes delegate to the control VM (nova-cell's hypervisor and cell
+        // lists) run under the computes' interpreter, /usr/bin/python3, while bootstrap puts
+        // the docker SDK into the control VM's Ansible venv only. dbus comes with the image.
+        run(
+            deployer,
+            "/usr/bin/python3 -c 'import docker' 2>/dev/null || /usr/bin/python3 -m pip install -q docker",
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+async fn prepare_host(sandbox: &Sandbox, neutron: bool, sink: &EventSink) -> Result<()> {
     step(sink, "게스트 부팅과 systemd 대기")?;
     farm::wait_until_booted(sandbox).await?;
     step(sink, "farm-identity·farm-hostname 유닛 적용")?;
@@ -228,7 +292,8 @@ async fn prepare(sandbox: &Sandbox, components: &[String], sink: &EventSink) -> 
     .await?;
     step(sink, "Docker 마운트 전파와 /dev/kvm 권한 준비")?;
     // Kolla toolbox bind-mounts /run with shared propagation, and nova_libvirt runs QEMU
-    // as uid/gid 42427 without systemd-udevd in the guest. Apply both now and on every Docker start.
+    // as uid/gid 42427 without systemd-udevd in the guest. Apply both now and on every Docker
+    // start, which also waits for a multi-node farm's links.
     run(
         sandbox,
         r#"set -euo pipefail
@@ -236,7 +301,7 @@ mkdir -p /etc/udev/rules.d /etc/systemd/system/docker.service.d
 cat > /etc/systemd/system/docker.service.d/farm-mounts.conf <<'EOF'
 [Unit]
 Requires=farm-hostname.service
-After=farm-identity.service farm-hostname.service farm-external.service
+After=farm-link@farm0.service farm-link@farm1.service farm-identity.service farm-hostname.service farm-external.service
 
 [Service]
 ExecStartPre=/usr/bin/mount --make-shared /run
@@ -247,31 +312,12 @@ if [ -c /dev/kvm ]; then chown root:42427 /dev/kvm && chmod 0666 /dev/kvm; fi
 systemctl daemon-reload"#,
     )
     .await?;
-    if components.iter().any(|c| c == "neutron") {
-        step(sink, "Neutron 외부 네트워크(veth·nftables) 준비")?;
-        sandbox
-            .fs()
-            .write(
-                "/etc/farm/external.conf",
-                format!(
-                    "EXTERNAL_NETWORK={EXTERNAL_NETWORK}\nEXTERNAL_GATEWAY={EXTERNAL_GATEWAY}/24\n"
-                ),
-            )
-            .await?;
+    if neutron {
+        // Every VM that runs OVS starts its vswitchd through this hook.
         sandbox
             .fs()
             .write(OVS_EXTEND_START, OVS_EXTEND_START_SCRIPT)
             .await?;
-        sandbox
-            .fs()
-            .write(
-                "/etc/farm/neutron-sitecustomize.py",
-                include_str!("neutron_sitecustomize.py"),
-            )
-            .await?;
-        // Golden images now install nftables; farms made from the former Docker-built
-        // image may predate it.
-        run(sandbox, "command -v nft >/dev/null || dnf install -y -q nftables; systemctl restart farm-external.service").await?;
     }
     Ok(())
 }
@@ -343,6 +389,7 @@ kolla-ansible --version"#
 
 async fn configure(
     deployer: &Sandbox,
+    computes: &[(Compute, Sandbox)],
     topology: &Topology,
     exposure: Option<&Exposure>,
     components: &[String],
@@ -359,9 +406,16 @@ async fn configure(
     )
     .await?;
 
+    let multinode = !computes.is_empty();
+    if multinode {
+        step(sink, "control VM에서 compute VM으로 SSH 키 배포")?;
+        distribute_ssh_key(deployer, computes).await?;
+    }
     let arch = run(deployer, "uname -m").await?;
+    // Instances run where nova-compute does.
+    let hypervisor = computes.first().map_or(deployer, |(_, sandbox)| sandbox);
     let kvm = run(
-        deployer,
+        hypervisor,
         "if [ -c /dev/kvm ]; then echo true; else echo false; fi",
     )
     .await?
@@ -371,11 +425,22 @@ async fn configure(
     let template = deployer
         .fs()
         .read_to_string(&format!(
-            "{VENV}/share/kolla-ansible/ansible/inventory/all-in-one"
+            "{VENV}/share/kolla-ansible/ansible/inventory/{}",
+            if multinode { "multinode" } else { "all-in-one" }
         ))
         .await?;
-    // Everything runs on one VM, including the Ansible controller.
-    let forks = 1;
+    let inventory = if multinode {
+        let peers: Vec<Compute> = computes.iter().map(|(c, _)| c.clone()).collect();
+        config::multinode_inventory(
+            &template,
+            &farm::hostname(farm::Role::Control, None),
+            &peers,
+        )?
+    } else {
+        template
+    };
+    // The Ansible controller runs on the deployer and reaches every VM at once.
+    let forks = 1 + computes.len();
     let fs = deployer.fs();
     let mut globals = config::globals(
         topology.vip()?,
@@ -383,6 +448,7 @@ async fn configure(
         arch.trim(),
         kvm,
         components,
+        multinode,
     );
     // Public catalog URLs retain host-side offset ports; service listeners and
     // all internal API/database calls use the VM's eth0 address and native ports.
@@ -417,23 +483,37 @@ async fn configure(
     // Kolla's default hybrid iptables firewall needs physdev, which the guest kernel lacks.
     // The OVS firewall uses the userspace datapath's own conntrack instead.
     let ovs_agent = format!("{CONFIG_DIR}/config/neutron/openvswitch_agent.ini");
+    let ml2 = format!("{CONFIG_DIR}/config/neutron/ml2_conf.ini");
     if components.iter().any(|c| c == "neutron") {
         run(deployer, &format!("mkdir -p {CONFIG_DIR}/config/neutron")).await?;
-        fs.write(
-            &ovs_agent,
-            "[securitygroup]\nfirewall_driver = openvswitch\n",
-        )
-        .await?;
+        if multinode {
+            fs.write(&ovs_agent, config::MULTINODE_OVS_AGENT).await?;
+            fs.write(&ml2, config::MULTINODE_ML2).await?;
+        } else {
+            fs.write(
+                &ovs_agent,
+                "[securitygroup]\nfirewall_driver = openvswitch\n",
+            )
+            .await?;
+            run(deployer, &format!("rm -f {ml2}")).await?;
+        }
     } else {
-        run(deployer, &format!("rm -f {ovs_agent}")).await?;
+        run(deployer, &format!("rm -f {ovs_agent} {ml2}")).await?;
     }
     fs.write(
         &format!("{CONFIG_DIR}/config/galera.cnf"),
         config::GALERA_CONFIG,
     )
     .await?;
-    step(sink, "all-in-one inventory와 Ansible 설정 작성")?;
-    fs.write(INVENTORY, template).await?;
+    step(
+        sink,
+        if multinode {
+            "multinode inventory와 Ansible 설정 작성"
+        } else {
+            "all-in-one inventory와 Ansible 설정 작성"
+        },
+    )?;
+    fs.write(INVENTORY, inventory).await?;
     run(deployer, "mkdir -p /etc/kolla/callback_plugins").await?;
     fs.write(
         "/etc/kolla/callback_plugins/farm.py",
@@ -451,6 +531,44 @@ async fn configure(
         "wrote {CONFIG_DIR}/globals.yml and {INVENTORY} (vip {})",
         topology.vip()?
     );
+    Ok(())
+}
+
+/// Let Kolla on the control VM reach every compute as root over the management link.
+async fn distribute_ssh_key(deployer: &Sandbox, computes: &[(Compute, Sandbox)]) -> Result<()> {
+    let key = run(
+        deployer,
+        "[ -f /root/.ssh/id_ed25519 ] || ssh-keygen -q -t ed25519 -N '' -f /root/.ssh/id_ed25519; cat /root/.ssh/id_ed25519.pub",
+    )
+    .await?;
+    let key = key.trim();
+    anyhow::ensure!(
+        key.starts_with("ssh-ed25519 ") && !key.contains(['\'', '\n']),
+        "unexpected SSH public key on the control VM"
+    );
+    for (compute, sandbox) in computes {
+        // An authorized_keys without a final newline would join the key to its last line.
+        run(
+            sandbox,
+            &format!(
+                r#"set -e
+mkdir -p /root/.ssh && chmod 700 /root/.ssh
+f=/root/.ssh/authorized_keys
+touch "$f" && chmod 600 "$f"
+grep -qxF '{key}' "$f" || {{ [ -s "$f" ] && [ -n "$(tail -c1 "$f")" ] && echo >> "$f"; echo '{key}' >> "$f"; }}"#
+            ),
+        )
+        .await?;
+        run(
+            deployer,
+            &format!(
+                "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 {} true",
+                compute.hostname
+            ),
+        )
+        .await
+        .with_context(|| format!("SSH from the control VM to {}", compute.hostname))?;
+    }
     Ok(())
 }
 
@@ -566,12 +684,13 @@ echo "neutron OK"
     if has("nova") {
         script.push_str(
             r#"compute_state=''
+# Every nova-compute, one per compute VM of a multi-node farm.
 for _ in $(seq 60); do
-  compute_state=$($os compute service list --service nova-compute -f value -c State 2>/dev/null | head -1)
-  [ "$compute_state" = up ] && break
+  compute_state=$($os compute service list --service nova-compute -f value -c State 2>/dev/null || true)
+  [ -n "$compute_state" ] && ! echo "$compute_state" | grep -qvx up && break
   sleep 5
 done
-[ "$compute_state" = up ] || { echo "nova-compute is not up: ${compute_state:-missing}" >&2; exit 1; }
+[ -n "$compute_state" ] && ! echo "$compute_state" | grep -qvx up || { echo "nova-compute is not up everywhere: ${compute_state:-missing}" >&2; exit 1; }
 echo "nova OK"
 "#,
         );
@@ -593,7 +712,10 @@ fn public_url_variable(component: &str) -> Option<&'static str> {
     })
 }
 
-fn post_deploy_script(components: &[String]) -> String {
+/// `multinode`: the external network's bridge is the control VM's second one (physnet2);
+/// physnet1 carries the tenant VLANs.
+fn post_deploy_script(components: &[String], multinode: bool) -> String {
+    let physnet = if multinode { "physnet2" } else { "physnet1" };
     let mut script = kolla_ansible("post-deploy");
     if components.iter().any(|c| c == "neutron") {
         // A shared external network for routers and floating IPs, created once per farm.
@@ -602,9 +724,9 @@ fn post_deploy_script(components: &[String]) -> String {
 set -euo pipefail
 . {CONFIG_DIR}/admin-openrc.sh
 os={OSC_VENV}/bin/openstack
-step "외부 네트워크 public 구성 (flat, physnet1)"
+step "외부 네트워크 public 구성 (flat, {physnet})"
 if ! $os network show public >/dev/null 2>&1; then
-  $os network create --external --share --provider-network-type flat --provider-physical-network physnet1 public
+  $os network create --external --share --provider-network-type flat --provider-physical-network {physnet} public
 fi
 if ! $os subnet show public-subnet >/dev/null 2>&1; then
   $os subnet create --network public --subnet-range {EXTERNAL_NETWORK} --gateway {EXTERNAL_GATEWAY} \
@@ -621,7 +743,8 @@ fn kolla_ansible(command: &str) -> String {
     format!("PATH={VENV}/bin:$PATH kolla-ansible {command} -i {INVENTORY}")
 }
 
-fn verify_script(components: &[String]) -> String {
+/// `computes`: a multi-node farm's compute VMs, whose nova-compute services must all be up.
+fn verify_script(components: &[String], computes: usize) -> String {
     let has = |id: &str| components.iter().any(|c| c == id);
     let mut script = format!(
         r#"set -euo pipefail
@@ -698,7 +821,7 @@ echo "horizon OK: ${home#200 }"
         script.push_str(&neutron_verify_script());
     }
     if has("nova") {
-        script.push_str(&nova_verify_script());
+        script.push_str(&nova_verify_script(computes.max(1)));
     }
     script
 }
@@ -749,15 +872,19 @@ echo "neutron OK: router gateway $gateway and DHCP port $dhcp reachable"
     .to_owned()
 }
 
-/// Boots a tiny Cirros instance and pings it from the router namespace.
-fn nova_verify_script() -> String {
-    r#"step "nova-compute 서비스 상태 확인"
+/// Waits for `computes` nova-compute services, then boots a tiny Cirros instance and pings
+/// it from the router namespace.
+fn nova_verify_script(computes: usize) -> String {
+    format!(
+        r#"step "nova-compute 서비스 상태 확인 ({computes}개)"
 for _ in $(seq 40); do
-  compute_state=$($os compute service list --service nova-compute -f value -c State | head -1)
-  [ "$compute_state" = up ] && break
+  compute_state=$($os compute service list --service nova-compute -f value -c State)
+  [ "$(echo "$compute_state" | grep -cx up)" -ge {computes} ] && break
   sleep 5
 done
-[ "$compute_state" = up ] || { echo "nova-compute is not up: ${compute_state:-missing}" >&2; exit 1; }
+[ "$(echo "$compute_state" | grep -cx up)" -ge {computes} ] || {{ echo "nova-compute is not up on {computes} hosts: ${{compute_state:-missing}}" >&2; exit 1; }}
+"#
+    ) + r#"
 $os flavor show m1.tiny >/dev/null 2>&1 || $os flavor create --ram 512 --disk 1 --vcpus 1 m1.tiny >/dev/null
 step "Cirros 인스턴스 생성과 라우터 경유 ping 검증"
 $os security group rule create --ingress --protocol icmp --ethertype IPv4 default >/dev/null 2>&1 || true
@@ -813,7 +940,6 @@ extra_cleanup
 server_id=''; router_id=''; net_id=''
 echo "nova OK: $name at $fixed answered from the router"
 "#
-    .to_owned()
 }
 
 #[cfg(test)]
@@ -858,8 +984,10 @@ mod tests {
         let (from, to) = (exposure(15000), exposure(15010));
         let scripts = [
             install_script(),
-            post_deploy_script(&components),
-            verify_script(&components),
+            post_deploy_script(&components, false),
+            post_deploy_script(&components, true),
+            verify_script(&components, 0),
+            verify_script(&components, 2),
             settle_script(None, &components),
             settle_script(Some((&from, &to)), &components),
             OVS_EXTEND_START_SCRIPT.to_owned(),
@@ -890,14 +1018,16 @@ mod tests {
         // where nothing points at the generated script.
         for script in [
             install_script(),
-            post_deploy_script(&components),
-            verify_script(&components),
+            post_deploy_script(&components, false),
+            post_deploy_script(&components, true),
+            verify_script(&components, 0),
+            verify_script(&components, 2),
             settle_script(None, &components),
         ] {
             assert_heredocs_do_not_nest(&script);
         }
 
-        let verify = verify_script(&components);
+        let verify = verify_script(&components, 0);
         assert!(
             !verify.contains("ssh "),
             "all-in-one verification must not require distributed SSH keys"
@@ -907,8 +1037,10 @@ mod tests {
         assert!(verify.contains("cirros-0.6.3-aarch64-disk.img"));
         for script in [
             install_script(),
-            verify_script(&components),
-            post_deploy_script(&components),
+            verify_script(&components, 0),
+            verify_script(&components, 2),
+            post_deploy_script(&components, false),
+            post_deploy_script(&components, true),
         ] {
             assert!(script.contains("step \""), "a phase script reports no step");
         }

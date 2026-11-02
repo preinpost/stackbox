@@ -112,7 +112,7 @@ pub async fn restore_farm(
     if !super::farm_handles(farm_id).await?.is_empty() {
         bail!("farm '{farm_id}' already exists");
     }
-    let name = node_name(farm_id, spec.role);
+    let name = node_name(farm_id, spec.role, spec.index);
     // `Sandbox::restore` boots a disk snapshot without an init handoff and cannot set init or
     // labels, so the guest never reaches systemd. The creation builder accepts a snapshot
     // source through `override_snapshot` (public, though doc-hidden), with the same init,
@@ -153,6 +153,7 @@ pub async fn restore_farm(
     Ok(vec![FarmNode {
         name,
         role: Some(spec.role),
+        index: spec.index,
         status: "running".into(),
         memory_mib: spec.memory_mib,
         ip: Some(ip),

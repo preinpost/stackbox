@@ -13,34 +13,103 @@ use microsandbox::sandbox::SandboxHandle;
 
 use node::{FARM_LABEL, describe_node, destroy_node, label};
 pub use node::{
-    FarmNode, GUEST_ADDRESS, GUEST_INTERFACE, IDENTITY_CONF, LEGACY_ALL_IN_ONE_SUFFIX, connect,
-    create_node, install_guest_files, install_links, is_node_name, node_name, wait_until_booted,
+    FarmNode, GUEST_ADDRESS, GUEST_INTERFACE, IDENTITY_CONF, LEGACY_ALL_IN_ONE_SUFFIX, NodeSetup,
+    connect, create_node, install_guest_files, install_links, is_node_name, node_name,
+    wait_until_booted,
 };
 pub use snapshot::{
     FrozenSnapshot, ImportedSnapshot, export_snapshot, freeze_farm, import_snapshot,
     remove_snapshot, restore_farm,
 };
-pub use template::{ALL_IN_ONE, NodeSpec, Role};
+pub use template::{
+    ALL_IN_ONE, COMPUTE, CONTROL, MAX_COMPUTES, NodeSpec, Role, address, hostname, suffix,
+};
 pub use terminal::{TerminalInput, TerminalIo, TerminalSize, attach as attach_terminal};
+
+/// A multi-node farm's networks, each a link on every VM: `(guest device, network, addressed)`.
+/// `mgmt` carries Kolla's network and API traffic on the VM's fixed address; `tenant` carries
+/// Neutron's tenant VLANs through an OVS bridge, so it has no address.
+pub const NETWORKS: [(&str, &str, bool); 2] = [("farm0", "mgmt", true), ("farm1", "tenant", false)];
 
 /// Create the farm's single all-in-one VM and confirm it boots.
 pub async fn create_farm(farm_id: &str, template: &[NodeSpec]) -> Result<Vec<FarmNode>> {
-    create_farm_with(farm_id, template, None, &[]).await
+    create_farm_with(farm_id, template, None, &[], None).await
 }
 
-/// `components` selects which service ports the all-in-one guest publishes.
+/// `components` selects which service ports the farm publishes. A multi-node farm needs
+/// `switch`, the host's link switch, to join its VMs.
 pub async fn create_farm_with(
     farm_id: &str,
     template: &[NodeSpec],
     exposure: Option<&crate::model::Exposure>,
     components: &[String],
+    switch: Option<&crate::link::host::Switch>,
 ) -> Result<Vec<FarmNode>> {
-    let spec = single_node(template)?;
+    let computes = layout(template)?;
     if !farm_handles(farm_id).await?.is_empty() {
         bail!("farm '{farm_id}' already exists");
     }
-    let node = create_node(farm_id, spec, exposure, &public_ports(components), &[]).await?;
-    Ok(vec![node])
+    if computes == 0 {
+        let setup = NodeSetup {
+            exposure,
+            public_ports: public_ports(components),
+            ..Default::default()
+        };
+        return Ok(vec![create_node(farm_id, template[0], &setup).await?]);
+    }
+    let switch = switch.context("multi-node farms need the host's link switch")?;
+    let url = switch.ensure(&switch_command()?).await?;
+    let mut setups = Vec::new();
+    for spec in template {
+        let suffix = suffix(spec.role, spec.index).context("multi-node VMs have a suffix")?;
+        let mut links = Vec::new();
+        for (dev, network, addressed) in NETWORKS {
+            let port = format!("{farm_id}/{suffix}/{network}");
+            let token = switch.add_port(&port, &format!("{farm_id}/{network}"))?;
+            links.push(crate::link::guest::LinkConf {
+                dev: dev.into(),
+                switch: url.clone(),
+                port,
+                token,
+                mtu: crate::link::DEFAULT_MTU,
+                address: addressed.then(|| format!("{}/24", spec.address())),
+            });
+        }
+        // The control VM serves the farm's APIs; the computes publish nothing.
+        let control = spec.role == Role::Control;
+        setups.push(NodeSetup {
+            exposure: exposure.filter(|_| control),
+            public_ports: if control {
+                public_ports(components)
+            } else {
+                Vec::new()
+            },
+            peers: template
+                .iter()
+                .filter(|other| other.hostname() != spec.hostname())
+                .map(|other| (other.address(), other.hostname()))
+                .collect(),
+            links,
+        });
+    }
+    try_join_all(
+        template
+            .iter()
+            .zip(&setups)
+            .map(|(spec, setup)| create_node(farm_id, *spec, setup)),
+    )
+    .await
+}
+
+/// `agent switch`, which both the `farm` and `farm-agent` binaries take.
+pub fn switch_command() -> Result<Vec<std::ffi::OsString>> {
+    Ok(vec![
+        std::env::current_exe()
+            .context("cannot locate the agent binary")?
+            .into(),
+        "agent".into(),
+        "switch".into(),
+    ])
 }
 
 /// `(port_base offset, guest port)` of each selected service, plus the data stores every farm installs.
@@ -57,15 +126,48 @@ fn public_ports(components: &[String]) -> Vec<(u16, u16)> {
         .collect()
 }
 
-fn single_node(template: &[NodeSpec]) -> Result<NodeSpec> {
-    let [spec] = template else {
-        bail!("new farms require exactly one all-in-one VM");
-    };
-    anyhow::ensure!(
-        spec.role == Role::AllInOne,
-        "legacy multi-VM layouts cannot be created; create a new all-in-one farm"
-    );
-    Ok(*spec)
+/// How many compute VMs a layout new farms can have has: 0 for one all-in-one VM, or a
+/// control VM followed by computes numbered from 1. Legacy multi-VM layouts are refused.
+pub fn layout(template: &[NodeSpec]) -> Result<u8> {
+    match template {
+        [spec] if spec.role == Role::AllInOne => Ok(0),
+        [control, computes @ ..]
+            if control.role == Role::Control
+                && control.index.is_none()
+                && !computes.is_empty()
+                && computes.len() <= usize::from(MAX_COMPUTES)
+                && computes.iter().enumerate().all(|(i, spec)| {
+                    spec.role == Role::Compute && spec.index == Some(i as u8 + 1)
+                }) =>
+        {
+            Ok(computes.len() as u8)
+        }
+        [] => bail!("a farm needs at least one VM"),
+        _ => bail!(
+            "legacy multi-VM layouts cannot be created; create an all-in-one or control + compute farm"
+        ),
+    }
+}
+
+/// The layout of a farm's observed VMs, as [`layout`]; `None` for legacy or partial farms.
+pub fn observed_layout(nodes: &[FarmNode]) -> Option<u8> {
+    let mut specs: Vec<NodeSpec> = nodes
+        .iter()
+        .map(|node| {
+            Some(NodeSpec {
+                role: node.role?,
+                index: node.index,
+                ..ALL_IN_ONE
+            })
+        })
+        .collect::<Option<_>>()?;
+    specs.sort_by_key(|spec| {
+        (
+            spec.role != Role::AllInOne && spec.role != Role::Control,
+            spec.index,
+        )
+    });
+    layout(&specs).ok()
 }
 
 pub async fn get_farm(farm_id: &str) -> Result<Vec<FarmNode>> {
@@ -141,14 +243,19 @@ fn farm_of(handle: &SandboxHandle) -> Option<String> {
     )
 }
 
-/// Name of the farm's all-in-one VM, which predates the farm-id naming on older farms.
+/// Name of the VM that runs Kolla and serves the farm's APIs: the all-in-one VM (which
+/// predates the farm-id naming on older farms) or a multi-node farm's control VM.
 pub async fn all_in_one_name(farm_id: &str) -> Result<String> {
-    farm_handles(farm_id)
-        .await?
-        .into_iter()
-        .find(|handle| label(handle, node::ROLE_LABEL).as_deref() == Some(Role::AllInOne.as_str()))
-        .map(|handle| handle.name().to_owned())
-        .with_context(|| format!("farm '{farm_id}' has no all-in-one VM"))
+    let nodes = get_farm(farm_id).await?;
+    let control = observed_layout(&nodes)
+        .filter(|computes| *computes > 0)
+        .and_then(|_| nodes.iter().find(|node| node.role == Some(Role::Control)));
+    nodes
+        .iter()
+        .find(|node| node.role == Some(Role::AllInOne))
+        .or(control)
+        .map(|node| node.name.clone())
+        .with_context(|| format!("farm '{farm_id}' has no all-in-one or control VM"))
 }
 
 /// A labelled all-in-one VM belongs to the farm in its name, so a snapshot copy can never
@@ -218,20 +325,59 @@ mod tests {
     }
 
     #[test]
-    fn create_rejects_legacy_or_multi_node_layouts_before_touching_the_runtime() {
-        let all = ALL_IN_ONE;
-        assert_eq!(single_node(&[all]).unwrap().role, Role::AllInOne);
-        assert!(single_node(&[]).is_err());
-        assert!(single_node(&[all, all]).is_err());
+    fn create_takes_all_in_one_or_control_and_numbered_computes_only() {
+        let compute = |index| NodeSpec {
+            index: Some(index),
+            ..COMPUTE
+        };
+        assert_eq!(layout(&[ALL_IN_ONE]).unwrap(), 0);
+        assert_eq!(layout(&[CONTROL, compute(1), compute(2)]).unwrap(), 2);
+        assert!(layout(&[]).is_err());
+        assert!(layout(&[ALL_IN_ONE, ALL_IN_ONE]).is_err());
+        assert!(layout(&[CONTROL]).is_err());
+        assert!(layout(&[CONTROL, compute(2)]).is_err());
+        assert!(layout(&[CONTROL, COMPUTE]).is_err());
+        assert!(layout(&[CONTROL, compute(1), compute(2), compute(3), compute(4)]).is_err());
         let legacy = NodeSpec {
             role: Role::Deployer,
-            ..all
+            ..ALL_IN_ONE
         };
         assert!(
-            single_node(&[legacy])
+            layout(&[legacy])
                 .unwrap_err()
                 .to_string()
                 .contains("legacy")
+        );
+        let node = |role, index| FarmNode {
+            name: String::new(),
+            role: Some(role),
+            index,
+            status: "running".into(),
+            memory_mib: 0,
+            ip: None,
+        };
+        // Observed nodes come sorted by name, not by role.
+        assert_eq!(
+            observed_layout(&[
+                node(Role::Compute, Some(2)),
+                node(Role::Compute, Some(1)),
+                node(Role::Control, None)
+            ]),
+            Some(2)
+        );
+        assert_eq!(observed_layout(&[node(Role::AllInOne, None)]), Some(0));
+        // A legacy farm with control and compute VMs is not a multi-node farm.
+        assert_eq!(
+            observed_layout(&[
+                node(Role::Deployer, None),
+                node(Role::Control, None),
+                node(Role::Compute, None)
+            ]),
+            None
+        );
+        assert_eq!(
+            observed_layout(&[node(Role::Control, None), node(Role::Compute, None)]),
+            None
         );
     }
 }

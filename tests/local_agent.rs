@@ -7,6 +7,7 @@ use farm::remote::{
 #[tokio::test]
 async fn the_farm_binary_answers_as_the_local_agent() {
     let link = ProcessLink {
+        guest_agent: Default::default(),
         program: env!("CARGO_BIN_EXE_farm").into(),
     };
     let reply = link

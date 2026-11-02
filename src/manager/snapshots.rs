@@ -156,7 +156,10 @@ fn parse_labels(labels: &BTreeMap<String, String>) -> Result<Imported> {
     Ok(Imported {
         arch: arch.clone(),
         platform: labels.get(label::PLATFORM).cloned(),
-        plan: plan(&PlanRequest { components })?,
+        plan: plan(&PlanRequest {
+            components,
+            computes: 0,
+        })?,
         deployed: get(label::DEPLOYED)? == "true",
         source_exposure: Exposure {
             host: get(label::EXPOSURE_HOST)?.clone(),
@@ -250,6 +253,9 @@ impl FarmManager {
                     "farms imported from older versions cannot be frozen",
                 ));
             };
+            if plan.computes > 0 {
+                return Err(conflict("multi-node farms cannot be frozen yet"));
+            }
             if farm.nodes.len() != 1
                 || farm.nodes[0].role != Some(Role::AllInOne)
                 || farm.nodes[0].status != "running"

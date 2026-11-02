@@ -76,6 +76,8 @@ struct Inner {
     accepting: AtomicBool,
     vault: crate::remote::Vault,
     host_gate: Semaphore,
+    /// The Linux farm-agent the local host's multi-node guests run, where this binary is not one.
+    guest_agent: std::sync::RwLock<Option<PathBuf>>,
     /// Agent binaries loaded at startup, by platform.
     artifacts: std::collections::BTreeMap<String, Arc<crate::remote::artifact::Artifact>>,
     /// This build's released agents for the other platforms, by platform.
@@ -128,11 +130,43 @@ const REATTACHING: &str = "Coordinator restarted; re-attaching to the running de
 
 impl FarmManager {
     pub async fn open(options: ManagerOptions) -> Result<Self> {
-        Self::with_link(
-            options,
-            Arc::new(crate::remote::link::ProcessLink::current()?),
-        )
-        .await
+        let link = crate::remote::link::ProcessLink::current()?;
+        let guest_agent = link.guest_agent.clone();
+        let manager = Self::with_link(options, Arc::new(link)).await?;
+        if let Some(path) = manager.write_guest_agent()? {
+            let _ = guest_agent.set(path);
+        }
+        Ok(manager)
+    }
+    /// Off Linux, the local agent cannot hand its own binary to the guests of multi-node
+    /// farms; give it the loaded Linux agent for this architecture instead.
+    fn write_guest_agent(&self) -> Result<Option<PathBuf>> {
+        if cfg!(target_os = "linux") {
+            return Ok(None);
+        }
+        let platform = format!("linux-{}", crate::model::current_arch());
+        let Some(artifact) = self.0.artifacts.get(&platform) else {
+            return Ok(None);
+        };
+        let dir = self.0.options.state_dir.join("guest");
+        std::fs::create_dir_all(&dir)?;
+        let path = dir.join(format!("farm-agent-{platform}"));
+        if std::fs::read(&path).ok().as_deref() != Some(&artifact.bytes[..]) {
+            let staging = dir.join(format!(".farm-agent-{}", uuid::Uuid::new_v4()));
+            std::fs::write(&staging, &artifact.bytes[..])?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&staging, std::fs::Permissions::from_mode(0o755))?;
+            }
+            std::fs::rename(&staging, &path)?;
+        }
+        *self
+            .0
+            .guest_agent
+            .write()
+            .map_err(|_| anyhow!("guest agent lock poisoned"))? = Some(path.clone());
+        Ok(Some(path))
     }
     /// Runs the local host's agent in-process on `backend`, so tests need no VMs.
     pub async fn with_backend(options: ManagerOptions, backend: Arc<dyn Backend>) -> Result<Self> {
@@ -201,6 +235,7 @@ impl FarmManager {
             accepting: AtomicBool::new(true),
             vault,
             host_gate: Semaphore::new(2),
+            guest_agent: Default::default(),
             artifacts,
             published: Default::default(),
         }));
@@ -344,10 +379,10 @@ impl FarmManager {
     /// Fails unless the farm's VM can take a shell session.
     pub fn check_terminal(&self, id: &str) -> Result<FarmRecord> {
         let farm = self.get(id)?;
-        let running = farm
-            .nodes
-            .iter()
-            .any(|node| node.role == Some(Role::AllInOne) && node.status == "running");
+        // A multi-node farm's shell opens on its control VM.
+        let running = farm.nodes.iter().any(|node| {
+            matches!(node.role, Some(Role::AllInOne | Role::Control)) && node.status == "running"
+        });
         if !running {
             return Err(conflict("the shell needs the farm's VM to be running"));
         }
@@ -577,6 +612,22 @@ impl FarmManager {
                 return Err(conflict("snapshots restore on the local host only"));
             }
             let inspection = host.inspection.as_ref().context("ready host has no inspection")?;
+            // A multi-node farm's guests run a Linux farm-agent for their links. Linux agents
+            // give their own; this machine gives the one loaded at startup.
+            if plan.computes > 0 {
+                let linux = inspection.os == "linux";
+                let local_ready = host.kind == HostKind::Local
+                    && (cfg!(target_os = "linux")
+                        || std::env::var_os("FARM_GUEST_AGENT").is_some()
+                        || self.0.guest_agent.read().is_ok_and(|g| g.is_some()));
+                if !linux && !local_ready {
+                    return Err(conflict(if host.kind == HostKind::Local {
+                        format!("multi-node farms need a linux-{} farm-agent for their guests; build it with `task agent-build` and restart the coordinator", crate::model::current_arch())
+                    } else {
+                        "multi-node farms run on Linux hosts and this machine's local host only".to_string()
+                    }));
+                }
+            }
             let (budget, agent_sha256, bind) = match host.kind {
                 HostKind::Local => (self.0.options.memory_budget_mib, None, self.0.options.public_bind),
                 HostKind::Agent => {
@@ -667,12 +718,11 @@ impl FarmManager {
             ) {
                 return Err(conflict("farm must be created before deploying"));
             }
-            if farm.plan.as_ref().is_some_and(|plan| plan.nodes.len() != 1 || plan.nodes[0].role != Role::AllInOne)
-                || farm.nodes.iter().any(|node| node.role != Some(Role::AllInOne))
-            {
-                return Err(conflict("legacy multi-node farms cannot be deployed by the single-VM engine; keep or delete this farm and create a new farm"));
+            let layout = farm.plan.as_ref().map(|plan| crate::farm::layout(&plan.nodes));
+            if !matches!(layout, Some(Ok(_))) {
+                return Err(conflict("legacy multi-node farms cannot be deployed; keep or delete this farm and create a new farm"));
             }
-            let expected = 1;
+            let expected = farm.plan.as_ref().map_or(1, |plan| plan.nodes.len());
             if farm.nodes.len() != expected || farm.nodes.iter().any(|n| n.status != "running") {
                 return Err(conflict(format!(
                     "all {expected} farm nodes must be running before deploying"
@@ -1255,13 +1305,13 @@ fn apply_inventory(
         if farm.status == FarmStatus::Deleted && nodes.is_empty() {
             continue;
         }
-        let expected: Vec<Role> = farm
+        let expected: Vec<(Role, Option<u8>)> = farm
             .plan
             .as_ref()
-            .map(|p| p.nodes.iter().map(|n| n.role).collect())
+            .map(|p| p.nodes.iter().map(|n| (n.role, n.index)).collect())
             .unwrap_or_else(|| {
                 if nodes.iter().any(|node| node.role == Some(Role::AllInOne)) {
-                    return vec![Role::AllInOne];
+                    return vec![(Role::AllInOne, None)];
                 }
                 // Imported legacy farms have no recorded plan. Preserve their
                 // known role layout, including optional control/compute nodes.
@@ -1277,12 +1327,13 @@ fn apply_inventory(
                         roles.push(role);
                     }
                 }
-                roles
+                roles.into_iter().map(|role| (role, None)).collect()
             });
         let intact = nodes.len() == expected.len()
-            && expected.iter().all(|role| {
+            && expected.iter().all(|(role, index)| {
                 nodes.iter().any(|n| {
-                    crate::farm::is_node_name(&farm.id, *role, &n.name) && n.status == "running"
+                    crate::farm::is_node_name(&farm.id, *role, *index, &n.name)
+                        && n.status == "running"
                 })
             });
         if !intact || farm.status == FarmStatus::Deleted {

@@ -1,3 +1,4 @@
+use crate::link::{Impair, host::Switch};
 use crate::{
     farm::{self, FarmNode, FrozenSnapshot, ImportedSnapshot, TerminalIo, TerminalSize},
     kolla::{self, EventSink, Phase},
@@ -5,7 +6,10 @@ use crate::{
 };
 use anyhow::{Result, anyhow};
 use futures::future::BoxFuture;
-use std::{collections::BTreeMap, path::PathBuf};
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+};
 
 fn unsupported<T: Send + 'static>() -> BoxFuture<'static, Result<T>> {
     Box::pin(async { Err(anyhow!("snapshots are available for local farms only")) })
@@ -78,6 +82,11 @@ pub trait Backend: Send + Sync + 'static {
     fn remove_snapshot(&self, _reference: String) -> BoxFuture<'_, Result<()>> {
         unsupported()
     }
+    /// Add faults to the links of a multi-node farm's VM (`control`, `compute-1`, ...);
+    /// `Impair::default()` heals them.
+    fn impair(&self, _id: String, _node: String, _impair: Impair) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async { Err(anyhow!("this backend has no links")) })
+    }
     /// Run an interactive login shell in the farm's VM until it exits or `io.input` closes.
     fn terminal(
         &self,
@@ -88,7 +97,17 @@ pub trait Backend: Send + Sync + 'static {
         Box::pin(async { Err(anyhow!("this backend has no terminal")) })
     }
 }
-pub struct MicrosandboxBackend;
+/// The farms of the host its agent directory belongs to, whose link switch it runs.
+pub struct MicrosandboxBackend {
+    switch: Switch,
+}
+impl MicrosandboxBackend {
+    pub fn new(agent_dir: &Path) -> Self {
+        Self {
+            switch: Switch::new(agent_dir),
+        }
+    }
+}
 impl Backend for MicrosandboxBackend {
     fn scan(&self) -> BoxFuture<'_, Result<BTreeMap<String, Vec<FarmNode>>>> {
         Box::pin(farm::scan_farms())
@@ -100,7 +119,14 @@ impl Backend for MicrosandboxBackend {
         exposure: Exposure,
     ) -> BoxFuture<'_, Result<Vec<FarmNode>>> {
         Box::pin(async move {
-            farm::create_farm_with(&id, &plan.nodes, Some(&exposure), &plan.components).await
+            farm::create_farm_with(
+                &id,
+                &plan.nodes,
+                Some(&exposure),
+                &plan.components,
+                Some(&self.switch),
+            )
+            .await
         })
     }
     fn deploy(
@@ -114,7 +140,20 @@ impl Backend for MicrosandboxBackend {
         Box::pin(async move { kolla::deploy_with(&id, from, exposure, &components, sink).await })
     }
     fn delete(&self, id: String) -> BoxFuture<'_, Result<()>> {
-        Box::pin(async move { farm::delete_farm(&id).await.map(|_| ()) })
+        Box::pin(async move {
+            farm::delete_farm(&id).await?;
+            self.switch.remove_ports(&id)?;
+            Ok(())
+        })
+    }
+    fn impair(&self, id: String, node: String, impair: Impair) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async move {
+            for (_, network, _) in farm::NETWORKS {
+                self.switch
+                    .impair(&format!("{id}/{node}/{network}"), impair)?;
+            }
+            Ok(())
+        })
     }
     fn endpoints(
         &self,
@@ -123,19 +162,18 @@ impl Backend for MicrosandboxBackend {
         components: Vec<String>,
     ) -> BoxFuture<'_, Result<Endpoints>> {
         Box::pin(async move {
-            let nodes = farm::get_farm(&id).await?;
-            // Legacy farms remain readable/deletable; their credentials still
-            // live on the old deployer. New farms keep everything on one VM.
-            let node = nodes
-                .iter()
-                .find(|node| node.role == Some(farm::Role::AllInOne))
-                .or_else(|| {
-                    nodes
-                        .iter()
-                        .find(|node| node.role == Some(farm::Role::Deployer))
-                })
-                .ok_or_else(|| anyhow::anyhow!("farm has no configuration VM"))?;
-            let sandbox = farm::connect(&node.name).await?;
+            // New farms keep Kolla's configuration on the all-in-one or control VM. Legacy
+            // farms remain readable/deletable; their credentials live on the old deployer.
+            let name = match farm::all_in_one_name(&id).await {
+                Ok(name) => name,
+                Err(error) => farm::get_farm(&id)
+                    .await?
+                    .into_iter()
+                    .find(|node| node.role == Some(farm::Role::Deployer))
+                    .map(|node| node.name)
+                    .ok_or(error)?,
+            };
+            let sandbox = farm::connect(&name).await?;
             let result = crate::shell::run(&sandbox, r#"set -euo pipefail
 . /etc/kolla/admin-openrc.sh
 python3 - <<'PY'

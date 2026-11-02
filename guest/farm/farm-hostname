@@ -3,6 +3,7 @@
 # fixed service address (see farm-identity), or to eth0 on farms created without one.
 set -euo pipefail
 FARM_ADDRESS=""
+FARM_PEERS=""
 if [ -f /etc/farm/identity.conf ]; then . /etc/farm/identity.conf; fi
 address="$FARM_ADDRESS"
 for _ in $(seq 60); do
@@ -26,6 +27,12 @@ awk -v name="$name" '
     print line
   }
 ' /etc/hosts > "$work"
-printf '\n# BEGIN FARM HOSTNAME\n%s %s\n# END FARM HOSTNAME\n' "$address" "$name" >> "$work"
+{
+  printf '\n# BEGIN FARM HOSTNAME\n%s %s\n' "$address" "$name"
+  # The farm's other VMs, as `address=hostname` words: Kolla's own entries do not survive
+  # msb rewriting /etc/hosts.
+  for peer in ${FARM_PEERS:-}; do printf '%s %s\n' "${peer%%=*}" "${peer#*=}"; done
+  printf '# END FARM HOSTNAME\n'
+} >> "$work"
 # /etc/hosts can be a bind mount; retain its inode rather than renaming over it.
 cat "$work" > /etc/hosts

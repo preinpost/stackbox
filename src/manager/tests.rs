@@ -50,7 +50,8 @@ impl Backend for Fake {
                 .nodes
                 .iter()
                 .map(|spec| FarmNode {
-                    name: crate::farm::node_name(&id, spec.role),
+                    name: crate::farm::node_name(&id, spec.role, spec.index),
+                    index: spec.index,
                     role: Some(spec.role),
                     status: "running".into(),
                     memory_mib: spec.memory_mib,
@@ -287,6 +288,7 @@ fn request(id: &str) -> CreateRequest {
         id: id.into(),
         host_id: Some("local".into()),
         components: vec![],
+        computes: 0,
         external_host: "localhost".into(),
         owner: Some("test".into()),
         expires_at: None,
@@ -1415,6 +1417,7 @@ async fn unreserved_vms_are_never_adopted_and_hostless_farms_can_only_be_removed
     backend.farms.lock().unwrap().insert(
         "stray".into(),
         vec![FarmNode {
+            index: None,
             name: "stray".into(),
             role: Some(Role::AllInOne),
             status: "running".into(),

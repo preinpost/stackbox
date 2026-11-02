@@ -10,7 +10,7 @@
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, ensure};
-use farm::farm::{ALL_IN_ONE, NodeSpec, connect, create_node, delete_farm};
+use farm::farm::{ALL_IN_ONE, NodeSetup, NodeSpec, connect, create_node, delete_farm};
 use farm::link::{Impair, guest::LinkConf, host::Switch};
 
 const VMS: [(&str, &str, &str); 3] = [
@@ -115,7 +115,11 @@ async fn vms_share_a_segment_through_the_switch() {
                 address: Some(format!("{}/24", address(i))),
             };
             // Boxed: the creation future is too deep to nest in this one.
-            Box::pin(create_node(vm, spec, None, &[], &[link]))
+            let setup = NodeSetup {
+                links: vec![link],
+                ..Default::default()
+            };
+            Box::pin(create_node(vm, spec, &setup))
                 .await
                 .with_context(|| format!("create {vm}"))?;
         }

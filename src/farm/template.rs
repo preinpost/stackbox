@@ -61,6 +61,9 @@ impl FromStr for Role {
 #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
 pub struct NodeSpec {
     pub role: Role,
+    /// Position among the farm's compute nodes, from 1; only multi-node compute nodes have one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index: Option<u8>,
     pub cpus: u8,
     pub memory_mib: u32,
     pub disk_mib: u32,
@@ -71,15 +74,89 @@ pub struct NodeSpec {
 /// Base size of the farm's single all-in-one guest; selected services add their footprint.
 pub const ALL_IN_ONE: NodeSpec = NodeSpec {
     role: Role::AllInOne,
+    index: None,
     cpus: 2,
     memory_mib: 3072,
     disk_mib: 20480,
     container_disk_mib: Some(32768),
 };
+/// Base size of a multi-node farm's control VM, which also runs the network node and
+/// Kolla; the control-plane share of each selected service adds to it.
+pub const CONTROL: NodeSpec = NodeSpec {
+    role: Role::Control,
+    cpus: 4,
+    ..ALL_IN_ONE
+};
+/// A multi-node farm's compute VM: nova-compute, libvirt and the Open vSwitch agent use
+/// about 0.8 GiB; the rest is room for a few small instances.
+pub const COMPUTE: NodeSpec = NodeSpec {
+    role: Role::Compute,
+    ..ALL_IN_ONE
+};
+/// Compute nodes a multi-node farm can have.
+pub const MAX_COMPUTES: u8 = 3;
+
+/// The VM name after `<farm>-`, such as `control` or `compute-2`; the all-in-one VM has none.
+pub fn suffix(role: Role, index: Option<u8>) -> Option<String> {
+    match (role, index) {
+        (Role::AllInOne, _) => None,
+        (role, Some(index)) => Some(format!("{role}-{index}")),
+        (role, None) => Some(role.to_string()),
+    }
+}
+/// Guest hostname. Every farm uses the same ones, so a snapshot keeps its identity elsewhere.
+pub fn hostname(role: Role, index: Option<u8>) -> String {
+    match suffix(role, index) {
+        None => "farm-aio".into(),
+        Some(suffix) => format!("farm-{suffix}"),
+    }
+}
+/// Fixed service address on the farm's management network (`farm0`).
+pub fn address(role: Role, index: Option<u8>) -> String {
+    match (role, index) {
+        (Role::Compute, Some(index)) => format!("10.254.0.{}", 10 + u16::from(index)),
+        (Role::Control, _) => "10.254.0.10".into(),
+        _ => "10.254.0.2".into(),
+    }
+}
+impl NodeSpec {
+    pub fn hostname(&self) -> String {
+        hostname(self.role, self.index)
+    }
+    pub fn address(&self) -> String {
+        address(self.role, self.index)
+    }
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn nodes_have_fixed_names_hostnames_and_addresses() {
+        let compute = |index| NodeSpec {
+            index: Some(index),
+            ..COMPUTE
+        };
+        assert_eq!(suffix(Role::AllInOne, None), None);
+        assert_eq!(suffix(Role::Control, None).as_deref(), Some("control"));
+        assert_eq!(suffix(Role::Compute, Some(2)).as_deref(), Some("compute-2"));
+        // Legacy multi-VM nodes keep their `<farm>-<role>` names.
+        assert_eq!(suffix(Role::Lb, None).as_deref(), Some("lb"));
+        assert_eq!(ALL_IN_ONE.hostname(), "farm-aio");
+        assert_eq!(ALL_IN_ONE.address(), "10.254.0.2");
+        assert_eq!(CONTROL.hostname(), "farm-control");
+        assert_eq!(CONTROL.address(), "10.254.0.10");
+        assert_eq!(compute(1).hostname(), "farm-compute-1");
+        assert_eq!(compute(MAX_COMPUTES).address(), "10.254.0.13");
+        // Old plans have no index and still read.
+        let old: NodeSpec = serde_json::from_str(
+            r#"{"role":"all-in-one","cpus":2,"memory_mib":3072,"disk_mib":20480,"container_disk_mib":32768}"#,
+        )
+        .unwrap();
+        assert_eq!(old.index, None);
+        assert!(!serde_json::to_string(&old).unwrap().contains("index"));
+    }
 
     #[test]
     fn base_guest_is_all_in_one_and_legacy_roles_still_parse() {

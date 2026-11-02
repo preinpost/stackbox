@@ -48,15 +48,24 @@ impl AgentLink for SshLink {
 /// This machine's agent: the coordinator's own binary, run as `farm agent` per request.
 pub struct ProcessLink {
     pub program: PathBuf,
+    /// Linux farm-agent for multi-node guests, passed as `FARM_GUEST_AGENT` once known.
+    pub guest_agent: Arc<std::sync::OnceLock<PathBuf>>,
 }
 impl ProcessLink {
     pub fn current() -> Result<Self> {
         Ok(Self {
             program: std::env::current_exe().context("cannot locate the farm binary")?,
+            guest_agent: Default::default(),
         })
     }
     fn spawn(&self) -> Result<tokio::process::Child> {
-        tokio::process::Command::new(&self.program)
+        let mut command = tokio::process::Command::new(&self.program);
+        if let Some(path) = self.guest_agent.get()
+            && std::env::var_os("FARM_GUEST_AGENT").is_none()
+        {
+            command.env("FARM_GUEST_AGENT", path);
+        }
+        command
             .arg("agent")
             .env("PATH", super::host::search_path())
             .env("MSB_BACKEND", "local")

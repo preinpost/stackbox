@@ -267,6 +267,7 @@ impl server::Handler for Handler {
                         .nodes
                         .into_iter()
                         .map(|node| crate::farm::FarmNode {
+                            index: node.index,
                             name: format!("{farm_id}-{}", node.role),
                             role: Some(node.role),
                             status: "running".into(),

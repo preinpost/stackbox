@@ -176,9 +176,10 @@ impl Agent {
         }
     }
     pub fn local() -> Self {
+        let dir = local_dir();
         Self {
-            dir: local_dir(),
-            backend: Arc::new(MicrosandboxBackend),
+            backend: Arc::new(MicrosandboxBackend::new(&dir)),
+            dir,
             limits: Limits::system(),
             runner: Runner::Detached,
         }
@@ -235,6 +236,7 @@ impl Agent {
         );
         let canonical = plan(&PlanRequest {
             components: requested.components.clone(),
+            computes: requested.computes,
         })?;
         ensure!(
             serde_json::to_value(requested)? == serde_json::to_value(&canonical)?,
@@ -253,6 +255,7 @@ impl Agent {
             id: id.into(),
             host_id: None,
             components: requested.components.clone(),
+            computes: requested.computes,
             external_host: exposure.host.clone(),
             owner: None,
             expires_at: None,
@@ -465,8 +468,8 @@ impl Agent {
     fn deployable(&self, request: &Request, id: &str, generation: &str) -> Result<Reservation> {
         let entry = self.owned(request, id, generation)?;
         ensure!(
-            entry.plan.nodes.len() == 1 && entry.plan.nodes[0].role == crate::farm::Role::AllInOne,
-            "legacy multi-node farm cannot be deployed by the single-VM engine; create a new farm"
+            crate::farm::layout(&entry.plan.nodes).is_ok(),
+            "legacy multi-node farm cannot be deployed; create a new farm"
         );
         Ok(entry)
     }
@@ -804,7 +807,11 @@ fn local_dir() -> PathBuf {
 /// `agent worker <job dir>`: run a job recorded under this agent's directory to its result.
 /// The agent starts it detached; it is not meant to be run by hand.
 pub async fn serve_worker(dir: &Path) -> Result<()> {
-    work(dir, Arc::new(MicrosandboxBackend)).await
+    let agent_dir = dir
+        .parent()
+        .and_then(Path::parent)
+        .context("not a job directory")?;
+    work(dir, Arc::new(MicrosandboxBackend::new(agent_dir))).await
 }
 async fn work(dir: &Path, backend: Arc<dyn Backend>) -> Result<()> {
     let id = dir
