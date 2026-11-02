@@ -18,7 +18,7 @@ up)
   i=2
   for n in a b; do
     msb list | grep -q "^farm-poc-$n " || msb create -q --name farm-poc-$n -c 2 -m 1G --net public,host farm-golden:rocky10
-    msb exec farm-poc-$n -- sh -c 'command -v iperf3 >/dev/null || dnf install -y -q iperf3 >/dev/null; pkill -f "farm-link link" || true; ip link del farm0 2>/dev/null || true'
+    msb exec farm-poc-$n -- sh -c 'command -v iperf3 >/dev/null || dnf install -y -q iperf3 >/dev/null; pkill -f "[f]arm-link link" || true; ip link del farm0 2>/dev/null || true'
     msb copy target/farm-link-linux farm-poc-$n:/usr/local/bin/farm-link
     # The guest reaches the host's loopback as host.microsandbox.internal.
     msb exec farm-poc-$n -- sh -c "chmod +x /usr/local/bin/farm-link

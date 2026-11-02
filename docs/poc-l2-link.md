@@ -89,21 +89,52 @@ all-in-one으로 배포하므로 compute가 하나뿐이라 evacuate를 할 수 
 
 ## 다음 단계
 
-1. **control 1 + compute 2 multinode 배포 (다음 할 일)**
-   - PoC 스위치를 그대로 쓰고, VM 3대를 `farm-link`로 잇는다. 필요한 메모리는 약 10~12 GiB이다
-     (control 약 6 GiB, compute 각 1.5~2 GiB + 인스턴스). 24 GiB 머신에서는 다른 farm과 같이 띄우기
-     어려워 더 큰 머신에서 한다.
-   - VM은 `farm-identity`의 hostname과 서비스 주소를 VM마다 다르게 주고, Kolla multinode inventory로
-     control VM에서 compute VM으로 SSH 배포한다.
-   - Nova, Neutron, Placement를 배포하고 Cirros 인스턴스를 compute 양쪽에 띄운다.
-   - compute 하나를 분리 주입으로 고립시키고, `compute service set --down` 후 다른 compute로
-     evacuate한다. evacuate 후 인스턴스 상태와 ping을 확인한다.
-2. 스위치를 farm-agent로 옮기고, VM별 토큰으로 링크를 인증한다. 프레임을 묶어 보내 MTU 1500의
+1. ~~control 1 + compute 2 multinode 배포와 evacuate~~ 완료. 아래 "multinode와 evacuate" 참고.
+2. **(다음 할 일)** 스위치를 farm-agent로 옮기고, VM별 토큰으로 링크를 인증한다. 프레임을 묶어 보내 MTU 1500의
    처리량을 높인다. golden image에 `farm-link`와 systemd unit을 넣는다.
 3. farm 모델에 노드 구성(control/compute 수)과 공유 스토리지 선택을 넣는다. plan, 메모리 예산,
    배포 단계, 포탈의 노드·토폴로지 화면을 바꾼다.
 4. 여러 VM 스냅샷.
 5. 호스트 간 중계, 이어서 UDP 직접 연결.
+
+## multinode와 evacuate (2026-11-02, Apple M1 Max 32 GiB)
+
+`sh scripts/poc-multinode.sh up`, `deploy`, `evacuate`로 재현한다. 게스트에서 도는 파일은
+`scripts/poc-multinode/`에 있다.
+
+- **구성**: `mn-ctl`(4 vCPU, 6 GiB), `mn-c1`·`mn-c2`(2 vCPU, 3 GiB). VM마다 링크가 두 개다.
+  `farm0`(`10.254.0.10~12`, MTU 9000)은 Kolla의 network·api 인터페이스이고, `farm1`(주소 없음)은
+  OVS `br-tenant`의 physnet1이다. 링크는 `farm-link@.service`로 부팅 때마다 다시 붙는다.
+- **배포**: Keystone, Glance, Placement, Nova, Neutron(OVS netdev). kolla-ansible은 `mn-ctl`에서
+  compute로 SSH 배포한다. 처음부터 끝까지 약 35분이 걸렸고, 끝난 뒤 nova-compute 2개,
+  OVS agent 3개, DHCP·L3·Metadata agent가 모두 up이었다. 배포 뒤 메모리 사용량은 ctl 3.3 GiB,
+  compute 각 0.8 GiB다.
+- **테넌트망은 VXLAN 대신 VLAN**(physnet1:100:199)이다. userspace datapath에서 VXLAN을 쓰려면
+  터널 주소가 OVS 브리지에 있어야 해서 PoC에서는 피했다. 외부망 `public`은 ctl의 `farm-ext`
+  (physnet2, flat)이고 라우터와 DHCP는 ctl에 있다.
+- **evacuate 결과**
+
+  | 단계 | 결과 |
+  |---|---|
+  | Cirros를 `mn-c1`에 부팅 (VLAN 164) | ACTIVE, ctl의 qrouter에서 ping 통과 |
+  | `c1`, `c1-t` 포트 손실 100% | nova가 55초 뒤 `mn-c1`을 down으로 표시 |
+  | `compute service set --down` → `server evacuate --host mn-c2` | 18초 뒤 `mn-c2`에서 ACTIVE, 같은 IP로 ping 통과 |
+  | 연결 복구, `--up`, c1의 `nova_compute` 재시작 | c1에 남아 있던 원래 인스턴스를 nova가 지움, 두 compute 모두 up |
+
+  고립된 동안 c1의 원래 인스턴스는 계속 실행 중이었다. 스위치 분리가 fencing 역할을 해서 같은
+  IP가 충돌하지 않았다. 디스크는 공유하지 않으므로 evacuate는 이미지로 다시 만든다.
+- M1 Max는 nested virtualization이 없어 게스트에 `/dev/kvm`이 없고 Nova는 qemu TCG로 돈다.
+- 같은 머신의 L2 측정: NAT 기준 4.7 Gbit/s(RTT 평균 0.33 ms), MTU 1500 2.0 Gbit/s(ping 평균 2.0 ms),
+  MTU 9000 2.9 Gbit/s(재전송 0, 8972 B DF ping 통과).
+
+본 구현에 넣을 것:
+
+- kolla의 `kolla_container`는 docker와 dbus를 import한다. compute가 ctl로 delegate하는 nova-cell
+  task(hypervisor·cell 목록)는 compute의 interpreter인 `/usr/bin/python3`로 ctl에서 돈다. bootstrap은
+  ctl의 venv에만 docker SDK를 넣으므로 ctl의 시스템 python에 `python3-dbus`와 `docker`를 따로 설치한다.
+- golden image의 `authorized_keys`는 끝에 개행이 없다. 키를 덧붙이면 앞 키와 한 줄로 붙는다.
+- `msb copy`는 실행 권한을 남기지 않는다. 복사 뒤 `chmod`한다.
+- 게스트 hostname은 VM마다 달라야 한다(`mn-ctl` 등). 지금의 고정 `farm-aio`는 multinode에서 쓸 수 없다.
 
 ## 다른 머신에서 이어가기
 
@@ -113,6 +144,12 @@ task docker-build                 # farm-golden:rocky10을 Docker로 만들고 m
 sh scripts/poc-l2-link.sh up      # farm-link 빌드, VM 2대, 스위치와 링크
 sh scripts/poc-l2-link.sh bench   # 위 표와 비교
 sh scripts/poc-l2-link.sh down
+
+sh scripts/poc-multinode.sh up         # VM 3대(약 12 GiB), 링크 6개
+sh scripts/poc-multinode.sh deploy     # kolla-ansible 설치와 multinode 배포 (약 35분)
+sh scripts/poc-multinode.sh evacuate   # c1에 부팅, c1 고립, c2로 evacuate
+sh scripts/poc-multinode.sh heal c1
+sh scripts/poc-multinode.sh down
 ```
 
 - 필요한 것: msb 0.7.13, Docker(게스트용 Linux 바이너리 빌드), Rust, 여유 메모리.
