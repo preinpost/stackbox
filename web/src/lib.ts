@@ -74,6 +74,28 @@ export const isAllInOneFarm = (farm: Farm) => {
 };
 export const farmNodeCount = (farm: Farm) =>
   farm.plan?.nodes.length ?? farm.nodes.length;
+/** A control VM and compute VMs joined by the host's link switch. */
+export const isMultiNodeFarm = (farm: Farm) => (farm.plan?.computes ?? 0) > 0;
+/** All-in-one and multi-node farms deploy; legacy multi-VM layouts do not. */
+export const isDeployableFarm = (farm: Farm) =>
+  isAllInOneFarm(farm) || isMultiNodeFarm(farm);
+/** Every planned VM exists and runs. */
+export const farmNodesRunning = (farm: Farm) =>
+  farm.nodes.length === farmNodeCount(farm) &&
+  farm.nodes.every((n) => n.status === "running");
+type NodeRef = { role?: string | null; index?: number | null };
+/** A multi-node VM's name after `<farm>-`, and its fault target: `control`, `compute-2`. */
+export const nodeSuffix = ({ role, index }: NodeRef) =>
+  index ? `${role}-${index}` : String(role);
+/** The fixed hostname and management address every farm gives this VM. */
+export const nodeHostname = (node: NodeRef) =>
+  String(node.role) === "all-in-one" ? "farm-aio" : `farm-${nodeSuffix(node)}`;
+export const nodeAddress = ({ role, index }: NodeRef) =>
+  String(role) === "compute" && index
+    ? `10.254.0.${10 + index}`
+    : String(role) === "control"
+      ? "10.254.0.10"
+      : "10.254.0.2";
 export const dateTime = (timestamp: number) =>
   new Intl.DateTimeFormat("ko-KR", {
     month: "short",

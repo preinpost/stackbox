@@ -28,8 +28,21 @@ pub(crate) struct Fake {
     pub(crate) fail: AtomicBool,
     pub(crate) deployment_gate: Option<Semaphore>,
     scan_delay: Mutex<Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>>,
+    /// `(farm, node, impair)` of each fault set on a link.
+    faults: Mutex<Vec<(String, String, crate::link::Impair)>>,
 }
 impl Backend for Fake {
+    fn impair(
+        &self,
+        id: String,
+        node: String,
+        impair: crate::link::Impair,
+    ) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async move {
+            self.faults.lock().unwrap().push((id, node, impair));
+            Ok(())
+        })
+    }
     fn scan(&self) -> BoxFuture<'_, Result<BTreeMap<String, Vec<FarmNode>>>> {
         Box::pin(async {
             let snapshot = self.farms.lock().unwrap().clone();
@@ -1130,6 +1143,115 @@ async fn lifecycle_reservations_failures_and_logs_survive_restart() {
 }
 
 #[tokio::test]
+async fn multi_node_farms_are_created_deployed_and_faulted_per_vm() {
+    let dir = tempfile::tempdir().unwrap();
+    let backend = Arc::new(Fake::default());
+    let mut opts = options(dir.path());
+    opts.memory_budget_mib = 64 * 1024;
+    let manager = open_with(opts, backend.clone()).await;
+    let multi = CreateRequest {
+        computes: 2,
+        ..request("mn")
+    };
+    if !cfg!(target_os = "linux") {
+        // Off Linux the local host needs a Linux agent for the guests' links.
+        let refused = manager.create(multi.clone()).unwrap_err();
+        assert!(
+            refused.to_string().contains("task agent-build"),
+            "{refused}"
+        );
+        *manager.0.guest_agent.write().unwrap() = Some(dir.path().join("farm-agent"));
+    }
+    let job = manager.create(multi).unwrap();
+    assert_eq!(done(&manager, &job).await.status, JobStatus::Succeeded);
+    let farm = manager.get("mn").unwrap();
+    let names: Vec<_> = farm.nodes.iter().map(|n| n.name.as_str()).collect();
+    assert_eq!(names, ["mn-control", "mn-compute-1", "mn-compute-2"]);
+    assert_eq!(farm.plan.as_ref().unwrap().computes, 2);
+    let job = manager.deploy("mn", DeployRequest::default()).unwrap();
+    assert_eq!(done(&manager, &job).await.status, JobStatus::Succeeded);
+    manager.reconcile().await.unwrap();
+    assert_eq!(manager.get("mn").unwrap().status, FarmStatus::Ready);
+    manager.check_terminal("mn").unwrap();
+
+    let cut = crate::link::Impair {
+        delay_ms: 0,
+        loss: 1.0,
+    };
+    let farm = manager.impair("mn", "compute-1", cut).await.unwrap();
+    assert_eq!(farm.faults["compute-1"], cut);
+    // The record keeps the fault across a restart's reload.
+    assert_eq!(manager.get("mn").unwrap().faults["compute-1"], cut);
+    let farm = manager
+        .impair("mn", "compute-1", crate::link::Impair::default())
+        .await
+        .unwrap();
+    assert!(farm.faults.is_empty());
+    assert_eq!(
+        backend.faults.lock().unwrap().clone(),
+        [
+            ("mn".into(), "compute-1".into(), cut),
+            ("mn".into(), "compute-1".into(), Default::default())
+        ]
+    );
+    assert!(
+        manager
+            .impair("mn", "compute-3", cut)
+            .await
+            .unwrap_err()
+            .is::<NotFound>()
+    );
+    let bad = crate::link::Impair {
+        delay_ms: 0,
+        loss: 2.0,
+    };
+    assert!(
+        manager
+            .impair("mn", "control", bad)
+            .await
+            .unwrap_err()
+            .is::<BadRequest>()
+    );
+    // An all-in-one farm has no links.
+    let job = manager.create(request("aio")).unwrap();
+    assert_eq!(done(&manager, &job).await.status, JobStatus::Succeeded);
+    assert!(
+        manager
+            .impair("aio", "control", cut)
+            .await
+            .unwrap_err()
+            .is::<Conflict>()
+    );
+    // Nor can a multi-node farm be frozen yet.
+    assert!(
+        manager
+            .freeze(
+                "mn",
+                SnapshotRequest {
+                    id: "mn-snap".into(),
+                    note: None,
+                },
+            )
+            .unwrap_err()
+            .is::<Conflict>()
+    );
+    // Over HTTP too.
+    let app = api::router(manager.clone(), None);
+    let response = app
+        .oneshot(
+            Request::put("/api/v1/farms/mn/nodes/control/faults")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"delay_ms":40}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(manager.get("mn").unwrap().faults["control"].delay_ms, 40);
+    settle(&manager).await;
+}
+
+#[tokio::test]
 async fn deploy_step_is_shown_while_running_and_cleared_after() {
     let dir = tempfile::tempdir().unwrap();
     let backend = Arc::new(Fake {
@@ -1451,6 +1573,7 @@ async fn unreserved_vms_are_never_adopted_and_hostless_farms_can_only_be_removed
                 created_at: now(),
                 updated_at: now(),
                 snapshot_id: None,
+                faults: Default::default(),
             };
             state.farms.insert("old".into(), farm);
             Ok(())

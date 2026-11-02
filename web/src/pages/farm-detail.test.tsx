@@ -1,5 +1,6 @@
-import { cleanup, render, screen } from "@testing-library/react";
-import { afterEach, expect, test } from "vitest";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import { afterEach, expect, test, vi } from "vitest";
 import type { Farm } from "../api/client";
 import { userEvent } from "@testing-library/user-event";
 import type { Datastore } from "../api/client";
@@ -10,7 +11,10 @@ import {
   NodeTopology,
 } from "./farm-detail";
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+});
 const farm: Farm = {
   id: "workspace",
   status: "created",
@@ -164,4 +168,79 @@ test("hides the Horizon password until asked and offers a copy for every row", a
   expect(
     screen.getByRole("button", { name: "비밀번호 복사" }).textContent,
   ).toBe("");
+});
+
+test("lays out a multi-node farm by VM and cuts a compute off its links", async () => {
+  const spec = { cpus: 2, disk_mib: 20480, memory_mib: 3072 };
+  const multi: Farm = {
+    ...farm,
+    id: "mn",
+    status: "ready",
+    plan: {
+      ...farm.plan!,
+      components: ["keystone", "glance", "placement", "neutron", "nova"],
+      computes: 2,
+      nodes: [
+        { ...spec, role: "control", cpus: 4, memory_mib: 6656 },
+        { ...spec, role: "compute", index: 1 },
+        { ...spec, role: "compute", index: 2 },
+      ],
+    },
+    nodes: [
+      {
+        name: "mn-control",
+        role: "control",
+        status: "running",
+        memory_mib: 6656,
+      },
+      {
+        name: "mn-compute-1",
+        role: "compute",
+        index: 1,
+        status: "running",
+        memory_mib: 3072,
+      },
+      {
+        name: "mn-compute-2",
+        role: "compute",
+        index: 2,
+        status: "running",
+        memory_mib: 3072,
+      },
+    ],
+  };
+  const calls: [string, unknown][] = [];
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (path: string, options?: RequestInit) => {
+      calls.push([path, JSON.parse(String(options?.body))]);
+      return Response.json({ ...multi, faults: { "compute-1": { loss: 1 } } });
+    }),
+  );
+  const client = new QueryClient();
+  const { container } = render(
+    <QueryClientProvider client={client}>
+      <NodeTopology farm={multi} />
+    </QueryClientProvider>,
+  );
+  expect(container.querySelectorAll(".topology-node")).toHaveLength(3);
+  for (const text of [
+    "farm-control",
+    "farm-compute-1",
+    "10.254.0.12",
+    "mn-compute-2",
+  ])
+    expect(screen.getByText(text)).toBeTruthy();
+  // Nothing to heal yet.
+  expect(
+    (screen.getAllByRole("button", { name: "복구" })[1] as HTMLButtonElement)
+      .disabled,
+  ).toBe(true);
+  await userEvent.click(screen.getAllByRole("button", { name: "고립" })[1]);
+  await waitFor(() => expect(calls).toHaveLength(1));
+  expect(calls[0]).toEqual([
+    "/api/v1/farms/mn/nodes/compute-1/faults",
+    { loss: 1 },
+  ]);
+  client.clear();
 });

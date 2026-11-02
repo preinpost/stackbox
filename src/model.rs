@@ -498,6 +498,9 @@ pub struct FarmRecord {
     /// Snapshot this farm was restored from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub snapshot_id: Option<String>,
+    /// Faults set on a multi-node farm's links, by VM (`control`, `compute-1`, ...).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub faults: BTreeMap<String, crate::link::Impair>,
 }
 impl FarmRecord {
     pub fn memory_mib(&self) -> u64 {

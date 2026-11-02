@@ -103,6 +103,18 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Delay or drop the traffic of a multi-node farm's VM; with neither, heal it
+    Fault {
+        id: String,
+        /// control, compute-1, ...
+        node: String,
+        /// Added to frames in each direction, so a round trip gains twice this
+        #[arg(long, default_value_t = 0)]
+        delay_ms: u64,
+        /// Share of frames dropped in each direction; 1 cuts the VM off
+        #[arg(long, default_value_t = 0.0)]
+        loss: f64,
+    },
     Logs {
         id: String,
         #[arg(long, default_value_t = 0)]
@@ -492,6 +504,20 @@ async fn main() -> Result<()> {
             }
         }
         Command::Endpoints { id, json: _ } => print_json(&manager.endpoints(&id).await?)?,
+        Command::Fault {
+            id,
+            node,
+            delay_ms,
+            loss,
+        } => {
+            let farm = manager
+                .impair(&id, &node, farm::link::Impair { delay_ms, loss })
+                .await?;
+            match farm.faults.get(&node) {
+                Some(f) => println!("{id}/{node}: delay {} ms, loss {}", f.delay_ms, f.loss),
+                None => println!("{id}/{node}: healed"),
+            }
+        }
         Command::Logs { id, after } => {
             for entry in manager.logs(&id, after, 1000)? {
                 println!("[{}] {}", entry.id, entry.message);

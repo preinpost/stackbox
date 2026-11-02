@@ -794,6 +794,22 @@ impl Agent {
                         .await?,
                 })
             }
+            Operation::Impair { node, impair, .. } => {
+                let entry = self.owned(&request, id, generation)?;
+                ensure!(
+                    entry.plan.nodes.iter().any(|spec| {
+                        spec.role != crate::farm::Role::AllInOne
+                            && crate::farm::suffix(spec.role, spec.index).as_deref()
+                                == Some(node.as_str())
+                    }),
+                    "farm '{id}' has no linked VM '{node}'"
+                );
+                impair.validate()?;
+                self.backend
+                    .impair(id.into(), node.clone(), *impair)
+                    .await?;
+                Ok(Reply::Done)
+            }
             _ => bail!("unsupported operation"),
         }
     }

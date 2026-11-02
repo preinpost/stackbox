@@ -2,6 +2,7 @@ use super::{
     link::AgentLink,
     protocol::{Operation, Reply, Request, VERSION},
 };
+use crate::link::Impair;
 use crate::{
     farm::{FarmNode, FrozenSnapshot, ImportedSnapshot, TerminalIo, TerminalSize},
     kolla::{EventSink, Phase},
@@ -215,6 +216,17 @@ impl Backend for AgentBackend {
                 _ => bail!("unexpected farm-agent import response"),
             }
         })
+    }
+    fn impair(&self, id: String, node: String, impair: Impair) -> BoxFuture<'_, Result<()>> {
+        Box::pin(self.done(
+            Operation::Impair {
+                farm_id: id,
+                generation: self.generation.clone(),
+                node,
+                impair,
+            },
+            None,
+        ))
     }
     fn remove_snapshot(&self, reference: String) -> BoxFuture<'_, Result<()>> {
         Box::pin(self.done(Operation::RemoveSnapshot { reference }, None))

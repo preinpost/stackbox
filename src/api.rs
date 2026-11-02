@@ -20,7 +20,7 @@ use axum::{
         IntoResponse, Response, Sse,
         sse::{Event, KeepAlive},
     },
-    routing::{get, post},
+    routing::{get, post, put},
 };
 use serde::{Deserialize, Serialize};
 use std::{convert::Infallible, io::Write, net::SocketAddr, sync::Arc, time::Duration};
@@ -107,6 +107,7 @@ pub fn router(manager: FarmManager, token: Option<String>) -> Router {
         .route("/api/v1/farms/{id}/deploy", post(deploy))
         .route("/api/v1/farms/{id}/settle", post(settle))
         .route("/api/v1/farms/{id}/endpoints", get(endpoints))
+        .route("/api/v1/farms/{id}/nodes/{node}/faults", put(set_faults))
         .route("/api/v1/farms/{id}/logs", get(logs))
         .route("/api/v1/farms/{id}/logs/stream", get(log_stream))
         .route("/api/v1/farms/{id}/shell", get(shell))
@@ -617,6 +618,14 @@ async fn endpoints(
 ) -> Result<Json<Endpoints>, ApiError> {
     Ok(Json(app.manager.endpoints(&id).await?))
 }
+#[utoipa::path(put, path="/api/v1/farms/{id}/nodes/{node}/faults", params(("id"=String, Path), ("node"=String, Path, description="VM of a multi-node farm: control, compute-1, ...")), request_body=crate::link::Impair, responses((status=200, description="The farm with the VM's faults applied; no delay and no loss heals it", body=FarmRecord), (status=400, body=ErrorBody), (status=404, body=ErrorBody), (status=409, body=ErrorBody)))]
+async fn set_faults(
+    State(app): State<App>,
+    Path((id, node)): Path<(String, String)>,
+    value: Result<Json<crate::link::Impair>, JsonRejection>,
+) -> Result<Json<FarmRecord>, ApiError> {
+    Ok(Json(app.manager.impair(&id, &node, body(value)?).await?))
+}
 #[utoipa::path(post, path="/api/v1/farms/{id}/snapshots", params(("id"=String, Path)), request_body=SnapshotRequest, responses((status=202, description="Snapshot job; the farm's VM stops for the capture and starts again", body=Job), (status=400, body=ErrorBody), (status=409, body=ErrorBody)))]
 async fn freeze(
     State(app): State<App>,
@@ -930,7 +939,7 @@ async fn relay_shell(
 }
 
 #[derive(OpenApi)]
-#[openapi(paths(host, remote_hosts, remote_host, host_fingerprint, test_connection, register_host, register_local_host, register_agent_host, update_host_credentials, unregister_host, check_host, prepare_host, install_agent, host_jobs, host_job, catalog_handler, plan_handler, list, detail, create, deploy, settle, delete, endpoints, logs, log_stream, freeze, snapshots, snapshot, delete_snapshot, export_snapshot, import_snapshot, buckets, bucket, register_bucket, update_bucket, unregister_bucket, test_bucket, check_bucket, bucket_objects, jobs, job), components(schemas(ErrorBody)), modifiers(&Security))]
+#[openapi(paths(host, remote_hosts, remote_host, host_fingerprint, test_connection, register_host, register_local_host, register_agent_host, update_host_credentials, unregister_host, check_host, prepare_host, install_agent, host_jobs, host_job, catalog_handler, plan_handler, list, detail, create, deploy, settle, delete, endpoints, set_faults, logs, log_stream, freeze, snapshots, snapshot, delete_snapshot, export_snapshot, import_snapshot, buckets, bucket, register_bucket, update_bucket, unregister_bucket, test_bucket, check_bucket, bucket_objects, jobs, job), components(schemas(ErrorBody)), modifiers(&Security))]
 struct ApiDoc;
 struct Security;
 impl utoipa::Modify for Security {

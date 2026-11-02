@@ -91,8 +91,8 @@ all-in-one으로 배포하므로 compute가 하나뿐이라 evacuate를 할 수 
 
 1. ~~control 1 + compute 2 multinode 배포와 evacuate~~ 완료. 아래 "multinode와 evacuate" 참고.
 2. ~~스위치를 제품 안으로 옮기고 링크 인증, 프레임 묶음 전송~~ 완료. 아래 "제품의 링크" 참고.
-3. **(다음 할 일)** farm 모델에 노드 구성(control/compute 수)과 공유 스토리지 선택을 넣는다. plan, 메모리 예산,
-   배포 단계, 포탈의 노드·토폴로지 화면을 바꾼다.
+3. ~~farm 모델에 노드 구성(control 1 + compute 1~3)을 넣고 plan, 배포, 장애 주입 API, 포털을 바꾼다~~ 완료.
+   아래 "제품의 다중 VM farm" 참고. 공유 스토리지 선택은 아직 하지 않았다(다음 할 일 후보).
 4. 여러 VM 스냅샷.
 5. 호스트 간 중계, 이어서 UDP 직접 연결.
 
@@ -178,6 +178,19 @@ sh scripts/build-agent.sh aarch64     # 게스트용 Linux farm-agent
 FARM_GUEST_AGENT=$PWD/dist/agent/aarch64/farm-agent \
   cargo test --release --test farm_link -- --ignored --nocapture
 ```
+
+## 제품의 다중 VM farm (2026-11-03, Apple M1 Max 32 GiB)
+
+`farm create mn --host-id local --computes 2`, `farm deploy mn`으로 만들었다(README의 "다중 VM farm").
+
+- VM 3대가 5초 만에 만들어지고 링크 6개가 스위치에 붙었다. 배포는 prepare부터 verify까지 약 15분이었고,
+  nova-compute 2개, OVS agent 3개, DHCP·L3·Metadata agent가 모두 up이었으며 verify의 Cirros ping이 통과했다.
+  배포 뒤 메모리 사용량은 control 4.1 GiB, compute 각 0.8~0.9 GiB.
+- `farm fault mn compute-1 --loss 1`로 고립시키자 nova가 60초 뒤 down으로 표시했다. `--down` 후
+  `server evacuate --host farm-compute-2`로 7초 만에 ACTIVE가 되고 같은 IP로 ping이 통과했다.
+  `farm fault mn compute-1`로 복구하고 `--up`·nova_compute 재시작 뒤 compute-1에 남은 원래 인스턴스가 지워졌다.
+- daemon API로 compute-2에 지연 25 ms를 주자 compute 사이 RTT가 55 ms 이상으로 늘었다.
+- 포털: 생성 화면의 **VM 구성**, 상세 화면 topology의 노드별 **고립·손실 5%·지연 50 ms·복구** 버튼.
 
 ## PoC 재현
 

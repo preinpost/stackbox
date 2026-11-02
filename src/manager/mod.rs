@@ -376,6 +376,52 @@ impl FarmManager {
             .endpoints(id.into(), farm.exposure, components)
             .await
     }
+    /// Set the faults of a multi-node farm VM's links (`node` is `control`, `compute-1`, ...),
+    /// such as loss 1.0 to cut it off; `Impair::default()` heals it. It applies at once,
+    /// whatever job the farm runs.
+    pub async fn impair(
+        &self,
+        id: &str,
+        node: &str,
+        impair: crate::link::Impair,
+    ) -> Result<FarmRecord> {
+        impair.validate().map_err(|e| bad_request(e.to_string()))?;
+        let farm = self.get(id)?;
+        if matches!(
+            farm.status,
+            FarmStatus::Creating | FarmStatus::Deleting | FarmStatus::Deleted
+        ) {
+            return Err(conflict("faults apply to a created farm"));
+        }
+        let plan = farm
+            .plan
+            .as_ref()
+            .filter(|plan| plan.computes > 0)
+            .ok_or_else(|| conflict("only multi-node farms have links to fault"))?;
+        if !plan
+            .nodes
+            .iter()
+            .any(|spec| crate::farm::suffix(spec.role, spec.index).as_deref() == Some(node))
+        {
+            return Err(NotFound(format!("VM '{node}' of farm '{id}'")).into());
+        }
+        self.backend_for(&farm)?
+            .impair(id.into(), node.into(), impair)
+            .await?;
+        self.update(|state| {
+            let farm = state
+                .farms
+                .get_mut(id)
+                .ok_or_else(|| NotFound(format!("farm '{id}'")))?;
+            if impair == crate::link::Impair::default() {
+                farm.faults.remove(node);
+            } else {
+                farm.faults.insert(node.into(), impair);
+            }
+            farm.updated_at = now();
+            Ok(farm.clone())
+        })
+    }
     /// Fails unless the farm's VM can take a shell session.
     pub fn check_terminal(&self, id: &str) -> Result<FarmRecord> {
         let farm = self.get(id)?;
@@ -615,12 +661,14 @@ impl FarmManager {
             // A multi-node farm's guests run a Linux farm-agent for their links. Linux agents
             // give their own; this machine gives the one loaded at startup.
             if plan.computes > 0 {
-                let linux = inspection.os == "linux";
-                let local_ready = host.kind == HostKind::Local
-                    && (cfg!(target_os = "linux")
+                let ready = if host.kind == HostKind::Local {
+                    cfg!(target_os = "linux")
                         || std::env::var_os("FARM_GUEST_AGENT").is_some()
-                        || self.0.guest_agent.read().is_ok_and(|g| g.is_some()));
-                if !linux && !local_ready {
+                        || self.0.guest_agent.read().is_ok_and(|g| g.is_some())
+                } else {
+                    inspection.os == "linux"
+                };
+                if !ready {
                     return Err(conflict(if host.kind == HostKind::Local {
                         format!("multi-node farms need a linux-{} farm-agent for their guests; build it with `task agent-build` and restart the coordinator", crate::model::current_arch())
                     } else {
@@ -688,6 +736,7 @@ impl FarmManager {
                     created_at: now(),
                     updated_at: now(),
                     snapshot_id: request.snapshot_id,
+                    faults: Default::default(),
                 },
             );
             state.jobs.insert(job.id.clone(), job.clone());

@@ -317,6 +317,7 @@ impl server::Handler for Handler {
                 | Operation::RemoveSnapshot { .. } => Reply::Done,
                 Operation::Freeze { .. }
                 | Operation::Restore { .. }
+                | Operation::Impair { .. }
                 | Operation::ImportSnapshot { .. }
                 | Operation::Inspect => {
                     unimplemented!("the SSH fixture does not emulate snapshots")

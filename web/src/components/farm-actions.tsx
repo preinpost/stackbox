@@ -37,7 +37,8 @@ import {
   remoteAgentNeedsUpdate,
   componentLabel,
   farmComponents,
-  isAllInOneFarm,
+  farmNodesRunning,
+  isDeployableFarm,
   memory,
   phases,
   resolveComponents,
@@ -122,6 +123,12 @@ export function CreateFarmForm({
   const [name, setName] = useState("");
   const [owner, setOwner] = useState("");
   const [selected, setSelected] = useState<string[]>([]);
+  // Compute VMs beside a control VM; 0 is one all-in-one VM. Compute VMs bring Nova.
+  const [computes, setComputes] = useState(0);
+  const requested =
+    computes > 0 && !selected.includes("nova")
+      ? [...selected, "nova"]
+      : selected;
   // Until the user picks one, default to the given host, else the first ready one.
   const [picked, setPicked] = useState(initialHost);
   const hostId =
@@ -133,11 +140,11 @@ export function CreateFarmForm({
   const farms = useQuery(farmsQuery());
   const components = resolveComponents(
     catalog.data?.components ?? [],
-    selected,
+    requested,
   );
   const plan = useQuery({
-    queryKey: ["plan", components],
-    queryFn: ({ signal }) => api.plan(components, signal),
+    queryKey: ["plan", components, computes],
+    queryFn: ({ signal }) => api.plan(components, computes, signal),
     enabled: catalog.isSuccess,
     staleTime: Infinity,
   });
@@ -164,7 +171,7 @@ export function CreateFarmForm({
   return (
     <Modal
       title="새 farm 만들기"
-      description="Farm마다 VM 한 대를 만들고 선택한 OpenStack 서비스를 설치합니다."
+      description="선택한 구성으로 VM을 만들고 OpenStack 서비스를 설치합니다."
       className="create-modal"
       closeDisabled={mutation.isPending}
     >
@@ -175,6 +182,7 @@ export function CreateFarmForm({
           mutation.mutate({
             id: name,
             components,
+            computes,
             external_host: hostName,
             host_id: hostId,
             ...(owner.trim() ? { owner: owner.trim() } : {}),
@@ -214,8 +222,8 @@ export function CreateFarmForm({
                 />
                 <p className="field-hint mt-2">
                   {target?.kind === "local"
-                    ? "coordinator(farmd)가 실행 중인 머신의 microsandbox에서 VM 한 대를 실행합니다."
-                    : "VM 한 대가 선택한 서버에서 실행됩니다. 서비스 포트는 해당 서버의 모든 IPv4 인터페이스에 바인딩됩니다."}
+                    ? "coordinator(farmd)가 실행 중인 머신의 microsandbox에서 farm의 VM을 실행합니다."
+                    : "farm의 VM이 선택한 서버에서 실행됩니다. 서비스 포트는 해당 서버의 모든 IPv4 인터페이스에 바인딩됩니다."}
                   {remaining !== null &&
                     ` · 추가 예약 가능 ${memory(Math.max(0, remaining))}`}
                 </p>
@@ -262,6 +270,27 @@ export function CreateFarmForm({
             </label>
           </div>
           <div>
+            <span className="field-label">VM 구성</span>
+            <SelectInput
+              value={String(computes)}
+              onChange={(value) => setComputes(Number(value))}
+              disabled={mutation.isPending}
+              label="VM 구성"
+              items={[
+                { value: "0", label: "VM 1대 · all-in-one" },
+                ...[1, 2, 3].map((n) => ({
+                  value: String(n),
+                  label: `Control 1 + Compute ${n} · VM ${n + 1}대`,
+                })),
+              ]}
+            />
+            <p className="field-hint mt-2">
+              {computes > 0
+                ? "control VM이 API·DB·MQ·네트워크 노드와 Kolla를 맡고, compute VM에서 Nova 인스턴스가 실행됩니다. VM끼리는 호스트의 링크 스위치로 연결되며, 상세 화면에서 compute VM을 고립시켜 evacuate를 시험할 수 있습니다. 아직 스냅샷은 지원하지 않습니다."
+                : "모든 서비스를 VM 한 대에 설치합니다."}
+            </p>
+          </div>
+          <div>
             <span className="field-label">OpenStack 서비스</span>
             <div className="component-options">
               {catalog.data?.components.map((c) => {
@@ -271,14 +300,18 @@ export function CreateFarmForm({
                   .filter(
                     (other) =>
                       other.id !== c.id &&
-                      selected.includes(other.id) &&
+                      requested.includes(other.id) &&
                       resolveComponents(catalog.data.components, [
                         other.id,
                       ]).includes(c.id),
                   )
                   .map((other) => componentLabel(other.id));
+                const forCompute = computes > 0 && c.id === "nova";
                 const locked =
-                  c.required || !c.available || neededBy.length > 0;
+                  c.required ||
+                  !c.available ||
+                  forCompute ||
+                  neededBy.length > 0;
                 return (
                   <label
                     className={`component-option ${included ? "selected" : ""} ${!c.available ? "unavailable" : ""}`}
@@ -308,9 +341,11 @@ export function CreateFarmForm({
                             ? "필수"
                             : !c.available
                               ? "준비 중"
-                              : neededBy.length
-                                ? `${neededBy.join("·")}에 필요`
-                                : "선택"}
+                              : forCompute
+                                ? "Compute VM에 필요"
+                                : neededBy.length
+                                  ? `${neededBy.join("·")}에 필요`
+                                  : "선택"}
                         </span>
                       </span>
                       <small>{componentInfo[c.id]?.description}</small>
@@ -320,9 +355,9 @@ export function CreateFarmForm({
               })}
             </div>
             <p className="field-hint mt-2">
-              의존성은 자동으로 포함됩니다. 선택한 서비스와 DB·메시지 큐는 같은
-              VM의 컨테이너로 실행되며, 추가 서비스의 메모리도 이 VM에
-              합산됩니다.
+              {computes > 0
+                ? "의존성은 자동으로 포함됩니다. Nova를 뺀 서비스와 DB·메시지 큐는 control VM의 컨테이너로 실행됩니다."
+                : "의존성은 자동으로 포함됩니다. 선택한 서비스와 DB·메시지 큐는 같은 VM의 컨테이너로 실행되며, 추가 서비스의 메모리도 이 VM에 합산됩니다."}
             </p>
           </div>
           <label className="field">
@@ -358,8 +393,10 @@ export function CreateFarmForm({
                 </span>
               </div>
               <p>
-                선택한 모든 서비스를 이 VM에 설치합니다. 생성 후 상세 화면에서
-                배포를 시작하세요.
+                {plan.data.computes
+                  ? `Control ${memory(plan.data.nodes[0].memory_mib)} + Compute ${memory(plan.data.nodes[1].memory_mib)} × ${plan.data.computes}. `
+                  : "선택한 모든 서비스를 이 VM에 설치합니다. "}
+                생성 후 상세 화면에서 배포를 시작하세요.
               </p>
             </div>
           )}
@@ -392,7 +429,9 @@ export function CreateFarmForm({
         <div className="modal-footer">
           <span className="flex items-center gap-1.5 text-xs text-stone-500">
             <ShieldCheck size={14} />
-            Farm마다 독립된 VM 한 대
+            {computes > 0
+              ? `Farm 전용 VM ${computes + 1}대와 내부망`
+              : "Farm마다 독립된 VM 한 대"}
           </span>
           <div className="flex gap-2">
             <Dialog.Close render={<Button disabled={mutation.isPending} />}>
@@ -441,12 +480,7 @@ export function DeployFarmDialog({
       setOpen(false);
     },
   });
-  const validNodes =
-    isAllInOneFarm(farm) &&
-    farm.nodes.length === 1 &&
-    farm.nodes.every(
-      (n) => String(n.role) === "all-in-one" && n.status === "running",
-    );
+  const validNodes = isDeployableFarm(farm) && farmNodesRunning(farm);
   const allowed =
     ["created", "failed", "ready"].includes(farm.status) &&
     validNodes &&
@@ -471,8 +505,8 @@ export function DeployFarmDialog({
       <Dialog.Trigger
         render={<Button variant="primary" disabled={!allowed} />}
         title={
-          !isAllInOneFarm(farm)
-            ? "기존 다중 VM Farm은 재배포할 수 없습니다. 단일 VM Farm을 새로 만드세요."
+          !isDeployableFarm(farm)
+            ? "기존 다중 VM Farm은 재배포할 수 없습니다. Farm을 새로 만드세요."
             : undefined
         }
       >
@@ -670,10 +704,9 @@ export function CheckServicesButton({
   const allowed =
     deployed &&
     !farm.active_job &&
-    isAllInOneFarm(farm) &&
+    isDeployableFarm(farm) &&
     ["created", "broken", "ready"].includes(farm.status) &&
-    farm.nodes.length === 1 &&
-    farm.nodes[0].status === "running";
+    farmNodesRunning(farm);
   return (
     <Button
       onClick={() => mutation.mutate()}

@@ -1,7 +1,9 @@
 # farm
 
-Farm마다 microsandbox VM **1대**를 만들고 Kolla all-in-one으로 OpenStack을 설치하는 Rust CLI와 REST API 데몬입니다.
-선택한 모든 서비스와 Ansible 실행기가 같은 VM에서 동작합니다.
+Farm마다 microsandbox VM을 만들고 Kolla로 OpenStack을 설치하는 Rust CLI와 REST API 데몬입니다.
+기본은 VM **1대**(all-in-one)로, 선택한 모든 서비스와 Ansible 실행기가 같은 VM에서 동작합니다.
+**control 1 + compute 1~3** 구성도 고를 수 있습니다. 이때 VM들은 호스트의 링크 스위치로 이어지고,
+compute VM을 고립시켜 evacuate 같은 장애 대응을 시험할 수 있습니다([다중 VM farm](#다중-vm-farm)).
 웹포탈 backend는 `farm serve`의 API를 호출해 farm 생성·배포·삭제 작업과 로그를 추적할 수 있습니다.
 
 항상 **Keystone + Glance**를 배포하고, 선택 서비스로 **Placement**, **Horizon**, **Neutron**,
@@ -71,6 +73,35 @@ farm settle demo                         # VM 재시작 뒤 배포 없이 서비
   systemd(`/sbin/init`), sshd, python3, nftables, iproute, gcc와 Python 빌드 헤더를 설치해야 합니다.
 - farm 스냅샷의 내보내기 아카이브에는 golden image 층도 들어 있어 golden image가 없는 호스트에서도 복원됩니다.
 - 이 방식 이전에 Docker로 만든 `farm-golden:rocky10` 이미지의 farm과 스냅샷은 그대로 동작합니다.
+
+## 다중 VM farm
+
+생성 요청의 `computes`(CLI `--computes`, 포털의 **VM 구성**)가 1~3이면 control VM 1대와 compute VM N대를 만듭니다.
+Nova와 그 의존성(Placement, Neutron)이 자동으로 들어갑니다.
+
+- **VM**: `<farm>-control`(4 vCPU, 서비스에 따라 6.5 GiB 안팎)은 API·DB·MQ·네트워크 노드(L3·DHCP)와 Kolla를,
+  `<farm>-compute-<n>`(2 vCPU, 3 GiB)은 nova-compute·libvirt·OVS agent를 맡습니다. 공개 포트는 control VM만 엽니다.
+- **고정 정체성**: hostname과 관리망 주소는 모든 farm에서 같습니다. `farm-control` 10.254.0.10,
+  `farm-compute-<n>` 10.254.0.(10+n). 서로의 이름은 `/etc/hosts`에 넣습니다.
+- **네트워크**: VM마다 링크가 두 개입니다. `farm0`(관리망, Kolla의 network·api 인터페이스)과 `farm1`(주소 없음,
+  OVS `br-tenant`의 physnet1, 테넌트 VLAN 100~199)입니다. 외부망 `public`은 control VM의 physnet2입니다.
+  링크는 호스트마다 하나 도는 스위치 프로세스(`<agent dir>/switch/`)에 WebSocket으로 붙습니다([docs/poc-l2-link.md](docs/poc-l2-link.md)).
+- **배포**: control VM에서 Kolla multinode inventory로 compute VM에 SSH 배포하고, verify는 모든 nova-compute가
+  up인지 확인한 뒤 Cirros를 띄웁니다.
+- **장애 주입**: `PUT /api/v1/farms/{id}/nodes/{node}/faults`(`{"loss":1}`, `{"delay_ms":50}`, `{}`로 복구),
+  CLI `farm fault <farm> compute-1 --loss 1`, 포털 VM topology의 **고립·손실·지연·복구** 버튼.
+  VM의 두 링크에 함께 걸립니다.
+- **제약**: 로컬 호스트와 Linux 원격 호스트에서만 만들 수 있습니다. 게스트는 링크에 Linux farm-agent를 쓰는데,
+  Linux 호스트는 agent 자신을 넣고 macOS 로컬 호스트는 `dist/agent/<arch>/farm-agent`(`task agent-build`)를 넣습니다.
+  스냅샷은 아직 지원하지 않습니다. 공유 스토리지가 없어 evacuate는 이미지로 인스턴스를 다시 만듭니다.
+
+```bash
+farm create mn --host-id local --computes 2      # 약 12.5 GiB
+farm deploy mn                                   # M1 Max에서 약 15분
+farm fault mn compute-1 --loss 1                 # compute-1 고립
+# control VM에서: compute service set --down, server evacuate --host farm-compute-2 ...
+farm fault mn compute-1                          # 복구
+```
 
 ## 웹포탈
 
@@ -157,6 +188,7 @@ curl -N http://127.0.0.1:8080/api/v1/farms/demo/logs/stream
 | POST | `/farms/{id}/deploy` | 배포 job (`{"from":"prechecks"}`로 재개) |
 | POST | `/farms/{id}/settle` | VM 재시작 뒤 서비스 응답 확인 job |
 | GET | `/farms/{id}/endpoints` | public 서비스 URL과 admin 인증정보 |
+| PUT | `/farms/{id}/nodes/{node}/faults` | 다중 VM farm의 VM 링크에 지연·손실 설정(`{}`이면 복구), 갱신된 farm |
 | GET | `/farms/{id}/logs?after=0&limit=1000` | 최근 로그 |
 | GET | `/farms/{id}/logs/stream` | 로그 SSE (`Last-Event-ID`로 재연결) |
 | GET (WebSocket) | `/farms/{id}/shell?rows=24&cols=80` | VM의 root 로그인 셸 |

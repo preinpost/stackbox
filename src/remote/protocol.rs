@@ -63,6 +63,14 @@ pub enum Operation {
         snapshot_id: String,
         labels: BTreeMap<String, String>,
     },
+    /// Set the faults of a multi-node farm VM's links (`node` is `control`, `compute-1`, ...);
+    /// no delay and no loss heals them.
+    Impair {
+        farm_id: String,
+        generation: String,
+        node: String,
+        impair: crate::link::Impair,
+    },
     /// Reserve like `Create`, but boot the farm's VM from a snapshot on this host.
     Restore {
         farm_id: String,
@@ -133,6 +141,11 @@ impl Operation {
                 ..
             }
             | Self::Freeze {
+                farm_id,
+                generation,
+                ..
+            }
+            | Self::Impair {
                 farm_id,
                 generation,
                 ..

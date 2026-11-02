@@ -1,6 +1,6 @@
 import { Tabs } from "@base-ui/react/tabs";
 import { lazy, Suspense, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useParams } from "@tanstack/react-router";
 import {
   ArrowLeft,
@@ -35,6 +35,7 @@ import {
   keys,
   type Datastore,
   type Farm,
+  type Impair,
 } from "../api/client";
 import {
   CheckServicesButton,
@@ -44,6 +45,7 @@ import {
 import { FreezeFarmDialog } from "../components/snapshot-actions";
 import { LogViewer } from "../components/log-viewer";
 import {
+  Button,
   CopyText,
   EmptyState,
   ErrorNotice,
@@ -57,7 +59,12 @@ import {
   farmMemory,
   farmNodeCount,
   isAllInOneFarm,
+  isDeployableFarm,
+  isMultiNodeFarm,
   memory,
+  nodeAddress,
+  nodeHostname,
+  nodeSuffix,
   phases,
   publicServices,
 } from "../lib";
@@ -162,10 +169,10 @@ export function FarmDetailPage({ id }: { id: string }) {
           )}
         </div>
       </div>
-      {!isAllInOneFarm(farm) && farm.status !== "deleted" && (
+      {!isDeployableFarm(farm) && farm.status !== "deleted" && (
         <div className="warning-notice mb-5">
           기존 다중 VM 구성입니다. 이 Farm의 상태 조회와 삭제는 계속 사용할 수
-          있습니다. 배포하려면 단일 VM Farm을 새로 만드세요.
+          있습니다. 배포하려면 Farm을 새로 만드세요.
         </div>
       )}
       {staleAgent && (
@@ -233,7 +240,7 @@ export function FarmDetailPage({ id }: { id: string }) {
       )}
       {farm.status === "created" &&
         !farm.active_job &&
-        isAllInOneFarm(farm) && (
+        isDeployableFarm(farm) && (
           <div className="info-notice">
             <ShieldCheck size={18} />
             <div>
@@ -341,7 +348,9 @@ export function FarmDetailPage({ id }: { id: string }) {
         </Tabs.Panel>
         <Tabs.Panel value="shell" className="tab-panel" keepMounted>
           {!farm.nodes.some(
-            (node) => node.role === "all-in-one" && node.status === "running",
+            (node) =>
+              (node.role === "all-in-one" || node.role === "control") &&
+              node.status === "running",
           ) ? (
             <section className="panel">
               <EmptyState
@@ -350,7 +359,9 @@ export function FarmDetailPage({ id }: { id: string }) {
                 description={
                   isAllInOneFarm(farm)
                     ? "VM이 실행 중일 때 셸을 열 수 있습니다."
-                    : "셸은 단일 VM farm에서만 지원합니다."
+                    : isMultiNodeFarm(farm)
+                      ? "control VM이 실행 중일 때 셸을 열 수 있습니다."
+                      : "셸은 기존 다중 VM farm에서 지원하지 않습니다."
                 }
               />
             </section>
@@ -380,7 +391,146 @@ const roleInfo: Record<string, { label: string; service: string }> = {
   compute: { label: "Compute", service: "" },
 };
 const controlServices = ["placement", "horizon", "neutron", "nova"];
+/** Faults the topology offers for a multi-node VM; the last entry heals it. */
+const faultPresets: { label: string; impair: Impair }[] = [
+  { label: "고립", impair: { loss: 1 } },
+  { label: "손실 5%", impair: { loss: 0.05 } },
+  { label: "지연 50 ms", impair: { delay_ms: 50 } },
+  { label: "복구", impair: {} },
+];
+function faultLabel(impair?: Impair) {
+  if (!impair) return null;
+  if ((impair.loss ?? 0) >= 1) return "고립됨";
+  return [
+    impair.delay_ms ? `지연 ${impair.delay_ms} ms` : null,
+    impair.loss ? `손실 ${Math.round(impair.loss * 100)}%` : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+}
+function NodeFaults({ farm, node }: { farm: Farm; node: string }) {
+  const client = useQueryClient();
+  const mutation = useMutation({
+    mutationFn: (impair: Impair) => api.setFaults(farm.id, node, impair),
+    onSuccess: (updated) => {
+      client.setQueryData(keys.farm(farm.id), updated);
+      void client.invalidateQueries({ queryKey: keys.farms });
+    },
+  });
+  const current = faultLabel(farm.faults?.[node]);
+  const usable = !["creating", "deleting", "deleted"].includes(farm.status);
+  return (
+    <div className="node-faults">
+      <span className={`fault-chip ${current ? "faulted" : ""}`}>
+        {current ?? "링크 정상"}
+      </span>
+      <div className="node-fault-actions">
+        {faultPresets.map(({ label, impair }) => (
+          <Button
+            key={label}
+            variant={impair.loss === 1 ? "danger" : "ghost"}
+            disabled={
+              !usable ||
+              mutation.isPending ||
+              (!current && !impair.loss && !impair.delay_ms)
+            }
+            onClick={() => mutation.mutate(impair)}
+          >
+            {label}
+          </Button>
+        ))}
+      </div>
+      {mutation.error && <ErrorNotice error={mutation.error} />}
+    </div>
+  );
+}
+/** A control VM and its computes on the farm's management and tenant links. */
+function MultiNodeTopology({ farm }: { farm: Farm }) {
+  const components = farmComponents(farm);
+  const specs = farm.plan?.nodes ?? [];
+  const exposure = farm.status !== "deleted" ? farm.exposure : null;
+  return (
+    <section className="panel topology">
+      <div className="panel-toolbar">
+        <h2 className="flex items-center gap-2">
+          <Network size={17} />
+          VM topology
+        </h2>
+        <span className="topology-network">
+          mgmt 10.254.0.0/24 · tenant VLAN · VM {specs.length}대
+          <span className="status-dot" />
+        </span>
+      </div>
+      <div className="topology-graph">
+        <div className="topology-box topology-host">
+          <Globe size={16} strokeWidth={1.6} />
+          <div>
+            <small>Host · link switch</small>
+            <code>{exposure?.host ?? "public 포트 없음"}</code>
+          </div>
+        </div>
+        <div className="topology-edge edge-active">
+          <code>farm0 · farm1</code>
+          <span className="edge-line" aria-hidden />
+          <small>WebSocket 링크</small>
+        </div>
+        <div className="topology-tree">
+          {specs.map((spec) => {
+            const node = farm.nodes.find(
+              (n) =>
+                n.role === spec.role &&
+                (n.index ?? null) === (spec.index ?? null),
+            );
+            const suffix = nodeSuffix(spec);
+            const control = spec.role === "control";
+            return (
+              <div className="topology-leaf" key={suffix}>
+                <div
+                  className={`topology-node ${node?.status === "running" ? "node-running" : ""}`}
+                >
+                  <div className="node-top">
+                    <Server size={15} strokeWidth={1.6} />
+                    <strong className="font-mono">{nodeHostname(spec)}</strong>
+                    <span className="node-memory">
+                      {memory(spec.memory_mib)}
+                    </span>
+                    <span
+                      className={`node-status ${node?.status === "running" ? "running" : ""}`}
+                      title={node?.status ?? "준비되지 않음"}
+                    />
+                  </div>
+                  <p>
+                    {control
+                      ? components
+                          .filter((c) => c !== "nova")
+                          .map(componentLabel)
+                          .concat("Nova API", "L3·DHCP", "Kolla")
+                          .join(" · ")
+                      : "nova-compute · libvirt · OVS agent"}
+                  </p>
+                  <div className="node-meta">
+                    <code>{nodeAddress(spec)}</code>
+                    <span className="font-mono">
+                      {node?.name ?? `${farm.id}-${suffix}`}
+                    </span>
+                  </div>
+                  <NodeFaults farm={farm} node={suffix} />
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+      <div className="topology-footer">
+        <ShieldCheck size={13} />
+        고립은 VM의 두 링크에서 모든 프레임을 버립니다. compute VM을 고립시키면
+        Nova가 약 1분 뒤 down으로 표시하고, 그 뒤 evacuate를 시험할 수 있습니다.
+      </div>
+    </section>
+  );
+}
 export function NodeTopology({ farm }: { farm: Farm }) {
+  if (isMultiNodeFarm(farm)) return <MultiNodeTopology farm={farm} />;
   const single = isAllInOneFarm(farm);
   const components = farmComponents(farm);
   const sources = farm.plan

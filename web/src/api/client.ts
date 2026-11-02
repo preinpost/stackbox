@@ -26,6 +26,7 @@ export type SnapshotRequest = Schema["SnapshotRequest"];
 export type ImportRequest = Schema["ImportRequest"];
 export type ExportRequest = Schema["ExportRequest"];
 export type Bucket = Schema["Bucket"];
+export type Impair = Schema["Impair"];
 export type RegisterBucket = Schema["RegisterBucket"];
 export type BucketObject = Schema["BucketObject"];
 
@@ -226,11 +227,17 @@ export const api = {
     request<Job>(`/farms/${encode(id)}${forget ? "?forget=true" : ""}`, {
       method: "DELETE",
     }),
-  plan: (components: string[], signal?: AbortSignal) =>
+  plan: (components: string[], computes = 0, signal?: AbortSignal) =>
     request<Plan>("/plans", {
       method: "POST",
-      body: JSON.stringify({ components }),
+      body: JSON.stringify({ components, computes }),
       signal,
+    }),
+  /** No delay and no loss heals the VM. */
+  setFaults: (farmId: string, node: string, impair: Impair) =>
+    request<Farm>(`/farms/${encode(farmId)}/nodes/${encode(node)}/faults`, {
+      method: "PUT",
+      body: JSON.stringify(impair),
     }),
   endpoints: (id: string) =>
     request<ServiceEndpoints>(`/farms/${encode(id)}/endpoints`),

@@ -212,6 +212,22 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/v1/farms/{id}/nodes/{node}/faults": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put: operations["set_faults"];
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/v1/farms/{id}/settle": {
     parameters: {
       query?: never;
@@ -614,6 +630,11 @@ export interface components {
     CreateRequest: {
       components?: string[];
       /**
+       * Format: int32
+       * @description Compute VMs beside a control VM (see [`PlanRequest::computes`]).
+       */
+      computes?: number;
+      /**
        * Format: int64
        * @description UTC Unix seconds. Metadata only in this version; no automatic deletion.
        */
@@ -696,6 +717,11 @@ export interface components {
       port_base: number;
     };
     FarmNode: {
+      /**
+       * Format: int32
+       * @description A multi-node compute VM's position, from 1.
+       */
+      index?: number | null;
       /** @description Live eth0 IPv4 for new all-in-one guests; legacy nodes may retain an overlay address. */
       ip?: string | null;
       /** Format: int32 */
@@ -713,6 +739,10 @@ export interface components {
       /** Format: int64 */
       expires_at?: number | null;
       exposure?: null | components["schemas"]["Exposure"];
+      /** @description Faults set on a multi-node farm's links, by VM (`control`, `compute-1`, ...). */
+      faults?: {
+        [key: string]: components["schemas"]["Impair"];
+      };
       host_id?: string | null;
       id: string;
       /** Format: int64 */
@@ -833,6 +863,19 @@ export interface components {
       | "runtime_ready"
       | "ready"
       | "failed";
+    /** @description Faults the switch adds to the frames from and to a port. */
+    Impair: {
+      /**
+       * Format: int64
+       * @description Added to frames entering and leaving the port, so a round trip gains twice this.
+       */
+      delay_ms?: number;
+      /**
+       * Format: double
+       * @description Share of frames dropped in each direction, 0.0 to 1.0; 1.0 isolates the port.
+       */
+      loss?: number;
+    };
     /** @description Import from an archive file, or from an object in a registered bucket. */
     ImportRequest: {
       /** @description Registered bucket holding the archive; requires `key`. */
@@ -899,6 +942,11 @@ export interface components {
       cpus: number;
       /** Format: int32 */
       disk_mib: number;
+      /**
+       * Format: int32
+       * @description Position among the farm's compute nodes, from 1; only multi-node compute nodes have one.
+       */
+      index?: number | null;
       /** Format: int32 */
       memory_mib: number;
       role: components["schemas"]["Role"];
@@ -916,6 +964,11 @@ export interface components {
     Plan: {
       components: string[];
       /**
+       * Format: int32
+       * @description Compute VMs beside the control VM; 0 for an all-in-one farm.
+       */
+      computes?: number;
+      /**
        * Format: int64
        * @description Includes both container disks for each container host. Sparse disks consume less initially.
        */
@@ -928,6 +981,13 @@ export interface components {
     PlanRequest: {
       /** @default [] */
       components: string[];
+      /**
+       * Format: int32
+       * @description Compute VMs beside a control VM, up to 3; 0 runs everything in one all-in-one VM.
+       *     A multi-node farm always runs Nova and Neutron.
+       * @default 0
+       */
+      computes: number;
     };
     /** @description Register a host whose agent will dial in. */
     RegisterAgentHost: {
@@ -1657,6 +1717,58 @@ export interface operations {
         };
         content: {
           "text/event-stream": string;
+        };
+      };
+    };
+  };
+  set_faults: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        id: string;
+        /** @description VM of a multi-node farm: control, compute-1, ... */
+        node: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["Impair"];
+      };
+    };
+    responses: {
+      /** @description The farm with the VM's faults applied; no delay and no loss heals it */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["FarmRecord"];
+        };
+      };
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorBody"];
+        };
+      };
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorBody"];
+        };
+      };
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorBody"];
         };
       };
     };

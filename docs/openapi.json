@@ -762,6 +762,83 @@
         }
       }
     },
+    "/api/v1/farms/{id}/nodes/{node}/faults": {
+      "put": {
+        "tags": [],
+        "operationId": "set_faults",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "node",
+            "in": "path",
+            "description": "VM of a multi-node farm: control, compute-1, ...",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Impair"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The farm with the VM's faults applied; no delay and no loss heals it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FarmRecord"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/farms/{id}/settle": {
       "post": {
         "tags": [],
@@ -2008,6 +2085,12 @@
               "type": "string"
             }
           },
+          "computes": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Compute VMs beside a control VM (see [`PlanRequest::computes`]).",
+            "minimum": 0
+          },
           "expires_at": {
             "type": [
               "integer",
@@ -2274,6 +2357,15 @@
           "memory_mib"
         ],
         "properties": {
+          "index": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "A multi-node compute VM's position, from 1.",
+            "minimum": 0
+          },
           "ip": {
             "type": [
               "string",
@@ -2354,6 +2446,16 @@
                 "$ref": "#/components/schemas/Exposure"
               }
             ]
+          },
+          "faults": {
+            "type": "object",
+            "description": "Faults set on a multi-node farm's links, by VM (`control`, `compute-1`, ...).",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/Impair"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
           },
           "host_id": {
             "type": [
@@ -2756,6 +2858,24 @@
           "failed"
         ]
       },
+      "Impair": {
+        "type": "object",
+        "description": "Faults the switch adds to the frames from and to a port.",
+        "properties": {
+          "delay_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Added to frames entering and leaving the port, so a round trip gains twice this.",
+            "minimum": 0
+          },
+          "loss": {
+            "type": "number",
+            "format": "double",
+            "description": "Share of frames dropped in each direction, 0.0 to 1.0; 1.0 isolates the port."
+          }
+        },
+        "additionalProperties": false
+      },
       "ImportRequest": {
         "type": "object",
         "description": "Import from an archive file, or from an object in a registered bucket.",
@@ -2978,6 +3098,15 @@
             "format": "int32",
             "minimum": 0
           },
+          "index": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Position among the farm's compute nodes, from 1; only multi-node compute nodes have one.",
+            "minimum": 0
+          },
           "memory_mib": {
             "type": "integer",
             "format": "int32",
@@ -3017,6 +3146,12 @@
               "type": "string"
             }
           },
+          "computes": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Compute VMs beside the control VM; 0 for an all-in-one farm.",
+            "minimum": 0
+          },
           "disk_mib": {
             "type": "integer",
             "format": "int64",
@@ -3051,6 +3186,13 @@
               "type": "string"
             },
             "default": []
+          },
+          "computes": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Compute VMs beside a control VM, up to 3; 0 runs everything in one all-in-one VM.\nA multi-node farm always runs Nova and Neutron.",
+            "default": 0,
+            "minimum": 0
           }
         },
         "additionalProperties": false

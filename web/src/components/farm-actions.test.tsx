@@ -438,7 +438,58 @@ test("allows deployment only for a running all-in-one VM and preserves legacy fa
     name: "OpenStack 배포",
   }) as HTMLButtonElement;
   expect(trigger.disabled).toBe(true);
-  expect(trigger.title).toContain("단일 VM Farm을 새로 만드세요");
+  expect(trigger.title).toContain("Farm을 새로 만드세요");
+  // A control VM and its computes deploy once all of them run.
+  const spec = singleVmPlan().nodes[0];
+  const multi: Farm = {
+    ...single,
+    id: "mn",
+    plan: {
+      ...singleVmPlan(),
+      computes: 2,
+      nodes: [
+        { ...spec, role: "control" },
+        { ...spec, role: "compute", index: 1 },
+        { ...spec, role: "compute", index: 2 },
+      ],
+    },
+    nodes: [
+      {
+        name: "mn-control",
+        role: "control",
+        status: "running",
+        memory_mib: 6656,
+      },
+      {
+        name: "mn-compute-1",
+        role: "compute",
+        index: 1,
+        status: "running",
+        memory_mib: 3072,
+      },
+      {
+        name: "mn-compute-2",
+        role: "compute",
+        index: 2,
+        status: "running",
+        memory_mib: 3072,
+      },
+    ],
+  };
+  const deployButton = () =>
+    screen.getByRole("button", { name: "OpenStack 배포" }) as HTMLButtonElement;
+  view.rerender(
+    <QueryClientProvider client={client}>
+      <DeployFarmDialog farm={multi} />
+    </QueryClientProvider>,
+  );
+  expect(deployButton().disabled).toBe(false);
+  view.rerender(
+    <QueryClientProvider client={client}>
+      <DeployFarmDialog farm={{ ...multi, nodes: multi.nodes.slice(0, 2) }} />
+    </QueryClientProvider>,
+  );
+  expect(deployButton().disabled).toBe(true);
   client.clear();
 });
 

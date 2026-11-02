@@ -4019,3 +4019,31 @@ h2 {
 .build-compare .build-unknown {
   color: #859386;
 }
+.node-faults {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed #e1e9e2;
+}
+.fault-chip {
+  justify-self: start;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: #eef5ef;
+  color: #56705a;
+  font-size: 12px;
+}
+.fault-chip.faulted {
+  background: #fdecea;
+  color: #a1392d;
+}
+.node-fault-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.node-fault-actions .btn {
+  padding: 3px 9px;
+  font-size: 12px;
+}
