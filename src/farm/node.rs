@@ -5,12 +5,15 @@ use microsandbox::{
     UnsupportedReason,
 };
 
-use super::template::{BASE_IMAGE, NodeSpec, Role};
+use super::golden;
+use super::template::{NodeSpec, Role};
 use crate::shell::run;
 
 pub const FARM_LABEL: &str = "farm";
 pub const ROLE_LABEL: &str = "farm.role";
 pub const OVERLAY_IP_LABEL: &str = "farm.overlay.ip";
+/// Guest distribution (`GuestOs::id`) of VMs made from a golden snapshot.
+pub const OS_LABEL: &str = "farm.os";
 
 /// Every farm guest gets the same hostname and service address, so a snapshot
 /// restores into another farm (and a restart into a new msb slot) unchanged.
@@ -38,7 +41,68 @@ pub fn identity_conf() -> String {
 
 // msb's default root is an overlay; Docker's overlayfs cannot nest on it,
 // so container storage gets its own ext4 disks.
-const CONTAINER_DIRS: &[&str] = &["/var/lib/docker", "/var/lib/containerd"];
+pub(super) const CONTAINER_DIRS: &[&str] = &["/var/lib/docker", "/var/lib/containerd"];
+
+/// Farm files every guest carries, whatever its distribution: (path, contents, mode).
+const GUEST_FILES: &[(&str, &str, &str)] = &[
+    (
+        "/usr/local/sbin/farm-identity",
+        include_str!("../../guest/farm/farm-identity"),
+        "755",
+    ),
+    (
+        "/etc/systemd/system/farm-identity.service",
+        include_str!("../../guest/farm/farm-identity.service"),
+        "644",
+    ),
+    (
+        "/usr/local/sbin/farm-hostname",
+        include_str!("../../guest/farm/farm-hostname"),
+        "755",
+    ),
+    (
+        "/etc/systemd/system/farm-hostname.service",
+        include_str!("../../guest/farm/farm-hostname.service"),
+        "644",
+    ),
+    (
+        "/usr/local/sbin/farm-external",
+        include_str!("../../guest/farm/farm-external"),
+        "755",
+    ),
+    (
+        "/etc/systemd/system/farm-external.service",
+        include_str!("../../guest/farm/farm-external.service"),
+        "644",
+    ),
+    (
+        "/etc/systemd/system/disable-ipv6.service",
+        include_str!("../../guest/farm/disable-ipv6.service"),
+        "644",
+    ),
+];
+const GUEST_UNITS: &str = "disable-ipv6 farm-identity farm-hostname farm-external";
+
+/// Write the farm's files and enable their units. Farm VMs get them when created and again
+/// when deployed, so a redeploy also upgrades a farm made by an older build.
+pub async fn install_guest_files(sandbox: &Sandbox) -> Result<()> {
+    let fs = sandbox.fs();
+    for (path, contents, _) in GUEST_FILES {
+        fs.write(path, *contents).await?;
+    }
+    let modes: String = GUEST_FILES
+        .iter()
+        .map(|(path, _, mode)| format!("chmod {mode} {path}\n"))
+        .collect();
+    run(
+        sandbox,
+        &format!(
+            "set -e\nmkdir -p /etc/farm\n{modes}systemctl daemon-reload\nsystemctl enable {GUEST_UNITS}\nsystemctl start disable-ipv6"
+        ),
+    )
+    .await?;
+    Ok(())
+}
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
 pub struct FarmNode {
@@ -77,12 +141,14 @@ pub async fn create_node(
     public_ports: &[(u16, u16)],
 ) -> Result<FarmNode> {
     let name = node_name(farm_id, spec.role);
+    let os = golden::DEFAULT_OS;
+    // The golden snapshot supplies the root and container disks.
+    let image = golden::ensure(os, &spec).await?;
     let build = || {
-        let mut builder = Sandbox::builder(&name)
-            .image(BASE_IMAGE)
+        Sandbox::builder(&name)
+            .override_snapshot(&image)
             .cpus(spec.cpus)
             .memory(spec.memory_mib)
-            .root_disk(spec.disk_mib)
             .init("/sbin/init")
             .hostname(GUEST_HOSTNAME)
             .network(|n| {
@@ -97,56 +163,20 @@ pub async fn create_node(
                 }
                 n
             })
-            .patch(|p| p.text(IDENTITY_CONF, identity_conf(), Some(0o644), true))
-            .patch(|p| {
-                p.text(
-                    "/usr/local/sbin/farm-identity",
-                    include_str!("../../docker/farm-identity"),
-                    Some(0o755),
-                    true,
-                )
-            })
-            .patch(|p| {
-                p.text(
-                    "/etc/systemd/system/farm-identity.service",
-                    include_str!("../../docker/farm-identity.service"),
-                    Some(0o644),
-                    true,
-                )
-            })
-            .patch(|p| {
-                p.text(
-                    "/usr/local/sbin/farm-hostname",
-                    include_str!("../../docker/farm-hostname"),
-                    Some(0o755),
-                    true,
-                )
-            })
-            .patch(|p| {
-                p.text(
-                    "/etc/systemd/system/farm-hostname.service",
-                    include_str!("../../docker/farm-hostname.service"),
-                    Some(0o644),
-                    true,
-                )
-            })
             .label(FARM_LABEL, farm_id)
             .label(ROLE_LABEL, spec.role.as_str())
-            .detached(true);
-        if let Some(size) = spec.container_disk_mib {
-            for dir in CONTAINER_DIRS {
-                builder = builder.volume(*dir, |m| m.owned_with(|v| v.disk().size(size)));
-            }
-        }
-        builder
+            .label(OS_LABEL, os.id)
+            .detached(true)
     };
     let sandbox = create_nested(build)
         .await
         .with_context(|| format!("create {name}"))?;
     let boot = async {
         wait_until_booted(&sandbox).await?;
-        // Golden images built before the identity unit lack nftables.
-        run(&sandbox, "rpm -q nftables >/dev/null || dnf install -y -q nftables; systemctl daemon-reload && systemctl enable farm-identity farm-hostname && systemctl restart farm-identity farm-hostname").await?;
+        // msb cannot patch files into a VM made from a snapshot, so they follow the boot.
+        sandbox.fs().write(IDENTITY_CONF, identity_conf()).await?;
+        install_guest_files(&sandbox).await?;
+        run(&sandbox, "systemctl restart farm-identity farm-hostname").await?;
         let ip = run(&sandbox, "ip -4 -o addr show dev eth0 scope global | awk 'NR==1 { split($4, a, \"/\"); print a[1] }'").await?;
         let ip = ip.trim().parse::<std::net::Ipv4Addr>().context("eth0 has no valid IPv4 address")?;
         Ok::<_, anyhow::Error>(ip.to_string())
@@ -256,7 +286,7 @@ mod tests {
         use std::io::{Read, Seek, SeekFrom};
         let dir = tempfile::tempdir().unwrap();
         let hosts = dir.path().join("hosts");
-        let script = include_str!("../../docker/farm-hostname")
+        let script = include_str!("../../guest/farm/farm-hostname")
             .replace("/etc/hosts", "\"$FARM_TEST_HOSTS\"")
             .replace(IDENTITY_CONF, "\"$FARM_TEST_HOSTS.identity\"");
         let initial = "127.0.0.1 localhost demo-all-in-one\n::1 localhost ip6-localhost demo-all-in-one\n192.0.2.1 custom-host\n";

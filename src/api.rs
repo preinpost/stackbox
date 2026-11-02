@@ -167,6 +167,7 @@ pub struct HostInfo {
     pub hypervisor: String,
     pub hypervisor_available: bool,
     pub msb_available: bool,
+    /// msb snapshot new farms start from; the first farm on the host builds it.
     pub golden_image: String,
     pub golden_image_available: bool,
     /// Revision this daemon was built from; a host agent must report the same one.
@@ -199,19 +200,17 @@ async fn host(State(app): State<App>) -> Result<Json<HostInfo>, ApiError> {
     .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
     let binary = std::env::var_os("MSB_PATH").unwrap_or_else(|| "msb".into());
     let mut command = tokio::process::Command::new(binary);
-    command
-        .args(["image", "list", "--quiet"])
-        .kill_on_drop(true);
+    command.arg("--version").kill_on_drop(true);
     let output = tokio::time::timeout(Duration::from_secs(5), command.output()).await;
-    let (msb, golden) = match output {
-        Ok(Ok(output)) if output.status.success() => (
-            true,
-            String::from_utf8_lossy(&output.stdout)
-                .lines()
-                .any(|l| l.trim() == crate::farm::BASE_IMAGE),
-        ),
-        _ => (false, false),
-    };
+    let msb = matches!(output, Ok(Ok(output)) if output.status.success());
+    let golden_image = crate::farm::golden::current();
+    let golden = msb
+        && tokio::time::timeout(
+            Duration::from_secs(5),
+            crate::farm::golden::available(&golden_image),
+        )
+        .await
+        .is_ok_and(|available| available.unwrap_or(false));
     let local = app
         .manager
         .hosts()?
@@ -233,7 +232,7 @@ async fn host(State(app): State<App>) -> Result<Json<HostInfo>, ApiError> {
         hypervisor: crate::remote::host::hypervisor().into(),
         hypervisor_available: crate::remote::host::hypervisor_available(),
         msb_available: msb,
-        golden_image: crate::farm::BASE_IMAGE.into(),
+        golden_image,
         golden_image_available: golden,
         build_id: crate::BUILD_ID.into(),
         memory_total_mib: total,

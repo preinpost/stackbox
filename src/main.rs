@@ -71,6 +71,12 @@ enum Command {
     },
     /// Check that a deployed farm's services answer again after its VM started from disk
     Settle { id: String },
+    /// Build this machine's golden image now instead of with the first farm
+    Golden {
+        /// Only report whether it is built
+        #[arg(long)]
+        check: bool,
+    },
     Status {
         id: String,
         #[arg(long)]
@@ -305,6 +311,18 @@ async fn main() -> Result<()> {
             return Ok(());
         }
         Command::Openapi => return print_json(&api::openapi_document()),
+        Command::Golden { check } => {
+            let golden = farm::farm::golden::current();
+            if *check {
+                let built = farm::farm::golden::available(&golden).await?;
+                println!("{golden}: {}", if built { "built" } else { "not built" });
+                return Ok(());
+            }
+            farm::farm::golden::ensure(farm::farm::golden::DEFAULT_OS, &farm::farm::ALL_IN_ONE)
+                .await?;
+            println!("{golden}: built");
+            return Ok(());
+        }
         Command::Agent {
             mode: Some(AgentMode::Connect { coordinator, token }),
         } => {
@@ -542,6 +560,7 @@ async fn main() -> Result<()> {
         Command::Catalog { .. }
         | Command::Plan { .. }
         | Command::Openapi
+        | Command::Golden { .. }
         | Command::Agent { .. } => {
             unreachable!()
         }

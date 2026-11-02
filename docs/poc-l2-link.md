@@ -91,7 +91,8 @@ all-in-one으로 배포하므로 compute가 하나뿐이라 evacuate를 할 수 
 
 1. ~~control 1 + compute 2 multinode 배포와 evacuate~~ 완료. 아래 "multinode와 evacuate" 참고.
 2. **(다음 할 일)** 스위치를 farm-agent로 옮기고, VM별 토큰으로 링크를 인증한다. 프레임을 묶어 보내 MTU 1500의
-   처리량을 높인다. golden image에 `farm-link`와 systemd unit을 넣는다.
+   처리량을 높인다. `farm-link`와 systemd unit은 VM을 만들 때 다른 farm 파일과 함께 넣는다
+   (`guest/farm/`, `install_guest_files`).
 3. farm 모델에 노드 구성(control/compute 수)과 공유 스토리지 선택을 넣는다. plan, 메모리 예산,
    배포 단계, 포탈의 노드·토폴로지 화면을 바꾼다.
 4. 여러 VM 스냅샷.
@@ -132,7 +133,8 @@ all-in-one으로 배포하므로 compute가 하나뿐이라 evacuate를 할 수 
 - kolla의 `kolla_container`는 docker와 dbus를 import한다. compute가 ctl로 delegate하는 nova-cell
   task(hypervisor·cell 목록)는 compute의 interpreter인 `/usr/bin/python3`로 ctl에서 돈다. bootstrap은
   ctl의 venv에만 docker SDK를 넣으므로 ctl의 시스템 python에 `python3-dbus`와 `docker`를 따로 설치한다.
-- golden image의 `authorized_keys`는 끝에 개행이 없다. 키를 덧붙이면 앞 키와 한 줄로 붙는다.
+  `python3-dbus`는 이제 golden image(`guest/os/rocky10.sh`)에 들어 있다.
+- 예전 Docker 이미지의 `authorized_keys`는 끝에 개행이 없었다. 지금 golden image에는 이 파일이 없다.
 - `msb copy`는 실행 권한을 남기지 않는다. 복사 뒤 `chmod`한다.
 - 게스트 hostname은 VM마다 달라야 한다(`mn-ctl` 등). 지금의 고정 `farm-aio`는 multinode에서 쓸 수 없다.
 
@@ -140,7 +142,11 @@ all-in-one으로 배포하므로 compute가 하나뿐이라 evacuate를 할 수 
 
 ```bash
 git fetch origin && git switch poc/l2-link
-task docker-build                 # farm-golden:rocky10을 Docker로 만들고 msb에 load
+# PoC 스크립트는 msb CLI로 init(systemd)을 켠 VM을 만들어야 해서, 골든 스냅샷이 아니라 Docker로 만든
+# 예전 이미지를 쓴다. msb CLI의 restore에는 init을 지정하는 옵션이 없다.
+rm -rf /tmp/farm-old && mkdir /tmp/farm-old && git archive 71594d0 docker | tar -x -C /tmp/farm-old
+docker build -t farm-golden:rocky10 /tmp/farm-old/docker
+docker save farm-golden:rocky10 | msb load --tag farm-golden:rocky10
 sh scripts/poc-l2-link.sh up      # farm-link 빌드, VM 2대, 스위치와 링크
 sh scripts/poc-l2-link.sh bench   # 위 표와 비교
 sh scripts/poc-l2-link.sh down

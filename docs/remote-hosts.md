@@ -32,9 +32,9 @@ keyboard-interactive/MFA, 호스트 인증서/CA, sudo 비밀번호 입력은 �
 - 비대화형 SSH exec, Bash, GNU `timeout`, `awk`, `grep`, `df`, `flock`, `tar`, `install`, `sha256sum`, `curl`이 필요하다.
 - 시험 VM 준비에는 가용 메모리 768 MiB와 홈 디렉터리 볼륨의 여유 디스크 8 GiB 이상을 요구한다.
   실제 Farm은 별도로 기본 3 GiB에 선택 서비스 메모리를 더한 게스트 메모리를 예약하며, 원격 호스트별 한도는 전체 메모리의 80%다.
-- golden image가 없으면 해당 사용자로 동작하는 Docker/BuildKit이 필요하다. Docker와 OS 패키지,
-  sudo 정책은 자동 설치·변경하지 않는다. 기존 golden image가 있으면 Docker 없이 재사용할 수 있다.
-- 타겟에서 GitHub 릴리스와 Docker/패키지 레지스트리로 나갈 수 있어야 한다.
+- Docker는 필요 없다. OS 패키지와 sudo 정책은 자동 설치·변경하지 않는다.
+- 타겟에서 GitHub 릴리스, OCI 레지스트리(Docker Hub의 `rockylinux/rockylinux:10`)와 배포판 패키지
+  미러로 나갈 수 있어야 한다.
 
 준비 작업은 다음 순서다.
 
@@ -44,10 +44,9 @@ keyboard-interactive/MFA, 호스트 인증서/CA, sudo 비밀번호 입력은 �
    `~/.microsandbox/lib`에 설치한다. 이후 명령은 해당 bin 경로를 사용한다.
    이미 0.7.13이면 재사용한다. 낮은 버전은 msb 공식 설치기처럼 그 자리에서 교체하며,
    실행 중인 sandbox는 기존 런타임으로 계속 돈다. 더 높은 버전은 다운그레이드하지 않고 실패한다.
-3. `farm-golden:rocky10` 캐시가 없으면 바이너리에 포함한 `docker/` 빌드 파일로 이미지를 만들고
-   `docker save` → `msb load`로 로드한다. 작업 디렉터리는 종료 시 제거한다.
-   개발자의 `docker/authorized_keys`는 전송하지 않고 빈 파일을 사용한다.
-4. UUID를 포함한 `farm-check-*` 시험 VM을 512 MiB로 부팅하고 `msb exec ... /bin/true`를 실행한 뒤 삭제한다.
+3. golden image는 빌드하지 않는다. 그 호스트의 첫 farm이 msb로 빌드한다(README의 Golden image 참고).
+   점검 결과의 `golden_image_available`은 이 빌드의 golden image가 이미 있는지만 알린다.
+4. UUID를 포함한 `farm-check-*` 시험 VM을 golden image의 기본 이미지로 512 MiB 부팅하고 `msb exec ... /bin/true`를 실행한 뒤 삭제한다.
    외부 네트워크는 비활성화하고 최대 실행 시간을 120초로 제한한다.
 5. 최종 점검과 시험 VM 성공 후에만 호스트를 `ready`로 표시한다. `FARM_AGENT_PATH`가 설정되어 있으면 실행기 업로드·체크섬·프로토콜 검증도 수행한다.
 
@@ -270,7 +269,7 @@ coordinator) 사용한다.
    (Linux 실행기는 `farm-agent connect <url>`). 끊기면 1초부터 30초까지 늘려 가며 다시 접속한다.
 3. 연결되면 점검·환경 준비를 실행한다. 점검, msb 설치와 시험 VM 부팅은 그 호스트의 agent가 직접 한다.
    msb가 없거나 0.7.13보다 낮으면 SSH 호스트와 같은 설치 스크립트로 공식 릴리스를 설치·업그레이드한다
-   (Linux, Apple Silicon macOS. 그 외 플랫폼은 직접 설치). golden image(`task docker-build`)는 호스트에 직접 준비한다.
+   (Linux, Apple Silicon macOS. 그 외 플랫폼은 직접 설치). golden image는 첫 farm이 빌드한다.
 
 요청·진행·결과는 SSH 실행기와 같은 프로토콜을 세션 번호로 나눠 한 소켓에 싣는다. 접속에는 API token이 아니라
 호스트 토큰을 `Authorization: Bearer`로 쓴다. 연결이 끊기면 그 소켓의 진행 중인 작업은 실패로 끝나고,

@@ -1,6 +1,7 @@
 #!/bin/sh
 # PoC: one control and two compute VMs joined by farm-link and deployed with Kolla multinode,
 # then a compute isolated and its instance evacuated (see docs/poc-l2-link.md).
+# Needs the former Docker-built farm-golden:rocky10 image; see "다른 머신에서 이어가기" there.
 #   sh scripts/poc-multinode.sh up              start the switch, create and link the VMs
 #   sh scripts/poc-multinode.sh deploy [FROM [TO]]  install kolla-ansible on ctl and deploy
 #   sh scripts/poc-multinode.sh evacuate        boot an instance on c1, isolate c1, evacuate

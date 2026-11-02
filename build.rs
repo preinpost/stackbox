@@ -1,9 +1,9 @@
 //! Bakes an identity of the agent's own sources into every binary, so a stale
 //! farm-agent artifact can be told apart from the coordinator that would use it.
 //!
-//! The identity covers what the protocol depends on (Rust sources and the image
-//! recipe), not the git revision: documentation or portal commits must not force
-//! every host to reinstall its agent.
+//! The identity covers what the protocol depends on (Rust sources and the guest files
+//! and image recipes under `guest/`), not the git revision: documentation or portal
+//! commits must not force every host to reinstall its agent.
 use std::{fs, path::Path};
 
 fn main() {
@@ -13,6 +13,7 @@ fn main() {
         "Cargo.toml",
         "Cargo.lock",
         "src",
+        "guest",
         "docker/agent.Dockerfile",
     ] {
         println!("cargo:rerun-if-changed={path}");
@@ -28,6 +29,7 @@ fn main() {
 fn source_identity() -> String {
     let mut files = Vec::new();
     collect(Path::new("src"), &mut files);
+    collect(Path::new("guest"), &mut files);
     files.push("Cargo.toml".into());
     files.push("Cargo.lock".into());
     files.push("docker/agent.Dockerfile".into());
@@ -51,9 +53,10 @@ fn collect(dir: &Path, files: &mut Vec<String>) {
         let path = entry.path();
         if path.is_dir() {
             collect(&path, files);
-        } else if path
-            .extension()
-            .is_some_and(|ext| ext == "rs" || ext == "py")
+        } else if path.starts_with("guest")
+            || path
+                .extension()
+                .is_some_and(|ext| ext == "rs" || ext == "py")
         {
             files.push(path.display().to_string());
         }

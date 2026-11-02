@@ -238,6 +238,7 @@ pub struct HostInspection {
     pub msb_version: Option<String>,
     pub msb_compatible: bool,
     pub docker_available: bool,
+    /// This build's golden image is built; otherwise the first farm on the host builds it.
     pub golden_image_available: bool,
     pub vm_boot_verified: bool,
     pub checked_at: u64,
@@ -251,7 +252,7 @@ impl HostInspection {
         self.compatible && self.kvm_available && self.msb_compatible
     }
     pub fn status(&self) -> HostStatus {
-        if self.runtime_ready() && self.golden_image_available && self.vm_boot_verified {
+        if self.runtime_ready() && self.vm_boot_verified {
             HostStatus::Ready
         } else if self.runtime_ready() {
             HostStatus::RuntimeReady

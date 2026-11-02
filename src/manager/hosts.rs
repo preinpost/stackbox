@@ -585,6 +585,21 @@ impl FarmManager {
         inspection.ok_or_else(|| anyhow::anyhow!("host has no inspection to report"))
     }
 
+    /// Tell how the host gets its golden image, which preparation leaves to the first farm.
+    fn golden_event(&self, job: &str, inspection: &HostInspection) -> Result<()> {
+        let golden = crate::farm::golden::current();
+        self.host_event(
+            job,
+            &if inspection.golden_image_available {
+                format!("Golden image {golden} is built")
+            } else {
+                format!(
+                    "Golden image {golden} is not built yet; the first farm builds it from {} with msb",
+                    crate::farm::golden::DEFAULT_OS.base_image
+                )
+            },
+        )
+    }
     fn host_event(&self, job: &str, message: &str) -> Result<()> {
         self.update(|state| {
             let job = state
@@ -637,7 +652,6 @@ impl FarmManager {
         let mut inspection = ssh.inspect().await?;
         // A read-only check may retain the previous successful boot evidence for the same runtime.
         inspection.vm_boot_verified = inspection.runtime_ready()
-            && inspection.golden_image_available
             && stored
                 .host
                 .inspection
@@ -716,22 +730,6 @@ impl FarmManager {
         ssh.install().await?;
         inspection = ssh.inspect().await?;
         self.host_inspection(&job.host_id, inspection.clone())?;
-        if !inspection.golden_image_available {
-            anyhow::ensure!(
-                inspection.docker_available,
-                "Docker is unavailable to the SSH user; configure Docker access before building the golden image"
-            );
-            self.host_event(
-                id,
-                "Building and loading farm-golden:rocky10; this can take up to 20 minutes",
-            )?;
-            ssh.golden_image().await?;
-        } else {
-            self.host_event(
-                id,
-                "Existing farm-golden:rocky10 found; keeping the cached image",
-            )?;
-        }
         self.host_event(
             id,
             "Booting a 512 MiB verification VM, executing a command and removing it",
@@ -739,11 +737,12 @@ impl FarmManager {
         ssh.smoke(id).await?;
         inspection = ssh.inspect().await?;
         anyhow::ensure!(
-            inspection.runtime_ready() && inspection.golden_image_available,
+            inspection.runtime_ready(),
             "host prerequisites changed during preparation; inspect the host and retry"
         );
         inspection.vm_boot_verified = true;
         self.host_event(id, "VM boot, command execution and cleanup verified")?;
+        self.golden_event(id, &inspection)?;
         if self.has_current_agent(&inspection.platform()) {
             self.install_host_agent(&ssh, &job).await?;
         } else {
@@ -759,8 +758,7 @@ impl FarmManager {
     }
     /// Check or prepare a host whose agent needs no installation: this machine, or a host
     /// that dials in. Its agent inspects the host, installs or upgrades msb (Linux and Apple
-    /// Silicon macOS) and boots the test VM. The golden image is built by hand there
-    /// (`task docker-build`).
+    /// Silicon macOS) and boots the test VM.
     async fn run_agent_host_job(
         &self,
         job: &HostJob,
@@ -799,7 +797,6 @@ impl FarmManager {
         let mut inspection = inspect().await?;
         inspection.vm_boot_verified = !matches!(job.kind, HostJobKind::Prepare)
             && inspection.runtime_ready()
-            && inspection.golden_image_available
             && stored
                 .host
                 .inspection
@@ -828,11 +825,6 @@ impl FarmManager {
                 inspection.msb_version.as_deref().unwrap_or("no msb")
             );
         }
-        anyhow::ensure!(
-            inspection.golden_image_available,
-            "build {} on the host first with `task docker-build`",
-            crate::farm::BASE_IMAGE
-        );
         self.host_event(
             id,
             "Booting a 512 MiB verification VM, executing a command and removing it",
@@ -840,11 +832,12 @@ impl FarmManager {
         call(Operation::VerifyVm).await?;
         inspection = inspect().await?;
         anyhow::ensure!(
-            inspection.runtime_ready() && inspection.golden_image_available,
+            inspection.runtime_ready(),
             "the host's prerequisites changed during preparation; check it and retry"
         );
         inspection.vm_boot_verified = true;
         self.host_event(id, "VM boot, command execution and cleanup verified")?;
+        self.golden_event(id, &inspection)?;
         Ok(inspection)
     }
     async fn install_host_agent(&self, ssh: &Session, job: &HostJob) -> Result<()> {

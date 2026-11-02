@@ -77,9 +77,9 @@ pub async fn inspect() -> HostInspection {
             .filter(|v| v.len() < 32 && v.bytes().all(|b| b.is_ascii_digit() || b == b'.'))
             .map(str::to_owned)
     });
-    let golden = output("msb", &["image", "list", "--quiet"])
+    let golden = crate::farm::golden::available(&crate::farm::golden::current())
         .await
-        .is_some_and(|list| list.lines().any(|l| l.trim() == crate::farm::BASE_IMAGE));
+        .unwrap_or(false);
     let docker = output("docker", &["version", "--format", "{{.Server.Version}}"])
         .await
         .is_some();

@@ -768,7 +768,8 @@ async fn remote_host_preparation_is_serialized_idempotent_and_secrets_never_reac
         JobStatus::Succeeded
     );
     let calls = fixture.observed.calls.lock().unwrap().clone();
-    assert_eq!(calls.iter().filter(|c| *c == "golden").count(), 1);
+    // Preparation leaves the golden image to the first farm; it never builds with Docker.
+    assert!(!calls.iter().any(|c| c == "golden"), "{calls:?}");
     assert_eq!(calls.iter().filter(|c| *c == "smoke").count(), 2);
     fixture.observed.fail_smoke.store(true, Ordering::SeqCst);
     let job = manager

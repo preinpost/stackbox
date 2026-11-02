@@ -93,7 +93,7 @@ pub enum Operation {
     },
     /// Report this host's OS, hypervisor, msb, golden image and resources.
     Inspect,
-    /// Boot a small VM from the golden image, run a command in it and remove it.
+    /// Boot a small VM from the golden image's base image, run a command in it and remove it.
     VerifyVm,
     /// Install the coordinator's msb release, upgrading an older one; a newer one fails.
     InstallMsb,
@@ -149,7 +149,8 @@ impl Operation {
         match self {
             // An attach follows a deploy, which stops itself after the same time.
             Self::Deploy { .. } | Self::Attach { .. } => 7200,
-            Self::Create { .. } => 600,
+            // The host's first farm also builds the golden image, mostly package downloads.
+            Self::Create { .. } => 1800,
             Self::Delete { .. } => 180,
             // A host can hold several farms, each destroyed VM by VM.
             Self::Purge => 1800,

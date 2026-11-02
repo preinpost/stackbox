@@ -460,11 +460,7 @@ impl Session {
         }
     }
     pub async fn inspect(&self) -> Result<HostInspection> {
-        parse_inspection(
-            &self
-                .run(include_str!("inspect.sh"), 45, "Host inspection")
-                .await?,
-        )
+        parse_inspection(&self.run(&inspect_script(), 45, "Host inspection").await?)
     }
     pub async fn install(&self) -> Result<()> {
         self.run(
@@ -474,43 +470,6 @@ impl Session {
                 "Pinned msb {} installation (curl, tar, sha256sum and flock required)",
                 super::MSB_VERSION
             ),
-        )
-        .await?;
-        Ok(())
-    }
-    pub async fn golden_image(&self) -> Result<()> {
-        // No personal authorized_keys from the working tree is sent to a target.
-        let mut script = format!(
-            "{COMMON}\nmkdir -p \"$HOME/.local/share/farm\"\nexec 9>\"$HOME/.local/share/farm/bootstrap.lock\"\nflock -n 9\nif msb image list --quiet | grep -Fxq 'farm-golden:rocky10'; then exit 0; fi\nwork=$(mktemp -d)\ntrap 'rm -rf \"$work\"' EXIT\ncd \"$work\"\n"
-        );
-        for (name, contents) in [
-            ("Dockerfile", include_str!("../../docker/Dockerfile")),
-            ("farm-hostname", include_str!("../../docker/farm-hostname")),
-            ("farm-external", include_str!("../../docker/farm-external")),
-            (
-                "farm-external.service",
-                include_str!("../../docker/farm-external.service"),
-            ),
-            (
-                "farm-hostname.service",
-                include_str!("../../docker/farm-hostname.service"),
-            ),
-            (
-                "disable-ipv6.service",
-                include_str!("../../docker/disable-ipv6.service"),
-            ),
-            ("authorized_keys", ""),
-        ] {
-            script.push_str(&format!(
-                "printf '%s' '{}' | base64 -d > '{name}'\n",
-                STANDARD.encode(contents)
-            ));
-        }
-        script.push_str("docker build -t farm-golden:rocky10 . </dev/null\ndocker save farm-golden:rocky10 -o golden.tar\nmsb load --tag farm-golden:rocky10 < golden.tar\nmsb image list --quiet | grep -Fxq 'farm-golden:rocky10'\n");
-        self.run(
-            &script,
-            1200,
-            "Golden image build (working Docker daemon and BuildKit required)",
         )
         .await?;
         Ok(())
@@ -532,12 +491,19 @@ pub(crate) fn install_script() -> String {
     include_str!("install.sh").replace("@MSB_VERSION@", super::MSB_VERSION)
 }
 
-/// Boot a small VM from the golden image, run a command in it and remove it.
+/// Report the host's facts; `golden` says whether this build's golden image is built yet.
+fn inspect_script() -> String {
+    include_str!("inspect.sh").replace("@GOLDEN@", &crate::farm::golden::current())
+}
+
+/// Boot a small VM from the base image the golden image is built from, run a command in it
+/// and remove it.
 pub(crate) fn smoke_script(token: &str) -> Result<String> {
     // Token comes exclusively from a locally generated UUID, never an API field.
     ensure!(uuid::Uuid::parse_str(token).is_ok(), "invalid smoke token");
     Ok(format!(
-        "{COMMON}\nname=farm-check-{token}\ntrap 'msb remove --force \"$name\" >/dev/null 2>&1' EXIT\nmsb create --name \"$name\" --cpus 1 --memory 512M --root-disk 2G --max-duration 120s --no-net --init /sbin/init farm-golden:rocky10\nmsb exec \"$name\" -- /bin/true\nmsb remove --force \"$name\"\ntrap - EXIT\n"
+        "{COMMON}\nname=farm-check-{token}\ntrap 'msb remove --force \"$name\" >/dev/null 2>&1' EXIT\nmsb create --name \"$name\" --cpus 1 --memory 512M --root-disk 2G --max-duration 120s --no-net {image}\nmsb exec \"$name\" -- /bin/true\nmsb remove --force \"$name\"\ntrap - EXIT\n",
+        image = crate::farm::golden::DEFAULT_OS.base_image
     ))
 }
 

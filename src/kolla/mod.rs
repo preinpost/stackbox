@@ -218,51 +218,14 @@ async fn prepare(sandbox: &Sandbox, components: &[String], sink: &EventSink) -> 
     step(sink, "게스트 부팅과 systemd 대기")?;
     farm::wait_until_booted(sandbox).await?;
     step(sink, "farm-identity·farm-hostname 유닛 적용")?;
-    // Upgrade cached golden images too. msb resets /etc/hosts on reboot, so
-    // restore the live eth0 hostname before Docker creates host-network containers.
-    sandbox
-        .fs()
-        .write(
-            "/usr/local/sbin/farm-identity",
-            include_str!("../../docker/farm-identity"),
-        )
-        .await?;
-    sandbox
-        .fs()
-        .write(
-            "/etc/systemd/system/farm-identity.service",
-            include_str!("../../docker/farm-identity.service"),
-        )
-        .await?;
-    sandbox
-        .fs()
-        .write(
-            "/usr/local/sbin/farm-hostname",
-            include_str!("../../docker/farm-hostname"),
-        )
-        .await?;
-    sandbox
-        .fs()
-        .write(
-            "/etc/systemd/system/farm-hostname.service",
-            include_str!("../../docker/farm-hostname.service"),
-        )
-        .await?;
-    sandbox
-        .fs()
-        .write(
-            "/usr/local/sbin/farm-external",
-            include_str!("../../docker/farm-external"),
-        )
-        .await?;
-    sandbox
-        .fs()
-        .write(
-            "/etc/systemd/system/farm-external.service",
-            include_str!("../../docker/farm-external.service"),
-        )
-        .await?;
-    run(sandbox, "chmod 755 /usr/local/sbin/farm-identity /usr/local/sbin/farm-hostname /usr/local/sbin/farm-external; systemctl daemon-reload; systemctl enable farm-identity.service farm-hostname.service farm-external.service; systemctl restart farm-identity.service farm-hostname.service").await?;
+    // Farms made by an older build get the current units too. msb resets /etc/hosts on
+    // reboot, so restore the hostname mapping before Docker creates host-network containers.
+    farm::install_guest_files(sandbox).await?;
+    run(
+        sandbox,
+        "systemctl restart farm-identity.service farm-hostname.service",
+    )
+    .await?;
     step(sink, "Docker 마운트 전파와 /dev/kvm 권한 준비")?;
     // Kolla toolbox bind-mounts /run with shared propagation, and nova_libvirt runs QEMU
     // as uid/gid 42427 without systemd-udevd in the guest. Apply both now and on every Docker start.
@@ -306,7 +269,9 @@ systemctl daemon-reload"#,
                 include_str!("neutron_sitecustomize.py"),
             )
             .await?;
-        run(sandbox, "rpm -q nftables >/dev/null || dnf install -y -q nftables; systemctl restart farm-external.service").await?;
+        // Golden images now install nftables; farms made from the former Docker-built
+        // image may predate it.
+        run(sandbox, "command -v nft >/dev/null || dnf install -y -q nftables; systemctl restart farm-external.service").await?;
     }
     Ok(())
 }
@@ -315,8 +280,11 @@ fn install_script() -> String {
     format!(
         r#"set -euo pipefail
 export PATH={VENV}/bin:$PATH
-step "빌드 도구 설치 (gcc, python3-devel, libffi, openssl)"
-dnf install -y -q gcc python3-devel libffi-devel openssl-devel
+# Golden images install the build tools; farms made from the former Docker-built image lack them.
+if ! command -v gcc >/dev/null; then
+  step "빌드 도구 설치 (gcc, python3-devel, libffi, openssl)"
+  dnf install -y -q gcc python3-devel libffi-devel openssl-devel
+fi
 if [ ! -x {VENV}/bin/kolla-ansible ]; then
   step "kolla-ansible 가상환경 생성 ({VENV})"
   python3 -m venv {VENV}
@@ -895,8 +863,8 @@ mod tests {
             settle_script(None, &components),
             settle_script(Some((&from, &to)), &components),
             OVS_EXTEND_START_SCRIPT.to_owned(),
-            include_str!("../../docker/farm-external").to_owned(),
-            include_str!("../../docker/farm-identity").to_owned(),
+            include_str!("../../guest/farm/farm-external").to_owned(),
+            include_str!("../../guest/farm/farm-identity").to_owned(),
         ];
         for script in scripts {
             let mut child = Command::new("bash")

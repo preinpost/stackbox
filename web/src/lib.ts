@@ -160,10 +160,10 @@ export function hostReady(host: RemoteHost, coordinatorBuildId?: string) {
 /** What still stands between the host and a new farm. */
 export function hostNotice(host: RemoteHost, coordinatorBuildId?: string) {
   if (host.kind === "local")
-    return "Hosts에서 로컬 호스트를 점검하고 환경 준비를 마치세요. msb 0.7.13과 golden image(`task docker-build`)가 필요합니다.";
+    return "Hosts에서 로컬 호스트를 점검하고 환경 준비를 마치세요. msb 0.7.13이 필요합니다.";
   if (host.kind === "agent")
     return host.connected
-      ? "Hosts에서 이 호스트를 점검하고 환경 준비를 마치세요. 호스트에 msb 0.7.13과 golden image(`task docker-build`)가 필요합니다."
+      ? "Hosts에서 이 호스트를 점검하고 환경 준비를 마치세요. 호스트에 msb 0.7.13이 필요합니다."
       : "에이전트가 연결되어 있지 않습니다. 호스트에서 `farm agent connect`를 실행하세요.";
   if (agentBuildMismatch(host.agent?.artifact, coordinatorBuildId))
     return "설치된 Farm 실행기가 이 coordinator와 다른 소스에서 빌드되었습니다. Coordinator는 시작할 때 현재 실행기를 자동으로 재설치합니다. 실패했다면 `task agent-build` 후 Coordinator를 재시작하거나 Farm 실행기 재설치를 누르세요.";

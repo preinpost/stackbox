@@ -1,8 +1,6 @@
 use std::fmt;
 use std::str::FromStr;
 
-pub const BASE_IMAGE: &str = "farm-golden:rocky10";
-
 #[derive(
     Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, utoipa::ToSchema,
 )]

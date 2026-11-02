@@ -16,7 +16,7 @@ Nova는 microsandbox nested virtualization으로 게스트에 `/dev/kvm`이 있�
 Linux에서는 접근 가능한 `/dev/kvm`이 필요합니다.
 
 ```bash
-task docker-build               # farm-golden:rocky10 빌드 후 msb 캐시에 로드
+task golden                     # 선택: golden image를 미리 빌드 (없으면 첫 farm이 빌드)
 cargo build --release
 
 ./target/release/farm catalog --json
@@ -54,6 +54,24 @@ farm settle demo                         # VM 재시작 뒤 배포 없이 서비
 **데몬 실행 중에는 포탈/API로 작업하고, 직접 CLI를 사용하려면 데몬을 먼저 종료**합니다.
 `catalog`, `plan`, `openapi`는 잠금 없이 실행됩니다.
 
+## Golden image
+
+모든 farm VM은 호스트의 golden image에서 시작합니다. golden image는 msb 디스크 스냅샷
+`farm-golden-<os>:<레시피 해시>`입니다. Docker도 호스트에 미리 준비할 것도 없습니다.
+
+- 호스트에 그 스냅샷이 없으면 첫 farm을 만들 때 msb가 빌드합니다. 배포판 공식 OCI 이미지
+  (`rockylinux/rockylinux:10`)로 VM을 띄워 `guest/os/<os>.sh`를 실행하고, VM을 멈춘 뒤 디스크(root와
+  Docker·containerd용 디스크 두 개)를 스냅샷으로 뜹니다. M1 Max에서 약 35초 걸렸습니다.
+  `task golden`(`farm golden`)으로 미리 빌드하고, `farm golden --check`로 확인할 수 있습니다.
+- `guest/os/<os>.sh`에는 배포판 패키지 설치만 둡니다. farm 전용 파일(`guest/farm/`의 identity·hostname·
+  외부망 유닛)은 VM을 만들 때와 배포할 때 넣으므로, 이 파일을 바꿔도 golden image를 다시 빌드하지 않습니다.
+- 스냅샷 이름의 해시는 기본 이미지, 설치 스크립트, 디스크 크기로 정해집니다. 셋 중 하나가 바뀌면 새 이름이
+  되어 다음 farm이 새로 빌드합니다. 옛 스냅샷은 그 위에서 만든 farm과 스냅샷이 있는 동안 남아 있습니다.
+- 새 배포판은 `guest/os/<id>.sh`와 `src/farm/golden.rs`의 `GuestOs` 항목 하나로 추가합니다. 스크립트는
+  systemd(`/sbin/init`), sshd, python3, nftables, iproute, gcc와 Python 빌드 헤더를 설치해야 합니다.
+- farm 스냅샷의 내보내기 아카이브에는 golden image 층도 들어 있어 golden image가 없는 호스트에서도 복원됩니다.
+- 이 방식 이전에 Docker로 만든 `farm-golden:rocky10` 이미지의 farm과 스냅샷은 그대로 동작합니다.
+
 ## 웹포탈
 
 Tailwind CSS·Base UI와 TanStack Router/Query/Table로 구성한 웹포탈은 `web/`에 있습니다.
@@ -65,7 +83,8 @@ SSH 정보 등록·점검·msb/이미지 준비·실행기 설치를 거칩니�
 farm-agent에게만 VM 작업을 맡깁니다(원격은 SSH, 로컬 호스트는 같은 바이너리를 `farm agent`로 실행).
 준비된 호스트의 **이 호스트에 Farm 만들기**를 누르거나 Farm 생성 시 실행 호스트를 선택하면
 VM 1대의 생성·조회·Kolla 배포·삭제를 해당 호스트에서 실행합니다. Farm 안의 컴포넌트는 같은 VM을 공유합니다.
-로컬 호스트의 환경 준비는 msb 0.7.13을 설치하거나 낮은 버전을 업그레이드하고, golden image(`task docker-build`)를 확인한 뒤 시험 VM을 부팅합니다.
+로컬 호스트의 환경 준비는 msb 0.7.13을 설치하거나 낮은 버전을 업그레이드하고 시험 VM을 부팅합니다.
+golden image는 아래 [Golden image](#golden-image)처럼 호스트의 첫 farm이 msb로 빌드합니다.
 **에이전트 호스트 등록**은 호스트의 agent가 coordinator로 먼저 접속하는 방식입니다. 등록하면 받는 토큰으로
 호스트에서 `FARM_AGENT_TOKEN=<token> farm agent connect https://<coordinator>`(Linux 서버는 `farm-agent connect`)를
 실행해 두면, SSH나 열린 포트 없이 NAT 뒤의 머신이나 외부에 둔 coordinator에서도 같은 방식으로 Farm을 실행합니다.
@@ -288,7 +307,6 @@ cargo clippy --all-targets -- -D warnings
 기존 daemon과 다른 상태 디렉터리를 사용하세요.
 
 ```bash
-task docker-build
 cargo build --bin farm
 state_dir=$(mktemp -d /tmp/farm-openstack.XXXXXX)
 target/debug/farm --state-dir "$state_dir" create e2e

@@ -1,3 +1,4 @@
+pub mod golden;
 mod node;
 mod snapshot;
 mod template;
@@ -13,13 +14,12 @@ use microsandbox::sandbox::SandboxHandle;
 use node::{FARM_LABEL, create_node, describe_node, destroy_node, label};
 pub use node::{
     FarmNode, GUEST_ADDRESS, GUEST_INTERFACE, IDENTITY_CONF, LEGACY_ALL_IN_ONE_SUFFIX, connect,
-    is_node_name, node_name, wait_until_booted,
+    install_guest_files, is_node_name, node_name, wait_until_booted,
 };
 pub use snapshot::{
     FrozenSnapshot, ImportedSnapshot, export_snapshot, freeze_farm, import_snapshot,
     remove_snapshot, restore_farm,
 };
-pub use template::BASE_IMAGE;
 pub use template::{ALL_IN_ONE, NodeSpec, Role};
 pub use terminal::{TerminalInput, TerminalIo, TerminalSize, attach as attach_terminal};
 

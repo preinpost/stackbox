@@ -362,10 +362,6 @@ impl server::Handler for Handler {
             self.observed.calls.lock().unwrap().push("install".into());
             *self.observed.msb.lock().unwrap() = Some(MSB_VERSION.into());
             String::new()
-        } else if script.contains("docker build") {
-            self.observed.calls.lock().unwrap().push("golden".into());
-            self.observed.golden.store(true, Ordering::SeqCst);
-            String::new()
         } else if script.contains("name=farm-check-") {
             self.observed.calls.lock().unwrap().push("smoke".into());
             if self.observed.fail_smoke.load(Ordering::SeqCst) {

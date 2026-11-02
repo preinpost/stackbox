@@ -1,5 +1,6 @@
 #!/bin/sh
 # PoC: two msb VMs on one L2 carried over WebSocket by farm-link (see docs/poc-l2-link.md).
+# Needs the former Docker-built farm-golden:rocky10 image; see "다른 머신에서 이어가기" there.
 #   sh scripts/poc-l2-link.sh up      build, create farm-poc-a/b, start the switch and links
 #   sh scripts/poc-l2-link.sh bench   ping and iperf3 between them
 #   sh scripts/poc-l2-link.sh down    stop the switch and remove the VMs

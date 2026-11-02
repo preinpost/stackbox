@@ -6,7 +6,7 @@
     "license": {
       "name": ""
     },
-    "version": "0.1.5"
+    "version": "0.1.6"
   },
   "paths": {
     "/api/v1/agent-hosts": {
@@ -2523,7 +2523,8 @@
             "minimum": 0
           },
           "golden_image": {
-            "type": "string"
+            "type": "string",
+            "description": "msb snapshot new farms start from; the first farm on the host builds it."
           },
           "golden_image_available": {
             "type": "boolean"
@@ -2603,7 +2604,8 @@
             "type": "boolean"
           },
           "golden_image_available": {
-            "type": "boolean"
+            "type": "boolean",
+            "description": "This build's golden image is built; otherwise the first farm on the host builds it."
           },
           "kvm_available": {
             "type": "boolean"

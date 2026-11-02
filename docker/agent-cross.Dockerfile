@@ -14,6 +14,7 @@ WORKDIR /build
 COPY Cargo.toml Cargo.lock build.rs ./
 COPY src ./src
 COPY docker ./docker
+COPY guest ./guest
 ARG TARGET
 # zig prefixes every -L/-F with SDKROOT, so the SDK paths are given relative to it.
 RUN --mount=type=bind,from=sdk,target=/sdk \

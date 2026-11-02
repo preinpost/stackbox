@@ -756,6 +756,7 @@ export interface components {
       build_id: string;
       /** Format: int64 */
       disk_available_mib?: number | null;
+      /** @description msb snapshot new farms start from; the first farm on the host builds it. */
       golden_image: string;
       golden_image_available: boolean;
       hypervisor: string;
@@ -780,6 +781,7 @@ export interface components {
       /** Format: int64 */
       disk_available_mib: number;
       docker_available: boolean;
+      /** @description This build's golden image is built; otherwise the first farm on the host builds it. */
       golden_image_available: boolean;
       kvm_available: boolean;
       /** Format: int64 */

@@ -336,7 +336,7 @@ export function RemoteHostsPage() {
               <p className="remote-unchecked">
                 {ssh
                   ? "아직 점검하지 않았습니다. SSH 접속과 실행 조건을 확인하세요."
-                  : "아직 점검하지 않았습니다. 호스트의 msb·가상화·golden image를 확인하세요."}
+                  : "아직 점검하지 않았습니다. 호스트의 msb와 가상화를 확인하세요."}
               </p>
             )}
             <div className="remote-actions">
@@ -659,9 +659,13 @@ function HostInspection({
       ready: i.kvm_available,
     },
     { label: "msb 0.7.13", ready: i.msb_compatible },
-    // A hand-prepared golden image needs no Docker access from the agent.
-    ...(local ? [] : [{ label: "Docker 접근", ready: i.docker_available }]),
-    { label: "Golden image", ready: i.golden_image_available },
+    // msb builds the golden image with the host's first farm; no host needs Docker.
+    {
+      label: i.golden_image_available
+        ? "Golden image"
+        : "Golden image · 첫 Farm 생성 때 빌드",
+      ready: i.golden_image_available,
+    },
     { label: "VM 부팅·실행 검증", ready: i.vm_boot_verified },
   ];
   // Only SSH hosts get an agent installed by the coordinator.
@@ -794,7 +798,7 @@ function HostActionDialog({
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<unknown>();
   const prepare = kind === "prepare";
-  // The local and dial-in hosts run their own agent; their golden image is built by hand.
+  // The local and dial-in hosts run their own agent and need no SSH installation.
   const local = host.kind !== "ssh";
   const place = host.kind === "local" ? "로컬 호스트" : "이 호스트";
   const [purge, setPurge] = useState(true);
@@ -838,25 +842,25 @@ function HostActionDialog({
               <>
                 <ol className="remote-prepare-list">
                   <li>msb 0.7.13 설치, 낮은 버전이면 업그레이드</li>
-                  <li>가상화·golden image 확인</li>
+                  <li>가상화 확인</li>
                   <li>512 MiB 시험 VM 부팅 → 명령 실행 → 시험 VM 삭제</li>
                 </ol>
                 <p className="field-hint">
-                  {place}에는 golden image를 직접 준비합니다. 이미지가 없다면
-                  먼저 <code>task docker-build</code>를 실행하세요.
+                  golden image는 첫 Farm을 만들 때 msb가 Rocky Linux 10 이미지로
+                  빌드합니다. 패키지를 내려받느라 첫 생성이 몇 분 더 걸릴 수
+                  있습니다.
                 </p>
               </>
             ) : prepare ? (
               <>
                 <ol className="remote-prepare-list">
                   <li>msb 0.7.13과 libkrunfw 설치, 낮은 버전이면 업그레이드</li>
-                  <li>golden image가 없으면 Docker로 빌드하고 msb에 로드</li>
                   <li>512 MiB 시험 VM 부팅 → 명령 실행 → 시험 VM 삭제</li>
                 </ol>
                 <p className="field-hint">
                   Linux, 동일 CPU 아키텍처, /dev/kvm 접근, 가용 메모리 768 MiB와
-                  디스크 8 GiB 이상이 필요합니다. 이미지 빌드에는 Docker 접근
-                  권한이 필요하며 최대 20분 정도 걸릴 수 있습니다.
+                  디스크 8 GiB 이상이 필요합니다. golden image는 첫 Farm을 만들
+                  때 msb가 빌드하므로 Docker는 필요 없습니다.
                 </p>
               </>
             ) : (

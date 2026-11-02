@@ -12,40 +12,17 @@ tasks:
       - Cargo.lock
       - src/**/*.rs
       - src/**/*.py
+      - guest/**/*
       - docker/agent.Dockerfile
     generates:
       - dist/agent/*/farm-agent
     cmds:
       - for: { var: ARCHS }
         cmd: sh scripts/build-agent.sh {{.ITEM}}
-  docker-build:
-    desc: Build farm-golden:rocky10 image
+  golden:
+    desc: Build this machine's golden image with msb now rather than with the first farm
     cmds:
-      - docker build -t farm-golden:rocky10 ./docker
-      - docker save farm-golden:rocky10 | msb load --tag farm-golden:rocky10
-  run-vm:
-    desc: Run farm-golden:rocky10 image as a VM
-    deps: [docker-build]
-    vars:
-      NAME: '{{.NAME | default "devbox"}}'
-      CPUS: '{{.CPUS | default "2"}}'
-      MEMORY: '{{.MEMORY | default "4G"}}'
-      DISK: '{{.DISK | default "30G"}}'
-    cmds:
-      - |
-        msb create --name {{.NAME}} \
-          --cpus {{.CPUS}} \
-          --memory {{.MEMORY}} \
-          --root-disk {{.DISK}} \
-          --net public,private \
-          --init /sbin/init \
-          --replace \
-          farm-golden:rocky10
-      - msb exec {{.NAME}} -- ip -4 -brief addr show eth0
-  destroy-vm:
-    desc: Destroy the VM
-    cmds:
-      - msb stop devbox && msb rm devbox
+      - cargo run --release -- golden
   build:
     desc: Build the farm release binary
     cmds:
