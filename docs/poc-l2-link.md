@@ -10,14 +10,14 @@ VM 사이에 L2가 필요하다. 이 PoC는 VM 안의 TAP을 WebSocket으로 호
 [farm-poc-b] farm0(TAP, 10.254.0.3) ⇄ farm-link link ─ws─┘
 ```
 
-- `src/bin/farm-link.rs`: `switch`(호스트), `link`(게스트, TAP ⇄ WebSocket), `sink`/`send`(기준 측정).
+- `src/bin/farm-link.rs`(`71594d0`, 지금은 `src/link/`): `switch`(호스트), `link`(게스트, TAP ⇄ WebSocket), `sink`/`send`(기준 측정).
   WebSocket 메시지 하나가 Ethernet 프레임 하나다. 일괄 전송 같은 최적화는 하지 않았다.
 - 스위치는 포트마다 지연과 손실을 넣는다(`POST /impair?name=b&delay_ms=50&loss=0.01`).
   지연은 그 포트로 들어가고 나가는 양방향에 걸리므로 RTT는 두 배만큼 늘어난다.
 - msb 네트워크 코드에는 VM에 두 번째 NIC를 소켓으로 붙이는 기능이 없다. 그래서 L2는 게스트 안의
   TAP으로 만든다. 게스트 커널(6.12.113)에 `/dev/net/tun`이 있다. 게스트는 호스트의 loopback에
   `host.microsandbox.internal`로 닿으므로 스위치는 외부 포트를 열지 않는다.
-- 재현: `sh scripts/poc-l2-link.sh up`, `bench`, `down`.
+- 재현: 아래 "PoC 재현" 참고.
 
 ## 결과
 
@@ -90,18 +90,16 @@ all-in-one으로 배포하므로 compute가 하나뿐이라 evacuate를 할 수 
 ## 다음 단계
 
 1. ~~control 1 + compute 2 multinode 배포와 evacuate~~ 완료. 아래 "multinode와 evacuate" 참고.
-2. **(다음 할 일)** 스위치를 farm-agent로 옮기고, VM별 토큰으로 링크를 인증한다. 프레임을 묶어 보내 MTU 1500의
-   처리량을 높인다. `farm-link`와 systemd unit은 VM을 만들 때 다른 farm 파일과 함께 넣는다
-   (`guest/farm/`, `install_guest_files`).
-3. farm 모델에 노드 구성(control/compute 수)과 공유 스토리지 선택을 넣는다. plan, 메모리 예산,
+2. ~~스위치를 제품 안으로 옮기고 링크 인증, 프레임 묶음 전송~~ 완료. 아래 "제품의 링크" 참고.
+3. **(다음 할 일)** farm 모델에 노드 구성(control/compute 수)과 공유 스토리지 선택을 넣는다. plan, 메모리 예산,
    배포 단계, 포탈의 노드·토폴로지 화면을 바꾼다.
 4. 여러 VM 스냅샷.
 5. 호스트 간 중계, 이어서 UDP 직접 연결.
 
 ## multinode와 evacuate (2026-11-02, Apple M1 Max 32 GiB)
 
-`sh scripts/poc-multinode.sh up`, `deploy`, `evacuate`로 재현한다. 게스트에서 도는 파일은
-`scripts/poc-multinode/`에 있다.
+PoC 스크립트(`scripts/poc-multinode.sh`, `scripts/poc-multinode/`)는 `71594d0`에 있다. 제품의 링크로
+대체해서 지금 브랜치에서는 지웠다. 재현은 아래 "PoC 재현" 참고.
 
 - **구성**: `mn-ctl`(4 vCPU, 6 GiB), `mn-c1`·`mn-c2`(2 vCPU, 3 GiB). VM마다 링크가 두 개다.
   `farm0`(`10.254.0.10~12`, MTU 9000)은 Kolla의 network·api 인터페이스이고, `farm1`(주소 없음)은
@@ -138,27 +136,58 @@ all-in-one으로 배포하므로 compute가 하나뿐이라 evacuate를 할 수 
 - `msb copy`는 실행 권한을 남기지 않는다. 복사 뒤 `chmod`한다.
 - 게스트 hostname은 VM마다 달라야 한다(`mn-ctl` 등). 지금의 고정 `farm-aio`는 multinode에서 쓸 수 없다.
 
-## 다른 머신에서 이어가기
+## 제품의 링크 (2026-11-03, Apple M1 Max)
+
+PoC의 `farm-link`를 `src/link/`로 옮겼다.
+
+- **스위치는 호스트마다 프로세스 하나**다. agent가 필요할 때 `agent switch <agent dir>/switch`로 띄운다
+  (`Switch::ensure`). deploy worker처럼 setsid로 떨어져 나가므로 agent·coordinator가 재시작해도 farm 네트워크는
+  끊기지 않는다. `switch.lock`으로 하나만 돌고, 처음 고른 loopback 포트를 `addr`에 남겨 재시작해도 같은 포트로
+  연다. 게스트의 설정에 그 포트가 들어가기 때문이다.
+- **포트 설정은 파일**(`ports.json`)이다. agent가 `ports.lock` 아래에서 통째로 바꾸고, 스위치는 0.5초마다 보고
+  따라간다. 포트마다 segment(`<farm>/<망>`), 토큰의 SHA-256, 지연·손실이 있다. 포트가 빠지거나 토큰이 바뀌면
+  그 연결을 끊는다. segment가 다르면 프레임이 건너가지 않으므로 farm·망마다 따로 된 L2다.
+- **WebSocket 대신 TCP 위 길이 접두 프레임**이다. 스위치가 호스트 loopback에만 있고 HTTP 경로가 필요 없어서다.
+  연결은 `FARMLINK/1 <port> <token>`으로 시작한다. 양쪽 모두 쌓인 프레임을 한 번에 쓰므로(최대 256 KiB)
+  MTU 1500에서도 처리량이 MTU 9000과 비슷하다.
+- **게스트**는 Linux farm-agent 바이너리를 `/usr/local/sbin/farm-agent`로 받고, `farm-link@<dev>.service`가
+  `agent link --setup`으로 영구(persistent) TAP과 MTU·주소를 만든 뒤 `agent link`로 붙는다. 링크 프로세스가
+  재시작해도 장치와 주소가 남아 그 주소에 바인딩한 서비스가 살아 있다. 바이너리는 Linux 호스트에서는 agent
+  자신이고, 그 밖에서는 `FARM_GUEST_AGENT`로 준다(macOS 개발 머신은 `dist/agent/aarch64/farm-agent`).
+- `create_node`가 `LinkConf` 목록을 받으면 VM을 만든 뒤 링크를 설치한다. 아직 이것을 쓰는 farm 구성은 없다(3번).
+
+실제 VM 3대로 확인했다(`tests/farm_link.rs`, 아래 명령).
+
+| 항목 | 결과 |
+|---|---|
+| 같은 segment a ⇄ b / 다른 segment c | 통신 / 닿지 않음 |
+| iperf3 MTU 9000 | 2.6~2.9 Gbit/s |
+| iperf3 MTU 1500 | 2.6~2.9 Gbit/s (PoC 1.15, Nagle을 켜면 2.0) |
+| 손실 100% → 복구, 지연 25 ms | 끊김 → 복구, RTT 55 ms |
+| 링크 프로세스 재시작 | 주소 유지, 0.2초 뒤 통신 |
+| 스위치 프로세스 SIGKILL → 다시 시작 | 같은 포트, 5~6초 뒤 통신 |
+| 토큰 교체 | 옛 토큰의 게스트는 거절됨 |
+| VM 재시작 | 부팅 때 링크가 다시 붙음 |
 
 ```bash
-git fetch origin && git switch poc/l2-link
-# PoC 스크립트는 msb CLI로 init(systemd)을 켠 VM을 만들어야 해서, 골든 스냅샷이 아니라 Docker로 만든
-# 예전 이미지를 쓴다. msb CLI의 restore에는 init을 지정하는 옵션이 없다.
-rm -rf /tmp/farm-old && mkdir /tmp/farm-old && git archive 71594d0 docker | tar -x -C /tmp/farm-old
-docker build -t farm-golden:rocky10 /tmp/farm-old/docker
-docker save farm-golden:rocky10 | msb load --tag farm-golden:rocky10
-sh scripts/poc-l2-link.sh up      # farm-link 빌드, VM 2대, 스위치와 링크
-sh scripts/poc-l2-link.sh bench   # 위 표와 비교
-sh scripts/poc-l2-link.sh down
+sh scripts/build-agent.sh aarch64     # 게스트용 Linux farm-agent
+FARM_GUEST_AGENT=$PWD/dist/agent/aarch64/farm-agent \
+  cargo test --release --test farm_link -- --ignored --nocapture
+```
 
+## PoC 재현
+
+PoC 스크립트와 `src/bin/farm-link.rs`는 `71594d0`에 있다. msb CLI로 systemd VM을 만들어야 해서 Docker로 만든 예전
+이미지를 쓴다(msb CLI의 restore에는 init을 지정하는 옵션이 없다).
+
+```bash
+git worktree add /tmp/farm-poc 71594d0 && cd /tmp/farm-poc
+task docker-build                      # 예전 farm-golden:rocky10을 Docker로 만들고 msb에 load
+sh scripts/poc-l2-link.sh up && sh scripts/poc-l2-link.sh bench && sh scripts/poc-l2-link.sh down
 sh scripts/poc-multinode.sh up         # VM 3대(약 12 GiB), 링크 6개
 sh scripts/poc-multinode.sh deploy     # kolla-ansible 설치와 multinode 배포 (약 35분)
 sh scripts/poc-multinode.sh evacuate   # c1에 부팅, c1 고립, c2로 evacuate
-sh scripts/poc-multinode.sh heal c1
 sh scripts/poc-multinode.sh down
 ```
 
-- 필요한 것: msb 0.7.13, Docker(게스트용 Linux 바이너리 빌드), Rust, 여유 메모리.
-- 스크립트는 aarch64 게스트를 가정한다(`--platform linux/arm64`). x86_64 Linux 호스트라면
-  `linux/amd64`로 바꾼다.
-- 결과 숫자는 Apple M5 Pro 기준이다. 다른 머신에서는 기준 측정(`sink`/`send`)부터 다시 잰다.
+스크립트는 aarch64 게스트를 가정한다(`--platform linux/arm64`). x86_64 Linux 호스트라면 `linux/amd64`로 바꾼다.

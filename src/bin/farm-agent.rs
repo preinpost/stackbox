@@ -32,6 +32,21 @@ async fn main() {
         }
         std::process::exit(0);
     }
+    // `agent switch <dir>` and `agent link [--setup] <conf>`, as `farm` takes them: the
+    // host's link switch, and a guest's link to it.
+    let result = match &args.iter().map(String::as_str).collect::<Vec<_>>()[..] {
+        ["agent", "switch", dir] => Some(farm::link::host::serve_dir(dir.as_ref()).await),
+        ["agent", "link", "--setup", conf] => Some(farm::link::guest::setup(conf.as_ref()).await),
+        ["agent", "link", conf] => Some(farm::link::guest::run(conf.as_ref()).await),
+        _ => None,
+    };
+    if let Some(result) = result {
+        if let Err(error) = result {
+            eprintln!("farm-agent: {error:#}");
+            std::process::exit(1);
+        }
+        return;
+    }
     if let Err(error) = farm::remote::agent::serve_stdio().await {
         eprintln!("farm-agent: {error}");
         std::process::exit(1);

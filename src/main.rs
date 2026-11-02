@@ -131,6 +131,17 @@ enum AgentMode {
     /// Run a deploy job the agent recorded, detached from the request that started it
     #[command(hide = true)]
     Worker { job: PathBuf },
+    /// Run the host's link switch; the agent starts it
+    #[command(hide = true)]
+    Switch { dir: PathBuf },
+    /// Carry a guest's link to its host's switch (in farm VMs, under farm-link@.service)
+    #[command(hide = true)]
+    Link {
+        /// Only create the TAP device and give it its MTU and address
+        #[arg(long)]
+        setup: bool,
+        conf: PathBuf,
+    },
 }
 #[derive(Subcommand)]
 enum HostCommand {
@@ -342,6 +353,18 @@ async fn main() -> Result<()> {
                 std::process::exit(1);
             }
             std::process::exit(0);
+        }
+        Command::Agent {
+            mode: Some(AgentMode::Switch { dir }),
+        } => return farm::link::host::serve_dir(dir).await,
+        Command::Agent {
+            mode: Some(AgentMode::Link { setup, conf }),
+        } => {
+            return if *setup {
+                farm::link::guest::setup(conf).await
+            } else {
+                farm::link::guest::run(conf).await
+            };
         }
         Command::Agent { mode: None } => {
             if let Err(error) = farm::remote::agent::serve_stdio().await {

@@ -302,6 +302,15 @@ cargo clippy --all-targets -- -D warnings
 관리/API 테스트는 fake backend로 작업 실패·재개·배포 동시성·재시작 복구와 배포 재연결·메모리 예약·
 파일 잠금·저장 실패·인증·SSE를 검증하며 VM을 띄우지 않습니다.
 
+farm VM 사이의 L2 링크(`src/link/`, [docs/poc-l2-link.md](docs/poc-l2-link.md))는 실제 VM 3대로 확인합니다.
+게스트용 Linux farm-agent가 필요합니다.
+
+```bash
+sh scripts/build-agent.sh aarch64
+FARM_GUEST_AGENT=$PWD/dist/agent/aarch64/farm-agent \
+  cargo test --release --test farm_link -- --ignored --nocapture
+```
+
 실제 OpenStack 설치는 별도의 로컬 Farm으로 확인합니다. 기본 구성은 VM 1대에
 3 GiB를 할당하며, 최초 실행에는 패키지와 컨테이너 이미지 다운로드가 필요합니다.
 기존 daemon과 다른 상태 디렉터리를 사용하세요.

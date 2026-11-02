@@ -7,7 +7,9 @@ use microsandbox::{
 
 use super::golden;
 use super::template::{NodeSpec, Role};
+use crate::link::guest::LinkConf;
 use crate::shell::run;
+use std::path::Path;
 
 pub const FARM_LABEL: &str = "farm";
 pub const ROLE_LABEL: &str = "farm.role";
@@ -80,6 +82,11 @@ const GUEST_FILES: &[(&str, &str, &str)] = &[
         include_str!("../../guest/farm/disable-ipv6.service"),
         "644",
     ),
+    (
+        "/etc/systemd/system/farm-link@.service",
+        include_str!("../../guest/farm/farm-link@.service"),
+        "644",
+    ),
 ];
 const GUEST_UNITS: &str = "disable-ipv6 farm-identity farm-hostname farm-external";
 
@@ -134,12 +141,63 @@ pub fn label(handle: &SandboxHandle, key: &str) -> Option<String> {
     handle.config().ok()?.spec.labels.get(key).cloned()
 }
 
+/// The link binary guests run (see [`crate::link::guest`]).
+const GUEST_AGENT: &str = "/usr/local/sbin/farm-agent";
+
+/// Give the guest its links: the Linux farm-agent at `binary`, each link's configuration and
+/// a running `farm-link@<dev>` unit. Returns once every device is up with its address.
+pub async fn install_links(sandbox: &Sandbox, binary: &Path, links: &[LinkConf]) -> Result<()> {
+    if links.is_empty() {
+        return Ok(());
+    }
+    let bytes = tokio::fs::read(binary)
+        .await
+        .with_context(|| format!("read the guest farm-agent {}", binary.display()))?;
+    sandbox.fs().write(GUEST_AGENT, bytes).await?;
+    for link in links {
+        link.validate()?;
+        sandbox
+            .fs()
+            .write(&LinkConf::path(&link.dev), link.render())
+            .await?;
+    }
+    let devs: Vec<String> = links.iter().map(|l| l.dev.clone()).collect();
+    let units: Vec<String> = devs.iter().map(|d| format!("farm-link@{d}")).collect();
+    run(
+        sandbox,
+        &format!(
+            r#"set -e
+chmod 755 {GUEST_AGENT}
+chmod 600 /etc/farm/link-*.conf
+systemctl daemon-reload
+systemctl enable {units}
+systemctl restart {units}
+for dev in {devs}; do
+  for _ in $(seq 100); do ip link show "$dev" >/dev/null 2>&1 && break; sleep 0.1; done
+  ip link show "$dev" >/dev/null
+done"#,
+            units = units.join(" "),
+            devs = devs.join(" "),
+        ),
+    )
+    .await
+    .context("start the guest's links")?;
+    Ok(())
+}
+
 pub async fn create_node(
     farm_id: &str,
     spec: NodeSpec,
     exposure: Option<&crate::model::Exposure>,
     public_ports: &[(u16, u16)],
+    links: &[LinkConf],
 ) -> Result<FarmNode> {
+    // Fail before creating anything when the guests' link binary is missing.
+    let guest_agent = if links.is_empty() {
+        None
+    } else {
+        Some(crate::link::host::guest_agent()?)
+    };
     let name = node_name(farm_id, spec.role);
     let os = golden::DEFAULT_OS;
     // The golden snapshot supplies the root and container disks.
@@ -176,6 +234,9 @@ pub async fn create_node(
         // msb cannot patch files into a VM made from a snapshot, so they follow the boot.
         sandbox.fs().write(IDENTITY_CONF, identity_conf()).await?;
         install_guest_files(&sandbox).await?;
+        if let Some(binary) = &guest_agent {
+            install_links(&sandbox, binary, links).await?;
+        }
         run(&sandbox, "systemctl restart farm-identity farm-hostname").await?;
         let ip = run(&sandbox, "ip -4 -o addr show dev eth0 scope global | awk 'NR==1 { split($4, a, \"/\"); print a[1] }'").await?;
         let ip = ip.trim().parse::<std::net::Ipv4Addr>().context("eth0 has no valid IPv4 address")?;

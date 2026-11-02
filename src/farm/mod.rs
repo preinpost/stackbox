@@ -11,10 +11,10 @@ use futures::future::try_join_all;
 use microsandbox::Sandbox;
 use microsandbox::sandbox::SandboxHandle;
 
-use node::{FARM_LABEL, create_node, describe_node, destroy_node, label};
+use node::{FARM_LABEL, describe_node, destroy_node, label};
 pub use node::{
     FarmNode, GUEST_ADDRESS, GUEST_INTERFACE, IDENTITY_CONF, LEGACY_ALL_IN_ONE_SUFFIX, connect,
-    install_guest_files, is_node_name, node_name, wait_until_booted,
+    create_node, install_guest_files, install_links, is_node_name, node_name, wait_until_booted,
 };
 pub use snapshot::{
     FrozenSnapshot, ImportedSnapshot, export_snapshot, freeze_farm, import_snapshot,
@@ -39,7 +39,7 @@ pub async fn create_farm_with(
     if !farm_handles(farm_id).await?.is_empty() {
         bail!("farm '{farm_id}' already exists");
     }
-    let node = create_node(farm_id, spec, exposure, &public_ports(components)).await?;
+    let node = create_node(farm_id, spec, exposure, &public_ports(components), &[]).await?;
     Ok(vec![node])
 }
 
