@@ -147,9 +147,13 @@ PoC의 `farm-link`를 `src/link/`로 옮겼다.
 - **포트 설정은 파일**(`ports.json`)이다. agent가 `ports.lock` 아래에서 통째로 바꾸고, 스위치는 0.5초마다 보고
   따라간다. 포트마다 segment(`<farm>/<망>`), 토큰의 SHA-256, 지연·손실이 있다. 포트가 빠지거나 토큰이 바뀌면
   그 연결을 끊는다. segment가 다르면 프레임이 건너가지 않으므로 farm·망마다 따로 된 L2다.
-- **WebSocket 대신 TCP 위 길이 접두 프레임**이다. 스위치가 호스트 loopback에만 있고 HTTP 경로가 필요 없어서다.
-  연결은 `FARMLINK/1 <port> <token>`으로 시작한다. 양쪽 모두 쌓인 프레임을 한 번에 쓰므로(최대 256 KiB)
-  MTU 1500에서도 처리량이 MTU 9000과 비슷하다.
+- **연결은 WebSocket**이다. 게스트가 `GET /link?port=<port>`에 `Authorization: Bearer <token>`을 붙여 열고,
+  모르는 포트나 틀린 토큰은 401로 거절된다. 지금은 호스트 loopback만 지나지만, 나중에 링크가 호스트 밖으로
+  나갈 때 HTTP 프록시·TLS(`wss://`)·로드밸런서를 그대로 지나도록 WebSocket을 쓴다. 게스트 설정의 `SWITCH`도
+  URL(`ws://host.microsandbox.internal:<port>/link`)이다.
+- **메시지 하나에 프레임 여러 개**를 담는다. 프레임마다 2바이트 길이를 앞에 붙이고, 양쪽 모두 쌓인 프레임을
+  한 메시지로 보낸다(최대 256 KiB). 그래서 MTU 1500에서도 처리량이 MTU 9000과 비슷하다. 같은 묶음 전송을 한
+  TCP 길이 접두 방식과 견줘 처리량 차이는 측정 오차 안이었다.
 - **게스트**는 Linux farm-agent 바이너리를 `/usr/local/sbin/farm-agent`로 받고, `farm-link@<dev>.service`가
   `agent link --setup`으로 영구(persistent) TAP과 MTU·주소를 만든 뒤 `agent link`로 붙는다. 링크 프로세스가
   재시작해도 장치와 주소가 남아 그 주소에 바인딩한 서비스가 살아 있다. 바이너리는 Linux 호스트에서는 agent
@@ -161,11 +165,11 @@ PoC의 `farm-link`를 `src/link/`로 옮겼다.
 | 항목 | 결과 |
 |---|---|
 | 같은 segment a ⇄ b / 다른 segment c | 통신 / 닿지 않음 |
-| iperf3 MTU 9000 | 2.6~2.9 Gbit/s |
-| iperf3 MTU 1500 | 2.6~2.9 Gbit/s (PoC 1.15, Nagle을 켜면 2.0) |
+| iperf3 MTU 9000 | 2.7 Gbit/s |
+| iperf3 MTU 1500 | 2.8 Gbit/s (PoC 1.15, Nagle을 켜면 2.0) |
 | 손실 100% → 복구, 지연 25 ms | 끊김 → 복구, RTT 55 ms |
 | 링크 프로세스 재시작 | 주소 유지, 0.2초 뒤 통신 |
-| 스위치 프로세스 SIGKILL → 다시 시작 | 같은 포트, 5~6초 뒤 통신 |
+| 스위치 프로세스 SIGKILL → 다시 시작 | 같은 포트, 2초 뒤 통신 |
 | 토큰 교체 | 옛 토큰의 게스트는 거절됨 |
 | VM 재시작 | 부팅 때 링크가 다시 붙음 |
 

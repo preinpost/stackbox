@@ -108,7 +108,7 @@ async fn vms_share_a_segment_through_the_switch() {
             tokens.push(token.clone());
             let link = LinkConf {
                 dev: DEV.into(),
-                switch: switch.guest_address()?,
+                switch: switch.guest_url()?,
                 port: (*port).into(),
                 token,
                 mtu: farm::link::DEFAULT_MTU,

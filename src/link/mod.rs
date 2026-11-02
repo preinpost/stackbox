@@ -1,6 +1,6 @@
 //! A farm's L2 networks between its VMs. msb does not carry traffic from one VM to another,
-//! so each guest bridges a TAP device to a port of a learning switch on its host, over TCP to
-//! the host's loopback (`host.microsandbox.internal`).
+//! so each guest bridges a TAP device to a port of a learning switch on its host, over a
+//! WebSocket to the host's loopback (`host.microsandbox.internal`).
 //!
 //! - [`switch`] runs on the host as a process of its own, started by the agent ([`host`]).
 //!   Ports belong to segments; frames never cross from one segment to another, so each
@@ -8,10 +8,12 @@
 //!   a file the agent edits.
 //! - [`guest`] runs in the guest (`farm-agent agent link <conf>`) under `farm-link@.service`.
 //!
-//! A connection starts with `FARMLINK/1 <port> <token>\n`, answered by `OK\n` or
-//! `ERR <reason>\n`. Frames follow in both directions, each prefixed by its length as a
-//! big-endian u16. Writers queue frames and send what has accumulated in one write, which
-//! keeps the per-frame cost low at the 1500-byte MTU.
+//! A guest opens `GET /link?port=<port>` with `Authorization: Bearer <token>`; the switch
+//! answers 401 to an unknown port or a wrong token. WebSocket keeps the link able to cross
+//! HTTP proxies, TLS and load balancers when it leaves the host. Each binary message carries
+//! one or more Ethernet frames, each prefixed by its length as a big-endian u16: writers send
+//! every frame queued so far in one message, which keeps the per-frame cost low at the
+//! 1500-byte MTU.
 
 pub mod guest;
 pub mod host;
@@ -23,11 +25,14 @@ use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-pub const HELLO: &str = "FARMLINK/1";
+/// Path of the switch's WebSocket endpoint.
+pub const PATH: &str = "/link";
 /// Largest frame the length prefix can carry.
 pub const MAX_FRAME: usize = u16::MAX as usize;
-/// Bytes a writer collects before it sends them in one write.
+/// Bytes a writer collects before it sends them in one message.
 pub const BATCH: usize = 256 * 1024;
+/// A message holds a batch plus the frame that pushed it over [`BATCH`].
+pub const MAX_MESSAGE: usize = BATCH + MAX_FRAME + 2;
 /// Guests reach the host's loopback under this name.
 pub const HOST_NAME: &str = "host.microsandbox.internal";
 /// Farm networks are virtual, so they use jumbo frames.
@@ -110,6 +115,21 @@ pub fn encode(buf: &mut Vec<u8>, frame: &[u8]) {
     buf.extend_from_slice(frame);
 }
 
+/// The frames of one message, sharing its buffer.
+pub fn decode(message: &bytes::Bytes) -> Result<Vec<bytes::Bytes>> {
+    let mut frames = Vec::new();
+    let mut at = 0;
+    while at < message.len() {
+        ensure!(message.len() - at >= 2, "truncated frame length");
+        let len = usize::from(u16::from_be_bytes([message[at], message[at + 1]]));
+        at += 2;
+        ensure!(message.len() - at >= len, "truncated frame");
+        frames.push(message.slice(at..at + len));
+        at += len;
+    }
+    Ok(frames)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -135,5 +155,11 @@ mod tests {
         let mut buf = Vec::new();
         encode(&mut buf, b"abc");
         assert_eq!(buf, [0, 3, b'a', b'b', b'c']);
+        encode(&mut buf, b"");
+        encode(&mut buf, b"de");
+        let message = bytes::Bytes::from(buf);
+        assert_eq!(decode(&message).unwrap(), [&b"abc"[..], b"", b"de"]);
+        assert!(decode(&message.slice(..message.len() - 1)).is_err());
+        assert!(decode(&bytes::Bytes::from_static(&[0])).is_err());
     }
 }

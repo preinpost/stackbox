@@ -11,7 +11,7 @@ use anyhow::{Context, Result, ensure};
 #[derive(Clone, Debug, PartialEq)]
 pub struct LinkConf {
     pub dev: String,
-    /// `host:port` of the host's switch.
+    /// The switch's WebSocket endpoint, `ws://host:port/link` (or `wss://`).
     pub switch: String,
     pub port: String,
     pub token: String,
@@ -81,11 +81,13 @@ impl LinkConf {
                 "ADDRESS prefix"
             );
         }
+        let uri: tokio_tungstenite::tungstenite::http::Uri =
+            self.switch.parse().context("SWITCH is not a URL")?;
         ensure!(
-            self.switch.rsplit_once(':').is_some_and(|(host, port)| {
-                !host.is_empty() && port.parse::<u16>().is_ok_and(|p| p != 0)
-            }),
-            "SWITCH must be host:port"
+            matches!(uri.scheme_str(), Some("ws" | "wss"))
+                && uri.host().is_some_and(|h| !h.is_empty())
+                && uri.query().is_none(),
+            "SWITCH must be a ws:// or wss:// URL without a query"
         );
         Ok(())
     }
@@ -113,17 +115,18 @@ pub async fn run(_conf: &std::path::Path) -> Result<()> {
 #[cfg(target_os = "linux")]
 mod linux {
     use super::{LinkConf, read};
-    use crate::link::{BATCH, HELLO, MAX_FRAME, switch::read_frame};
+    use crate::link::{BATCH, MAX_FRAME, MAX_MESSAGE, decode};
     use anyhow::{Context, Result, bail};
+    use futures::{SinkExt, StreamExt};
     use std::{
         os::fd::{AsRawFd, FromRawFd, OwnedFd},
         path::Path,
         time::Duration,
     };
-    use tokio::{
-        io::unix::AsyncFd,
-        io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-        net::TcpStream,
+    use tokio::io::unix::AsyncFd;
+    use tokio_tungstenite::tungstenite::{
+        self, Message, client::IntoClientRequest, http::header::AUTHORIZATION,
+        protocol::WebSocketConfig,
     };
 
     const TUNSETIFF: libc::c_ulong = 0x4004_54ca;
@@ -273,48 +276,58 @@ mod linux {
     }
 
     async fn session(conf: &LinkConf, tap: &std::sync::Arc<Tap>) -> Result<()> {
-        let stream = TcpStream::connect(&conf.switch)
+        let mut request = format!("{}?port={}", conf.switch, conf.port).into_client_request()?;
+        request
+            .headers_mut()
+            .insert(AUTHORIZATION, format!("Bearer {}", conf.token).parse()?);
+        let config = WebSocketConfig::default()
+            .max_message_size(Some(MAX_MESSAGE))
+            .max_frame_size(Some(MAX_MESSAGE));
+        let socket = match tokio_tungstenite::connect_async_with_config(request, Some(config), true)
             .await
-            .with_context(|| format!("connect {}", conf.switch))?;
-        stream.set_nodelay(true)?;
-        let (read, mut write) = stream.into_split();
-        write
-            .write_all(format!("{HELLO} {} {}\n", conf.port, conf.token).as_bytes())
-            .await?;
-        let mut read = BufReader::with_capacity(BATCH, read);
-        let mut line = String::new();
-        read.read_line(&mut line).await?;
-        if line != "OK\n" {
-            bail!("switch refused {}: {}", conf.port, line.trim());
-        }
+        {
+            Ok((socket, _)) => socket,
+            Err(tungstenite::Error::Http(response)) => {
+                bail!("switch refused {}: {}", conf.port, response.status())
+            }
+            Err(error) => return Err(error).with_context(|| format!("connect {}", conf.switch)),
+        };
         eprintln!("connected to {} as {}", conf.switch, conf.port);
-        let up = tokio::spawn({
+        let (mut sink, mut stream) = socket.split();
+        let mut up = tokio::spawn({
             let tap = tap.clone();
             async move {
-                let mut buf = Vec::with_capacity(BATCH + MAX_FRAME + 2);
+                let mut buf = Vec::with_capacity(MAX_MESSAGE);
                 loop {
                     tap.read_batch(&mut buf).await?;
-                    write.write_all(&buf).await?;
-                    buf.clear();
+                    let message = std::mem::replace(&mut buf, Vec::with_capacity(MAX_MESSAGE));
+                    sink.send(Message::Binary(message.into())).await?;
                 }
                 #[allow(unreachable_code)]
-                Ok::<_, std::io::Error>(())
+                Ok::<_, anyhow::Error>(())
             }
         });
         let down = async {
-            loop {
-                let frame = read_frame(&mut read).await?;
-                // A frame the guest cannot take is lost, as on a wire.
-                let _ = tap.write(&frame).await;
+            while let Some(message) = stream.next().await {
+                let data = match message? {
+                    Message::Binary(data) => data,
+                    Message::Close(_) => break,
+                    _ => continue,
+                };
+                for frame in decode(&data)? {
+                    // A frame the guest cannot take is lost, as on a wire.
+                    let _ = tap.write(&frame).await;
+                }
             }
-            #[allow(unreachable_code)]
-            Ok::<_, std::io::Error>(())
+            Ok::<_, anyhow::Error>(())
         };
         let result = tokio::select! {
             result = down => result,
-            result = up => result.context("link writer")?,
+            result = &mut up => result.context("link writer")?,
         };
-        Ok(result.map(|_| ())?)
+        // A writer left behind would take the TAP's frames from the next connection's.
+        up.abort();
+        result
     }
 }
 
@@ -326,7 +339,7 @@ mod tests {
     fn configuration_round_trips_and_is_checked() {
         let conf = LinkConf {
             dev: "farm0".into(),
-            switch: "host.microsandbox.internal:41234".into(),
+            switch: "ws://host.microsandbox.internal:41234/link".into(),
             port: "dev/ctl/mgmt".into(),
             token: "a".repeat(64),
             mtu: 9000,
@@ -353,7 +366,15 @@ mod tests {
                 ..conf.clone()
             },
             LinkConf {
-                switch: "nohost".into(),
+                switch: "host.microsandbox.internal:41234".into(),
+                ..conf.clone()
+            },
+            LinkConf {
+                switch: "http://host:1/link".into(),
+                ..conf.clone()
+            },
+            LinkConf {
+                switch: "ws://host:1/link?port=x".into(),
                 ..conf.clone()
             },
             LinkConf {

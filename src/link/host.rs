@@ -16,7 +16,7 @@ use std::{
 use anyhow::{Context, Result, anyhow, bail};
 use fs2::FileExt;
 
-use super::{Config, HOST_NAME, Impair, PortConfig, new_token, token_hash, validate_name};
+use super::{Config, HOST_NAME, Impair, PATH, PortConfig, new_token, token_hash, validate_name};
 
 pub struct Switch {
     dir: PathBuf,
@@ -50,10 +50,10 @@ impl Switch {
         Ok(options.open(self.dir.join(name))?)
     }
 
-    /// The switch's address, as guests on this host reach it.
-    pub fn guest_address(&self) -> Result<String> {
+    /// The switch's endpoint, as guests on this host reach it.
+    pub fn guest_url(&self) -> Result<String> {
         let addr = self.addr()?.context("the link switch has not started")?;
-        Ok(format!("{HOST_NAME}:{}", addr.port()))
+        Ok(format!("ws://{HOST_NAME}:{}{PATH}", addr.port()))
     }
     fn addr(&self) -> Result<Option<SocketAddr>> {
         match fs::read_to_string(self.dir.join("addr")) {
@@ -157,7 +157,7 @@ impl Switch {
     }
 
     /// Start the switch with `command` (the agent binary and `agent switch`; the switch
-    /// directory is appended) unless it runs, and return its guest address.
+    /// directory is appended) unless it runs, and return its guest endpoint.
     pub async fn ensure(&self, command: &[OsString]) -> Result<String> {
         if !self.running()? {
             let (program, args) = command.split_first().context("no switch command")?;
@@ -206,7 +206,7 @@ impl Switch {
                     self.dir.join("switch.log").display()
                 )
             })??;
-        self.guest_address()
+        self.guest_url()
     }
 
     /// The switch process: hold the lock, listen on the recorded address (a free loopback
@@ -308,25 +308,18 @@ mod tests {
         );
         assert!(!switch.running().unwrap());
         let address = switch.ensure(&command).await.unwrap();
-        assert!(address.starts_with("host.microsandbox.internal:"));
+        assert!(
+            address.starts_with("ws://host.microsandbox.internal:") && address.ends_with("/link"),
+            "{address}"
+        );
         assert!(switch.running().unwrap());
         // A second start finds it running.
         assert_eq!(switch.ensure(&command).await.unwrap(), address);
         let addr = switch.addr().unwrap().unwrap();
         // The switch serves the port with that token.
-        let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
-        let (read, mut write) = stream.into_split();
-        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
-        write
-            .write_all(format!("FARMLINK/1 f/a/m {token}\n").as_bytes())
-            .await
-            .unwrap();
-        let mut line = String::new();
-        tokio::io::BufReader::new(read)
-            .read_line(&mut line)
-            .await
-            .unwrap();
-        assert_eq!(line, "OK\n");
+        use crate::link::switch::tests::Guest;
+        Guest::connect(addr, "f/a/m", &token).await.unwrap();
+        assert!(Guest::connect(addr, "f/a/m", "wrong").await.is_err());
         switch
             .impair(
                 "f/a/m",

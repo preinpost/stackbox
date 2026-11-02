@@ -1,5 +1,5 @@
-//! The host's learning switch. Each connection is one port; the port's segment decides which
-//! other ports see its frames. Delay and loss apply per port, as on the PoC switch.
+//! The host's learning switch. Each WebSocket connection is one port; the port's segment
+//! decides which other ports see its frames. Delay and loss apply per port, as on the PoC switch.
 
 use std::{
     collections::HashMap,
@@ -8,23 +8,26 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
-use anyhow::{Context, Result, bail};
-use bytes::Bytes;
-use tokio::{
-    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
-    net::{
-        TcpListener, TcpStream,
-        tcp::{OwnedReadHalf, OwnedWriteHalf},
+use anyhow::{Context, Result};
+use axum::{
+    Router,
+    extract::{
+        Query, State as Extract,
+        ws::{Message, WebSocket, WebSocketUpgrade},
     },
-    sync::mpsc,
-    task::AbortHandle,
+    http::{HeaderMap, StatusCode, header::AUTHORIZATION},
+    response::{IntoResponse, Response},
+    routing::get,
 };
+use bytes::Bytes;
+use futures::{SinkExt, StreamExt, stream::SplitSink};
+use serde::Deserialize;
+use tokio::{net::TcpListener, sync::mpsc, task::AbortHandle};
 
-use super::{BATCH, Config, HELLO, Impair, MAX_FRAME, encode, token_hash};
+use super::{BATCH, Config, Impair, MAX_MESSAGE, PATH, decode, encode, token_hash};
 
 /// Frames queued for a port before the switch drops, like a real switch's buffer.
 const QUEUE: usize = 4096;
-const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
 const RELOAD_EVERY: Duration = Duration::from_millis(500);
 
 type Queued = (Option<Instant>, Bytes);
@@ -152,15 +155,14 @@ pub async fn serve(listener: TcpListener, config: PathBuf) -> Result<()> {
         ..Default::default()
     }));
     tokio::spawn(follow(state.clone(), config));
-    loop {
-        let (stream, _) = listener.accept().await?;
-        let state = state.clone();
-        tokio::spawn(async move {
-            if let Err(error) = connection(state, stream).await {
-                eprintln!("link: {error:#}");
-            }
-        });
-    }
+    let app = Router::new().route(PATH, get(upgrade)).with_state(state);
+    use axum::serve::ListenerExt;
+    // Frames are small and latency-bound; Nagle would hold them back.
+    let listener = listener.tap_io(|tcp| {
+        let _ = tcp.set_nodelay(true);
+    });
+    axum::serve(listener, app).await?;
+    Ok(())
 }
 
 fn read_config(path: &Path) -> Result<Config> {
@@ -194,52 +196,55 @@ async fn follow(state: Shared, path: PathBuf) {
     }
 }
 
-async fn connection(state: Shared, stream: TcpStream) -> Result<()> {
-    stream.set_nodelay(true)?;
-    let (read, mut write) = stream.into_split();
-    let mut read = BufReader::with_capacity(BATCH, read);
-    let mut line = Vec::new();
-    tokio::time::timeout(
-        HELLO_TIMEOUT,
-        (&mut read).take(512).read_until(b'\n', &mut line),
-    )
-    .await
-    .context("no hello")??;
-    // A readiness probe connects and closes without a word.
-    if line.is_empty() {
-        return Ok(());
-    }
-    let hello = String::from_utf8_lossy(&line);
-    let (name, token) = match hello.trim_end().split(' ').collect::<Vec<_>>()[..] {
-        [HELLO, name, token] => (name.to_owned(), token.to_owned()),
-        _ => {
-            let _ = write
-                .write_all(b"ERR expected FARMLINK/1 <port> <token>\n")
-                .await;
-            bail!("bad hello");
-        }
-    };
+#[derive(Deserialize)]
+struct LinkQuery {
+    port: String,
+}
+
+async fn upgrade(
+    Extract(state): Extract<Shared>,
+    Query(query): Query<LinkQuery>,
+    headers: HeaderMap,
+    ws: WebSocketUpgrade,
+) -> Response {
+    let token = headers
+        .get(AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .unwrap_or_default();
     let accepted = {
         let state = state.lock().unwrap();
-        state.config.ports.get(&name).and_then(|port| {
+        state.config.ports.get(&query.port).and_then(|port| {
             // Compare hashes in constant time; the token is the port's only credential.
             use subtle::ConstantTimeEq;
             bool::from(
                 port.token_sha256
                     .as_bytes()
-                    .ct_eq(token_hash(&token).as_bytes()),
+                    .ct_eq(token_hash(token).as_bytes()),
             )
             .then(|| (port.segment.clone(), port.impair))
         })
     };
     let Some((segment, impair)) = accepted else {
-        let _ = write.write_all(b"ERR unknown port or wrong token\n").await;
-        bail!("refused port {name}");
+        eprintln!("link: refused port {}", query.port);
+        return (StatusCode::UNAUTHORIZED, "unknown port or wrong token\n").into_response();
     };
-    write.write_all(b"OK\n").await?;
+    ws.max_message_size(MAX_MESSAGE)
+        .max_frame_size(MAX_MESSAGE)
+        .on_upgrade(move |socket| connection(state, query.port, segment, impair, socket))
+}
+
+async fn connection(
+    state: Shared,
+    name: String,
+    segment: String,
+    impair: Impair,
+    socket: WebSocket,
+) {
+    let (sink, stream) = socket.split();
     let (tx, rx) = mpsc::channel(QUEUE);
-    let writer = tokio::spawn(write_frames(rx, write));
-    let reader = tokio::spawn(read_frames(state.clone(), name.clone(), read));
+    let writer = tokio::spawn(write_frames(rx, sink));
+    let reader = tokio::spawn(read_frames(state.clone(), name.clone(), stream));
     let id = {
         let mut state = state.lock().unwrap();
         // The guest reconnected, say after its VM restarted: the new connection wins.
@@ -268,11 +273,14 @@ async fn connection(state: Shared, stream: TcpStream) -> Result<()> {
     }
     writer.abort();
     eprintln!("port {name} down");
-    Ok(())
 }
 
-/// Read frames and forward each run that has already arrived under one lock.
-async fn read_frames(state: Shared, name: String, mut read: BufReader<OwnedReadHalf>) {
+/// Forward the frames of each message under one lock.
+async fn read_frames(
+    state: Shared,
+    name: String,
+    mut stream: futures::stream::SplitStream<WebSocket>,
+) {
     // Delayed frames wait in their own queue, so the connection keeps being read.
     let (delayed_tx, mut delayed_rx) = mpsc::channel::<(Instant, Bytes)>(QUEUE);
     let delayed = tokio::spawn({
@@ -284,54 +292,37 @@ async fn read_frames(state: Shared, name: String, mut read: BufReader<OwnedReadH
             }
         }
     });
-    let _ = async {
-        loop {
-            let mut frames = vec![read_frame(&mut read).await?];
-            while complete_frame(read.buffer()) {
-                frames.push(read_frame(&mut read).await?);
-            }
-            let delay = state
-                .lock()
-                .unwrap()
-                .ports
-                .get(&name)
-                .map_or(0, |live| live.impair.delay_ms);
-            if delay == 0 {
-                state.lock().unwrap().forward(&name, frames);
-            } else {
-                let due = Instant::now() + Duration::from_millis(delay);
-                for frame in frames {
-                    let _ = delayed_tx.try_send((due, frame));
-                }
+    while let Some(Ok(message)) = stream.next().await {
+        let data = match message {
+            Message::Binary(data) => data,
+            Message::Close(_) => break,
+            _ => continue,
+        };
+        let Ok(frames) = decode(&data) else {
+            eprintln!("link: port {name} sent a malformed message");
+            break;
+        };
+        let delay = state
+            .lock()
+            .unwrap()
+            .ports
+            .get(&name)
+            .map_or(0, |live| live.impair.delay_ms);
+        if delay == 0 {
+            state.lock().unwrap().forward(&name, frames);
+        } else {
+            let due = Instant::now() + Duration::from_millis(delay);
+            for frame in frames {
+                let _ = delayed_tx.try_send((due, frame));
             }
         }
-        #[allow(unreachable_code)]
-        Ok::<_, std::io::Error>(())
     }
-    .await;
     delayed.abort();
 }
 
-/// Whether `buffered` starts with a whole frame, which can then be read without waiting.
-pub(crate) fn complete_frame(buffered: &[u8]) -> bool {
-    match buffered {
-        [hi, lo, rest @ ..] => rest.len() >= usize::from(u16::from_be_bytes([*hi, *lo])),
-        _ => false,
-    }
-}
-
-pub(crate) async fn read_frame<R: tokio::io::AsyncRead + Unpin>(
-    read: &mut R,
-) -> std::io::Result<Bytes> {
-    let len = usize::from(read.read_u16().await?);
-    let mut frame = vec![0; len];
-    read.read_exact(&mut frame).await?;
-    Ok(frame.into())
-}
-
-/// Send queued frames, as many per write as have accumulated, each after its due time.
-async fn write_frames(mut rx: mpsc::Receiver<Queued>, mut write: OwnedWriteHalf) {
-    let mut buf = Vec::with_capacity(BATCH + MAX_FRAME + 2);
+/// Send queued frames, as many per message as have accumulated, each after its due time.
+async fn write_frames(mut rx: mpsc::Receiver<Queued>, mut sink: SplitSink<WebSocket, Message>) {
+    let mut buf = Vec::with_capacity(MAX_MESSAGE);
     let _ = async {
         while let Some(first) = rx.recv().await {
             let mut next = Some(first);
@@ -340,8 +331,7 @@ async fn write_frames(mut rx: mpsc::Receiver<Queued>, mut write: OwnedWriteHalf)
                     && due > Instant::now()
                 {
                     if !buf.is_empty() {
-                        write.write_all(&buf).await?;
-                        buf.clear();
+                        send(&mut sink, &mut buf).await?;
                     }
                     tokio::time::sleep_until(due.into()).await;
                 }
@@ -351,18 +341,26 @@ async fn write_frames(mut rx: mpsc::Receiver<Queued>, mut write: OwnedWriteHalf)
                 }
                 next = rx.try_recv().ok();
             }
-            write.write_all(&buf).await?;
-            buf.clear();
+            send(&mut sink, &mut buf).await?;
         }
-        Ok::<_, std::io::Error>(())
+        Ok::<_, axum::Error>(())
     }
     .await;
 }
 
+async fn send(
+    sink: &mut SplitSink<WebSocket, Message>,
+    buf: &mut Vec<u8>,
+) -> Result<(), axum::Error> {
+    let message = std::mem::replace(buf, Vec::with_capacity(MAX_MESSAGE));
+    sink.send(Message::Binary(message.into())).await
+}
+
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::link::{PortConfig, token_hash};
+    use tokio_tungstenite::tungstenite;
 
     fn frame(dst: u8, src: u8, body: &[u8]) -> Vec<u8> {
         let mut f = vec![2, 0, 0, 0, 0, dst, 2, 0, 0, 0, 0, src, 0x08, 0x00];
@@ -371,35 +369,62 @@ mod tests {
     }
     const BROADCAST: u8 = 0xff;
 
-    struct Guest {
-        read: BufReader<OwnedReadHalf>,
-        write: OwnedWriteHalf,
+    type Socket = tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >;
+    pub(crate) struct Guest {
+        socket: Socket,
+        pending: std::collections::VecDeque<Bytes>,
     }
     impl Guest {
-        async fn connect(addr: std::net::SocketAddr, port: &str, token: &str) -> Result<Self> {
-            let stream = TcpStream::connect(addr).await?;
-            let (read, mut write) = stream.into_split();
-            write
-                .write_all(format!("{HELLO} {port} {token}\n").as_bytes())
-                .await?;
-            let mut read = BufReader::new(read);
-            let mut line = String::new();
-            read.read_line(&mut line).await?;
-            anyhow::ensure!(line == "OK\n", "{line}");
-            Ok(Self { read, write })
+        /// Open `port` as a guest would; an Err is the switch's refusal.
+        pub(crate) async fn connect(
+            addr: std::net::SocketAddr,
+            port: &str,
+            token: &str,
+        ) -> Result<Self> {
+            use tungstenite::client::IntoClientRequest;
+            let mut request = format!("ws://{addr}{PATH}?port={port}").into_client_request()?;
+            request
+                .headers_mut()
+                .insert(AUTHORIZATION, format!("Bearer {token}").parse()?);
+            let (socket, _) = tokio_tungstenite::connect_async(request).await?;
+            Ok(Self {
+                socket,
+                pending: Default::default(),
+            })
         }
         async fn send(&mut self, frames: &[Vec<u8>]) {
             let mut buf = Vec::new();
             for f in frames {
                 encode(&mut buf, f);
             }
-            self.write.write_all(&buf).await.unwrap();
+            self.socket
+                .send(tungstenite::Message::Binary(buf.into()))
+                .await
+                .unwrap();
+        }
+        async fn recv_within(&mut self, wait: Duration) -> Option<Bytes> {
+            while self.pending.is_empty() {
+                match tokio::time::timeout(wait, self.socket.next()).await {
+                    Ok(Some(Ok(tungstenite::Message::Binary(data)))) => {
+                        self.pending.extend(decode(&data).unwrap())
+                    }
+                    Ok(Some(Ok(_))) => continue,
+                    _ => return None,
+                }
+            }
+            self.pending.pop_front()
         }
         async fn recv(&mut self) -> Option<Bytes> {
-            tokio::time::timeout(Duration::from_millis(300), read_frame(&mut self.read))
-                .await
-                .ok()
-                .and_then(Result::ok)
+            self.recv_within(Duration::from_millis(300)).await
+        }
+        /// Whether the switch has closed the connection.
+        async fn closed(&mut self) -> bool {
+            matches!(
+                tokio::time::timeout(Duration::from_secs(2), self.socket.next()).await,
+                Ok(None | Some(Err(_)) | Some(Ok(tungstenite::Message::Close(_))))
+            )
         }
     }
 
@@ -440,7 +465,8 @@ mod tests {
             ("g/x/m", "g/m", "tx"),
         ]))
         .await;
-        assert!(Guest::connect(addr, "f/a/m", "wrong").await.is_err());
+        let refused = Guest::connect(addr, "f/a/m", "wrong").await.err().unwrap();
+        assert!(refused.to_string().contains("401"), "{refused}");
         assert!(Guest::connect(addr, "nope", "ta").await.is_err());
         let mut a = Guest::connect(addr, "f/a/m", "ta").await.unwrap();
         let mut b = Guest::connect(addr, "f/b/m", "tb").await.unwrap();
@@ -484,8 +510,7 @@ mod tests {
         a.send(&[frame(BROADCAST, 1, b"x")]).await;
         assert!(b.recv().await.is_none());
         // Delay b instead: frames still arrive, later.
-        let port = cfg.ports.get_mut("f/b/m").unwrap();
-        port.impair = Impair {
+        cfg.ports.get_mut("f/b/m").unwrap().impair = Impair {
             delay_ms: 150,
             loss: 0.0,
         };
@@ -493,10 +518,7 @@ mod tests {
         tokio::time::sleep(RELOAD_EVERY * 3).await;
         let sent = Instant::now();
         a.send(&[frame(BROADCAST, 1, b"y")]).await;
-        let got = tokio::time::timeout(Duration::from_secs(2), read_frame(&mut b.read))
-            .await
-            .unwrap()
-            .unwrap();
+        let got = b.recv_within(Duration::from_secs(2)).await.unwrap();
         assert_eq!(&got[14..], b"y");
         assert!(sent.elapsed() >= Duration::from_millis(140));
         // Removing a port, or rotating its token, ends its connection.
@@ -504,14 +526,8 @@ mod tests {
         cfg.ports.get_mut("f/a/m").unwrap().token_sha256 = token_hash("new");
         write(&cfg);
         tokio::time::sleep(RELOAD_EVERY * 3).await;
-        let mut byte = [0u8; 1];
-        for guest in [&mut a, &mut b] {
-            let n = tokio::time::timeout(Duration::from_secs(2), guest.read.read(&mut byte))
-                .await
-                .unwrap()
-                .unwrap_or(0);
-            assert_eq!(n, 0, "connection still open");
-        }
+        assert!(a.closed().await, "a still connected");
+        assert!(b.closed().await, "b still connected");
         assert!(Guest::connect(addr, "f/a/m", "new").await.is_ok());
     }
 
@@ -526,5 +542,16 @@ mod tests {
         b.send(&[frame(BROADCAST, 2, b"z")]).await;
         assert_eq!(&new.recv().await.unwrap()[14..], b"z");
         assert!(old.recv().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn malformed_messages_end_the_connection() {
+        let (addr, _, _dir) = start(&config(&[("f/a/m", "f/m", "ta")])).await;
+        let mut a = Guest::connect(addr, "f/a/m", "ta").await.unwrap();
+        a.socket
+            .send(tungstenite::Message::Binary(vec![0, 9, 1].into()))
+            .await
+            .unwrap();
+        assert!(a.closed().await);
     }
 }
