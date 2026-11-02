@@ -92,9 +92,9 @@ all-in-one으로 배포하므로 compute가 하나뿐이라 evacuate를 할 수 
 1. ~~control 1 + compute 2 multinode 배포와 evacuate~~ 완료. 아래 "multinode와 evacuate" 참고.
 2. ~~스위치를 제품 안으로 옮기고 링크 인증, 프레임 묶음 전송~~ 완료. 아래 "제품의 링크" 참고.
 3. ~~farm 모델에 노드 구성(control 1 + compute 1~3)을 넣고 plan, 배포, 장애 주입 API, 포털을 바꾼다~~ 완료.
-   아래 "제품의 다중 VM farm" 참고. 공유 스토리지 선택은 아직 하지 않았다(다음 할 일 후보).
-4. 여러 VM 스냅샷.
-5. 호스트 간 중계, 이어서 UDP 직접 연결.
+   아래 "제품의 다중 VM farm" 참고.
+4. 다음 후보 세 가지(공유 스토리지, 여러 VM 스냅샷, 호스트 간 중계)와 남은 검증은 아래 "다음 후보"에 정리했다.
+   순서는 아직 정하지 않았다.
 
 ## multinode와 evacuate (2026-11-02, Apple M1 Max 32 GiB)
 
@@ -191,6 +191,100 @@ FARM_GUEST_AGENT=$PWD/dist/agent/aarch64/farm-agent \
   `farm fault mn compute-1`로 복구하고 `--up`·nova_compute 재시작 뒤 compute-1에 남은 원래 인스턴스가 지워졌다.
 - daemon API로 compute-2에 지연 25 ms를 주자 compute 사이 RTT가 55 ms 이상으로 늘었다.
 - 포털: 생성 화면의 **VM 구성**, 상세 화면 topology의 노드별 **고립·손실 5%·지연 50 ms·복구** 버튼.
+
+## 다음 후보 (2026-11-03 정리)
+
+### 1. 공유 스토리지 선택
+
+**목표**: evacuate 뒤에도 인스턴스 디스크가 남게 하고, live migration도 시험할 수 있게 한다. 지금은 디스크를
+공유하지 않아 evacuate가 이미지로 인스턴스를 새로 만든다.
+
+**게스트 커널에서 확인한 것** (`mn-compute-1`, 6.12.113, modprobe 없음, `/proc/config.gz` 없음):
+
+| 기능 | 결과 | 확인 방법 |
+|---|---|---|
+| NFS 클라이언트 | 없음 | `/proc/filesystems`에 `nfs` 없음 |
+| CephFS·RBD 커널 드라이버 | 없음 | `/proc/filesystems`, `/sys/module` |
+| iSCSI initiator | 없음 | `scsi_transport_iscsi`는 있으나 `/sys/class/iscsi_transport`가 비어 있음(`iscsi_tcp` 없음) |
+| FUSE | 있음 | `/dev/fuse`, `/proc/filesystems`의 `fuse`·`fuseblk` |
+| loop 장치 | 있음 | `/dev/loop-control` |
+
+그래서 처음 적었던 선택지 중 NFS 공유 인스턴스 스토리지와 Cinder LVM(iSCSI)은 지금 커널로는 쓸 수 없다.
+남는 선택지:
+
+- **A. Ceph RBD (권장)**: Nova(`images_type = rbd`), Glance, Cinder가 커널 드라이버 없이 QEMU의 librbd로 디스크에
+  붙는다. 운영 환경과 가장 비슷하고, evacuate는 디스크를 그대로 쓰며 live migration도 된다.
+  - Kolla는 Ceph를 직접 배포하지 않으므로 cephadm으로 따로 띄운다. 처음에는 control VM(또는 storage VM 하나)에
+    MON·MGR·OSD 하나씩, pool `size = 1`로 둔다.
+  - OSD 장치는 loop 장치나 msb가 붙이는 디스크를 쓴다. msb의 owned disk는 ext4로 포맷돼 나오므로 raw 블록이
+    필요하면 그 위 파일을 loop로 쓰는 방식을 먼저 시험한다.
+  - 메모리는 MON·MGR·OSD 합쳐 2~3 GiB 정도를 예상한다(측정 전 추정).
+- **B. FUSE 공유 인스턴스 스토리지**: compute들의 `/var/lib/nova/instances`를 FUSE 파일시스템(GlusterFS 클라이언트,
+  ceph-fuse, sshfs 중 하나)으로 함께 마운트한다. 가볍지만 QEMU 파일 잠금과 성능을 따로 확인해야 하고, 운영
+  환경과는 거리가 있다. A가 막힐 때의 대안으로 둔다.
+- **C. msb 커널에 NFS·iSCSI를 넣기**: libkrunfw 커널을 다시 빌드해야 하므로 범위 밖으로 둔다.
+
+**제품에 넣을 것**
+- plan과 생성 요청에 `storage`(`none` | `rbd` | 나중에 `fuse`)를 넣는다. multinode farm에서만 고를 수 있게 한다.
+- 메모리 예산과 디스크 예산에 스토리지 몫을 더한다. 포털 생성 화면에 선택 항목을 둔다.
+- 배포에 cephadm 단계를 넣고, globals.yml에 외부 Ceph 설정(`nova_backend_ceph`, `glance_backend_ceph`)을 쓴다.
+- verify에서 RBD로 부팅한 인스턴스를 evacuate 해 디스크 내용이 남는지(파일 하나를 써 두고 확인) 본다.
+
+**먼저 확인할 것**: control VM 하나에서 cephadm 단일 노드 + loop OSD가 뜨는지, Nova가 그 pool로 Cirros를
+부팅하는지, evacuate 뒤 디스크가 유지되는지.
+
+### 2. 여러 VM 스냅샷
+
+**지금**: `freeze_farm`이 all-in-one VM 하나를 멈추고 msb 디스크 스냅샷 하나(`farm-snap-<id>` 그룹)를 뜬다.
+`SnapshotRecord`에는 msb 참조가 하나뿐이고, 내보내기는 `.msb` 아카이브 하나다. multinode farm의 freeze는 막아 두었다.
+
+**바꿀 것**
+- **멈추고 뜨는 순서**: compute를 먼저 멈추고 control을 멈춘다(MariaDB·RabbitMQ가 깨끗이 내려가게). 모든 VM을
+  같은 그룹에 하나씩 뜬 뒤, control을 먼저 켜고 compute를 켠다.
+- **기록**: `SnapshotRecord`가 VM별 참조 목록(role·index → 참조)과 구성(`computes`)을 갖게 한다. 예전 기록은
+  참조 하나짜리 all-in-one으로 읽는다.
+- **복원**: VM마다 `override_snapshot`으로 만든다. 링크 포트 이름에 farm id가 들어가고 스위치 포트·토큰도 새로
+  받으므로, 부팅 뒤 `/etc/farm/link-*.conf`를 새 값으로 바꾸고 `farm-link@` 유닛을 재시작한다(snapshot에서
+  만든 VM에는 msb patch를 쓸 수 없다). 그 뒤 기존 settle로 서비스 응답과 public endpoint 이동을 확인한다.
+  hostname·관리망 주소는 모든 farm에서 같으므로 그대로 둔다. 장애 설정은 복원할 때 비운다.
+- **내보내기·가져오기**: VM별 `.msb`를 하나의 묶음(tar)으로 보내거나, 같은 base 층을 한 번만 담을 수 있는지
+  msb의 `--since`·`--with-parents`를 먼저 확인한다. VM마다 `--with-image`를 쓰면 base 층이 VM 수만큼 겹친다.
+  S3 내보내기도 이 묶음 하나를 객체 하나로 올린다.
+- 포털의 스냅샷 화면과 freeze 버튼이 multinode farm을 받도록 바꾼다.
+
+### 3. 호스트 간 중계
+
+**목표**: control은 한 호스트에 두고 compute만 다른 호스트(다른 지역 포함)에 두어, 실제 WAN 지연·손실에서
+장애 대응을 시험한다(OpenStack Edge/DCN 패턴). Galera·RabbitMQ가 대륙 간 지연을 견디지 못하므로 control은 나누지 않는다.
+
+**바꿀 것**
+- **배치**: plan의 노드마다 `host_id`를 둔다. 지금은 farm 기록에 호스트가 하나다. 생성·삭제·조회를 호스트별
+  agent에 나눠 맡기고, 한 호스트라도 실패하면 이미 만든 VM을 정리한다. 메모리 예산도 호스트별로 센다.
+- **스위치 사이 trunk**: 스위치에 uplink 포트를 둔다. 이 포트는 여러 segment를 실어 나르므로 메시지에
+  segment 식별자를 붙인다. MAC 학습은 uplink 너머의 MAC도 그 포트로 배운다.
+- **경로 1단계 (coordinator 중계)**: 각 호스트의 스위치가 coordinator의 새 WebSocket 엔드포인트
+  (예: `/api/v1/link-relay`)에 호스트 토큰으로 붙고, coordinator가 segment별로 프레임을 전달한다. 링크를
+  WebSocket으로 바꾼 이유가 이 구간이다. SSH 호스트의 agent는 요청마다 뜨는 프로세스라 지속 연결이 없으므로,
+  연결은 agent가 아니라 스위치 프로세스가 맡는다.
+- **경로 2단계 (직접 연결)**: 서로 닿는 호스트끼리는 스위치끼리 `wss://`로 바로 잇고, 이어서 UDP(QUIC datagram
+  또는 WireGuard 방식)와 NAT hole punching을 붙인다. 실패하면 coordinator 중계로 돌아간다.
+- **MTU**: 호스트 안은 9000이지만 WAN을 지나는 farm은 1380 정도로 낮추고 Kolla `global_physnet_mtu`도 맞춘다.
+  한 farm의 링크 MTU는 같아야 하므로 생성할 때 배치를 보고 정한다.
+- **Kolla**: control VM에서 원격 compute로의 SSH와 nova-compute → RabbitMQ 연결이 모두 관리망 링크로 가므로
+  inventory는 지금과 같다.
+
+**먼저 확인할 것**: 이 Mac(control, compute-1)과 Linux 서버 하나(compute-2)로 farm을 만들고, coordinator 중계를
+거쳐 배포·evacuate가 되는지, 처리량과 RTT가 얼마인지.
+
+### 남은 검증
+
+- multinode farm을 **원격 Linux 호스트**에서 만들고 배포하는 것은 아직 돌려보지 않았다(로컬 macOS 호스트만 확인).
+- **nested KVM**이 있는 머신(M5 Pro, Linux/KVM)에서 compute VM의 Nova가 `virt_type=kvm`으로 도는지 확인하지 않았다.
+  M1 Max는 TCG였다.
+- multinode farm의 **삭제**(VM 3대와 스위치 포트 정리)와 **VM 재시작 뒤 settle**을 실제 VM으로 돌려보지 않았다.
+  fake backend 테스트만 있다.
+- Horizon을 넣은 multinode farm은 배포해 보지 않았다.
+- 3단계 변경 뒤 Linux 컨테이너에서 clippy를 다시 돌리지 않았다(Linux 전용 TAP 코드는 바꾸지 않았다).
 
 ## PoC 재현
 
