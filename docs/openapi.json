@@ -6,7 +6,7 @@
     "license": {
       "name": ""
     },
-    "version": "0.1.4"
+    "version": "0.1.5"
   },
   "paths": {
     "/api/v1/agent-hosts": {
@@ -2233,7 +2233,7 @@
               "string",
               "null"
             ],
-            "description": "Object key in `bucket`; defaults to `<prefix><id>.msb`. An existing object is not replaced."
+            "description": "Object key in `bucket`, with `.msb` appended when missing; defaults to `<prefix><id>.msb`.\nAn existing object is not replaced."
           },
           "path": {
             "type": [

@@ -1882,6 +1882,14 @@ async fn snapshots_move_through_registered_buckets_with_sealed_keys() {
         "export over an object"
     );
     assert_eq!(again.archive.unwrap().exported_at, archive.exported_at);
+    // Exports keep the extension imports look for.
+    export("minio", Some("farm/renamed")).unwrap();
+    let renamed = manager.wait_snapshot("clean").await.unwrap();
+    assert_eq!(renamed.error, None);
+    assert_eq!(
+        renamed.archive.unwrap().key.as_deref(),
+        Some("farm/renamed.msb")
+    );
     // A failed upload is aborted rather than left billed.
     *s3.fail_parts.lock().unwrap() = Some(StatusCode::FORBIDDEN);
     export("minio", Some("farm/failed.msb")).unwrap();
@@ -1898,7 +1906,7 @@ async fn snapshots_move_through_registered_buckets_with_sealed_keys() {
     let objects = manager.bucket_objects("minio").await.unwrap();
     assert_eq!(
         objects.iter().map(|o| o.key.as_str()).collect::<Vec<_>>(),
-        ["farm/clean.msb"]
+        ["farm/clean.msb", "farm/renamed.msb"]
     );
     let import = |key: Option<&str>, id: Option<&str>| {
         manager.import_snapshot(ImportRequest {

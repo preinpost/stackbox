@@ -3858,6 +3858,35 @@ h2 {
 .form-advanced[open] .form-advanced-chevron {
   transform: rotate(90deg);
 }
+.input-affix {
+  display: flex;
+  align-items: center;
+  padding: 0 12px;
+}
+.input-affix:focus-within {
+  outline: 2px solid #bddcc7;
+  outline-offset: 1px;
+}
+.input-affix input {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: inherit;
+}
+.input-affix input::placeholder {
+  color: #a3afa6;
+}
+.input-affix > span {
+  flex-shrink: 0;
+  max-width: 45%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #7c8b80;
+}
 .bucket-objects {
   display: flex;
   flex-direction: column;

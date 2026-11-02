@@ -443,14 +443,16 @@ export function ExportSnapshotDialog({ snapshot }: { snapshot: Snapshot }) {
   const [mode, setMode] = useState<"file" | "bucket">("file");
   const [path, setPath] = useState("");
   const [bucketId, setBucketId] = useState("");
-  const [key, setKey] = useState("");
+  const [name, setName] = useState("");
   const bucket = buckets.find((b) => b.id === bucketId);
+  // Only the name is typed; the prefix and the extension imports look for are fixed.
+  const key = `${bucket?.prefix ?? ""}${name.trim().replace(/\.msb$/i, "") || snapshot.id}.msb`;
   const mutation = useMutation({
     mutationFn: () =>
       api.exportSnapshot(
         snapshot.id,
         mode === "bucket"
-          ? { bucket: bucketId, ...(key.trim() ? { key: key.trim() } : {}) }
+          ? { bucket: bucketId, key }
           : path.trim()
             ? { path: path.trim() }
             : {},
@@ -464,13 +466,12 @@ export function ExportSnapshotDialog({ snapshot }: { snapshot: Snapshot }) {
     setMode(buckets.length ? "bucket" : "file");
     setPath("");
     setBucketId(buckets[0]?.id ?? "");
-    setKey("");
+    setName("");
     mutation.reset();
   });
   const defaultPath = host.data
     ? `${host.data.state_dir}/exports/${snapshot.id}.msb`
     : `exports/${snapshot.id}.msb`;
-  const defaultKey = `${bucket?.prefix ?? ""}${snapshot.id}.msb`;
   return (
     <Dialog.Root open={dialog.open} onOpenChange={dialog.onOpenChange}>
       <Dialog.Trigger
@@ -515,19 +516,26 @@ export function ExportSnapshotDialog({ snapshot }: { snapshot: Snapshot }) {
                 </div>
                 <label className="field">
                   <span>
-                    객체 키 <span className="optional">선택</span>
+                    파일 이름 <span className="optional">선택</span>
                   </span>
-                  <Input
-                    autoFocus
-                    value={key}
-                    onValueChange={setKey}
-                    className="input font-mono"
-                    placeholder={defaultKey}
-                    disabled={mutation.isPending}
-                  />
+                  <div className="input input-affix font-mono">
+                    {bucket?.prefix && (
+                      <span title={bucket.prefix}>{bucket.prefix}</span>
+                    )}
+                    <Input
+                      autoFocus
+                      value={name}
+                      onValueChange={setName}
+                      onBlur={() => setName((n) => n.replace(/\.msb$/i, ""))}
+                      placeholder={snapshot.id}
+                      aria-label="파일 이름"
+                      disabled={mutation.isPending}
+                    />
+                    <span>.msb</span>
+                  </div>
                   <small>
-                    s3://{bucket?.name}/{key.trim() || defaultKey}에 올립니다.
-                    같은 키의 객체가 있으면 덮어쓰지 않습니다.
+                    s3://{bucket?.name}/{key}에 올립니다. 같은 이름의 파일이
+                    있으면 덮어쓰지 않습니다.
                   </small>
                 </label>
                 <div className="info-notice">

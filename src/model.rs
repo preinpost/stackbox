@@ -519,7 +519,8 @@ pub struct ExportRequest {
     /// Registered bucket to upload the archive to instead of keeping it on the coordinator.
     #[serde(default)]
     pub bucket: Option<String>,
-    /// Object key in `bucket`; defaults to `<prefix><id>.msb`. An existing object is not replaced.
+    /// Object key in `bucket`, with `.msb` appended when missing; defaults to `<prefix><id>.msb`.
+    /// An existing object is not replaced.
     #[serde(default)]
     pub key: Option<String>,
 }

@@ -397,7 +397,14 @@ impl FarmManager {
                 return Err(bad_request("export to either a path or a bucket"));
             }
             (None, Some(bucket)) => {
-                let key = given(request.key);
+                // Imports list `.msb` objects only, so keep exports findable.
+                let key = given(request.key).map(|key| {
+                    if key.ends_with(".msb") {
+                        key
+                    } else {
+                        format!("{key}.msb")
+                    }
+                });
                 if let Some(key) = &key {
                     crate::s3::validate_key(key).map_err(|e| bad_request(e.to_string()))?;
                 }

@@ -681,7 +681,10 @@ export interface components {
     ExportRequest: {
       /** @description Registered bucket to upload the archive to instead of keeping it on the coordinator. */
       bucket?: string | null;
-      /** @description Object key in `bucket`; defaults to `<prefix><id>.msb`. An existing object is not replaced. */
+      /**
+       * @description Object key in `bucket`, with `.msb` appended when missing; defaults to `<prefix><id>.msb`.
+       *     An existing object is not replaced.
+       */
       key?: string | null;
       /** @description Absolute archive path on the coordinator; defaults to `<state dir>/exports/<id>.msb`. */
       path?: string | null;

@@ -165,7 +165,7 @@ enum SnapshotCommand {
         /// Registered bucket to upload to
         #[arg(long)]
         bucket: Option<String>,
-        /// Object key; defaults to <bucket prefix><id>.msb
+        /// Object key, with .msb appended when missing; defaults to <bucket prefix><id>.msb
         #[arg(long, requires = "bucket")]
         key: Option<String>,
     },
