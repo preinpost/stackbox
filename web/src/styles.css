@@ -3793,6 +3793,71 @@ h2 {
   font-size: 11.5px;
   color: #597260;
 }
+.bucket-modal {
+  width: 580px;
+  max-height: calc(100dvh - 40px);
+  overflow-y: auto;
+}
+.service-picker button {
+  flex: 1;
+  padding: 7px 10px;
+  font-weight: 550;
+}
+.service-picker button:disabled {
+  opacity: 0.6;
+}
+.form-section {
+  display: grid;
+  gap: 16px;
+}
+.form-section + .form-section {
+  padding-top: 22px;
+  border-top: 1px solid #edf1ed;
+}
+.form-section h3 {
+  font-size: 13px;
+  font-weight: 650;
+  color: #3f5a47;
+}
+.form-advanced {
+  border: 1px solid #e4ece4;
+  border-radius: 8px;
+  padding: 0 14px;
+}
+.form-advanced[open] {
+  padding-bottom: 16px;
+}
+.form-advanced summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 11px 0;
+  font-size: 14px;
+  font-weight: 550;
+  color: #536a5a;
+  cursor: pointer;
+  list-style: none;
+}
+.form-advanced summary::-webkit-details-marker {
+  display: none;
+}
+.form-advanced summary > span {
+  margin-left: auto;
+  font-size: 12px;
+  font-weight: 400;
+  color: #7c8b80;
+}
+.form-advanced .checkbox-row {
+  border: 0;
+  background: none;
+  padding: 0;
+}
+.form-advanced-chevron {
+  transition: transform 0.15s;
+}
+.form-advanced[open] .form-advanced-chevron {
+  transform: rotate(90deg);
+}
 .bucket-objects {
   display: flex;
   flex-direction: column;

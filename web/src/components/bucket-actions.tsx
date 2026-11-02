@@ -4,6 +4,7 @@ import { Input } from "@base-ui/react/input";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Check,
+  ChevronRight,
   CircleCheck,
   Cloud,
   LoaderCircle,
@@ -29,7 +30,6 @@ import {
   ErrorNotice,
   Loading,
   Modal,
-  SelectInput,
 } from "./ui";
 
 const idPattern = "[a-z0-9]([a-z0-9\\-]{0,46}[a-z0-9])?";
@@ -55,7 +55,7 @@ const services: {
   },
   {
     value: "other",
-    label: "MinIO · RustFS · 기타 S3 호환",
+    label: "S3 Compatible",
     region: "us-east-1",
     endpoint: "https://minio.example:9000",
   },
@@ -202,6 +202,7 @@ export function BucketDialog({ bucket }: { bucket?: Bucket }) {
   const [pathStyle, setPathStyle] = useState(true);
   const [ca, setCa] = useState("");
   const [caFile, setCaFile] = useState("");
+  const [advanced, setAdvanced] = useState(false);
   const [fileError, setFileError] = useState<Error>();
   const caInput = useRef<HTMLInputElement>(null);
   const preset = services.find((s) => s.value === service)!;
@@ -227,7 +228,8 @@ export function BucketDialog({ bucket }: { bucket?: Bucket }) {
   });
   const pending = save.isPending || test.isPending;
   const reset = () => {
-    setService(serviceOf(bucket));
+    const kind = serviceOf(bucket);
+    setService(kind);
     setId(bucket?.id ?? "");
     setEndpoint(bucket?.endpoint ?? "");
     setRegion(bucket?.region ?? "");
@@ -238,6 +240,13 @@ export function BucketDialog({ bucket }: { bucket?: Bucket }) {
     setPathStyle(bucket?.path_style ?? true);
     setCa(bucket?.ca_pem ?? "");
     setCaFile("");
+    // Show the advanced settings when they differ from the service's defaults.
+    setAdvanced(
+      Boolean(bucket?.ca_pem) ||
+        (bucket !== undefined &&
+          kind !== "aws" &&
+          bucket.path_style !== (kind !== "r2")),
+    );
     setFileError(undefined);
     test.reset();
     save.reset();
@@ -278,8 +287,8 @@ export function BucketDialog({ bucket }: { bucket?: Bucket }) {
       </Dialog.Trigger>
       <Modal
         title={editing ? "S3 버킷 수정" : "S3 버킷 등록"}
-        description="스냅샷 아카이브를 올리고 가져올 S3 호환 버킷입니다. Secret key는 farmd가 암호화해서 저장하고 다시 보여주지 않습니다."
-        className="remote-register-modal"
+        description="스냅샷을 올리고 가져올 버킷입니다. Secret key는 암호화해서 저장합니다."
+        className="bucket-modal"
         closeDisabled={pending}
       >
         <form
@@ -288,10 +297,36 @@ export function BucketDialog({ bucket }: { bucket?: Bucket }) {
             save.mutate();
           }}
         >
-          <div className="modal-body space-y-5">
-            <div className="grid grid-cols-2 gap-3">
+          <div className="modal-body space-y-6">
+            <div
+              className="segmented-control service-picker"
+              role="radiogroup"
+              aria-label="서비스"
+            >
+              {services.map((item) => (
+                <button
+                  key={item.value}
+                  type="button"
+                  role="radio"
+                  aria-checked={service === item.value}
+                  className={service === item.value ? "selected" : ""}
+                  disabled={pending}
+                  onClick={() => {
+                    setService(item.value);
+                    setRegion("");
+                    setPathStyle(item.value !== "r2");
+                    test.reset();
+                  }}
+                >
+                  {item.label}
+                </button>
+              ))}
+            </div>
+
+            <section className="form-section">
+              <h3>저장소</h3>
               <label className="field">
-                <span>버킷 ID</span>
+                <span>등록 ID</span>
                 <Input
                   autoFocus={!editing}
                   value={id}
@@ -301,214 +336,215 @@ export function BucketDialog({ bucket }: { bucket?: Bucket }) {
                   maxLength={48}
                   pattern={idPattern}
                   placeholder="team-r2"
+                  title="소문자, 숫자, 하이픈 · 최대 48자"
                   disabled={pending || editing}
                 />
-                <small>farm에서 부를 이름</small>
               </label>
-              <div className="field">
-                <span>서비스</span>
-                <SelectInput
-                  label="서비스"
-                  value={service}
-                  disabled={pending}
-                  items={services.map((s) => ({
-                    value: s.value,
-                    label: s.label,
-                  }))}
-                  onChange={(value) => {
-                    setService(value);
-                    setRegion("");
-                    setPathStyle(value !== "r2");
-                    test.reset();
-                  }}
-                />
-              </div>
-            </div>
-            {service !== "aws" && (
-              <label className="field">
-                <span>Endpoint</span>
-                <Input
-                  value={endpoint}
-                  onValueChange={edited(setEndpoint)}
-                  className="input font-mono"
-                  required
-                  placeholder={preset.endpoint}
-                  disabled={pending}
-                />
-                <small>
-                  scheme과 호스트, 포트만 적습니다. 사내 저장소는 http://도
-                  됩니다.
-                </small>
-              </label>
-            )}
-            <div className="grid grid-cols-2 gap-3">
-              <label className="field">
-                <span>버킷 이름</span>
-                <Input
-                  value={name}
-                  onValueChange={edited(setName)}
-                  className="input font-mono"
-                  required
-                  placeholder="farm-snapshots"
-                  disabled={pending}
-                />
-              </label>
-              <label className="field">
-                <span>
-                  Region <span className="optional">선택</span>
-                </span>
-                <Input
-                  value={region}
-                  onValueChange={edited(setRegion)}
-                  className="input font-mono"
-                  placeholder={preset.region}
-                  disabled={pending}
-                />
-              </label>
-            </div>
-            <label className="field">
-              <span>
-                Prefix <span className="optional">선택</span>
-              </span>
-              <Input
-                value={prefix}
-                onValueChange={edited(setPrefix)}
-                className="input font-mono"
-                placeholder="farm/"
-                disabled={pending}
-              />
-              <small>
-                아카이브를 이 경로 아래에 올리고, 가져오기는 이 경로 아래의 .msb
-                파일을 보여줍니다.
-              </small>
-            </label>
-            <div className="grid grid-cols-2 gap-3">
-              <label className="field">
-                <span>Access key ID</span>
-                <Input
-                  value={accessKey}
-                  onValueChange={edited(setAccessKey)}
-                  className="input font-mono"
-                  required
-                  autoComplete="off"
-                  disabled={pending}
-                />
-              </label>
-              <label className="field">
-                <span>
-                  Secret access key{" "}
-                  {editing && <span className="optional">선택</span>}
-                </span>
-                <Input
-                  type="password"
-                  value={secret}
-                  onValueChange={edited(setSecret)}
-                  className="input font-mono"
-                  required={!editing}
-                  autoComplete="new-password"
-                  placeholder={editing ? "비워 두면 저장된 키 유지" : ""}
-                  disabled={pending}
-                />
-              </label>
-            </div>
-            {service !== "aws" && (
-              <>
-                <label className="checkbox-row">
-                  <Checkbox.Root
-                    checked={pathStyle}
+              {service !== "aws" && (
+                <label className="field">
+                  <span>Endpoint</span>
+                  <Input
+                    value={endpoint}
+                    onValueChange={edited(setEndpoint)}
+                    className="input font-mono"
+                    required
+                    placeholder={preset.endpoint}
                     disabled={pending}
-                    onCheckedChange={(next) => edited(setPathStyle)(next)}
-                    className="checkbox"
-                  >
-                    <Checkbox.Indicator>
-                      <Check size={12} strokeWidth={3} />
-                    </Checkbox.Indicator>
-                  </Checkbox.Root>
-                  <span>
-                    Path-style 주소
-                    <small>
-                      endpoint/버킷/키 형태로 요청합니다. MinIO와 RustFS는 보통
-                      켜고, R2는 어느 쪽이든 됩니다.
-                    </small>
-                  </span>
+                  />
+                </label>
+              )}
+              <div className="grid grid-cols-[3fr_2fr] items-end gap-3">
+                <label className="field">
+                  <span>버킷 이름</span>
+                  <Input
+                    value={name}
+                    onValueChange={edited(setName)}
+                    className="input font-mono"
+                    required
+                    placeholder="farm-snapshots"
+                    disabled={pending}
+                  />
                 </label>
                 <label className="field">
-                  <span className="flex items-center justify-between gap-2">
-                    <span>
-                      사설 CA 인증서 <span className="optional">선택</span>
-                    </span>
-                    <button
-                      type="button"
-                      className="text-link"
-                      disabled={pending}
-                      onClick={() => caInput.current?.click()}
-                    >
-                      <Upload size={13} />
-                      파일 선택
-                    </button>
+                  <span>
+                    Region <span className="optional">선택</span>
                   </span>
-                  <input
-                    ref={caInput}
-                    type="file"
-                    accept=".pem,.crt,.cer"
-                    className="sr-only"
-                    aria-label="CA 인증서 파일"
+                  <Input
+                    value={region}
+                    onValueChange={edited(setRegion)}
+                    className="input font-mono"
+                    placeholder={preset.region}
                     disabled={pending}
-                    onChange={(event) => {
-                      const file = event.target.files?.[0];
-                      event.target.value = "";
-                      if (!file) return;
-                      if (file.size > 65536) {
-                        setFileError(
-                          new Error(
-                            "CA 인증서 파일은 64KB를 넘을 수 없습니다.",
-                          ),
-                        );
-                        return;
-                      }
-                      void file.text().then(
-                        (text) => {
-                          edited(setCa)(text.replace(/\r\n/g, "\n"));
-                          setCaFile(file.name);
-                          setFileError(undefined);
-                        },
-                        () =>
-                          setFileError(
-                            new Error("CA 인증서 파일을 읽지 못했습니다."),
-                          ),
-                      );
-                    }}
                   />
-                  <textarea
-                    className="input remote-key-input"
-                    value={ca}
-                    maxLength={65536}
-                    disabled={pending}
-                    spellCheck={false}
-                    placeholder="-----BEGIN CERTIFICATE-----"
-                    onChange={(e) => {
-                      edited(setCa)(e.target.value);
-                      setCaFile("");
-                    }}
-                  />
-                  <small>
-                    {caFile
-                      ? `${caFile} 파일을 불러왔습니다.`
-                      : "자체 서명·사내 CA로 TLS를 쓰는 경우 PEM을 붙여넣으세요. 시스템 인증서와 함께 신뢰합니다."}
-                  </small>
                 </label>
-              </>
+              </div>
+              <label className="field">
+                <span>
+                  Prefix <span className="optional">선택</span>
+                </span>
+                <Input
+                  value={prefix}
+                  onValueChange={edited(setPrefix)}
+                  className="input font-mono"
+                  placeholder="farm/"
+                  disabled={pending}
+                />
+                <small>아카이브를 올리고 찾는 경로입니다.</small>
+              </label>
+            </section>
+
+            <section className="form-section">
+              <h3>인증</h3>
+              <div className="grid grid-cols-2 items-end gap-3">
+                <label className="field">
+                  <span>Access key ID</span>
+                  <Input
+                    value={accessKey}
+                    onValueChange={edited(setAccessKey)}
+                    className="input font-mono"
+                    required
+                    autoComplete="off"
+                    disabled={pending}
+                  />
+                </label>
+                <label className="field">
+                  <span>
+                    Secret access key
+                    {editing && <span className="optional">선택</span>}
+                  </span>
+                  <Input
+                    type="password"
+                    value={secret}
+                    onValueChange={edited(setSecret)}
+                    className="input font-mono"
+                    required={!editing}
+                    autoComplete="new-password"
+                    placeholder={editing ? "비우면 기존 키 유지" : ""}
+                    disabled={pending}
+                  />
+                </label>
+              </div>
+            </section>
+
+            {service !== "aws" && (
+              <details
+                className="form-advanced"
+                open={advanced}
+                onToggle={(event) => setAdvanced(event.currentTarget.open)}
+              >
+                <summary>
+                  <ChevronRight size={15} className="form-advanced-chevron" />
+                  고급 설정
+                  <span>
+                    {[
+                      pathStyle ? "Path-style" : "Virtual-host",
+                      ca.trim() && "사설 CA",
+                    ]
+                      .filter(Boolean)
+                      .join(" · ")}
+                  </span>
+                </summary>
+                <div className="space-y-5 pt-4">
+                  <label className="checkbox-row">
+                    <Checkbox.Root
+                      checked={pathStyle}
+                      disabled={pending}
+                      onCheckedChange={(next) => edited(setPathStyle)(next)}
+                      className="checkbox"
+                    >
+                      <Checkbox.Indicator>
+                        <Check size={12} strokeWidth={3} />
+                      </Checkbox.Indicator>
+                    </Checkbox.Root>
+                    <span>
+                      Path-style 주소
+                      <small>
+                        endpoint/버킷/키로 요청합니다. MinIO와 RustFS는
+                        켜두세요.
+                      </small>
+                    </span>
+                  </label>
+                  <label className="field">
+                    <span className="flex items-center justify-between gap-2">
+                      <span>
+                        사설 CA 인증서 <span className="optional">PEM</span>
+                      </span>
+                      <button
+                        type="button"
+                        className="text-link"
+                        disabled={pending}
+                        onClick={() => caInput.current?.click()}
+                      >
+                        <Upload size={13} />
+                        파일 선택
+                      </button>
+                    </span>
+                    <input
+                      ref={caInput}
+                      type="file"
+                      accept=".pem,.crt,.cer"
+                      className="sr-only"
+                      aria-label="CA 인증서 파일"
+                      disabled={pending}
+                      onChange={(event) => {
+                        const file = event.target.files?.[0];
+                        event.target.value = "";
+                        if (!file) return;
+                        if (file.size > 65536) {
+                          setFileError(
+                            new Error(
+                              "CA 인증서 파일은 64KB를 넘을 수 없습니다.",
+                            ),
+                          );
+                          return;
+                        }
+                        void file.text().then(
+                          (text) => {
+                            edited(setCa)(text.replace(/\r\n/g, "\n"));
+                            setCaFile(file.name);
+                            setFileError(undefined);
+                          },
+                          () =>
+                            setFileError(
+                              new Error("CA 인증서 파일을 읽지 못했습니다."),
+                            ),
+                        );
+                      }}
+                    />
+                    <textarea
+                      className="input remote-key-input"
+                      value={ca}
+                      maxLength={65536}
+                      disabled={pending}
+                      spellCheck={false}
+                      placeholder="-----BEGIN CERTIFICATE-----"
+                      onChange={(e) => {
+                        edited(setCa)(e.target.value);
+                        setCaFile("");
+                      }}
+                    />
+                    <small>
+                      {caFile
+                        ? `${caFile} 파일을 불러왔습니다.`
+                        : "자체 서명 인증서를 쓰는 경우에만 넣으세요. 시스템 인증서와 함께 신뢰합니다."}
+                    </small>
+                  </label>
+                </div>
+              </details>
             )}
+
             {test.isSuccess && (
-              <div className="info-notice">
+              <div className="info-notice mb-0">
                 <CircleCheck size={17} className="shrink-0" />
                 <span>
-                  연결을 확인했습니다.{" "}
-                  {bucketLocation({
-                    name: name.trim(),
-                    prefix: cleanPrefix(prefix),
-                  })}{" "}
-                  아래에 목록 조회, 쓰기, 삭제가 됩니다.
+                  연결됐습니다.{" "}
+                  <span className="font-mono">
+                    {bucketLocation({
+                      name: name.trim(),
+                      prefix: cleanPrefix(prefix),
+                    })}
+                  </span>
+                  에 쓰고 읽을 수 있습니다.
                 </span>
               </div>
             )}
@@ -516,7 +552,7 @@ export function BucketDialog({ bucket }: { bucket?: Bucket }) {
             {test.error && <ErrorNotice error={test.error} />}
             {save.error && <ErrorNotice error={save.error} />}
           </div>
-          <div className="modal-footer justify-between">
+          <div className="modal-footer">
             <Button
               disabled={pending}
               onClick={(event) => {
