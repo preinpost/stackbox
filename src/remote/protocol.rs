@@ -26,10 +26,19 @@ pub enum Operation {
         plan: Plan,
         exposure: Exposure,
     },
+    /// Runs as the host-side job `job_id`, which outlives this request; repeating the
+    /// request with the same `job_id` attaches to that job instead of deploying again.
     Deploy {
         farm_id: String,
         generation: String,
         from: Phase,
+        job_id: String,
+    },
+    /// Follow a host-side job this coordinator started, skipping the first `offset` progress
+    /// frames it already received, until the job's result.
+    Attach {
+        job_id: String,
+        offset: u64,
     },
     Delete {
         farm_id: String,
@@ -138,7 +147,8 @@ impl Operation {
     }
     pub fn seconds(&self) -> u64 {
         match self {
-            Self::Deploy { .. } => 7200,
+            // An attach follows a deploy, which stops itself after the same time.
+            Self::Deploy { .. } | Self::Attach { .. } => 7200,
             Self::Create { .. } => 600,
             Self::Delete { .. } => 180,
             // A host can hold several farms, each destroyed VM by VM.
@@ -221,7 +231,10 @@ pub enum Reply {
 impl Operation {
     /// Whether the agent reports phases and steps while running this operation.
     fn reports_progress(&self) -> bool {
-        matches!(self, Self::Deploy { .. } | Self::Settle { .. })
+        matches!(
+            self,
+            Self::Deploy { .. } | Self::Attach { .. } | Self::Settle { .. }
+        )
     }
     /// Whether the agent may stream command output while running this operation.
     fn reports_output(&self) -> bool {
@@ -231,6 +244,17 @@ impl Operation {
         )
     }
 }
+
+/// An operation's own failure as the agent reported it. Any other error of a request means
+/// the agent was not reached or the connection to it broke, so the outcome is unknown.
+#[derive(Debug)]
+pub struct AgentError(pub String);
+impl std::fmt::Display for AgentError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+impl std::error::Error for AgentError {}
 
 /// Hand a progress frame of a one-shot request to `sink`. Returns the outcome once the
 /// agent reports one; a frame the operation cannot produce is a protocol error.
@@ -242,7 +266,7 @@ pub fn deliver(
     use crate::kolla::DeployEvent;
     let event = match frame {
         Frame::Result { result } => return Ok(Some(Ok(result))),
-        Frame::Error { message } => return Ok(Some(Err(anyhow::anyhow!("{message}")))),
+        Frame::Error { message } => return Ok(Some(Err(AgentError(message).into()))),
         Frame::Attached | Frame::Terminal { .. } => {
             anyhow::bail!("unexpected farm-agent terminal event")
         }

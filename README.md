@@ -163,10 +163,16 @@ Farm 작업 생성은 `202 Accepted`와 `Location: /api/v1/jobs/{id}`를 반환�
 - 기본 메모리 예약 한도는 호스트 RAM의 80%입니다. `--memory-budget-mib`로 조절합니다.
   생성 요청을 받는 시점에 전체 게스트 메모리를 예약하고, 삭제 성공 후 반환합니다.
   가져온 기존 farm도 VM 설정의 메모리를 계산합니다.
-- 데몬이 갑자기 종료되면 진행 중/대기 중 job은 다음 시작 시 `interrupted`가 됩니다.
+- 배포는 호스트에서 데몬과 분리된 worker 프로세스로 실행합니다. 데몬이 종료·재시작되거나 호스트와의
+  연결이 끊겨도 배포는 끝까지 진행됩니다. 다시 시작한 데몬은 실행 중이던 배포 job을 `running`으로 두고
+  (`Coordinator restarted; re-attaching to the running deploy`) 받지 못한 진행 로그부터 이어 받아
+  평소처럼 마무리합니다. 호스트에 10분 동안 다시 연결하지 못하면 job은 `interrupted`가 되며,
+  이때 배포는 호스트에서 아직 진행 중일 수 있으니 호스트를 확인한 뒤 재시도합니다.
+- 그 밖의 job과 아직 시작하지 않은(대기 중) 배포는 데몬이 갑자기 종료되면 다음 시작 시 `interrupted`가 됩니다.
   자동 재실행하지 않습니다. 배포는 저장된 phase를 확인하고 `from`을 지정해 재개합니다.
   일부 VM만 생성된 farm은 삭제한 뒤 다시 만듭니다.
-- SIGINT/SIGTERM은 새 작업 접수를 멈추고 큐를 비운 뒤 종료합니다.
+- SIGINT/SIGTERM/SIGHUP은 새 작업 접수를 멈추고 배포를 제외한 진행 중 작업을 기다린 뒤 종료합니다.
+  진행 중인 배포는 기다리지 않고 호스트에서 계속되며, 다음 시작 때 다시 붙습니다.
   두 번째 신호는 즉시 종료합니다. VM은 데몬 종료 후에도 유지됩니다.
 - `owner`, `expires_at`은 metadata입니다. TTL 자동 삭제는 아직 수행하지 않습니다.
 - 호스트 로그는 `logs/<farm>.jsonl`에 보관하며, API는 최근 1,000개 이벤트를 제공합니다.
@@ -272,7 +278,7 @@ cargo test
 cargo clippy --all-targets -- -D warnings
 ```
 
-관리/API 테스트는 fake backend로 작업 실패·재개·배포 동시성·재시작 복구·메모리 예약·
+관리/API 테스트는 fake backend로 작업 실패·재개·배포 동시성·재시작 복구와 배포 재연결·메모리 예약·
 파일 잠금·저장 실패·인증·SSE를 검증하며 VM을 띄우지 않습니다.
 
 실제 OpenStack 설치는 별도의 로컬 Farm으로 확인합니다. 기본 구성은 VM 1대에

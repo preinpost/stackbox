@@ -17,8 +17,9 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
+    time::{Duration, Instant},
 };
 use store::{State, Store};
 use tokio::sync::Semaphore;
@@ -111,6 +112,18 @@ impl std::error::Error for BadRequest {}
 fn bad_request(message: impl Into<String>) -> anyhow::Error {
     BadRequest(message.into()).into()
 }
+/// A deploy whose host-side job this coordinator lost; it may still be running there.
+#[derive(Debug)]
+struct Detached(String);
+impl std::fmt::Display for Detached {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+impl std::error::Error for Detached {}
+/// How long a deploy keeps trying to reach its host-side job again before giving it up.
+const REATTACH_FOR: Duration = Duration::from_secs(if cfg!(test) { 2 } else { 600 });
+const REATTACHING: &str = "Coordinator restarted; re-attaching to the running deploy";
 
 impl FarmManager {
     pub async fn open(options: ManagerOptions) -> Result<Self> {
@@ -184,6 +197,7 @@ impl FarmManager {
             artifacts,
             published: Default::default(),
         }));
+        let mut resumed = Vec::new();
         manager.update(|state| {
             for job in state.host_jobs.values_mut().filter(|j| j.status.active()) {
                 job.status = JobStatus::Interrupted;
@@ -200,6 +214,16 @@ impl FarmManager {
                 }
             }
             for job in state.jobs.values_mut().filter(|j| j.status.active()) {
+                // A deploy runs on as its host-side job; follow it again instead of giving it up.
+                if job.kind == JobKind::Deploy && job.remote_job_id.is_some() {
+                    job.status = JobStatus::Running;
+                    if let Some(farm) = state.farms.get_mut(&job.farm_id) {
+                        farm.step = Some(REATTACHING.into());
+                        farm.updated_at = now();
+                    }
+                    resumed.push(job.clone());
+                    continue;
+                }
                 job.status = JobStatus::Interrupted;
                 job.error = Some(
                     "daemon stopped during this job; inspect the VMs and retry explicitly".into(),
@@ -216,6 +240,10 @@ impl FarmManager {
             Ok(())
         })?;
         manager.reconcile().await?;
+        for job in resumed {
+            manager.log(&job.farm_id, &job.id, job.phase, format!("{REATTACHING}\n"))?;
+            manager.spawn(job, None);
+        }
         Ok(manager)
     }
     fn update<T>(&self, f: impl FnOnce(&mut State) -> Result<T>) -> Result<T> {
@@ -430,10 +458,13 @@ impl FarmManager {
         })
     }
     fn backend_for(&self, farm: &FarmRecord) -> Result<Arc<dyn Backend>> {
+        Ok(Arc::new(self.agent_for(farm)?))
+    }
+    fn agent_for(&self, farm: &FarmRecord) -> Result<crate::remote::backend::AgentBackend> {
         let host_id = farm.host_id.as_deref().ok_or_else(|| {
             conflict("this farm predates host registration; it has no host to run on")
         })?;
-        self.agent_backend(
+        self.agent(
             host_id,
             farm.agent_sha256.as_deref(),
             farm.remote_generation
@@ -441,14 +472,22 @@ impl FarmManager {
                 .context("farm has no generation")?,
         )
     }
-    /// The host's farm-agent, acting for one farm generation. A remote host runs the agent
-    /// artifact `digest`; the local host runs this coordinator's own binary.
     fn agent_backend(
         &self,
         host_id: &str,
         digest: Option<&str>,
         generation: &str,
     ) -> Result<Arc<dyn Backend>> {
+        Ok(Arc::new(self.agent(host_id, digest, generation)?))
+    }
+    /// The host's farm-agent, acting for one farm generation. A remote host runs the agent
+    /// artifact `digest`; the local host runs this coordinator's own binary.
+    fn agent(
+        &self,
+        host_id: &str,
+        digest: Option<&str>,
+        generation: &str,
+    ) -> Result<crate::remote::backend::AgentBackend> {
         let store = self
             .0
             .store
@@ -477,11 +516,11 @@ impl FarmManager {
                 digest: digest.context("remote farm has no pinned agent")?.into(),
             }),
         };
-        Ok(Arc::new(crate::remote::backend::AgentBackend {
+        Ok(crate::remote::backend::AgentBackend {
             link,
             coordinator_id: store.state.coordinator_id.clone(),
             generation: generation.into(),
-        }))
+        })
     }
     /// This machine's agent, which keeps the snapshots. Requires a registered local host.
     fn local_backend(&self) -> Result<Arc<dyn Backend>> {
@@ -831,15 +870,17 @@ impl FarmManager {
         self.update(|state| {
             let j = state.jobs.get_mut(&job.id).context("job missing")?;
             j.status = JobStatus::Running;
-            j.started_at = Some(now());
+            j.started_at.get_or_insert_with(now);
             Ok(())
         })?;
-        self.log(
-            &job.farm_id,
-            &job.id,
-            None,
-            format!("{:?} started", job.kind),
-        )?;
+        if job.remote_job_id.is_none() {
+            self.log(
+                &job.farm_id,
+                &job.id,
+                None,
+                format!("{:?} started", job.kind),
+            )?;
+        }
         let farm = self.get(&job.farm_id)?;
         match job.kind {
             JobKind::Create => {
@@ -861,16 +902,8 @@ impl FarmManager {
                 })?;
             }
             JobKind::Deploy => {
-                let components = farm_components(&farm);
-                self.backend_for(&farm)?
-                    .deploy(
-                        farm.id,
-                        request.unwrap_or_default().from,
-                        farm.exposure,
-                        components,
-                        self.event_sink(job),
-                    )
-                    .await?;
+                self.deploy_job(job, &farm, request.unwrap_or_default().from)
+                    .await?
             }
             JobKind::Delete if job.forget => self.log(
                 &farm.id,
@@ -893,7 +926,7 @@ impl FarmManager {
             JobKind::Settle => {
                 let components = farm_components(&farm);
                 self.backend_for(&farm)?
-                    .settle(farm.id, None, components, self.event_sink(job))
+                    .settle(farm.id, None, components, self.event_sink(job, None))
                     .await?;
             }
             JobKind::Snapshot => self.freeze_job(job, farm).await?,
@@ -901,18 +934,122 @@ impl FarmManager {
         }
         Ok(())
     }
-    /// Records deployment phases on the farm and job, and output in the farm log.
-    fn event_sink(&self, job: &Job) -> EventSink {
+    /// Runs a deploy as a host-side job, which outlives this coordinator and its connection
+    /// to the host. A lost connection, or a restart for a job recorded with its host-side
+    /// id, follows that job again from the frames already recorded.
+    async fn deploy_job(
+        &self,
+        job: &Job,
+        farm: &FarmRecord,
+        from: crate::kolla::Phase,
+    ) -> Result<()> {
+        use crate::remote::protocol::AgentError;
+        let backend = self.agent_for(farm)?;
+        let mut attach = job.remote_job_id.is_some();
+        let remote = match &job.remote_job_id {
+            Some(remote) => remote.clone(),
+            None => {
+                let remote = uuid::Uuid::new_v4().to_string();
+                // Recorded before the host hears of it, so a restart knows what to follow.
+                self.update(|state| {
+                    state
+                        .jobs
+                        .get_mut(&job.id)
+                        .context("job missing")?
+                        .remote_job_id = Some(remote.clone());
+                    Ok(())
+                })?;
+                remote
+            }
+        };
+        let frames = Arc::new(AtomicU64::new(job.remote_frames));
+        let sink = self.event_sink(job, Some(frames.clone()));
+        let mut request_failed = None;
+        let mut lost: Option<Instant> = None;
+        let mut delay = Duration::from_secs(1);
+        let outcome = loop {
+            let before = frames.load(Ordering::SeqCst);
+            let outcome = if attach {
+                backend.attach(remote.clone(), before, sink.clone()).await
+            } else {
+                backend
+                    .deploy_job(farm.id.clone(), from, remote.clone(), sink.clone())
+                    .await
+            };
+            let error = match outcome {
+                Ok(()) => break Ok(()),
+                // The deploy request may never have arrived; say why it was sent again.
+                Err(error) if error.is::<AgentError>() => {
+                    break Err(match request_failed {
+                        Some(cause) if frames.load(Ordering::SeqCst) == 0 => {
+                            anyhow!("{error:#} (the deploy request failed: {cause})")
+                        }
+                        _ => error,
+                    });
+                }
+                Err(error) => error,
+            };
+            if !attach {
+                request_failed = Some(format!("{error:#}"));
+            }
+            attach = true;
+            if lost.is_none() || frames.load(Ordering::SeqCst) != before {
+                self.log(
+                    &job.farm_id,
+                    &job.id,
+                    self.job(&job.id)?.phase,
+                    format!("lost the connection to the host's deploy ({error:#}); re-attaching\n"),
+                )?;
+                lost = Some(Instant::now());
+                delay = Duration::from_secs(1);
+            }
+            if lost.is_some_and(|since| since.elapsed() >= REATTACH_FOR) {
+                break Err(Detached(format!(
+                    "cannot reach the host's deploy job {remote} ({error:#}); it may still be running on the host, so check the farm there before retrying"
+                ))
+                .into());
+            }
+            tokio::time::sleep(delay).await;
+            delay = (delay * 2).min(Duration::from_secs(30));
+        };
+        // Output since the last save counts too, so the finished job tells it all.
+        let saved = self.update(|state| {
+            state
+                .jobs
+                .get_mut(&job.id)
+                .context("job missing")?
+                .remote_frames = frames.load(Ordering::SeqCst);
+            Ok(())
+        });
+        outcome.and(saved)
+    }
+    /// Records deployment phases on the farm and job, and output in the farm log. With
+    /// `frames`, it also counts the host-side job's frames applied, saved with the job.
+    fn event_sink(&self, job: &Job, frames: Option<Arc<AtomicU64>>) -> EventSink {
         let manager = self.clone();
         let job = job.clone();
+        let saved = Mutex::new(Instant::now());
         Arc::new(move |event| {
+            let count = frames
+                .as_ref()
+                .map(|frames| frames.fetch_add(1, Ordering::SeqCst) + 1);
+            let save = |state: &mut State| {
+                if let Some(count) = count {
+                    state
+                        .jobs
+                        .get_mut(&job.id)
+                        .context("job missing")?
+                        .remote_frames = count;
+                }
+                Ok::<_, anyhow::Error>(())
+            };
             let phase = match event {
                 DeployEvent::Step(step) => {
                     manager.update(|state| {
                         let farm = state.farms.get_mut(&job.farm_id).context("farm missing")?;
                         farm.step = Some(step.clone());
                         farm.updated_at = now();
-                        Ok(())
+                        save(state)
                     })?;
                     manager.log(&job.farm_id, &job.id, None, format!("step: {step}"))?;
                     return Ok(());
@@ -924,7 +1061,7 @@ impl FarmManager {
                         farm.step = None;
                         farm.updated_at = now();
                         state.jobs.get_mut(&job.id).context("job missing")?.phase = Some(phase);
-                        Ok(())
+                        save(state)
                     })?;
                     manager.log(&job.farm_id, &job.id, Some(phase), format!("phase {phase}"))?;
                     return Ok(());
@@ -934,10 +1071,19 @@ impl FarmManager {
                     (phase, message)
                 }
             };
-            manager.log(&job.farm_id, &job.id, phase.0, phase.1)
+            manager.log(&job.farm_id, &job.id, phase.0, phase.1)?;
+            // Output is too frequent to save each count; a restart within this window
+            // records those lines again.
+            let mut saved = saved.lock().map_err(|_| anyhow!("sink mutex poisoned"))?;
+            if count.is_some() && saved.elapsed() >= Duration::from_secs(2) {
+                manager.update(save)?;
+                *saved = Instant::now();
+            }
+            Ok(())
         })
     }
     fn finish(&self, job: &Job, result: Result<()>) -> Result<()> {
+        let detached = result.as_ref().is_err_and(|e| e.is::<Detached>());
         let error = result.err().map(|e| format!("{e:#}"));
         // A terminal state must still be persisted if writing the final log fails.
         let log_result = self.log(
@@ -948,7 +1094,9 @@ impl FarmManager {
         );
         self.update(|state| {
             let current = state.jobs.get_mut(&job.id).context("job missing")?;
-            current.status = if error.is_some() {
+            current.status = if detached {
+                JobStatus::Interrupted
+            } else if error.is_some() {
                 JobStatus::Failed
             } else {
                 JobStatus::Succeeded
@@ -1007,7 +1155,11 @@ impl FarmManager {
             self.0.accepting.store(false, Ordering::SeqCst);
         }
         loop {
-            if self.jobs()?.iter().all(|j| !j.status.active())
+            // A deploy runs on as its host-side job, and the next start re-attaches to it.
+            if self
+                .jobs()?
+                .iter()
+                .all(|j| !j.status.active() || j.kind == JobKind::Deploy)
                 && self.host_jobs()?.iter().all(|j| !j.status.active())
                 && self.snapshots()?.iter().all(|s| !snapshots::busy(s.status))
             {
@@ -1159,6 +1311,8 @@ fn new_job(farm: &str, kind: JobKind) -> Job {
         finished_at: None,
         snapshot_id: None,
         forget: false,
+        remote_job_id: None,
+        remote_frames: 0,
     }
 }
 fn farm_components(farm: &FarmRecord) -> Vec<String> {

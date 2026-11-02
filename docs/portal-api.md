@@ -29,6 +29,8 @@ API prefix는 `/api/v1`입니다. token이 설정된 경우 모든 경로에
    `id`는 1~48자의 소문자·숫자·하이픈이며 양끝에 하이픈을 쓸 수 없습니다.
 4. 응답의 `id` 또는 `Location`으로 `GET /jobs/{id}`를 polling합니다.
    job 상태는 `queued → running → succeeded/failed`입니다. 데몬 강제 종료 시 `interrupted`가 될 수 있습니다.
+   실행 중인 배포 job은 예외입니다. 배포는 호스트에서 계속되고, 다시 시작한 데몬이 같은 job에 다시 붙어
+   `running`에서 이어 갑니다. 호스트에 다시 연결하지 못할 때만 `interrupted`가 됩니다.
 5. create 성공 후 `POST /farms/{id}/deploy`에 `{}`를 전달합니다.
    배포 job이 성공하면 farm 상태가 `ready`가 됩니다. 기존 다중 VM Farm의 재배포는 `409`로 거절하며 자동 변환하지 않습니다.
 6. 실패하면 job의 `phase`와 `error`를 표시합니다. 재개 요청 예:

@@ -6,7 +6,7 @@
     "license": {
       "name": ""
     },
-    "version": "0.1.1"
+    "version": "0.1.3"
   },
   "paths": {
     "/api/v1/agent-hosts": {
@@ -2377,6 +2377,19 @@
                 "$ref": "#/components/schemas/Phase"
               }
             ]
+          },
+          "remote_frames": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Progress events of the host-side job already recorded here.",
+            "minimum": 0
+          },
+          "remote_job_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The host-side job a deploy runs as. It outlives the coordinator, which re-attaches\nto it after a restart."
           },
           "snapshot_id": {
             "type": [

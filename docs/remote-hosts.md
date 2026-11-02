@@ -194,6 +194,22 @@ worker도 전체 예약과 물리 가용 메모리·KVM을 확인한다. 같은 
 강제 종료한 작업은 interrupted가 되며 자동 재실행하지 않는다. SSH 연결이 끊겨도 원격 작업은 timeout까지 남을 수 있다.
 실행기는 create 10분, deploy 2시간, delete 3분으로 제한하며 agent의 파일 잠금과 registry를 확인한 뒤 재시도한다.
 
+배포만은 요청과 분리해 실행한다. Coordinator는 배포 job마다 원격 job ID(UUID)를 만들어 job 기록(`remote_job_id`)에
+먼저 저장하고 deploy 요청에 담아 보낸다. 실행기는 `~/.local/share/farm/worker-v1/jobs/<job ID>/`를 만들고
+자기 자신을 새 세션의 worker 프로세스(`farm-agent agent worker <dir>`, 로컬은 `farm agent worker <dir>`)로 띄운 뒤
+그 디렉터리를 따라 읽어 진행을 전달한다. worker는 `deploy.lock`과 Farm 잠금을 잡고 진행 frame을 `frames.jsonl`에,
+결과를 `result.json`(atomic rename)에 쓰며, 실행 중에는 `worker.lock`을 쥐고 `pid`를 남긴다. stderr는 `worker.log`에 남는다.
+SSH 채널·`timeout`·하위 프로세스 종료·터미널 신호로는 요청을 처리하던 쪽만 끝나고 worker는 2시간 제한까지 계속한다.
+같은 job ID의 deploy 요청은 새로 배포하지 않고 기존 job에 붙는다. `attach` 요청(`job_id`, 이미 받은 frame 수 `offset`)은
+남은 frame부터 결과까지 전달한다. job을 시작한 Coordinator만 붙을 수 있고, worker가 결과 없이 사라졌으면
+`deploy worker exited without a result` 오류를 돌려준다. 끝난 job 디렉터리는 7일 뒤 새 배포를 시작할 때 지운다.
+
+Coordinator는 적용한 frame 수를 job 기록(`remote_frames`)에 저장한다(step/phase마다, 출력은 2초마다).
+연결이 끊기거나 Coordinator가 재시작하면 그 수부터 `attach`해 같은 job을 평소처럼 마무리한다. 재시작 직전 2초 안의
+출력 몇 줄은 로그에 두 번 남을 수 있다. 호스트에 10분 동안 다시 붙지 못하면 job은 interrupted가 되며 배포는
+호스트에서 계속 중일 수 있다. systemd-logind가 `KillUserProcesses=yes`인 Linux 호스트(대부분 배포판의 기본값은 `no`)에서는
+SSH 세션이 끝날 때 세션의 worker도 종료되므로, 실행 사용자를 `logind.conf`의 `KillExcludeUsers=`에 넣는다.
+
 ## 단일 원격 실행 검증 기록
 
 2026-10-20 추가 검증:
@@ -258,6 +274,9 @@ coordinator) 사용한다.
 
 요청·진행·결과는 SSH 실행기와 같은 프로토콜을 세션 번호로 나눠 한 소켓에 싣는다. 접속에는 API token이 아니라
 호스트 토큰을 `Authorization: Bearer`로 쓴다. 연결이 끊기면 그 소켓의 진행 중인 작업은 실패로 끝나고,
-agent 쪽에서도 함께 중단된다(SSH가 끊길 때와 같다). 연결되지 않은 호스트에는 Farm을 만들 수 없다.
+agent 쪽에서도 함께 중단된다(SSH가 끊길 때와 같다). 배포만은 SSH 호스트처럼 분리된 worker로 계속되고,
+agent가 다시 접속하면 coordinator가 다시 붙는다. agent를 systemd 서비스로 돌린다면 서비스를 멈출 때
+cgroup의 worker도 함께 종료되므로(`KillMode=control-group`) 배포 중에는 서비스를 재시작하지 않는다.
+연결되지 않은 호스트에는 Farm을 만들 수 없다.
 public 포트는 원격 호스트처럼 `0.0.0.0`에 바인딩한다.
 

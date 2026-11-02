@@ -122,6 +122,9 @@ enum AgentMode {
         #[arg(long)]
         token: Option<String>,
     },
+    /// Run a deploy job the agent recorded, detached from the request that started it
+    #[command(hide = true)]
+    Worker { job: PathBuf },
 }
 #[derive(Subcommand)]
 enum HostCommand {
@@ -299,6 +302,15 @@ async fn main() -> Result<()> {
                 .ok_or_else(|| anyhow::anyhow!("pass --token or set FARM_AGENT_TOKEN"))?;
             let agent = std::sync::Arc::new(farm::remote::agent::Agent::local());
             return farm::remote::dial::run(coordinator, &token, agent).await;
+        }
+        Command::Agent {
+            mode: Some(AgentMode::Worker { job }),
+        } => {
+            if let Err(error) = farm::remote::agent::serve_worker(job).await {
+                eprintln!("farm agent worker: {error:#}");
+                std::process::exit(1);
+            }
+            std::process::exit(0);
         }
         Command::Agent { mode: None } => {
             if let Err(error) = farm::remote::agent::serve_stdio().await {

@@ -31,6 +31,10 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 # Published agents; already in the tree through microsandbox's registry client.
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
 
+[target.'cfg(unix)'.dependencies]
+# setsid for deploy workers; already in the tree through tokio.
+libc = "0.2"
+
 [dev-dependencies]
 http-body-util = "0.1"
 tempfile = "3"

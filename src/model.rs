@@ -481,6 +481,16 @@ pub struct Job {
     /// A delete that removes only the coordinator's record and leaves any VM on the host.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub forget: bool,
+    /// The host-side job a deploy runs as. It outlives the coordinator, which re-attaches
+    /// to it after a restart.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_job_id: Option<String>,
+    /// Progress events of the host-side job already recorded here.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub remote_frames: u64,
+}
+fn is_zero(value: &u64) -> bool {
+    *value == 0
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, ToSchema)]

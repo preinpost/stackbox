@@ -1,5 +1,8 @@
 //! One SSH request per process; no listener and no SSH credentials on the target.
-use super::protocol::{Frame, MAX_FRAME, Operation, Reply, Request, TerminalFrame, VERSION};
+use super::{
+    job::Job,
+    protocol::{Frame, MAX_FRAME, Operation, Reply, Request, TerminalFrame, VERSION},
+};
 use crate::{
     farm::{TerminalInput, TerminalIo, TerminalSize},
     manager::{Backend, MicrosandboxBackend},
@@ -11,11 +14,13 @@ use fs2::FileExt;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
+    ffi::OsString,
     fs::{self, File, OpenOptions},
     io::Write,
     net::TcpListener,
     path::{Path, PathBuf},
     sync::Arc,
+    time::Duration,
 };
 
 pub type Emitter = Arc<dyn Fn(Frame) -> Result<()> + Send + Sync>;
@@ -110,6 +115,7 @@ fn lock(dir: &Path, name: &str) -> Result<AgentLock> {
     Ok(AgentLock(file))
 }
 
+#[derive(Clone)]
 pub struct Limits {
     pub memory_budget_mib: u64,
     pub available_mib: u64,
@@ -134,13 +140,27 @@ impl Limits {
         }
     }
 }
+/// Where a deploy job's worker runs. Either way it records the job in the same files.
+#[derive(Clone)]
+enum Runner {
+    /// A task of this process, which the job does not outlive.
+    Inline,
+    /// A process of its own: this binary as `agent worker <job dir>`.
+    Detached,
+    /// A process of its own from this command, with the job directory appended.
+    #[cfg(test)]
+    Command(Vec<OsString>),
+}
+#[derive(Clone)]
 pub struct Agent {
     dir: PathBuf,
     backend: Arc<dyn Backend>,
     limits: Limits,
+    runner: Runner,
 }
 impl Agent {
-    /// An agent that runs inside the coordinator's process, for tests.
+    /// An agent that runs inside the coordinator's process, for tests. Its deploys run as
+    /// tasks of that process.
     pub fn in_process(dir: PathBuf, backend: Arc<dyn Backend>) -> Self {
         Self {
             dir,
@@ -152,14 +172,15 @@ impl Agent {
                 // Parallel tests would contend for the same real ports.
                 probe_ports: false,
             },
+            runner: Runner::Inline,
         }
     }
     pub fn local() -> Self {
-        let home = std::env::var_os("HOME").unwrap_or_else(|| ".".into());
         Self {
-            dir: PathBuf::from(home).join(".local/share/farm/worker-v1"),
+            dir: local_dir(),
             backend: Arc::new(MicrosandboxBackend),
             limits: Limits::system(),
+            runner: Runner::Detached,
         }
     }
     /// Destroys every farm VM this host's agent created, whatever coordinator reserved it,
@@ -337,6 +358,11 @@ impl Agent {
             validate_id(id)?;
             uuid::Uuid::parse_str(generation).context("invalid farm generation")?;
         }
+        if let Operation::Deploy { job_id, .. } | Operation::Attach { job_id, .. } =
+            &request.operation
+        {
+            uuid::Uuid::parse_str(job_id).context("invalid job id")?;
+        }
         Ok(())
     }
 
@@ -433,6 +459,110 @@ impl Agent {
             .clone();
         ensure!(!entry.deleted, "farm was deleted");
         Ok(entry)
+    }
+
+    /// The reservation a deploy of this farm generation runs on.
+    fn deployable(&self, request: &Request, id: &str, generation: &str) -> Result<Reservation> {
+        let entry = self.owned(request, id, generation)?;
+        ensure!(
+            entry.plan.nodes.len() == 1 && entry.plan.nodes[0].role == crate::farm::Role::AllInOne,
+            "legacy multi-node farm cannot be deployed by the single-VM engine; create a new farm"
+        );
+        Ok(entry)
+    }
+
+    /// Start the deploy as job `job_id`, or join the job already started under that id, and
+    /// follow it to its result. Ending this request leaves the job running.
+    async fn deploy(&self, request: &Request, job_id: &str, emit: Emitter) -> Result<Reply> {
+        let (id, generation) = request
+            .operation
+            .scope()
+            .context("deploy without a farm id")?;
+        // Refuse a foreign or impossible deploy before it leaves a job behind.
+        self.deployable(request, id, generation)?;
+        let (job, created) = Job::create(&self.dir, job_id, request)?;
+        if created {
+            if let Err(error) = self.launch(&job).await {
+                job.finish(Err(anyhow::anyhow!("{error:#}")))?;
+                return Err(error);
+            }
+        } else {
+            ensure!(
+                job.request.coordinator_id == request.coordinator_id
+                    && serde_json::to_value(&job.request.operation)?
+                        == serde_json::to_value(&request.operation)?,
+                "job {job_id} is another deploy"
+            );
+        }
+        job.follow(0, &emit).await
+    }
+
+    async fn launch(&self, job: &Job) -> Result<()> {
+        let command: Vec<OsString> = match &self.runner {
+            Runner::Inline => {
+                let claim = job.claim()?;
+                let (agent, job) = (self.clone(), job.clone());
+                tokio::spawn(async move {
+                    let _claim = claim;
+                    if let Err(error) = agent.run_job(&job).await {
+                        eprintln!("farm agent: cannot record the deploy job: {error:#}");
+                    }
+                });
+                return Ok(());
+            }
+            Runner::Detached => vec![
+                std::env::current_exe()
+                    .context("cannot locate the agent binary")?
+                    .into(),
+                "agent".into(),
+                "worker".into(),
+            ],
+            #[cfg(test)]
+            Runner::Command(command) => command.clone(),
+        };
+        job.spawn(&command).await
+    }
+
+    /// Run a claimed job and record its result. Bounded like the request it replaced.
+    async fn run_job(&self, job: &Job) -> Result<()> {
+        let seconds = job.request.operation.seconds();
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(seconds),
+            self.run_deploy(&job.request, job.recorder()?),
+        )
+        .await
+        .unwrap_or_else(|_| {
+            Err(anyhow::anyhow!(
+                "deploy timed out after {seconds} s; inspect the farm's VM before retrying"
+            ))
+        });
+        job.finish(outcome)
+    }
+
+    async fn run_deploy(&self, request: &Request, emit: Emitter) -> Result<Reply> {
+        Self::admit(request)?;
+        let Operation::Deploy {
+            farm_id: id,
+            generation,
+            from,
+            ..
+        } = &request.operation
+        else {
+            bail!("not a deploy job");
+        };
+        let _farm_lock = lock(&self.dir, &format!("{id}.lock"))?;
+        let entry = self.deployable(request, id, generation)?;
+        let _deploy_lock = lock(&self.dir, "deploy.lock")?;
+        self.backend
+            .deploy(
+                id.into(),
+                *from,
+                Some(entry.exposure),
+                entry.plan.components.clone(),
+                progress(emit),
+            )
+            .await?;
+        Ok(Reply::Done)
     }
 
     /// Snapshot storage on this host. Paths name files on this host, which the coordinator
@@ -537,6 +667,19 @@ impl Agent {
         ) {
             return self.snapshot_operation(&request.operation).await;
         }
+        // A deploy outlives this request; its worker takes the farm's locks instead.
+        if let Operation::Deploy { job_id, .. } = &request.operation {
+            return self.deploy(&request, job_id, emit).await;
+        }
+        if let Operation::Attach { job_id, offset } = &request.operation {
+            let job = Job::open(&self.dir, job_id)?;
+            // Its reservation was checked when the job started; the job names its owner.
+            ensure!(
+                job.request.coordinator_id == request.coordinator_id,
+                "job {job_id} belongs to another coordinator"
+            );
+            return job.follow(*offset, &emit).await;
+        }
         let (id, generation) = request
             .operation
             .scope()
@@ -613,25 +756,6 @@ impl Agent {
                 registry.save()?;
                 Ok(Reply::Done)
             }
-            Operation::Deploy { from, .. } => {
-                let entry = self.owned(&request, id, generation)?;
-                ensure!(
-                    entry.plan.nodes.len() == 1
-                        && entry.plan.nodes[0].role == crate::farm::Role::AllInOne,
-                    "legacy multi-node farm cannot be deployed by the single-VM engine; create a new farm"
-                );
-                let _deploy_lock = lock(&self.dir, "deploy.lock")?;
-                self.backend
-                    .deploy(
-                        id.into(),
-                        *from,
-                        Some(entry.exposure),
-                        entry.plan.components.clone(),
-                        progress(emit),
-                    )
-                    .await?;
-                Ok(Reply::Done)
-            }
             Operation::Endpoints { .. } => {
                 let entry = self.owned(&request, id, generation)?;
                 Ok(Reply::Endpoints {
@@ -670,6 +794,44 @@ impl Agent {
             _ => bail!("unsupported operation"),
         }
     }
+}
+
+fn local_dir() -> PathBuf {
+    let home = std::env::var_os("HOME").unwrap_or_else(|| ".".into());
+    PathBuf::from(home).join(".local/share/farm/worker-v1")
+}
+
+/// `agent worker <job dir>`: run a job recorded under this agent's directory to its result.
+/// The agent starts it detached; it is not meant to be run by hand.
+pub async fn serve_worker(dir: &Path) -> Result<()> {
+    work(dir, Arc::new(MicrosandboxBackend)).await
+}
+async fn work(dir: &Path, backend: Arc<dyn Backend>) -> Result<()> {
+    let id = dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("not a job directory")?;
+    let agent_dir = dir
+        .parent()
+        .and_then(Path::parent)
+        .context("not a job directory")?;
+    let job = Job::open(agent_dir, id)?;
+    let _claim = job.claim()?;
+    ensure!(!job.finished(), "job {id} already finished");
+    Agent {
+        dir: agent_dir.into(),
+        backend,
+        // A worker only runs its job; it reserves nothing.
+        limits: Limits {
+            memory_budget_mib: 0,
+            available_mib: 0,
+            virtualization: false,
+            probe_ports: false,
+        },
+        runner: Runner::Inline,
+    }
+    .run_job(&job)
+    .await
 }
 
 /// Forwards deployment progress to the coordinator as frames.
@@ -812,6 +974,7 @@ mod tests {
                 virtualization: true,
                 probe_ports: true,
             },
+            runner: Runner::Inline,
         };
         let owner = uuid::Uuid::new_v4().to_string();
         let other = uuid::Uuid::new_v4().to_string();
@@ -950,6 +1113,273 @@ mod tests {
         assert!(!original.is_empty());
     }
 
+    type Frames = Arc<std::sync::Mutex<Vec<Frame>>>;
+    fn collector() -> (Frames, Emitter) {
+        let frames = Frames::default();
+        let collect: Emitter = {
+            let frames = frames.clone();
+            Arc::new(move |frame| {
+                frames.lock().unwrap().push(frame);
+                Ok(())
+            })
+        };
+        (frames, collect)
+    }
+    fn deploy(owner: &str, generation: &str, job_id: &str) -> Request {
+        request(
+            owner,
+            Operation::Deploy {
+                farm_id: "one".into(),
+                generation: generation.into(),
+                from: crate::kolla::Phase::Prepare,
+                job_id: job_id.into(),
+            },
+        )
+    }
+    fn attach(owner: &str, job_id: &str, offset: u64) -> Request {
+        request(
+            owner,
+            Operation::Attach {
+                job_id: job_id.into(),
+                offset,
+            },
+        )
+    }
+
+    #[tokio::test]
+    async fn deploy_jobs_are_recorded_attached_to_and_owned_by_their_coordinator() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = Arc::new(Fake::default());
+        let agent = Agent::in_process(dir.path().into(), backend.clone());
+        let owner = uuid::Uuid::new_v4().to_string();
+        let other = uuid::Uuid::new_v4().to_string();
+        let generation = uuid::Uuid::new_v4().to_string();
+        let (_, silent) = collector();
+        agent
+            .execute(
+                request(&owner, create("one", &generation, 23700)),
+                silent.clone(),
+            )
+            .await
+            .unwrap();
+        let job_id = uuid::Uuid::new_v4().to_string();
+        let (frames, collect) = collector();
+        let reply = agent
+            .execute(deploy(&owner, &generation, &job_id), collect)
+            .await
+            .unwrap();
+        assert!(matches!(reply, Reply::Done));
+        assert_eq!(frames.lock().unwrap().len(), 3);
+        let job_dir = dir.path().join("jobs").join(&job_id);
+        assert_eq!(
+            fs::read_to_string(job_dir.join("frames.jsonl"))
+                .unwrap()
+                .lines()
+                .count(),
+            3
+        );
+        assert!(job_dir.join("result.json").exists());
+
+        // The same deploy again joins the recorded job instead of deploying twice.
+        let (again, collect) = collector();
+        agent
+            .execute(deploy(&owner, &generation, &job_id), collect)
+            .await
+            .unwrap();
+        assert_eq!(again.lock().unwrap().len(), 3);
+        assert_eq!(backend.deployed.load(Ordering::SeqCst), 1);
+        let (rest, collect) = collector();
+        agent
+            .execute(attach(&owner, &job_id, 2), collect)
+            .await
+            .unwrap();
+        assert!(matches!(
+            &rest.lock().unwrap()[..],
+            [Frame::Step { step }] if step == "make images"
+        ));
+
+        let foreign = agent
+            .execute(attach(&other, &job_id, 0), silent.clone())
+            .await
+            .unwrap_err();
+        assert!(
+            foreign.to_string().contains("another coordinator"),
+            "{foreign:#}"
+        );
+        assert!(
+            agent
+                .execute(deploy(&other, &generation, &job_id), silent.clone())
+                .await
+                .is_err()
+        );
+        let unknown = agent
+            .execute(
+                attach(&owner, &uuid::Uuid::new_v4().to_string(), 0),
+                silent.clone(),
+            )
+            .await
+            .unwrap_err();
+        assert!(unknown.to_string().contains("unknown"), "{unknown:#}");
+
+        // A job whose worker is gone without a result reports that, not a hang.
+        let orphan = uuid::Uuid::new_v4().to_string();
+        Job::create(dir.path(), &orphan, &deploy(&owner, &generation, &orphan)).unwrap();
+        let lost = agent
+            .execute(attach(&owner, &orphan, 0), silent.clone())
+            .await
+            .unwrap_err();
+        assert!(
+            lost.to_string()
+                .contains("deploy worker exited without a result"),
+            "{lost:#}"
+        );
+
+        // A failed deploy keeps its error for a later attach.
+        backend.fail.store(true, Ordering::SeqCst);
+        let failing = uuid::Uuid::new_v4().to_string();
+        for operation in [
+            deploy(&owner, &generation, &failing),
+            attach(&owner, &failing, 0),
+        ] {
+            let error = agent.execute(operation, silent.clone()).await.unwrap_err();
+            assert!(error.to_string().contains("intentional deploy failure"));
+        }
+        assert_eq!(backend.deployed.load(Ordering::SeqCst), 2);
+    }
+
+    /// Holds a deploy until its job directory has a `release` file.
+    struct Held(PathBuf);
+    impl Backend for Held {
+        fn scan(
+            &self,
+        ) -> futures::future::BoxFuture<'_, Result<BTreeMap<String, Vec<crate::farm::FarmNode>>>>
+        {
+            Box::pin(async { bail!("not in this test") })
+        }
+        fn create(
+            &self,
+            _: String,
+            _: Plan,
+            _: Exposure,
+        ) -> futures::future::BoxFuture<'_, Result<Vec<crate::farm::FarmNode>>> {
+            Box::pin(async { bail!("not in this test") })
+        }
+        fn deploy(
+            &self,
+            _: String,
+            from: crate::kolla::Phase,
+            _: Option<Exposure>,
+            _: Vec<String>,
+            sink: crate::kolla::EventSink,
+        ) -> futures::future::BoxFuture<'_, Result<()>> {
+            use crate::kolla::DeployEvent;
+            Box::pin(async move {
+                sink(DeployEvent::Phase(from))?;
+                sink(DeployEvent::Output("waiting for release".into()))?;
+                for _ in 0..600 {
+                    if self.0.exists() {
+                        sink(DeployEvent::Output("released".into()))?;
+                        return Ok(());
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                bail!("never released")
+            })
+        }
+        fn delete(&self, _: String) -> futures::future::BoxFuture<'_, Result<()>> {
+            Box::pin(async { bail!("not in this test") })
+        }
+        fn endpoints(
+            &self,
+            _: String,
+            _: Option<Exposure>,
+            _: Vec<String>,
+        ) -> futures::future::BoxFuture<'_, Result<crate::model::Endpoints>> {
+            Box::pin(async { bail!("not in this test") })
+        }
+    }
+
+    /// Not a test of its own: the worker process `a_detached_worker_outlives_its_request`
+    /// starts from this test binary runs it with the job directory as the last argument.
+    #[tokio::test]
+    async fn detached_worker() {
+        let Some(dir) = std::env::args()
+            .next_back()
+            .map(PathBuf::from)
+            .filter(|dir| dir.join("spec.json").exists())
+        else {
+            return;
+        };
+        work(&dir, Arc::new(Held(dir.join("release"))))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_detached_worker_outlives_its_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut agent = Agent::in_process(dir.path().into(), Arc::new(Fake::default()));
+        agent.runner = Runner::Command(vec![
+            std::env::current_exe().unwrap().into(),
+            "--exact".into(),
+            "remote::agent::tests::detached_worker".into(),
+            "--nocapture".into(),
+        ]);
+        let agent = Arc::new(agent);
+        let owner = uuid::Uuid::new_v4().to_string();
+        let generation = uuid::Uuid::new_v4().to_string();
+        let (_, silent) = collector();
+        agent
+            .execute(request(&owner, create("one", &generation, 23710)), silent)
+            .await
+            .unwrap();
+        let job_id = uuid::Uuid::new_v4().to_string();
+        let (frames, collect) = collector();
+        let requester = tokio::spawn({
+            let (agent, request) = (agent.clone(), deploy(&owner, &generation, &job_id));
+            async move { agent.execute(request, collect).await }
+        });
+        tokio::time::timeout(Duration::from_secs(30), async {
+            while frames.lock().unwrap().len() < 2 {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap();
+        // The coordinator's connection ends; the worker does not.
+        requester.abort();
+        let _ = requester.await;
+        let job = Job::open(dir.path(), &job_id).unwrap();
+        assert!(job.running() && !job.finished());
+        #[cfg(unix)]
+        {
+            let pid: i32 = fs::read_to_string(dir.path().join("jobs").join(&job_id).join("pid"))
+                .unwrap()
+                .parse()
+                .unwrap();
+            // SAFETY: getsid only reads the session ids of two processes.
+            let (worker, ours) = unsafe { (libc::getsid(pid), libc::getsid(0)) };
+            assert!(
+                worker == pid && worker != ours,
+                "the worker has its own session"
+            );
+        }
+        fs::write(dir.path().join("jobs").join(&job_id).join("release"), "").unwrap();
+        let (rest, collect) = collector();
+        let reply = tokio::time::timeout(
+            Duration::from_secs(60),
+            agent.execute(attach(&owner, &job_id, 2), collect),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(matches!(reply, Reply::Done));
+        assert!(matches!(
+            &rest.lock().unwrap()[..],
+            [Frame::Output { message }] if message == "released"
+        ));
+    }
+
     #[tokio::test]
     async fn purge_removes_every_reserved_farm_and_forgets_them() {
         let dir = tempfile::tempdir().unwrap();
@@ -964,6 +1394,7 @@ mod tests {
                 virtualization: true,
                 probe_ports: true,
             },
+            runner: Runner::Inline,
         };
         let owner = uuid::Uuid::new_v4().to_string();
         let other = uuid::Uuid::new_v4().to_string();
@@ -1013,6 +1444,7 @@ mod tests {
                 virtualization: true,
                 probe_ports: true,
             },
+            runner: Runner::Inline,
         };
         let owner = uuid::Uuid::new_v4().to_string();
         let generation = uuid::Uuid::new_v4().to_string();

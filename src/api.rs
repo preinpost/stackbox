@@ -22,7 +22,7 @@ use axum::{
     routing::{get, post},
 };
 use serde::{Deserialize, Serialize};
-use std::{convert::Infallible, net::SocketAddr, sync::Arc, time::Duration};
+use std::{convert::Infallible, io::Write, net::SocketAddr, sync::Arc, time::Duration};
 use utoipa::{OpenApi, ToSchema};
 
 #[derive(Clone)]
@@ -908,7 +908,11 @@ pub async fn serve(
     let shutdown_manager = manager.clone();
     let result = axum::serve(listener, router(manager.clone(), token)).with_graceful_shutdown(async move {
         shutdown_signal().await;
-        println!("farmd draining active jobs; a second signal terminates immediately");
+        // A closed terminal sends SIGHUP and then fails writes; that must not abort the drain.
+        let _ = writeln!(
+            std::io::stdout(),
+            "farmd draining active jobs (running deploys continue on their hosts); a second signal terminates immediately"
+        );
         let graceful = async { let result = shutdown_manager.shutdown().await; if let Err(e) = result { eprintln!("shutdown failed: {e:#}"); } };
         tokio::select! { _ = graceful => {}, _ = shutdown_signal() => { std::process::exit(130); } }
     }).await;
@@ -919,9 +923,11 @@ pub async fn serve(
 async fn shutdown_signal() {
     #[cfg(unix)]
     {
-        let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .expect("install SIGTERM handler");
-        tokio::select! { _ = tokio::signal::ctrl_c() => {}, _ = term.recv() => {} }
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut term = signal(SignalKind::terminate()).expect("install SIGTERM handler");
+        // The terminal the daemon runs in was closed.
+        let mut hangup = signal(SignalKind::hangup()).expect("install SIGHUP handler");
+        tokio::select! { _ = tokio::signal::ctrl_c() => {}, _ = term.recv() => {}, _ = hangup.recv() => {} }
     }
     #[cfg(not(unix))]
     {

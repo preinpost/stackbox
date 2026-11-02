@@ -4,6 +4,7 @@ pub mod backend;
 pub mod dial;
 pub mod host;
 pub mod hub;
+pub mod job;
 pub mod link;
 pub mod protocol;
 mod secrets;

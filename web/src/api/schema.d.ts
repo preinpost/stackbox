@@ -739,6 +739,16 @@ export interface components {
       id: string;
       kind: components["schemas"]["JobKind"];
       phase?: null | components["schemas"]["Phase"];
+      /**
+       * Format: int64
+       * @description Progress events of the host-side job already recorded here.
+       */
+      remote_frames?: number;
+      /**
+       * @description The host-side job a deploy runs as. It outlives the coordinator, which re-attaches
+       *     to it after a restart.
+       */
+      remote_job_id?: string | null;
       /** @description Snapshot captured by a snapshot job, or restored by a restore job. */
       snapshot_id?: string | null;
       /** Format: int64 */

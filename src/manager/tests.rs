@@ -25,8 +25,10 @@ pub(crate) struct Fake {
     settled: Mutex<Vec<Option<(Exposure, Exposure)>>>,
     deploys: AtomicUsize,
     max_deploys: AtomicUsize,
-    fail: AtomicBool,
-    deployment_gate: Option<Semaphore>,
+    /// Deploys started, finished or not.
+    pub(crate) deployed: AtomicUsize,
+    pub(crate) fail: AtomicBool,
+    pub(crate) deployment_gate: Option<Semaphore>,
     scan_delay: Mutex<Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>>,
 }
 impl Backend for Fake {
@@ -70,6 +72,7 @@ impl Backend for Fake {
         sink: EventSink,
     ) -> BoxFuture<'_, Result<()>> {
         Box::pin(async move {
+            self.deployed.fetch_add(1, Ordering::SeqCst);
             let active = self.deploys.fetch_add(1, Ordering::SeqCst) + 1;
             self.max_deploys.fetch_max(active, Ordering::SeqCst);
             sink(DeployEvent::Phase(from))?;
@@ -2468,4 +2471,309 @@ async fn a_released_build_installs_agents_it_never_loaded() {
     let unreleased = open_with(released, Arc::new(Fake::default())).await;
     assert_eq!(unreleased.load_published_agents().await.unwrap(), 0);
     settle(&unreleased).await;
+}
+
+/// Records a running deploy of `farm` as a coordinator that stopped mid-deploy leaves it,
+/// with the host-side job `remote` of which `frames` progress frames were recorded.
+fn running_deploy(manager: &FarmManager, farm: &str, remote: &str, frames: u64) -> Job {
+    manager
+        .update(|state| {
+            let mut job = new_job(farm, JobKind::Deploy);
+            job.status = JobStatus::Running;
+            job.phase = Some(Phase::Prepare);
+            job.started_at = Some(now());
+            job.remote_job_id = Some(remote.into());
+            job.remote_frames = frames;
+            let record = state.farms.get_mut(farm).unwrap();
+            record.status = FarmStatus::Deploying;
+            record.active_job = Some(job.id.clone());
+            record.phase = job.phase;
+            state.jobs.insert(job.id.clone(), job.clone());
+            Ok(job)
+        })
+        .unwrap()
+}
+fn count(manager: &FarmManager, farm: &str, message: &str) -> usize {
+    manager
+        .logs(farm, 0, 1000)
+        .unwrap()
+        .iter()
+        .filter(|entry| entry.message.contains(message))
+        .count()
+}
+
+#[tokio::test]
+async fn a_restarted_coordinator_reattaches_to_the_deploy_its_host_kept_running() {
+    use crate::remote::{agent::Agent, protocol};
+    let dir = tempfile::tempdir().unwrap();
+    let backend = Arc::new(Fake {
+        deployment_gate: Some(Semaphore::new(0)),
+        ..Default::default()
+    });
+    let manager = open_with(options(dir.path()), backend.clone()).await;
+    done(&manager, &manager.create(request("resume")).unwrap()).await;
+    let coordinator_id = manager.0.store.lock().unwrap().state.coordinator_id.clone();
+    let generation = manager.get("resume").unwrap().remote_generation.unwrap();
+    // The coordinator recorded the deploy, had applied its first frame and stopped...
+    let remote = uuid::Uuid::new_v4().to_string();
+    let job = running_deploy(&manager, "resume", &remote, 1);
+    // ...while the host's agent went on with it after the request was gone.
+    let agent = Arc::new(Agent::in_process(dir.path().join("agent"), backend.clone()));
+    let requester = tokio::spawn({
+        let request = protocol::Request {
+            version: protocol::VERSION,
+            coordinator_id,
+            operation: protocol::Operation::Deploy {
+                farm_id: "resume".into(),
+                generation,
+                from: Phase::Prepare,
+                job_id: remote.clone(),
+            },
+        };
+        async move { agent.execute(request, Arc::new(|_| Ok(()))).await }
+    });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while backend.deploys.load(Ordering::SeqCst) == 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    requester.abort();
+    // Stopping does not wait for a deploy; it goes on without the coordinator.
+    tokio::time::timeout(Duration::from_secs(5), manager.shutdown())
+        .await
+        .unwrap()
+        .unwrap();
+    drop(manager);
+
+    let manager = open_with(options(dir.path()), backend.clone()).await;
+    assert_eq!(manager.job(&job.id).unwrap().status, JobStatus::Running);
+    assert_eq!(manager.get("resume").unwrap().status, FarmStatus::Deploying);
+    assert_eq!(
+        count(&manager, "resume", "re-attaching to the running deploy"),
+        1
+    );
+    backend.deployment_gate.as_ref().unwrap().add_permits(1);
+    let finished = done(&manager, &job).await;
+    assert_eq!(
+        finished.status,
+        JobStatus::Succeeded,
+        "{:?}",
+        finished.error
+    );
+    assert_eq!(finished.remote_frames, 3);
+    assert_eq!(finished.started_at, job.started_at);
+    let farm = manager.get("resume").unwrap();
+    assert_eq!(farm.status, FarmStatus::Ready);
+    assert!(farm.active_job.is_none() && farm.step.is_none() && farm.error.is_none());
+    // Only the frames recorded after the restart are applied, each once, from one deploy.
+    assert_eq!(count(&manager, "resume", "test deployment output"), 1);
+    assert_eq!(count(&manager, "resume", "step: make images"), 1);
+    assert_eq!(count(&manager, "resume", "phase prepare"), 0);
+    assert_eq!(backend.deployed.load(Ordering::SeqCst), 1);
+    assert!(manager.endpoints("resume").await.is_ok());
+    settle(&manager).await;
+}
+
+#[tokio::test]
+async fn a_deploy_whose_host_stays_unreachable_after_a_restart_is_interrupted() {
+    let dir = tempfile::tempdir().unwrap();
+    let manager = open_with(options(dir.path()), Arc::new(Fake::default())).await;
+    manager
+        .register_agent_host(crate::remote::RegisterAgentHost { id: "edge".into() })
+        .unwrap();
+    done(&manager, &manager.create(request("far")).unwrap()).await;
+    manager
+        .update(|state| {
+            state.farms.get_mut("far").unwrap().host_id = Some("edge".into());
+            Ok(())
+        })
+        .unwrap();
+    let job = running_deploy(&manager, "far", &uuid::Uuid::new_v4().to_string(), 0);
+    settle(&manager).await;
+    drop(manager);
+
+    // The dial-in agent never connects again.
+    let manager = open_with(options(dir.path()), Arc::new(Fake::default())).await;
+    let finished = tokio::time::timeout(Duration::from_secs(15), manager.wait(&job.id))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(finished.status, JobStatus::Interrupted);
+    assert!(
+        finished
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("may still be running on the host"),
+        "{:?}",
+        finished.error
+    );
+    let farm = manager.get("far").unwrap();
+    assert_eq!(farm.status, FarmStatus::Failed);
+    assert!(farm.active_job.is_none());
+    settle(&manager).await;
+}
+
+#[tokio::test]
+async fn a_restarted_coordinator_reattaches_to_a_remote_deploy_over_ssh() {
+    use crate::remote::{AgentArtifactInfo, HostJobKind, InstalledAgent, test_server::Fixture};
+    let fixture = Fixture::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let manager = open_with(options(dir.path()), Arc::new(Fake::default())).await;
+    manager
+        .register_host(fixture.registration("target"))
+        .unwrap();
+    let prep = manager
+        .start_host_job("target", HostJobKind::Prepare)
+        .unwrap();
+    host_done(&manager, &prep.id).await;
+    manager
+        .update(|state| {
+            state.hosts.get_mut("target").unwrap().host.agent = Some(InstalledAgent {
+                artifact: AgentArtifactInfo {
+                    sha256: "a".repeat(64),
+                    os: "linux".into(),
+                    arch: std::env::consts::ARCH.into(),
+                    protocol: 1,
+                    supports_single_vm: true,
+                    build_id: crate::BUILD_ID.into(),
+                },
+                verified_at: now(),
+            });
+            Ok(())
+        })
+        .unwrap();
+    let mut remote = request("remote-farm");
+    remote.host_id = Some("target".into());
+    remote.external_host = "target.example".into();
+    done(&manager, &manager.create(remote).unwrap()).await;
+    let remote_job = uuid::Uuid::new_v4().to_string();
+    let job = running_deploy(&manager, "remote-farm", &remote_job, 5);
+    settle(&manager).await;
+    drop(manager);
+
+    let manager = open_with(options(dir.path()), Arc::new(Fake::default())).await;
+    let finished = done(&manager, &job).await;
+    assert_eq!(
+        finished.status,
+        JobStatus::Succeeded,
+        "{:?}",
+        finished.error
+    );
+    assert_eq!(finished.remote_frames, 6);
+    assert!(
+        fixture
+            .observed
+            .calls
+            .lock()
+            .unwrap()
+            .contains(&format!("attach:{remote_job}:5"))
+    );
+    assert_eq!(
+        count(&manager, "remote-farm", "remote deploy re-attached output"),
+        1
+    );
+    assert_eq!(
+        manager.get("remote-farm").unwrap().status,
+        FarmStatus::Ready
+    );
+    settle(&manager).await;
+}
+
+/// The local agent, whose first deploy request loses its connection after the first frame.
+struct DroppingLink {
+    inner: crate::remote::link::InProcessLink,
+    dropped: AtomicBool,
+    attaches: AtomicUsize,
+}
+impl crate::remote::link::AgentLink for DroppingLink {
+    fn call(
+        &self,
+        request: crate::remote::protocol::Request,
+        sink: Option<EventSink>,
+    ) -> BoxFuture<'_, Result<crate::remote::protocol::Reply>> {
+        use crate::remote::protocol::Operation;
+        Box::pin(async move {
+            match request.operation {
+                Operation::Deploy { .. } if !self.dropped.swap(true, Ordering::SeqCst) => {
+                    let sink = sink.unwrap();
+                    let (first, applied) = tokio::sync::oneshot::channel();
+                    let first = Mutex::new(Some(first));
+                    let forward: EventSink = Arc::new(move |event| {
+                        sink(event)?;
+                        if let Some(first) = first.lock().unwrap().take() {
+                            let _ = first.send(());
+                        }
+                        Ok(())
+                    });
+                    tokio::select! {
+                        _ = self.inner.call(request, Some(forward)) => bail!("the deploy ended early"),
+                        _ = applied => bail!("connection reset by peer"),
+                    }
+                }
+                Operation::Attach { .. } => {
+                    self.attaches.fetch_add(1, Ordering::SeqCst);
+                }
+                _ => {}
+            }
+            self.inner.call(request, sink).await
+        })
+    }
+    fn terminal(
+        &self,
+        request: crate::remote::protocol::Request,
+        io: crate::farm::TerminalIo,
+    ) -> BoxFuture<'_, Result<()>> {
+        self.inner.terminal(request, io)
+    }
+}
+
+#[tokio::test]
+async fn a_deploy_that_loses_its_connection_follows_the_host_job_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let backend = Arc::new(Fake {
+        deployment_gate: Some(Semaphore::new(0)),
+        ..Default::default()
+    });
+    let link = Arc::new(DroppingLink {
+        inner: crate::remote::link::InProcessLink {
+            agent: Arc::new(crate::remote::agent::Agent::in_process(
+                dir.path().join("agent"),
+                backend.clone(),
+            )),
+        },
+        dropped: AtomicBool::new(false),
+        attaches: AtomicUsize::new(0),
+    });
+    let manager = FarmManager::with_link(options(dir.path()), link.clone())
+        .await
+        .unwrap();
+    local_host(&manager);
+    done(&manager, &manager.create(request("flaky")).unwrap()).await;
+    let job = manager.deploy("flaky", DeployRequest::default()).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while link.attaches.load(Ordering::SeqCst) == 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(manager.job(&job.id).unwrap().status, JobStatus::Running);
+    backend.deployment_gate.as_ref().unwrap().add_permits(1);
+    let finished = done(&manager, &job).await;
+    assert_eq!(
+        finished.status,
+        JobStatus::Succeeded,
+        "{:?}",
+        finished.error
+    );
+    assert_eq!(finished.remote_frames, 3);
+    assert_eq!(count(&manager, "flaky", "lost the connection"), 1);
+    assert_eq!(count(&manager, "flaky", "test deployment output"), 1);
+    assert_eq!(count(&manager, "flaky", "step: make images"), 1);
+    assert_eq!(backend.deployed.load(Ordering::SeqCst), 1);
+    assert_eq!(manager.get("flaky").unwrap().status, FarmStatus::Ready);
+    settle(&manager).await;
 }

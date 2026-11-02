@@ -20,6 +20,18 @@ async fn main() {
         }
         return;
     }
+    // The same arguments as `farm agent worker`, so either binary starts its deploy
+    // workers alike.
+    if let [agent, worker, job] = &args[..]
+        && agent == "agent"
+        && worker == "worker"
+    {
+        if let Err(error) = farm::remote::agent::serve_worker(job.as_ref()).await {
+            eprintln!("farm-agent worker: {error:#}");
+            std::process::exit(1);
+        }
+        std::process::exit(0);
+    }
     if let Err(error) = farm::remote::agent::serve_stdio().await {
         eprintln!("farm-agent: {error}");
         std::process::exit(1);

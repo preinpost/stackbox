@@ -4,7 +4,7 @@
 use super::{
     Credentials, RemoteHost,
     agent::{Agent, Emitter},
-    protocol::{Frame, MAX_FRAME, Reply, Request, TerminalFrame, deliver},
+    protocol::{AgentError, Frame, MAX_FRAME, Reply, Request, TerminalFrame, deliver},
     ssh::Session,
 };
 use crate::{
@@ -179,7 +179,11 @@ impl AgentLink for InProcessLink {
             if matches!(request.operation, super::protocol::Operation::Shell { .. }) {
                 bail!("shell sessions need a terminal stream");
             }
-            self.agent.execute(request, emit).await
+            // Whatever the agent itself fails with is the operation's outcome, as over a wire.
+            self.agent
+                .execute(request, emit)
+                .await
+                .map_err(|error| AgentError(format!("{error:#}")).into())
         })
     }
     fn terminal(&self, request: Request, io: TerminalIo) -> BoxFuture<'_, Result<()>> {

@@ -288,6 +288,17 @@ impl server::Handler for Handler {
                     });
                     Reply::Done
                 }
+                Operation::Attach { job_id, offset } => {
+                    self.observed
+                        .calls
+                        .lock()
+                        .unwrap()
+                        .push(format!("attach:{job_id}:{offset}"));
+                    frames.push(Frame::Output {
+                        message: "remote deploy re-attached output\n".into(),
+                    });
+                    Reply::Done
+                }
                 Operation::Delete { farm_id, .. } => {
                     self.observed.rpc_farms.lock().unwrap().remove(&farm_id);
                     Reply::Done

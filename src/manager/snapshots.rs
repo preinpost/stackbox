@@ -315,7 +315,7 @@ impl FarmManager {
                     farm.id.clone(),
                     None,
                     snapshot.plan.components.clone(),
-                    self.event_sink(job),
+                    self.event_sink(job, None),
                 )
                 .await
                 .with_context(|| {
@@ -364,7 +364,7 @@ impl FarmManager {
                     farm.id.clone(),
                     Some((snapshot.source_exposure.clone(), exposure)),
                     plan.components.clone(),
-                    self.event_sink(job),
+                    self.event_sink(job, None),
                 )
                 .await?;
         }

@@ -35,6 +35,30 @@ impl AgentBackend {
             _ => bail!("unexpected farm-agent response"),
         }
     }
+    /// Deploy as the host-side job `job_id`, which keeps running if this request ends.
+    pub async fn deploy_job(
+        &self,
+        id: String,
+        from: Phase,
+        job_id: String,
+        sink: EventSink,
+    ) -> Result<()> {
+        self.done(
+            Operation::Deploy {
+                farm_id: id,
+                generation: self.generation.clone(),
+                from,
+                job_id,
+            },
+            Some(sink),
+        )
+        .await
+    }
+    /// Follow the host-side job `job_id` from its `offset`th progress frame to its result.
+    pub async fn attach(&self, job_id: String, offset: u64, sink: EventSink) -> Result<()> {
+        self.done(Operation::Attach { job_id, offset }, Some(sink))
+            .await
+    }
     async fn nodes(&self, operation: Operation) -> Result<Vec<FarmNode>> {
         match self.call(operation, None).await? {
             Reply::Nodes { nodes } => Ok(nodes),
@@ -73,14 +97,7 @@ impl Backend for AgentBackend {
         _: Vec<String>,
         sink: EventSink,
     ) -> BoxFuture<'_, Result<()>> {
-        Box::pin(self.done(
-            Operation::Deploy {
-                farm_id: id,
-                generation: self.generation.clone(),
-                from,
-            },
-            Some(sink),
-        ))
+        Box::pin(self.deploy_job(id, from, uuid::Uuid::new_v4().to_string(), sink))
     }
     fn delete(&self, id: String) -> BoxFuture<'_, Result<()>> {
         Box::pin(self.done(
