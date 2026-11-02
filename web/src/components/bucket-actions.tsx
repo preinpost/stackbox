@@ -108,7 +108,7 @@ export function BucketsPanel() {
         <EmptyState
           icon={<Cloud size={24} />}
           title="등록된 S3 버킷이 없습니다"
-          description="AWS S3, Cloudflare R2, MinIO, RustFS처럼 S3 API를 쓰는 저장소를 등록하면 스냅샷을 바로 올리고 다른 호스트에서 가져올 수 있습니다."
+          description="S3 Compatible 저장소를 등록하면 스냅샷을 올리고 다른 호스트에서 가져올 수 있습니다."
         />
       ) : (
         sorted.map((bucket) => <BucketRow bucket={bucket} key={bucket.id} />)
