@@ -74,15 +74,23 @@ tasks:
     internal: true
     deps: [serve, portal-dev]
   portal-install:
-    desc: Install web portal dependencies
+    desc: Install web portal dependencies; skipped while package.json and the lockfile are unchanged
+    # npm ci writes node_modules/.package-lock.json, so a deleted node_modules installs again.
+    sources:
+      - web/package.json
+      - web/package-lock.json
+    generates:
+      - web/node_modules/.package-lock.json
     cmds:
       - npm --prefix web ci
   portal-dev:
     desc: Run the local web portal (run task serve separately)
+    deps: [portal-install]
     cmds:
       - npm --prefix web run dev
   portal-build:
     desc: Type-check and build the web portal
+    deps: [portal-install]
     cmds:
       - npm --prefix web run build
   portal-serve:

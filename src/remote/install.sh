@@ -1,4 +1,6 @@
 set -eu
+# A umask such as 0002 would leave ~/.microsandbox group-writable, which msb refuses.
+umask 022
 export PATH="$HOME/.microsandbox/bin:$HOME/.local/bin:$PATH"
 command -v curl >/dev/null
 command -v tar >/dev/null
@@ -16,6 +18,11 @@ if [ "$os" = linux ]; then
 fi
 # macOS has no flock(1); the farm-agent that runs this there holds the install lock.
 want=@MSB_VERSION@
+# msb 0.7.13 refuses a catalog under a group- or world-writable ancestor. Earlier installs
+# could leave ~/.microsandbox that way, so fix it even when msb itself is already current.
+if [ -d "$HOME/.microsandbox" ]; then
+    chmod go-w "$HOME/.microsandbox"
+fi
 installed() { msb --version 2>/dev/null | awk '{ print $NF }'; }
 # An older msb is upgraded in place, as msb's own installer does: running sandboxes keep the
 # runtime they started with. A newer one would need a state downgrade, so it is left alone.
