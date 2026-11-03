@@ -729,6 +729,14 @@ fn public_url_variable(component: &str) -> Option<&'static str> {
 fn post_deploy_script(components: &[String], multinode: bool) -> String {
     let physnet = if multinode { "physnet2" } else { "physnet1" };
     let mut script = kolla_ansible("post-deploy");
+    // The portal's Shell tab runs a login shell: give it the CLI and admin credentials.
+    script.push_str(&format!(
+        r#"
+cat > /etc/profile.d/openstack.sh <<'EOF'
+export PATH={OSC_VENV}/bin:$PATH
+if [ -r {CONFIG_DIR}/admin-openrc.sh ]; then . {CONFIG_DIR}/admin-openrc.sh; fi
+EOF"#
+    ));
     if components.iter().any(|c| c == "neutron") {
         // A shared external network for routers and floating IPs, created once per farm.
         script.push_str(&format!(
