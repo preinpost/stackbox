@@ -68,6 +68,7 @@ import {
   phases,
   publicServices,
 } from "../lib";
+import { shellTargets } from "../components/shell-targets";
 import { JobRow } from "./jobs";
 
 // xterm is large; load it only when a shell is opened.
@@ -347,10 +348,8 @@ export function FarmDetailPage({ id }: { id: string }) {
           </section>
         </Tabs.Panel>
         <Tabs.Panel value="shell" className="tab-panel" keepMounted>
-          {!farm.nodes.some(
-            (node) =>
-              (node.role === "all-in-one" || node.role === "control") &&
-              node.status === "running",
+          {!shellTargets(farm.nodes).some(
+            ({ node }) => node.status === "running",
           ) ? (
             <section className="panel">
               <EmptyState
@@ -360,7 +359,7 @@ export function FarmDetailPage({ id }: { id: string }) {
                   isAllInOneFarm(farm)
                     ? "VM이 실행 중일 때 셸을 열 수 있습니다."
                     : isMultiNodeFarm(farm)
-                      ? "control VM이 실행 중일 때 셸을 열 수 있습니다."
+                      ? "VM이 실행 중일 때 셸을 열 수 있습니다."
                       : "셸은 기존 다중 VM farm에서 지원하지 않습니다."
                 }
               />

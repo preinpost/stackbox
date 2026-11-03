@@ -756,6 +756,7 @@ mod tests {
             operation: super::super::protocol::Operation::Shell {
                 farm_id: "demo".into(),
                 generation: uuid::Uuid::new_v4().to_string(),
+                node: None,
                 size: TerminalSize { rows: 24, cols: 80 },
             },
         };

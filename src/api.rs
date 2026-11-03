@@ -816,6 +816,9 @@ async fn log_stream(
 struct ShellQuery {
     rows: u16,
     cols: u16,
+    /// A multi-node VM's suffix (`control`, `compute-1`); omitted for the default VM.
+    #[serde(default)]
+    node: Option<String>,
 }
 /// Control messages share the socket with terminal bytes, which travel as binary frames.
 #[derive(Deserialize, Serialize)]
@@ -862,12 +865,14 @@ async fn shell(
     }
     .validate()
     .map_err(bad)?;
-    app.manager.check_terminal(&id)?;
-    Ok(upgrade.on_upgrade(move |socket| relay_shell(app.manager, id, size, socket)))
+    app.manager.check_terminal(&id, query.node.as_deref())?;
+    let node = query.node;
+    Ok(upgrade.on_upgrade(move |socket| relay_shell(app.manager, id, node, size, socket)))
 }
 async fn relay_shell(
     manager: FarmManager,
     id: String,
+    node: Option<String>,
     size: crate::farm::TerminalSize,
     socket: WebSocket,
 ) {
@@ -879,6 +884,7 @@ async fn relay_shell(
     let result = {
         let session = manager.terminal(
             &id,
+            node.as_deref(),
             size,
             TerminalIo {
                 input: input_rx,

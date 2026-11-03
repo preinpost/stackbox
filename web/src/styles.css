@@ -2510,6 +2510,42 @@ h2 {
   font-size: 12px;
   color: #789c81;
 }
+.terminal-nodes {
+  display: flex;
+  gap: 2px;
+  border-bottom: 1px solid #2e4435;
+  padding: 6px 12px 0;
+}
+.terminal-node {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  border-bottom: 2px solid transparent;
+  padding: 6px 10px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: #7da88a;
+}
+.terminal-node:hover:not(:disabled) {
+  color: #c9dccf;
+}
+.terminal-node.selected {
+  border-bottom-color: #6caf85;
+  color: #c9dccf;
+}
+.terminal-node:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.terminal-node-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #4d6655;
+}
+.terminal-node-dot.live {
+  background: #6caf85;
+}
 .log-note {
   padding: 8px 17px;
   font-size: 13px;

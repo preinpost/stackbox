@@ -91,9 +91,11 @@ pub trait Backend: Send + Sync + 'static {
         Box::pin(async { Err(anyhow!("this backend has no links")) })
     }
     /// Run an interactive login shell in the farm's VM until it exits or `io.input` closes.
+    /// `node` picks a multi-node VM by suffix; `None` is the all-in-one or control VM.
     fn terminal(
         &self,
         _id: String,
+        _node: Option<String>,
         _size: TerminalSize,
         _io: TerminalIo,
     ) -> BoxFuture<'_, Result<()>> {
@@ -288,10 +290,15 @@ PY"#).await;
     fn terminal(
         &self,
         id: String,
+        node: Option<String>,
         size: TerminalSize,
         io: TerminalIo,
     ) -> BoxFuture<'_, Result<()>> {
-        Box::pin(async move { farm::attach_terminal(&id, size, io).await.map(|_| ()) })
+        Box::pin(async move {
+            farm::attach_terminal(&id, node.as_deref(), size, io)
+                .await
+                .map(|_| ())
+        })
     }
 }
 /// Reads the data store credentials from Kolla's generated passwords and the live schemas.

@@ -250,6 +250,7 @@ impl Backend for Fake {
     fn terminal(
         &self,
         _id: String,
+        _node: Option<String>,
         size: crate::farm::TerminalSize,
         io: crate::farm::TerminalIo,
     ) -> BoxFuture<'_, Result<()>> {
@@ -1194,7 +1195,9 @@ async fn multi_node_farms_are_created_deployed_and_faulted_per_vm() {
     assert_eq!(done(&manager, &job).await.status, JobStatus::Succeeded);
     manager.reconcile().await.unwrap();
     assert_eq!(manager.get("mn").unwrap().status, FarmStatus::Ready);
-    manager.check_terminal("mn").unwrap();
+    manager.check_terminal("mn", None).unwrap();
+    manager.check_terminal("mn", Some("compute-2")).unwrap();
+    assert!(manager.check_terminal("mn", Some("compute-3")).is_err());
 
     let cut = crate::link::Impair {
         delay_ms: 0,
@@ -2750,6 +2753,7 @@ async fn a_dial_in_host_runs_farms_and_shells_over_its_own_connection() {
     let (output_tx, mut output) = tokio::sync::mpsc::channel(4);
     let shell = manager.terminal(
         "edge-farm",
+        None,
         crate::farm::TerminalSize { rows: 24, cols: 80 },
         crate::farm::TerminalIo {
             input: input_rx,

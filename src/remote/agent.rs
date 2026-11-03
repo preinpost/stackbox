@@ -381,6 +381,7 @@ impl Agent {
         let Operation::Shell {
             farm_id: id,
             generation,
+            node,
             size,
         } = &request.operation
         else {
@@ -397,6 +398,7 @@ impl Agent {
         let (output_tx, output_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
         let session = self.backend.terminal(
             id.clone(),
+            node.clone(),
             size,
             TerminalIo {
                 input: input_rx,
@@ -1488,6 +1490,7 @@ mod tests {
                 Operation::Shell {
                     farm_id: "one".into(),
                     generation: generation.clone(),
+                    node: None,
                     size: TerminalSize { rows: 24, cols: 80 },
                 },
             )

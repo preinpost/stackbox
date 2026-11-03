@@ -422,14 +422,28 @@ impl FarmManager {
             Ok(farm.clone())
         })
     }
-    /// Fails unless the farm's VM can take a shell session.
-    pub fn check_terminal(&self, id: &str) -> Result<FarmRecord> {
+    /// Fails unless the farm's VM can take a shell session. `node` picks a multi-node VM by
+    /// suffix (`control`, `compute-1`); without it the shell opens on the all-in-one or control VM.
+    pub fn check_terminal(&self, id: &str, node: Option<&str>) -> Result<FarmRecord> {
         let farm = self.get(id)?;
-        // A multi-node farm's shell opens on its control VM.
-        let running = farm.nodes.iter().any(|node| {
-            matches!(node.role, Some(Role::AllInOne | Role::Control)) && node.status == "running"
-        });
-        if !running {
+        let vm = match node {
+            None => farm
+                .nodes
+                .iter()
+                .find(|vm| matches!(vm.role, Some(Role::AllInOne | Role::Control))),
+            Some(node) => Some(
+                farm.nodes
+                    .iter()
+                    .find(|vm| {
+                        vm.role
+                            .and_then(|role| crate::farm::suffix(role, vm.index))
+                            .as_deref()
+                            == Some(node)
+                    })
+                    .ok_or_else(|| NotFound(format!("VM '{node}' of farm '{id}'")))?,
+            ),
+        };
+        if !vm.is_some_and(|vm| vm.status == "running") {
             return Err(conflict("the shell needs the farm's VM to be running"));
         }
         Ok(farm)
@@ -438,10 +452,11 @@ impl FarmManager {
     pub async fn terminal(
         &self,
         id: &str,
+        node: Option<&str>,
         size: crate::farm::TerminalSize,
         io: crate::farm::TerminalIo,
     ) -> Result<()> {
-        let farm = self.check_terminal(id)?;
+        let farm = self.check_terminal(id, node)?;
         // A shell needs only the host's reservation, not the agent the farm was built
         // with, so a remote farm uses the host's current agent once that matches this coordinator.
         let current = farm.host_id.as_ref().and_then(|host_id| {
@@ -468,7 +483,9 @@ impl FarmManager {
             )?,
             None => self.backend_for(&farm)?,
         };
-        backend.terminal(id.into(), size, io).await
+        backend
+            .terminal(id.into(), node.map(Into::into), size, io)
+            .await
     }
     pub fn options(&self) -> &ManagerOptions {
         &self.0.options

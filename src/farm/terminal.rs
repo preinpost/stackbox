@@ -40,10 +40,30 @@ pub struct TerminalIo {
     pub output: mpsc::Sender<Vec<u8>>,
 }
 
-/// Run a login shell in the farm's VM until it exits or the client goes away.
-/// Returns the shell's exit code, or `None` when the client closed the session.
-pub async fn attach(farm_id: &str, size: TerminalSize, io: TerminalIo) -> Result<Option<i32>> {
-    let name = super::all_in_one_name(farm_id).await?;
+/// Run a login shell in one of the farm's VMs until it exits or the client goes away.
+/// `node` names a multi-node VM by its suffix (`control`, `compute-1`); `None` opens the
+/// all-in-one or control VM. Returns the shell's exit code, or `None` when the client closed
+/// the session.
+pub async fn attach(
+    farm_id: &str,
+    node: Option<&str>,
+    size: TerminalSize,
+    io: TerminalIo,
+) -> Result<Option<i32>> {
+    let name = match node {
+        None => super::all_in_one_name(farm_id).await?,
+        Some(node) => super::get_farm(farm_id)
+            .await?
+            .into_iter()
+            .find(|vm| {
+                vm.role
+                    .and_then(|role| super::suffix(role, vm.index))
+                    .as_deref()
+                    == Some(node)
+            })
+            .map(|vm| vm.name)
+            .with_context(|| format!("farm '{farm_id}' has no VM '{node}'"))?,
+    };
     let sandbox = connect(&name).await?;
     let result = session(&sandbox, size, io).await;
     sandbox.detach().await;

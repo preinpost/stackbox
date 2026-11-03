@@ -86,7 +86,10 @@ text frame은 제어 메시지입니다. 클라이언트는 `{"type":"resize","r
 서버는 셸이 끝나면 `{"type":"exit"}`, 실패하면 `{"type":"error","message":"..."}`를 보낸 뒤 닫습니다.
 연결이 끊기면 셸에 SIGHUP을 보내 그 안에서 실행 중인 작업도 함께 종료합니다.
 
-VM이 실행 중이어야 하며(`409`), 배포 등 작업 중에도 열 수 있습니다. 원격 호스트 farm은
+다중 노드 farm은 `&node=<control|compute-N>`으로 셸을 열 VM을 고릅니다(없는 VM은 `404`).
+생략하면 all-in-one VM, 다중 노드 farm에서는 control VM에 열립니다.
+
+대상 VM이 실행 중이어야 하며(`409`), 배포 등 작업 중에도 열 수 있습니다. 원격 호스트 farm은
 farm-agent가 SSH로 중계하므로 이 기능이 들어간 agent를 호스트에 다시 설치해야 합니다.
 WebSocket에는 CORS가 적용되지 않으므로 farmd는 `Origin`이 없거나(포탈 프록시) 같은 호스트일 때만
 연결을 받고, 포탈 프록시는 브라우저의 `Origin`이 포탈 자신일 때만 중계합니다.

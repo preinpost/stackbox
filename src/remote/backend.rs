@@ -236,6 +236,7 @@ impl Backend for AgentBackend {
     fn terminal(
         &self,
         id: String,
+        node: Option<String>,
         size: TerminalSize,
         io: TerminalIo,
     ) -> BoxFuture<'_, Result<()>> {
@@ -243,6 +244,7 @@ impl Backend for AgentBackend {
             self.request(Operation::Shell {
                 farm_id: id,
                 generation: self.generation.clone(),
+                node,
                 size,
             }),
             io,

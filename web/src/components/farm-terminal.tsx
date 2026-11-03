@@ -4,6 +4,7 @@ import "@xterm/xterm/css/xterm.css";
 import { Radio, RotateCcw, SquareTerminal } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type { Farm } from "../api/client";
+import { type ShellTarget, shellTargets } from "./shell-targets";
 import { Button } from "./ui";
 
 type Connection = "connecting" | "open" | "closed";
@@ -15,9 +16,11 @@ export function shellUrl(
   id: string,
   rows: number,
   cols: number,
+  node?: string,
 ) {
   const scheme = location.protocol === "https:" ? "wss:" : "ws:";
-  return `${scheme}//${location.host}/api/v1/farms/${encodeURIComponent(id)}/shell?rows=${rows}&cols=${cols}`;
+  const target = node ? `&node=${encodeURIComponent(node)}` : "";
+  return `${scheme}//${location.host}/api/v1/farms/${encodeURIComponent(id)}/shell?rows=${rows}&cols=${cols}${target}`;
 }
 
 export function parseControl(data: string): Control | null {
@@ -32,7 +35,10 @@ export function parseControl(data: string): Control | null {
   return null;
 }
 
-/** Login shell in the farm's VM. `active` refits the terminal when its tab is shown again. */
+/**
+ * Login shells in the farm's VMs. A multi-node farm picks its VM from a tab bar; each opened
+ * VM keeps its session while another is shown. `active` refits the terminal when its tab is shown again.
+ */
 export function FarmTerminal({
   farm,
   active,
@@ -40,12 +46,79 @@ export function FarmTerminal({
   farm: Farm;
   active: boolean;
 }) {
+  const targets = shellTargets(farm.nodes);
+  const [selected, setSelected] = useState(
+    () =>
+      targets.find(({ node }) => node.status === "running")?.key ??
+      targets[0]?.key ??
+      "",
+  );
+  const [opened, setOpened] = useState(() => [selected]);
+  const select = (key: string) => {
+    setSelected(key);
+    setOpened((keys) => (keys.includes(key) ? keys : [...keys, key]));
+  };
+  return (
+    <section className="log-panel" aria-label="VM 셸">
+      {targets.length > 1 && (
+        <div className="terminal-nodes" role="tablist" aria-label="VM 선택">
+          {targets.map(({ key, node }) => (
+            <button
+              key={key}
+              type="button"
+              role="tab"
+              aria-selected={key === selected}
+              className={`terminal-node ${key === selected ? "selected" : ""}`}
+              disabled={node.status !== "running"}
+              title={
+                node.status === "running"
+                  ? node.name
+                  : `${node.name} · ${node.status}`
+              }
+              onClick={() => select(key)}
+            >
+              <span
+                className={`terminal-node-dot ${node.status === "running" ? "live" : ""}`}
+              />
+              {key}
+            </button>
+          ))}
+        </div>
+      )}
+      {opened.map((key) => {
+        const target = targets.find((t) => t.key === key);
+        return (
+          target && (
+            <div key={key} hidden={key !== selected}>
+              <NodeShell
+                farm={farm}
+                target={target}
+                active={active && key === selected}
+              />
+            </div>
+          )
+        );
+      })}
+    </section>
+  );
+}
+
+function NodeShell({
+  farm,
+  target,
+  active,
+}: {
+  farm: Farm;
+  target: ShellTarget;
+  active: boolean;
+}) {
   const container = useRef<HTMLDivElement>(null);
   const fit = useRef<FitAddon | null>(null);
   const [connection, setConnection] = useState<Connection>("connecting");
   const [notice, setNotice] = useState("");
   const [attempt, setAttempt] = useState(0);
-  const vm = farm.nodes.find((node) => node.role === "all-in-one");
+  const vm = target.node;
+  const node = target.key || undefined;
   useEffect(() => {
     const element = container.current;
     if (!element) return;
@@ -75,7 +148,7 @@ export function FarmTerminal({
     setConnection("connecting");
     setNotice("");
     const socket = new WebSocket(
-      shellUrl(window.location, farm.id, terminal.rows, terminal.cols),
+      shellUrl(window.location, farm.id, terminal.rows, terminal.cols, node),
     );
     socket.binaryType = "arraybuffer";
     let ended = false;
@@ -131,17 +204,17 @@ export function FarmTerminal({
       terminal.dispose();
       fit.current = null;
     };
-  }, [farm.id, attempt]);
+  }, [farm.id, node, attempt]);
   useEffect(() => {
     if (active && container.current?.offsetWidth) fit.current?.fit();
   }, [active]);
   return (
-    <section className="log-panel" aria-label="VM 셸">
+    <>
       <div className="log-toolbar">
         <div className="flex items-center gap-2">
           <SquareTerminal size={16} />
           <strong>Shell</strong>
-          {vm && <span className="terminal-vm">{vm.name}</span>}
+          <span className="terminal-vm">{vm.name}</span>
           <span
             className={`stream-status ${connection === "open" ? "live" : connection === "connecting" ? "" : "reconnecting"}`}
           >
@@ -173,6 +246,6 @@ export function FarmTerminal({
       <div className="log-footer">
         <span>root 로그인 셸 · 페이지를 떠나면 셸도 종료됩니다</span>
       </div>
-    </section>
+    </>
   );
 }

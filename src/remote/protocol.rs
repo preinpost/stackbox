@@ -100,6 +100,9 @@ pub enum Operation {
     Shell {
         farm_id: String,
         generation: String,
+        /// A multi-node VM's suffix (`control`, `compute-1`); absent for the default VM.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        node: Option<String>,
         size: TerminalSize,
     },
     /// Report this host's OS, hypervisor, msb, golden image and resources.
