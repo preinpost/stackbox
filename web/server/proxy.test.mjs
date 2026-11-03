@@ -241,6 +241,28 @@ test("forwards bucket routes and keeps others closed", async (t) => {
   }
   assert.equal(seen.length, allowed.length);
 });
+test("forwards the relay settings and cloudflared update only", async (t) => {
+  const seen = [];
+  const address = await setup(t, (req, res) => {
+    seen.push(`${req.method} ${req.url}`);
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end("{}");
+  });
+  const allowed = [
+    ["GET", "/api/v1/relay"],
+    ["PUT", "/api/v1/relay"],
+    ["DELETE", "/api/v1/relay"],
+    ["POST", "/api/v1/relay/cloudflared/update"],
+  ];
+  for (const [method, path] of allowed) {
+    const response = await fetch(address + path, { method });
+    assert.equal(response.status, 200, `${method} ${path}`);
+  }
+  for (const path of ["/api/v1/relay/x", "/api/v1/link-relay"]) {
+    assert.equal((await fetch(address + path)).status, 404, path);
+  }
+  assert.equal(seen.length, allowed.length);
+});
 test("forwards local host registration and service checks", async (t) => {
   const seen = [];
   const address = await setup(t, (req, res) => {
@@ -367,7 +389,10 @@ test("tunnels the shell WebSocket with the server token and normalized query", a
 });
 test("keeps the shell's multi-node VM in the upstream query", async (t) => {
   const address = await upgradeSetup(t, (req, socket) => {
-    assert.equal(req.url, "/api/v1/farms/demo/shell?rows=24&cols=80&node=compute-1");
+    assert.equal(
+      req.url,
+      "/api/v1/farms/demo/shell?rows=24&cols=80&node=compute-1",
+    );
     socket.write(
       "HTTP/1.1 101 Switching Protocols\r\nupgrade: websocket\r\nconnection: Upgrade\r\n\r\n",
     );
