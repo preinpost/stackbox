@@ -626,6 +626,37 @@ impl FarmManager {
             Ok(())
         })
     }
+    /// Re-inspect an SSH host whose last inspection is older than `max_age` seconds, as a
+    /// farm created on it is about to start. Returns whether it inspected the host.
+    pub(super) async fn refresh_ssh_inspection(&self, host_id: &str, max_age: u64) -> Result<bool> {
+        let stored = self.stored_host(host_id)?;
+        let Some(previous) = stored.host.inspection.as_ref() else {
+            anyhow::bail!("host '{host_id}' has never been inspected; check it under Hosts");
+        };
+        if stored.host.kind != HostKind::Ssh || now().saturating_sub(previous.checked_at) <= max_age {
+            return Ok(false);
+        }
+        let credentials = self.0.vault.unseal(
+            stored
+                .credentials
+                .as_ref()
+                .context("remote host has no credentials")?,
+            &stored.aad(),
+        )?;
+        let ssh = Session::connect(&stored.host, credentials).await?;
+        let mut inspection = ssh.inspect().await?;
+        // Keep the boot evidence of preparation while the runtime it verified is unchanged.
+        inspection.vm_boot_verified = inspection.runtime_ready()
+            && previous.vm_boot_verified
+            && previous.msb_version == inspection.msb_version;
+        let ready = inspection.vm_boot_verified;
+        self.host_inspection(host_id, inspection)?;
+        anyhow::ensure!(
+            ready,
+            "host '{host_id}' is no longer ready (KVM, msb or architecture changed); check and prepare it under Hosts"
+        );
+        Ok(true)
+    }
     async fn run_host_job(&self, id: &str) -> Result<HostInspection> {
         let _permit = self.0.host_gate.acquire().await?;
         let job = self.host_job(id)?;

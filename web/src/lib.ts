@@ -168,15 +168,14 @@ export function resolveComponents(
 export const remoteAgentNeedsUpdate = (host: RemoteHost) =>
   Boolean(host.agent && !host.agent.artifact?.supports_single_vm);
 /** Whether a farm can be created on the host now. A remote host also needs an agent
- * from this coordinator's build and an inspection from the last five minutes. */
+ * from this coordinator's build; the farm's job re-inspects it if the last check is old. */
 export function hostReady(host: RemoteHost, coordinatorBuildId?: string) {
   if (host.status !== "ready" || host.active_job) return false;
   if (host.kind === "local") return true;
   if (host.kind === "agent") return host.connected;
   return (
     host.agent?.artifact?.supports_single_vm === true &&
-    !agentBuildMismatch(host.agent?.artifact, coordinatorBuildId) &&
-    Date.now() / 1000 - (host.inspection?.checked_at ?? 0) <= 300
+    !agentBuildMismatch(host.agent?.artifact, coordinatorBuildId)
   );
 }
 /** What still stands between the host and a new farm. */
@@ -191,7 +190,7 @@ export function hostNotice(host: RemoteHost, coordinatorBuildId?: string) {
     return "설치된 Farm 실행기가 이 coordinator와 다른 소스에서 빌드되었습니다. Coordinator는 시작할 때 현재 실행기를 자동으로 재설치합니다. 실패했다면 `task agent-build` 후 Coordinator를 재시작하거나 Farm 실행기 재설치를 누르세요.";
   if (remoteAgentNeedsUpdate(host))
     return "설치된 Farm 실행기는 단일 VM 생성을 지원하지 않습니다. Hosts에서 최신 Farm 실행기를 설치하세요. 기존 Farm의 조회와 삭제는 계속 사용할 수 있습니다.";
-  return "Hosts에서 환경 준비와 단일 VM용 Farm 실행기 설치를 완료하세요. 마지막 SSH 점검이 5분을 지났다면 점검을 갱신하세요.";
+  return "Hosts에서 환경 준비와 단일 VM용 Farm 실행기 설치를 완료하세요.";
 }
 export const hostLabel = (host: RemoteHost) =>
   `${host.id} · ${host.kind === "local" ? "로컬" : host.kind === "agent" ? "에이전트" : "원격"}`;

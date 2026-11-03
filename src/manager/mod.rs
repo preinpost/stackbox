@@ -685,7 +685,6 @@ impl FarmManager {
                     (inspection.memory_total_mib * 80 / 100, None, IpAddr::V4(Ipv4Addr::UNSPECIFIED))
                 }
                 HostKind::Ssh => {
-                    if now().saturating_sub(inspection.checked_at) > 300 { return Err(conflict("remote inspection is older than 5 minutes; check the host again before creating a farm")); }
                     let agent = host.agent.as_ref().ok_or_else(|| conflict("install the Farm execution agent on this host first"))?;
                     if !agent.artifact.supports_single_vm { return Err(conflict("install the updated Farm execution agent to create single-VM farms")); }
                     if agent.artifact.build_id != crate::BUILD_ID {
@@ -991,6 +990,12 @@ impl FarmManager {
         let farm = self.get(&job.farm_id)?;
         match job.kind {
             JobKind::Create => {
+                // An SSH host's inspection may be old by now; look at the host again first.
+                if let Some(host_id) = &farm.host_id {
+                    if self.refresh_ssh_inspection(host_id, 300).await? {
+                        self.log(&farm.id, &job.id, None, format!("re-inspected host {host_id} over SSH\n"))?;
+                    }
+                }
                 let nodes = self
                     .backend_for(&farm)?
                     .create(
