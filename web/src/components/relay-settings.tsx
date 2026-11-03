@@ -3,9 +3,23 @@ import { Input } from "@base-ui/react/input";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Radio } from "@base-ui/react/radio";
 import { RadioGroup } from "@base-ui/react/radio-group";
-import { Cloud, CloudCog, Network, ShieldCheck, Waypoints } from "lucide-react";
+import {
+  Check,
+  Cloud,
+  CloudCog,
+  LoaderCircle,
+  Network,
+  ShieldCheck,
+  Waypoints,
+} from "lucide-react";
 import { useState } from "react";
-import { api, keys, relayQuery, type RelaySettings } from "../api/client";
+import {
+  api,
+  keys,
+  relayQuery,
+  tunnelStage,
+  type RelaySettings,
+} from "../api/client";
 import { Button, Modal } from "./ui";
 
 type Mode = RelaySettings["mode"];
@@ -106,6 +120,7 @@ function RelaySettingsForm() {
   const quick = current.mode === "quick_tunnel";
   const named = current.mode === "named_tunnel";
   const tunnel = relay.data?.tunnel;
+  const stage = tunnelStage(relay.data);
   const checked = tunnel?.checked_at
     ? new Date(tunnel.checked_at * 1000).toLocaleString()
     : null;
@@ -240,7 +255,10 @@ function RelaySettingsForm() {
               )이 있어 연결 방식과 URL은 바꿀 수 없습니다.
             </div>
           )}
-          {tunnel && (
+          {tunnel && stage !== "ready" && stage !== "failed" && (
+            <TunnelProgress stage={stage} quick={quick} />
+          )}
+          {tunnel && stage === "ready" && (
             <div className="field-hint flex flex-wrap items-center gap-x-3 gap-y-1">
               <span>
                 cloudflared {tunnel.version ?? "설치 중"}
@@ -294,11 +312,63 @@ function RelaySettingsForm() {
               variant="primary"
               disabled={mutation.isPending || (!quick && !current.url.trim())}
             >
-              저장
+              {mutation.isPending ? (
+                <>
+                  <LoaderCircle size={15} className="animate-spin" />
+                  저장 중…
+                </>
+              ) : (
+                "저장"
+              )}
             </Button>
           </div>
         </div>
       </form>
     </Modal>
+  );
+}
+
+const stages = [
+  { id: "download", label: "cloudflared 내려받고 검증하는 중" },
+  { id: "connect", label: "Cloudflare에 터널 연결하는 중" },
+  { id: "address", label: "주소 준비 중 (DNS 반영, 약 15초)" },
+] as const;
+
+/** Each step of bringing a tunnel up, with the current one spinning. */
+function TunnelProgress({
+  stage,
+  quick,
+}: {
+  stage: "download" | "connect" | "address";
+  quick: boolean;
+}) {
+  const steps = stages.filter((s) => quick || s.id !== "address");
+  const current = steps.findIndex((s) => s.id === stage);
+  return (
+    <div className="tunnel-progress" role="status" aria-live="polite">
+      <ol>
+        {steps.map((step, index) => (
+          <li
+            key={step.id}
+            data-state={
+              index < current ? "done" : index === current ? "active" : "todo"
+            }
+          >
+            {index < current ? (
+              <Check size={14} />
+            ) : index === current ? (
+              <LoaderCircle size={14} className="animate-spin" />
+            ) : (
+              <span className="tunnel-progress-dot" />
+            )}
+            {step.label}
+          </li>
+        ))}
+      </ol>
+      <p>
+        coordinator에서 진행되므로 이 창을 닫아도 계속됩니다. 처음 한 번은
+        내려받느라 조금 걸릴 수 있어요.
+      </p>
+    </div>
   );
 }

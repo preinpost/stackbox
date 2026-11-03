@@ -4171,3 +4171,53 @@ h2 {
     grid-template-columns: 1fr;
   }
 }
+
+/* A tunnel coming up, step by step. */
+.tunnel-progress {
+  padding: 12px 14px;
+  border: 1px solid #e4ece4;
+  border-radius: 10px;
+  background: #fbfcfb;
+}
+.tunnel-progress ol {
+  display: grid;
+  gap: 8px;
+}
+.tunnel-progress li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: #a3b0a6;
+}
+.tunnel-progress li[data-state="active"] {
+  color: #24382a;
+  font-weight: 600;
+}
+.tunnel-progress li[data-state="active"] svg {
+  color: #2f7a4b;
+}
+.tunnel-progress li[data-state="done"] {
+  color: #5d7263;
+}
+.tunnel-progress li[data-state="done"] svg {
+  color: #3a8b58;
+}
+.tunnel-progress-dot {
+  width: 14px;
+  height: 14px;
+  display: grid;
+  place-items: center;
+}
+.tunnel-progress-dot::after {
+  content: "";
+  width: 5px;
+  height: 5px;
+  border-radius: 9999px;
+  background: #ccd6ce;
+}
+.tunnel-progress p {
+  margin-top: 10px;
+  font-size: 12px;
+  color: #7c8b80;
+}

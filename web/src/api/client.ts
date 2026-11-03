@@ -114,7 +114,9 @@ export const relayQuery = () =>
   queryOptions({
     queryKey: keys.relay,
     queryFn: ({ signal }) => request<RelayStatus>("/relay", { signal }),
-    refetchInterval: 15_000,
+    // Follow a tunnel closely while cloudflared downloads, connects and gets its address.
+    refetchInterval: (q) =>
+      tunnelStage(q.state.data) === "ready" ? 15_000 : 1000,
   });
 export const hostsQuery = () =>
   queryOptions({
@@ -311,3 +313,16 @@ export const api = {
       method: "POST",
     }),
 };
+
+/** Where a tunnel the coordinator runs is: no tunnel at all is "ready". */
+export function tunnelStage(
+  relay?: RelayStatus,
+): "download" | "connect" | "address" | "ready" | "failed" {
+  const tunnel = relay?.tunnel;
+  if (!tunnel) return "ready";
+  if (tunnel.error && !tunnel.connected) return "failed";
+  if (!tunnel.version && !tunnel.unmanaged) return "download";
+  if (!tunnel.connected) return "connect";
+  if (relay?.settings?.mode === "quick_tunnel" && !tunnel.url) return "address";
+  return "ready";
+}
