@@ -22,6 +22,7 @@ import {
   Trash2,
 } from "lucide-react";
 import { useRef, useState } from "react";
+import { RelaySettingsDialog } from "../components/relay-settings";
 import {
   api,
   farmsQuery,
@@ -133,6 +134,7 @@ export function RemoteHostsPage() {
               <RefreshCw size={15} />
               새로고침
             </Button>
+            <RelaySettingsDialog />
             {hosts.isSuccess && !localRegistered && (
               <Button
                 disabled={registerLocal.isPending}

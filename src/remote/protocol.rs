@@ -25,6 +25,21 @@ pub enum Operation {
         generation: String,
         plan: Plan,
         exposure: Exposure,
+        /// For a farm that spans hosts: the part this host runs.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        share: Option<Box<Share>>,
+    },
+    /// Ready this host's compute VMs of a farm that spans hosts for Kolla, which the
+    /// control VM's host deploys afterwards.
+    Prepare {
+        farm_id: String,
+        generation: String,
+    },
+    /// Point this host's switch at the relay's new address for a farm that spans hosts.
+    Relink {
+        farm_id: String,
+        generation: String,
+        url: String,
     },
     /// Runs as the host-side job `job_id`, which outlives this request; repeating the
     /// request with the same `job_id` attaches to that job instead of deploying again.
@@ -132,6 +147,15 @@ impl Operation {
                 farm_id,
                 generation,
             }
+            | Self::Prepare {
+                farm_id,
+                generation,
+            }
+            | Self::Relink {
+                farm_id,
+                generation,
+                ..
+            }
             | Self::Endpoints {
                 farm_id,
                 generation,
@@ -174,7 +198,10 @@ impl Operation {
             // A host can hold several farms, each destroyed VM by VM.
             Self::Purge => 1800,
             Self::Shell { .. } => 12 * 3600,
-            Self::Settle { .. } | Self::Freeze { .. } | Self::Restore { .. } => 3600,
+            Self::Settle { .. }
+            | Self::Freeze { .. }
+            | Self::Restore { .. }
+            | Self::Prepare { .. } => 3600,
             // Each moves a whole VM disk.
             Self::ExportSnapshot { .. } | Self::ImportSnapshot { .. } => 7200,
             Self::RemoveSnapshot { .. } => 300,
@@ -185,6 +212,78 @@ impl Operation {
         }
     }
 }
+/// The part of a farm that spans hosts which one host runs.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Share {
+    /// Suffixes of the farm's VMs on this host (`control`, `compute-1`, ...).
+    pub nodes: Vec<String>,
+    /// This host's switch joins the farm's segments on the other hosts through it.
+    pub uplink: crate::link::UplinkConfig,
+    /// Key Kolla on the control VM reaches the computes with, in OpenSSH format; only the
+    /// control VM's host gets the private half.
+    pub ssh_public_key: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh_private_key: Option<String>,
+}
+impl Share {
+    /// Check the share against the farm's plan.
+    pub fn validate(&self, farm_id: &str, plan: &Plan) -> anyhow::Result<()> {
+        use anyhow::ensure;
+        let suffixes: Vec<String> = plan
+            .nodes
+            .iter()
+            .filter_map(|spec| crate::farm::suffix(spec.role, spec.index))
+            .collect();
+        ensure!(plan.computes > 0, "only multi-node farms span hosts");
+        ensure!(
+            !self.nodes.is_empty()
+                && self.nodes.len() < suffixes.len()
+                && self.nodes.iter().all(|n| suffixes.contains(n)),
+            "the share names VMs the farm does not have"
+        );
+        let control = self.nodes.iter().any(|n| n == "control");
+        ensure!(
+            control == self.ssh_private_key.is_some(),
+            "only the control VM's host gets the SSH private key"
+        );
+        ensure!(
+            self.ssh_public_key.starts_with("ssh-ed25519 ")
+                && !self.ssh_public_key.contains(['\'', '\n']),
+            "invalid SSH public key"
+        );
+        let mut segments: Vec<String> = crate::farm::NETWORKS
+            .iter()
+            .map(|(_, network, _)| format!("{farm_id}/{network}"))
+            .collect();
+        let mut carried = self.uplink.segments.clone();
+        segments.sort();
+        carried.sort();
+        ensure!(
+            carried == segments,
+            "the uplink carries other segments than the farm's"
+        );
+        // An empty CA trusts the public ones, for a relay behind a TLS proxy.
+        if !self.uplink.ca.is_empty() {
+            crate::link::tls::validate_ca(&self.uplink.ca)?;
+        }
+        ensure!(self.uplink.url.starts_with("wss://"), "uplinks use TLS");
+        ensure!(
+            self.uplink.key.len() == 64 && self.uplink.key.bytes().all(|b| b.is_ascii_hexdigit()),
+            "invalid uplink key"
+        );
+        ensure!(
+            self.uplink.token.len() == 64
+                && self.uplink.token.bytes().all(|b| b.is_ascii_hexdigit()),
+            "invalid uplink token"
+        );
+        Ok(())
+    }
+    pub fn has_control(&self) -> bool {
+        self.nodes.iter().any(|n| n == "control")
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Frame {

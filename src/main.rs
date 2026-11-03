@@ -103,6 +103,10 @@ enum Command {
         /// Start from a snapshot instead of an empty VM (this machine's host only; replaces --components)
         #[arg(long, conflicts_with = "components")]
         snapshot: Option<String>,
+        /// Run a compute VM on another host, as `compute-2=<host id>`; repeatable.
+        /// Needs FARM_RELAY_URL on the coordinator.
+        #[arg(long = "place", value_parser = parse_placement, conflicts_with = "snapshot")]
+        placement: Vec<(String, String)>,
     },
     Deploy {
         id: String,
@@ -475,6 +479,7 @@ async fn main() -> Result<()> {
             owner,
             expires_at,
             snapshot,
+            placement,
         } => {
             let job = manager.create(CreateRequest {
                 id: id.clone(),
@@ -486,6 +491,7 @@ async fn main() -> Result<()> {
                 owner,
                 expires_at,
                 snapshot_id: snapshot,
+                placement: placement.into_iter().collect(),
             })?;
             wait(&manager, job).await?;
             print_json(&manager.get(&id)?)?;
@@ -668,4 +674,11 @@ async fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn parse_placement(value: &str) -> Result<(String, String), String> {
+    value
+        .split_once('=')
+        .map(|(node, host)| (node.to_owned(), host.to_owned()))
+        .ok_or_else(|| "expected compute-<n>=<host id>".into())
 }

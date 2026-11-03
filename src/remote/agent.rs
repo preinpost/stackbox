@@ -32,6 +32,36 @@ struct Reservation {
     plan: Plan,
     exposure: Exposure,
     deleted: bool,
+    /// The part of a farm that spans hosts this host runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    share: Option<super::protocol::Share>,
+}
+impl Reservation {
+    /// Memory of the VMs this host runs.
+    fn memory_mib(&self) -> u64 {
+        share_memory(&self.plan, self.share.as_ref())
+    }
+    /// Whether this host publishes the farm's ports: it runs its all-in-one or control VM.
+    fn publishes(&self) -> bool {
+        self.share.as_ref().is_none_or(|share| share.has_control())
+    }
+    /// Whether this host runs the VM with `suffix`.
+    fn runs(&self, suffix: &str) -> bool {
+        self.share
+            .as_ref()
+            .is_none_or(|share| share.nodes.iter().any(|n| n == suffix))
+    }
+}
+fn share_memory(plan: &Plan, share: Option<&super::protocol::Share>) -> u64 {
+    plan.nodes
+        .iter()
+        .filter(|spec| {
+            share.is_none_or(|share| {
+                crate::farm::suffix(spec.role, spec.index).is_some_and(|s| share.nodes.contains(&s))
+            })
+        })
+        .map(|spec| u64::from(spec.memory_mib))
+        .sum()
 }
 #[derive(Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -229,6 +259,7 @@ impl Agent {
         generation: &str,
         requested: &Plan,
         exposure: &Exposure,
+        share: Option<&super::protocol::Share>,
     ) -> Result<Option<Vec<crate::farm::FarmNode>>> {
         ensure!(
             self.limits.virtualization,
@@ -263,8 +294,14 @@ impl Agent {
             owner: None,
             expires_at: None,
             snapshot_id: None,
+            placement: Default::default(),
         }
         .validate()?;
+        if let Some(share) = share {
+            share.validate(id, requested)?;
+        }
+        let publishes = share.is_none_or(|share| share.has_control());
+        let memory_mib = share_memory(requested, share);
         let _create_lock = lock(&self.dir, "create.lock")?;
         let mut registry = LockedRegistry::open(&self.dir)?;
         let observed = self.backend.scan().await?;
@@ -281,13 +318,14 @@ impl Agent {
                 ensure!(
                     serde_json::to_value(&entry.plan)? == serde_json::to_value(requested)?
                         && serde_json::to_value(&entry.exposure)?
-                            == serde_json::to_value(exposure)?,
+                            == serde_json::to_value(exposure)?
+                        && entry.share.as_ref() == share,
                     "replayed create differs from the original reservation"
                 );
                 let nodes = observed.get(id).cloned().unwrap_or_default();
+                let expected = share.map_or(requested.nodes.len(), |share| share.nodes.len());
                 ensure!(
-                    nodes.len() == requested.nodes.len()
-                        && nodes.iter().all(|n| n.status == "running"),
+                    nodes.len() == expected && nodes.iter().all(|n| n.status == "running"),
                     "earlier create is incomplete; inspect and delete it explicitly before recreating"
                 );
                 return Ok(Some(nodes));
@@ -306,7 +344,7 @@ impl Agent {
             .farms
             .values()
             .filter(|r| !r.deleted)
-            .map(|r| r.plan.memory_mib)
+            .map(Reservation::memory_mib)
             .sum();
         let foreign: u64 = observed
             .iter()
@@ -315,26 +353,24 @@ impl Agent {
             .map(|n| u64::from(n.memory_mib))
             .sum();
         ensure!(
-            reserved
-                .saturating_add(foreign)
-                .saturating_add(requested.memory_mib)
+            reserved.saturating_add(foreign).saturating_add(memory_mib)
                 <= self.limits.memory_budget_mib,
             "remote host memory reservation budget exceeded"
         );
         ensure!(
-            requested.memory_mib <= self.limits.available_mib,
+            memory_mib <= self.limits.available_mib,
             "remote host available memory is insufficient"
         );
+        // Only the host of the control VM publishes the farm's ports.
         ensure!(
-            !registry
-                .state
-                .farms
-                .values()
-                .any(|r| !r.deleted && r.exposure.port_base == exposure.port_base),
+            !publishes
+                || !registry.state.farms.values().any(|r| {
+                    !r.deleted && r.publishes() && r.exposure.port_base == exposure.port_base
+                }),
             "remote public ports are reserved by another farm"
         );
         let sockets = (exposure.port_base..exposure.port_base + 10)
-            .filter(|_| self.limits.probe_ports)
+            .filter(|_| self.limits.probe_ports && publishes)
             .map(|p| TcpListener::bind((exposure.bind, p)))
             .collect::<std::io::Result<Vec<_>>>()
             .context("the farm's public port block is occupied on this host")?;
@@ -346,6 +382,7 @@ impl Agent {
                 plan: requested.clone(),
                 exposure: exposure.clone(),
                 deleted: false,
+                share: share.cloned(),
             },
         );
         registry.save()?;
@@ -394,6 +431,11 @@ impl Agent {
             let registry = LockedRegistry::open(&self.dir)?;
             let entry = registry.owned(&request.coordinator_id, id, generation)?;
             ensure!(!entry.deleted, "remote farm was deleted");
+            let wanted = node.clone().unwrap_or_else(|| "control".into());
+            ensure!(
+                entry.share.is_none() || entry.runs(&wanted),
+                "VM '{wanted}' of farm '{id}' runs on another host"
+            );
         }
         emit(Frame::Attached)?;
         let (input_tx, input_rx) = tokio::sync::mpsc::channel(64);
@@ -475,6 +517,10 @@ impl Agent {
         ensure!(
             crate::farm::layout(&entry.plan.nodes).is_ok(),
             "legacy multi-node farm cannot be deployed; create a new farm"
+        );
+        ensure!(
+            entry.publishes(),
+            "this host runs only compute VMs of farm '{id}'; deploy it from the control VM's host"
         );
         Ok(entry)
     }
@@ -561,6 +607,34 @@ impl Agent {
         let _farm_lock = lock(&self.dir, &format!("{id}.lock"))?;
         let entry = self.deployable(request, id, generation)?;
         let _deploy_lock = lock(&self.dir, "deploy.lock")?;
+        if let Some(share) = &entry.share {
+            // Computes on other hosts; the coordinator prepared them before this deploy.
+            let remote: Vec<u8> = entry
+                .plan
+                .nodes
+                .iter()
+                .filter(|spec| {
+                    crate::farm::suffix(spec.role, spec.index)
+                        .is_some_and(|s| !share.nodes.contains(&s))
+                })
+                .filter_map(|spec| spec.index)
+                .collect();
+            self.backend
+                .deploy_spanning(
+                    id.into(),
+                    *from,
+                    Some(entry.exposure.clone()),
+                    entry.plan.components.clone(),
+                    remote,
+                    share
+                        .ssh_private_key
+                        .clone()
+                        .context("deploy the farm from the host of its control VM")?,
+                    progress(emit),
+                )
+                .await?;
+            return Ok(Reply::Done);
+        }
         self.backend
             .deploy(
                 id.into(),
@@ -697,10 +771,18 @@ impl Agent {
             Operation::Create {
                 plan: requested,
                 exposure,
+                share,
                 ..
             } => {
                 if let Some(nodes) = self
-                    .reserve(&request, id, generation, requested, exposure)
+                    .reserve(
+                        &request,
+                        id,
+                        generation,
+                        requested,
+                        exposure,
+                        share.as_deref(),
+                    )
                     .await?
                 {
                     return Ok(Reply::Nodes { nodes });
@@ -709,12 +791,53 @@ impl Agent {
                     message: "Host capacity and public ports reserved; creating the farm VM\n"
                         .into(),
                 })?;
-                Ok(Reply::Nodes {
-                    nodes: self
-                        .backend
-                        .create(id.into(), requested.clone(), exposure.clone())
-                        .await?,
-                })
+                let nodes = match share {
+                    Some(share) => {
+                        self.backend
+                            .create_share(
+                                id.into(),
+                                requested.clone(),
+                                exposure.clone(),
+                                (**share).clone(),
+                            )
+                            .await?
+                    }
+                    None => {
+                        self.backend
+                            .create(id.into(), requested.clone(), exposure.clone())
+                            .await?
+                    }
+                };
+                Ok(Reply::Nodes { nodes })
+            }
+            Operation::Relink { url, .. } => {
+                let entry = self.owned(&request, id, generation)?;
+                ensure!(entry.share.is_some(), "farm '{id}' runs on this host alone");
+                ensure!(
+                    url.starts_with("wss://") && url.contains(&format!("?farm={id}&host=")),
+                    "invalid relay URL for farm '{id}'"
+                );
+                self.backend.relink(id.into(), url.clone()).await?;
+                Ok(Reply::Done)
+            }
+            Operation::Prepare { .. } => {
+                let entry = self.owned(&request, id, generation)?;
+                let share = entry
+                    .share
+                    .as_ref()
+                    .context("only a farm that spans hosts is prepared apart from its deploy")?;
+                ensure!(
+                    !share.has_control(),
+                    "the control VM's host prepares its VMs as it deploys"
+                );
+                self.backend
+                    .prepare(
+                        id.into(),
+                        entry.plan.components.clone(),
+                        share.ssh_public_key.clone(),
+                    )
+                    .await?;
+                Ok(Reply::Done)
             }
             Operation::Restore {
                 reference,
@@ -724,7 +847,7 @@ impl Agent {
                 ..
             } => {
                 if let Some(nodes) = self
-                    .reserve(&request, id, generation, requested, exposure)
+                    .reserve(&request, id, generation, requested, exposure, None)
                     .await?
                 {
                     return Ok(Reply::Nodes { nodes });
@@ -768,6 +891,7 @@ impl Agent {
             }
             Operation::Endpoints { .. } => {
                 let entry = self.owned(&request, id, generation)?;
+                ensure!(entry.publishes(), "farm '{id}' is served from another host");
                 Ok(Reply::Endpoints {
                     endpoints: self
                         .backend
@@ -777,6 +901,7 @@ impl Agent {
             }
             Operation::Settle { rebind, .. } => {
                 let entry = self.owned(&request, id, generation)?;
+                ensure!(entry.publishes(), "farm '{id}' is served from another host");
                 self.backend
                     .settle(
                         id.into(),
@@ -810,6 +935,10 @@ impl Agent {
                                 == Some(node.as_str())
                     }),
                     "farm '{id}' has no linked VM '{node}'"
+                );
+                ensure!(
+                    entry.runs(node),
+                    "VM '{node}' of farm '{id}' runs on another host"
                 );
                 impair.validate()?;
                 self.backend
@@ -981,6 +1110,7 @@ mod tests {
                 bind: "0.0.0.0".parse().unwrap(),
                 port_base: base,
             },
+            share: None,
         }
     }
     fn request(owner: &str, operation: Operation) -> Request {

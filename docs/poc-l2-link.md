@@ -306,6 +306,16 @@ FARM_GUEST_AGENT=$PWD/dist/agent/aarch64/farm-agent \
 
 ### 3. 호스트 간 중계
 
+**진행 (2026-11-03)**: 1단계(coordinator 중계)를 제품에 넣었다. 실제 두 호스트(Mac + `dev-01`) 배포는 아직이다.
+- 스위치 uplink와 relay(`src/link/relay.rs`), segment 이름을 앞에 붙인 trunk 메시지(`encode_trunk`).
+- relay는 coordinator 사설 CA의 TLS로만 연다(`src/link/tls.rs`). CA는 `Create`의 share에 실려 가고 스위치는
+  그 CA만 믿는다. uplink 토큰은 (farm, 호스트)마다 32바이트, coordinator에는 해시만 둔다.
+- 배치: `placement`, `FarmRecord.shares`, agent의 `Share`와 `Prepare` 작업, 호스트별 메모리 예산.
+- MTU는 바꾸지 않았다. 중계 구간이 TCP(WebSocket)라 9000 프레임도 그대로 실린다. 1380은 2단계 UDP 경로에서 필요하다.
+- uplink 메시지는 TLS와 별개로 (farm, 호스트) 키로 종단 간 암호화한다(`src/link/seal.rs`). Cloudflare 터널(coordinator가
+  관리하는 cloudflared, 임시·고정 터널)이나 프록시가 TLS를 끝내도 프레임을 볼 수 없다.
+- 1단계의 relay는 같은 farm의 다른 호스트 모두에 넘긴다(MAC 학습 없음). 호스트가 셋 이상이면 flood가 늘어난다.
+
 **목표**: control은 한 호스트에 두고 compute만 다른 호스트(다른 지역 포함)에 두어, 실제 WAN 지연·손실에서
 장애 대응을 시험한다(OpenStack Edge/DCN 패턴). Galera·RabbitMQ가 대륙 간 지연을 견디지 못하므로 control은 나누지 않는다.
 
@@ -330,7 +340,8 @@ FARM_GUEST_AGENT=$PWD/dist/agent/aarch64/farm-agent \
 
 ### 남은 검증
 
-- multinode farm을 **원격 Linux 호스트**에서 만들고 배포하는 것은 아직 돌려보지 않았다(로컬 macOS 호스트만 확인).
+- ~~multinode farm을 **원격 Linux 호스트**에서 만들고 배포~~: `dev-01`에서 control 1 + compute 1 farm `dev-001`이
+  Ready까지 갔다(2026-11-03).
 - ~~**nested KVM**~~: M5 Pro에서 compute VM에 `/dev/kvm`이 있고 `virt_type = kvm`으로 배포됐다(2026-11-03). M1 Max는 TCG였다.
   Linux/KVM 호스트는 아직이다.
 - multinode farm의 **VM 재시작 뒤 settle**을 실제 VM으로 돌려보지 않았다. fake backend 테스트만 있다.

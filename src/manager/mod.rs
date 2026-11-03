@@ -33,6 +33,9 @@ pub struct ManagerOptions {
     pub agent_binary: Option<PathBuf>,
     /// Release bucket to fetch this build's agents from, for platforms no local artifact covers.
     pub agent_url: Option<String>,
+    /// Relay settings to start with when none are stored yet, from `FARM_RELAY_URL`,
+    /// `FARM_RELAY_TLS` (`private` or `proxy`) and `FARM_RELAY_BIND`. The portal changes them.
+    pub relay: Option<crate::link::relay::RelaySettings>,
 }
 impl ManagerOptions {
     pub fn local(state_dir: PathBuf) -> Self {
@@ -47,6 +50,21 @@ impl ManagerOptions {
                 Ok(url) => Some(url).filter(|url| !url.trim().is_empty()),
                 Err(_) => Some(crate::remote::artifact::RELEASE_URL.into()),
             },
+            relay: std::env::var("FARM_RELAY_URL")
+                .ok()
+                .filter(|url| !url.trim().is_empty())
+                .map(|url| crate::link::relay::RelaySettings {
+                    url,
+                    mode: match std::env::var("FARM_RELAY_TLS").as_deref() {
+                        Ok("proxy") => crate::link::relay::RelayTlsMode::Proxy,
+                        Ok("named-tunnel") => crate::link::relay::RelayTlsMode::NamedTunnel,
+                        _ => crate::link::relay::RelayTlsMode::Private,
+                    },
+                    tunnel_token: std::env::var("FARM_RELAY_TUNNEL_TOKEN").ok(),
+                    bind: std::env::var("FARM_RELAY_BIND")
+                        .ok()
+                        .and_then(|bind| bind.parse().ok()),
+                }),
         }
     }
 }
@@ -68,6 +86,18 @@ struct Inner {
     local_link: Arc<dyn crate::remote::link::AgentLink>,
     /// Sockets of hosts whose agents dial in.
     hub: Arc<crate::remote::hub::Hub>,
+    /// Joins the switches of farms that span hosts.
+    relay: Arc<crate::link::relay::Relay>,
+    /// The relay's CA and server certificate, with private TLS.
+    relay_tls: std::sync::RwLock<Option<Arc<crate::link::tls::RelayTls>>>,
+    /// The relay's listener once the daemon serves: its address, or why it does not listen.
+    relay_listener: tokio::sync::Mutex<RelayListener>,
+    /// A quick tunnel's current address, which new farms that span hosts get.
+    tunnel_url: Mutex<Option<String>>,
+    /// What each host of a farm that spans hosts gets at create, secrets included, until
+    /// its create job has handed it over. Only hashes are stored.
+    spreads:
+        Mutex<std::collections::HashMap<String, Vec<(String, crate::remote::protocol::Share)>>>,
     options: ManagerOptions,
     create_gate: Semaphore,
     deploy_gate: Semaphore,
@@ -209,7 +239,9 @@ impl FarmManager {
         let vault = crate::remote::Vault::open(
             &options.state_dir,
             store.state.hosts.values().any(|h| h.credentials.is_some())
-                || !store.state.buckets.is_empty(),
+                || !store.state.buckets.is_empty()
+                || store.state.relay_token.is_some()
+                || !store.state.relay_keys.is_empty(),
         )?;
         for host in store.state.hosts.values() {
             // A missing/wrong key must never silently discard or replace existing credentials.
@@ -223,11 +255,27 @@ impl FarmManager {
         // Archives of transfers a stopped daemon left; holding the state lock, none is running.
         let _ = std::fs::remove_dir_all(options.state_dir.join("transfers"));
         let logs = logs::Logs::new(&options.state_dir)?;
+        let mut store = store;
+        if store.state.relay.is_none() && options.relay.is_some() {
+            store.update(|state| {
+                state.relay = options.relay.clone();
+                Ok(())
+            })?;
+        }
+        let relay_tls = match &store.state.relay {
+            Some(settings) => relay_tls(&options.state_dir, settings)?,
+            None => None,
+        };
         let manager = Self(Arc::new(Inner {
             store: Mutex::new(store),
             logs: Mutex::new(logs),
             local_link,
             hub: Arc::default(),
+            relay: Arc::default(),
+            relay_tls: std::sync::RwLock::new(relay_tls),
+            relay_listener: Default::default(),
+            tunnel_url: Default::default(),
+            spreads: Default::default(),
             options,
             create_gate: Semaphore::new(1),
             deploy_gate: Semaphore::new(1),
@@ -281,6 +329,9 @@ impl FarmManager {
             snapshots::recover_interrupted(state);
             Ok(())
         })?;
+        for farm in manager.list()? {
+            manager.authorize_uplinks(&farm);
+        }
         manager.reconcile().await?;
         for job in resumed {
             manager.log(&job.farm_id, &job.id, job.phase, format!("{REATTACHING}\n"))?;
@@ -405,7 +456,7 @@ impl FarmManager {
         {
             return Err(NotFound(format!("VM '{node}' of farm '{id}'")).into());
         }
-        self.backend_for(&farm)?
+        self.node_backend(&farm, node)?
             .impair(id.into(), node.into(), impair)
             .await?;
         self.update(|state| {
@@ -457,6 +508,17 @@ impl FarmManager {
         io: crate::farm::TerminalIo,
     ) -> Result<()> {
         let farm = self.check_terminal(id, node)?;
+        if let Some(node) = node
+            && farm
+                .shares
+                .iter()
+                .any(|s| s.nodes.iter().any(|n| n == node))
+        {
+            return self
+                .node_backend(&farm, node)?
+                .terminal(id.into(), Some(node.into()), size, io)
+                .await;
+        }
         // A shell needs only the host's reservation, not the agent the farm was built
         // with, so a remote farm uses the host's current agent once that matches this coordinator.
         let current = farm.host_id.as_ref().and_then(|host_id| {
@@ -645,9 +707,578 @@ impl FarmManager {
             })?;
         self.agent_backend(&local, None, "")
     }
+    /// Whether a farm can be created on `host_id`: its memory budget, the agent the farm
+    /// pins there, the address its ports bind and whether it is this machine.
+    fn admit_host(
+        &self,
+        state: &State,
+        host_id: &str,
+        multinode: bool,
+    ) -> Result<(u64, Option<String>, IpAddr, bool)> {
+        let host = &state
+            .hosts
+            .get(host_id)
+            .ok_or_else(|| NotFound(format!("host '{host_id}'")))?
+            .host;
+        if !matches!(host.status, crate::remote::HostStatus::Ready) || host.active_job.is_some() {
+            return Err(conflict(format!(
+                "host '{host_id}' must finish preparation before creating farms"
+            )));
+        }
+        let inspection = host
+            .inspection
+            .as_ref()
+            .context("ready host has no inspection")?;
+        // A multi-node farm's guests run a Linux farm-agent for their links. Linux agents
+        // give their own; this machine gives the one loaded at startup.
+        if multinode {
+            let ready = if host.kind == HostKind::Local {
+                cfg!(target_os = "linux")
+                    || std::env::var_os("FARM_GUEST_AGENT").is_some()
+                    || self.0.guest_agent.read().is_ok_and(|g| g.is_some())
+            } else {
+                inspection.os == "linux"
+            };
+            if !ready {
+                return Err(conflict(if host.kind == HostKind::Local {
+                    format!(
+                        "multi-node farms need a linux-{} farm-agent for their guests; build it with `task agent-build` and restart the coordinator",
+                        crate::model::current_arch()
+                    )
+                } else {
+                    "multi-node farms run on Linux hosts and this machine's local host only"
+                        .to_string()
+                }));
+            }
+        }
+        Ok(match host.kind {
+            HostKind::Local => (
+                self.0.options.memory_budget_mib,
+                None,
+                self.0.options.public_bind,
+                true,
+            ),
+            HostKind::Agent => {
+                if !self.0.hub.connected(host_id) {
+                    return Err(conflict(format!(
+                        "the agent of host '{host_id}' is not connected; run `farm agent connect` there"
+                    )));
+                }
+                (
+                    inspection.memory_total_mib * 80 / 100,
+                    None,
+                    IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+                    false,
+                )
+            }
+            HostKind::Ssh => {
+                let agent = host.agent.as_ref().ok_or_else(|| {
+                    conflict(format!(
+                        "install the Farm execution agent on host '{host_id}' first"
+                    ))
+                })?;
+                if !agent.artifact.supports_single_vm {
+                    return Err(conflict(
+                        "install the updated Farm execution agent to create single-VM farms",
+                    ));
+                }
+                if agent.artifact.build_id != crate::BUILD_ID {
+                    return Err(conflict(format!(
+                        "the agent installed on {host_id} was built from {} but this coordinator is {}; rebuild it with `task agent-build` and install the agent again",
+                        agent.artifact.build_id,
+                        crate::BUILD_ID
+                    )));
+                }
+                (
+                    inspection.memory_total_mib * 80 / 100,
+                    Some(agent.artifact.sha256.clone()),
+                    IpAddr::V4(Ipv4Addr::UNSPECIFIED),
+                    false,
+                )
+            }
+        })
+    }
+    /// What each host of a farm that spans hosts runs, with a new uplink token per host and
+    /// the key Kolla reaches the computes with. `control_host` comes first.
+    fn spread(
+        &self,
+        id: &str,
+        control_host: &str,
+        plan: &Plan,
+        placed: &std::collections::BTreeMap<String, Vec<String>>,
+        relay: Option<(&crate::link::relay::RelaySettings, &str)>,
+    ) -> Result<Vec<(String, crate::remote::protocol::Share)>> {
+        // Runs under the state lock, so the settings come from the caller's state.
+        let (settings, relay) = relay.context("no relay is configured")?;
+        // A relay behind a proxy shows a public certificate; switches then trust public CAs.
+        let ca = match settings.mode {
+            crate::link::relay::RelayTlsMode::Private => self
+                .0
+                .relay_tls
+                .read()
+                .map_err(|_| anyhow!("relay lock poisoned"))?
+                .as_ref()
+                .context("no relay CA")?
+                .ca_pem
+                .clone(),
+            _ => String::new(),
+        };
+        let (private, public) = new_ssh_key()?;
+        let segments: Vec<String> = crate::farm::NETWORKS
+            .iter()
+            .map(|(_, network, _)| format!("{id}/{network}"))
+            .collect();
+        let elsewhere: Vec<&String> = placed.values().flatten().collect();
+        let mut hosts = vec![(
+            control_host.to_owned(),
+            plan.nodes
+                .iter()
+                .filter_map(|spec| crate::farm::suffix(spec.role, spec.index))
+                .filter(|suffix| !elsewhere.contains(&suffix))
+                .collect::<Vec<_>>(),
+        )];
+        hosts.extend(
+            placed
+                .iter()
+                .map(|(host, nodes)| (host.clone(), nodes.clone())),
+        );
+        hosts
+            .into_iter()
+            .map(|(host, nodes)| {
+                let share = crate::remote::protocol::Share {
+                    uplink: crate::link::UplinkConfig {
+                        url: crate::link::relay::uplink_url(relay, id, &host)?,
+                        ca: ca.clone(),
+                        token: crate::link::new_token()?,
+                        key: crate::link::seal::new_key()?,
+                        segments: segments.clone(),
+                    },
+                    ssh_private_key: (host == control_host).then(|| private.clone()),
+                    ssh_public_key: public.clone(),
+                    nodes,
+                };
+                share.validate(id, plan)?;
+                Ok((host, share))
+            })
+            .collect()
+    }
+    /// Close a deleted farm's uplinks and drop their keys.
+    fn forget_uplinks(&self, id: &str) -> Result<()> {
+        self.0.relay.forget(id);
+        self.update(|state| {
+            state.relay_keys.remove(id);
+            Ok(())
+        })
+    }
+    /// Let the switches of a farm that spans hosts join its relay.
+    fn authorize_uplinks(&self, farm: &FarmRecord) {
+        if farm.status == FarmStatus::Deleted {
+            self.0.relay.forget(&farm.id);
+            return;
+        }
+        let Some((host, hash)) = farm.host_id.as_ref().zip(farm.uplink_sha256.as_ref()) else {
+            return;
+        };
+        let keys = self
+            .read(|state| state.relay_keys.get(&farm.id).cloned())
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        let hosts = std::iter::once((host.as_str(), hash.as_str())).chain(
+            farm.shares
+                .iter()
+                .map(|share| (share.host_id.as_str(), share.uplink_sha256.as_str())),
+        );
+        for (host, hash) in hosts {
+            match keys.get(host).context("no uplink key").and_then(|sealed| {
+                self.0
+                    .vault
+                    .unseal::<String>(sealed, &uplink_key_aad(&farm.id, host))
+            }) {
+                Ok(key) => self.0.relay.authorize(&farm.id, host, hash, &key),
+                Err(error) => eprintln!("relay: farm {} on {host}: {error:#}", farm.id),
+            }
+        }
+    }
+    /// The agents of the other hosts of a farm that spans hosts, with their shares.
+    fn share_backends(&self, farm: &FarmRecord) -> Result<Vec<(HostShare, Arc<dyn Backend>)>> {
+        let generation = farm
+            .remote_generation
+            .as_deref()
+            .context("farm has no generation")?;
+        farm.shares
+            .iter()
+            .map(|share| {
+                Ok((
+                    share.clone(),
+                    self.agent_backend(&share.host_id, share.agent_sha256.as_deref(), generation)?,
+                ))
+            })
+            .collect()
+    }
+    /// The agent of the host that runs the farm's VM `node`.
+    fn node_backend(&self, farm: &FarmRecord, node: &str) -> Result<Arc<dyn Backend>> {
+        match farm
+            .shares
+            .iter()
+            .find(|s| s.nodes.iter().any(|n| n == node))
+        {
+            Some(share) => self.agent_backend(
+                &share.host_id,
+                share.agent_sha256.as_deref(),
+                farm.remote_generation
+                    .as_deref()
+                    .context("farm has no generation")?,
+            ),
+            None => self.backend_for(farm),
+        }
+    }
+    /// The farm's VMs as all its hosts see them.
+    async fn scan_farm(&self, farm: &FarmRecord) -> Result<Vec<crate::farm::FarmNode>> {
+        let mut nodes = self
+            .backend_for(farm)?
+            .scan()
+            .await?
+            .remove(&farm.id)
+            .unwrap_or_default();
+        for (_, backend) in self.share_backends(farm)? {
+            nodes.extend(backend.scan().await?.remove(&farm.id).unwrap_or_default());
+        }
+        if !farm.shares.is_empty() {
+            nodes.sort_by(|a, b| a.name.cmp(&b.name));
+        }
+        Ok(nodes)
+    }
+    /// Create every host's part of a farm that spans hosts, each with its own share.
+    async fn create_spanning(
+        &self,
+        job: &Job,
+        farm: &FarmRecord,
+    ) -> Result<Vec<crate::farm::FarmNode>> {
+        let spread = self
+            .0
+            .spreads
+            .lock()
+            .map_err(|_| anyhow!("spread mutex poisoned"))?
+            .remove(&farm.id)
+            .context("this create lost its hosts' shares when the coordinator restarted; delete the farm and create it again")?;
+        let plan = farm.plan.clone().context("farm has no plan")?;
+        let exposure = farm.exposure.clone().context("farm has no exposure")?;
+        let generation = farm
+            .remote_generation
+            .as_deref()
+            .context("farm has no generation")?;
+        let creates = spread.into_iter().map(|(host, share)| {
+            let (plan, exposure) = (plan.clone(), exposure.clone());
+            async move {
+                let digest = if Some(host.as_str()) == farm.host_id.as_deref() {
+                    farm.agent_sha256.clone()
+                } else {
+                    farm.shares
+                        .iter()
+                        .find(|s| s.host_id == host)
+                        .and_then(|s| s.agent_sha256.clone())
+                };
+                self.log(
+                    &farm.id,
+                    &job.id,
+                    None,
+                    format!("creating {} on host {host}\n", share.nodes.join(", ")),
+                )?;
+                self.agent_backend(&host, digest.as_deref(), generation)?
+                    .create_share(farm.id.clone(), plan, exposure, share)
+                    .await
+                    .with_context(|| format!("create the VMs on host {host}"))
+            }
+        });
+        let mut nodes: Vec<_> = futures::future::try_join_all(creates)
+            .await?
+            .into_iter()
+            .flatten()
+            .collect();
+        nodes.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(nodes)
+    }
+    /// The relay URL new farms that span hosts get, once there is one.
+    pub fn relay_url(&self) -> Option<String> {
+        let tunnel = self.0.tunnel_url.lock().ok()?.clone();
+        effective_url(&self.relay_settings()?, tunnel.as_deref())
+    }
+    pub fn relay_settings(&self) -> Option<crate::link::relay::RelaySettings> {
+        self.0.store.lock().ok()?.state.relay.clone()
+    }
+    /// Listen for the switches of farms that span hosts, replacing an earlier listener. A
+    /// failure is reported in [`Self::relay_status`] and leaves the rest of the daemon up.
+    pub async fn start_relay(&self) {
+        let mut listener = self.0.relay_listener.lock().await;
+        if let Some(task) = listener.task.take() {
+            task.abort();
+        }
+        listener.tunnel = None;
+        if let Ok(mut url) = self.0.tunnel_url.lock() {
+            *url = None;
+        }
+        listener.addr = None;
+        listener.error = None;
+        listener.serving = true;
+        let Some(settings) = self.relay_settings() else {
+            return;
+        };
+        let tls = self
+            .0
+            .relay_tls
+            .read()
+            .ok()
+            .and_then(|tls| tls.as_ref().map(|tls| tls.server.clone()));
+        let bind = settings.bind();
+        match crate::link::relay::listen(self.0.relay.clone(), bind, tls).await {
+            Ok((addr, task)) => {
+                println!(
+                    "relay listening on {}{addr} for {}",
+                    if settings.mode.proxied() {
+                        "http://"
+                    } else {
+                        "https://"
+                    },
+                    settings.url
+                );
+                listener.addr = Some(addr);
+                listener.task = Some(task);
+                if settings.mode.tunnel() {
+                    match self.tunnel_kind(&settings) {
+                        Ok(kind) => {
+                            let manager = Arc::downgrade(&self.0);
+                            let on_url: Arc<dyn Fn(String) + Send + Sync> = Arc::new(move |url| {
+                                let Some(inner) = manager.upgrade() else {
+                                    return;
+                                };
+                                let manager = FarmManager(inner);
+                                if let Ok(mut current) = manager.0.tunnel_url.lock() {
+                                    *current = Some(url.clone());
+                                }
+                                tokio::spawn(async move { manager.relink(&url).await });
+                            });
+                            listener.tunnel = Some(crate::link::cloudflared::Tunnel::start(
+                                &self.0.options.state_dir,
+                                kind,
+                                format!("http://{addr}"),
+                                on_url,
+                            ));
+                        }
+                        Err(error) => listener.error = Some(format!("{error:#}")),
+                    }
+                }
+            }
+            Err(error) => {
+                eprintln!("relay: {error:#}");
+                listener.error = Some(format!("{error:#}"));
+            }
+        }
+    }
+    pub async fn relay_status(&self) -> Result<RelayStatus> {
+        let listener = self.0.relay_listener.lock().await;
+        let ca_sha256 = self
+            .0
+            .relay_tls
+            .read()
+            .map_err(|_| anyhow!("relay lock poisoned"))?
+            .as_ref()
+            .map(|tls| crate::link::token_hash(&tls.ca_pem));
+        let settings = self.relay_settings();
+        let tunnel_url = self
+            .0
+            .tunnel_url
+            .lock()
+            .map_err(|_| anyhow!("tunnel lock poisoned"))?
+            .clone();
+        Ok(RelayStatus {
+            url: settings
+                .as_ref()
+                .and_then(|s| effective_url(s, tunnel_url.as_deref())),
+            tunnel: listener.tunnel.as_ref().map(|t| t.status()),
+            bind: settings.as_ref().map(|s| s.bind().to_string()),
+            settings,
+            listening: listener.addr.map(|addr| addr.to_string()),
+            error: listener.error.clone(),
+            ca_sha256,
+            spanning_farms: self.spanning_farms()?,
+        })
+    }
+    /// Farms that span hosts, whose switches hold the relay's URL and CA.
+    fn spanning_farms(&self) -> Result<Vec<String>> {
+        Ok(self
+            .list()?
+            .into_iter()
+            .filter(|f| f.status != FarmStatus::Deleted && !f.shares.is_empty())
+            .map(|f| f.id)
+            .collect())
+    }
+    /// Change where farms that span hosts join, or turn it off with `None`. The switches of
+    /// existing such farms keep the old URL and CA, so while any lives only the listen
+    /// address may change.
+    pub async fn set_relay(
+        &self,
+        mut settings: Option<crate::link::relay::RelaySettings>,
+    ) -> Result<RelayStatus> {
+        if let Some(settings) = &settings {
+            settings
+                .validate()
+                .map_err(|e| bad_request(e.to_string()))?;
+        }
+        // A named tunnel's token is sealed apart from the settings; a change keeps the stored one.
+        let token = settings
+            .as_mut()
+            .and_then(|s| s.tunnel_token.take())
+            .filter(|t| !t.trim().is_empty());
+        let named = settings
+            .as_ref()
+            .is_some_and(|s| s.mode == crate::link::relay::RelayTlsMode::NamedTunnel);
+        let sealed = match (&token, named) {
+            (Some(token), true) => Some(
+                self.0
+                    .vault
+                    .seal(&token.trim().to_owned(), TUNNEL_TOKEN_AAD)?,
+            ),
+            (None, true) => Some(self.read(|state| state.relay_token.clone())?.ok_or_else(
+                || bad_request("a named tunnel needs its token from the Cloudflare dashboard"),
+            )?),
+            _ => None,
+        };
+        let current = self.relay_settings();
+        let same_link = |a: &Option<crate::link::relay::RelaySettings>,
+                         b: &Option<crate::link::relay::RelaySettings>| {
+            a.as_ref().map(|s| (&s.url, s.mode)) == b.as_ref().map(|s| (&s.url, s.mode))
+        };
+        let spanning = self.spanning_farms()?;
+        if !spanning.is_empty() && !same_link(&current, &settings) {
+            return Err(conflict(format!(
+                "farms that span hosts use the current relay URL and CA; delete them first: {}",
+                spanning.join(", ")
+            )));
+        }
+        let tls = match &settings {
+            Some(settings) => relay_tls(&self.0.options.state_dir, settings)?,
+            None => None,
+        };
+        self.update(|state| {
+            state.relay = settings.clone();
+            state.relay_token = sealed.clone();
+            Ok(())
+        })?;
+        *self
+            .0
+            .relay_tls
+            .write()
+            .map_err(|_| anyhow!("relay lock poisoned"))? = tls;
+        let serving = self.0.relay_listener.lock().await.serving;
+        if serving {
+            self.start_relay().await;
+        }
+        self.relay_status().await
+    }
+    fn read<T>(&self, f: impl FnOnce(&State) -> T) -> Result<T> {
+        Ok(f(&self
+            .0
+            .store
+            .lock()
+            .map_err(|_| anyhow!("state mutex poisoned"))?
+            .state))
+    }
+    fn tunnel_kind(
+        &self,
+        settings: &crate::link::relay::RelaySettings,
+    ) -> Result<crate::link::cloudflared::Kind> {
+        Ok(match settings.mode {
+            crate::link::relay::RelayTlsMode::NamedTunnel => {
+                let sealed = self
+                    .read(|state| state.relay_token.clone())?
+                    .context("the named tunnel has no token")?;
+                crate::link::cloudflared::Kind::Named {
+                    token: self.0.vault.unseal(&sealed, TUNNEL_TOKEN_AAD)?,
+                }
+            }
+            _ => crate::link::cloudflared::Kind::Quick,
+        })
+    }
+    /// Check for a new cloudflared now and restart the tunnel on one.
+    pub async fn update_cloudflared(&self) -> Result<RelayStatus> {
+        {
+            let listener = self.0.relay_listener.lock().await;
+            let tunnel = listener
+                .tunnel
+                .as_ref()
+                .ok_or_else(|| conflict("the relay runs no tunnel"))?;
+            tunnel.update(&self.0.options.state_dir).await?;
+        }
+        self.relay_status().await
+    }
+    /// Point the switches of every farm that spans hosts at the relay's new address, as a
+    /// quick tunnel gets one each start. Each keeps its token and CA.
+    pub async fn relink(&self, url: &str) {
+        self.relink_hosts(url, false).await
+    }
+    /// Retry [`Self::relink`] for the hosts whose switch is not on the relay, as one that
+    /// was unreachable when a quick tunnel got its address. The reconciler calls it.
+    pub async fn relink_missing(&self) {
+        let url = self.0.tunnel_url.lock().ok().and_then(|url| url.clone());
+        if let Some(url) = url {
+            self.relink_hosts(&url, true).await
+        }
+    }
+    async fn relink_hosts(&self, url: &str, missing_only: bool) {
+        let Ok(farms) = self.list() else { return };
+        for farm in farms
+            .into_iter()
+            .filter(|f| f.status != FarmStatus::Deleted && !f.shares.is_empty())
+        {
+            let connected = self.0.relay.connected(&farm.id);
+            for host in farm.hosts() {
+                if missing_only && connected.iter().any(|c| c == host) {
+                    continue;
+                }
+                let result = async {
+                    let backend = if Some(host) == farm.host_id.as_deref() {
+                        self.backend_for(&farm)?
+                    } else {
+                        self.node_backend(
+                            &farm,
+                            farm.shares
+                                .iter()
+                                .find(|s| s.host_id == host)
+                                .and_then(|s| s.nodes.first())
+                                .context("share has no VM")?,
+                        )?
+                    };
+                    backend
+                        .relink(
+                            farm.id.clone(),
+                            crate::link::relay::uplink_url(url, &farm.id, host)?,
+                        )
+                        .await
+                }
+                .await;
+                match result {
+                    Ok(()) => eprintln!("relay: {} on {host} now joins {url}", farm.id),
+                    Err(error) => eprintln!(
+                        "relay: cannot move {} on {host} to {url}: {error:#}",
+                        farm.id
+                    ),
+                }
+            }
+        }
+    }
+    pub fn relay(&self) -> Arc<crate::link::relay::Relay> {
+        self.0.relay.clone()
+    }
     pub fn create(&self, request: CreateRequest) -> Result<Job> {
         let mut plan = request.validate()?;
         let id = request.id.clone();
+        let tunnel_url = self
+            .0
+            .tunnel_url
+            .lock()
+            .map_err(|_| anyhow!("tunnel lock poisoned"))?
+            .clone();
         let job = self.update(|state| {
             self.ensure_accepting()?;
             if state
@@ -663,68 +1294,73 @@ impl FarmManager {
             let host_id = request.host_id.clone().ok_or_else(|| {
                 bad_request("choose a host for the farm; register the local host or a server under Hosts first")
             })?;
-            let host = &state
-                .hosts
-                .get(&host_id)
-                .ok_or_else(|| NotFound(format!("host '{host_id}'")))?
-                .host;
-            if !matches!(host.status, crate::remote::HostStatus::Ready) || host.active_job.is_some() {
-                return Err(conflict("the host must finish preparation before creating farms"));
-            }
-            if request.snapshot_id.is_some() && host.kind != HostKind::Local {
+            if request.snapshot_id.is_some()
+                && state.hosts.get(&host_id).is_some_and(|h| h.host.kind != HostKind::Local)
+            {
                 return Err(conflict("snapshots restore on the local host only"));
             }
-            let inspection = host.inspection.as_ref().context("ready host has no inspection")?;
-            // A multi-node farm's guests run a Linux farm-agent for their links. Linux agents
-            // give their own; this machine gives the one loaded at startup.
-            if plan.computes > 0 {
-                let ready = if host.kind == HostKind::Local {
-                    cfg!(target_os = "linux")
-                        || std::env::var_os("FARM_GUEST_AGENT").is_some()
-                        || self.0.guest_agent.read().is_ok_and(|g| g.is_some())
-                } else {
-                    inspection.os == "linux"
-                };
-                if !ready {
-                    return Err(conflict(if host.kind == HostKind::Local {
-                        format!("multi-node farms need a linux-{} farm-agent for their guests; build it with `task agent-build` and restart the coordinator", crate::model::current_arch())
-                    } else {
-                        "multi-node farms run on Linux hosts and this machine's local host only".to_string()
-                    }));
+            // Computes placed on the control VM's host need no share of their own.
+            let mut placed: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+            for (node, host) in &request.placement {
+                if *host != host_id {
+                    placed.entry(host.clone()).or_default().push(node.clone());
                 }
             }
-            let (budget, agent_sha256, bind) = match host.kind {
-                HostKind::Local => (self.0.options.memory_budget_mib, None, self.0.options.public_bind),
-                HostKind::Agent => {
-                    if !self.0.hub.connected(&host_id) {
-                        return Err(conflict(format!("the agent of host '{host_id}' is not connected; run `farm agent connect` there")));
-                    }
-                    (inspection.memory_total_mib * 80 / 100, None, IpAddr::V4(Ipv4Addr::UNSPECIFIED))
+            let (budget, agent_sha256, bind, local) = self.admit_host(state, &host_id, plan.computes > 0)?;
+            let mut hosts = vec![(host_id.clone(), budget, agent_sha256.clone())];
+            let mut relay_url = None;
+            if !placed.is_empty() {
+                let relay = state.relay.as_ref().ok_or_else(|| {
+                    conflict("farms that span hosts need the relay; set it up under Hosts")
+                })?;
+                let url = effective_url(relay, tunnel_url.as_deref()).ok_or_else(|| {
+                    conflict("the relay's quick tunnel has no address yet; see Hosts and try again")
+                })?;
+                crate::link::relay::uplink_url(&url, &id, &host_id)
+                    .map_err(|e| bad_request(e.to_string()))?;
+                relay_url = Some(url);
+                for host in placed.keys() {
+                    let (budget, sha, _, _) = self.admit_host(state, host, true)?;
+                    hosts.push((host.clone(), budget, sha));
                 }
-                HostKind::Ssh => {
-                    let agent = host.agent.as_ref().ok_or_else(|| conflict("install the Farm execution agent on this host first"))?;
-                    if !agent.artifact.supports_single_vm { return Err(conflict("install the updated Farm execution agent to create single-VM farms")); }
-                    if agent.artifact.build_id != crate::BUILD_ID {
-                        return Err(conflict(format!(
-                            "the agent installed on this host was built from {} but this coordinator is {}; rebuild it with `task agent-build` and install the agent again",
-                            agent.artifact.build_id, crate::BUILD_ID
-                        )));
-                    }
-                    (inspection.memory_total_mib * 80 / 100, Some(agent.artifact.sha256.clone()), IpAddr::V4(Ipv4Addr::UNSPECIFIED))
+            }
+            let spread = (!placed.is_empty())
+                .then(|| {
+                    self.spread(&id, &host_id, &plan, &placed, state.relay.as_ref().zip(relay_url.as_deref()))
+                })
+                .transpose()?;
+            let shares: Vec<HostShare> = spread
+                .iter()
+                .flatten()
+                .skip(1)
+                .zip(&hosts[1..])
+                .map(|((host, share), (_, _, sha))| HostShare {
+                    host_id: host.clone(),
+                    agent_sha256: sha.clone(),
+                    nodes: share.nodes.clone(),
+                    uplink_sha256: crate::link::token_hash(&share.uplink.token),
+                })
+                .collect();
+            let uplink_sha256 = spread
+                .as_ref()
+                .map(|spread| crate::link::token_hash(&spread[0].1.uplink.token));
+            for (host, budget, _) in &hosts {
+                let reserved: u64 = state
+                    .farms
+                    .values()
+                    .filter(|f| f.status != FarmStatus::Deleted)
+                    .map(|f| f.memory_on(host))
+                    .sum();
+                let requested = if shares.is_empty() {
+                    plan.memory_mib
+                } else {
+                    crate::model::memory_on(&plan, Some(&host_id), &shares, host)
+                };
+                if reserved.saturating_add(requested) > *budget {
+                    return Err(conflict(format!(
+                        "memory budget of host '{host}' exceeded: {reserved} MiB reserved + {requested} MiB requested > {budget} MiB"
+                    )));
                 }
-            };
-            let local = host.kind == HostKind::Local;
-            let reserved: u64 = state
-                .farms
-                .values()
-                .filter(|f| f.status != FarmStatus::Deleted && f.host_id.as_deref() == Some(host_id.as_str()))
-                .map(FarmRecord::memory_mib)
-                .sum();
-            if reserved.saturating_add(plan.memory_mib) > budget {
-                return Err(conflict(format!(
-                    "memory budget exceeded: {reserved} MiB reserved + {} MiB requested > {} MiB",
-                    plan.memory_mib, budget
-                )));
             }
             let exposure = allocate_ports(state, request.external_host, bind, &host_id, local)?;
             let remote_generation = Some(uuid::Uuid::new_v4().to_string());
@@ -753,11 +1389,26 @@ impl FarmManager {
                     updated_at: now(),
                     snapshot_id: request.snapshot_id,
                     faults: Default::default(),
+                    shares,
+                    uplink_sha256,
                 },
             );
             state.jobs.insert(job.id.clone(), job.clone());
+            if let Some(spread) = &spread {
+                let mut keys = std::collections::BTreeMap::new();
+                for (host, share) in spread {
+                    keys.insert(host.clone(), self.0.vault.seal(&share.uplink.key, &uplink_key_aad(&id, host))?);
+                }
+                state.relay_keys.insert(id.clone(), keys);
+            }
+            if let Some(spread) = spread {
+                self.0.spreads.lock().map_err(|_| anyhow!("spread mutex poisoned"))?.insert(id.clone(), spread);
+            }
             Ok(job)
         })?;
+        if let Ok(farm) = self.get(&id) {
+            self.authorize_uplinks(&farm);
+        }
         self.spawn(job.clone(), None);
         Ok(job)
     }
@@ -960,22 +1611,18 @@ impl FarmManager {
             // Refresh partial VM results even if creation or deletion failed. A forgotten
             // farm's host is not asked; it may be the reason the farm is being forgotten.
             if !job.forget
-                && let Ok(backend) = manager
-                    .get(&job.farm_id)
-                    .and_then(|farm| manager.backend_for(&farm))
-                && let Ok(mut observed) = backend.scan().await
-            {
-                let nodes = observed.remove(&job.farm_id).unwrap_or_default();
-                if let Err(error) = manager.update(|state| {
+                && let Ok(farm) = manager.get(&job.farm_id)
+                && let Ok(nodes) = manager.scan_farm(&farm).await
+                && let Err(error) = manager.update(|state| {
                     state
                         .farms
                         .get_mut(&job.farm_id)
                         .context("farm missing")?
                         .nodes = nodes;
                     Ok(())
-                }) {
-                    eprintln!("cannot refresh job inventory: {error:#}");
-                }
+                })
+            {
+                eprintln!("cannot refresh job inventory: {error:#}");
             }
             if let Err(error) = manager.finish(&job, result) {
                 eprintln!("cannot persist completion of {}: {error:#}", job.id);
@@ -1013,14 +1660,17 @@ impl FarmManager {
                         self.log(&farm.id, &job.id, None, format!("re-inspected host {host_id} over SSH\n"))?;
                     }
                 }
-                let nodes = self
-                    .backend_for(&farm)?
-                    .create(
-                        farm.id.clone(),
-                        farm.plan.context("farm has no plan")?,
-                        farm.exposure.context("farm has no exposure")?,
-                    )
-                    .await?;
+                let nodes = if farm.shares.is_empty() {
+                    self.backend_for(&farm)?
+                        .create(
+                            farm.id.clone(),
+                            farm.plan.context("farm has no plan")?,
+                            farm.exposure.context("farm has no exposure")?,
+                        )
+                        .await?
+                } else {
+                    self.create_spanning(job, &farm).await?
+                };
                 self.update(|state| {
                     state
                         .farms
@@ -1031,18 +1681,31 @@ impl FarmManager {
                 })?;
             }
             JobKind::Deploy => {
-                self.deploy_job(job, &farm, request.unwrap_or_default().from)
-                    .await?
+                let from = request.unwrap_or_default().from;
+                // A followed host-side job got past preparing the other hosts already.
+                if from <= crate::kolla::Phase::Prepare && job.remote_job_id.is_none() {
+                    for (share, backend) in self.share_backends(&farm)? {
+                        self.log(&farm.id, &job.id, None, format!("preparing {} on host {}\n", share.nodes.join(", "), share.host_id))?;
+                        backend
+                            .prepare(farm.id.clone(), farm_components(&farm), String::new())
+                            .await
+                            .with_context(|| format!("prepare the VMs on host {}", share.host_id))?;
+                    }
+                }
+                self.deploy_job(job, &farm, from).await?
             }
-            JobKind::Delete if job.forget => self.log(
+            JobKind::Delete if job.forget => {
+                self.forget_uplinks(&farm.id)?;
+                self.log(
                 &farm.id,
                 &job.id,
                 None,
                 format!(
                     "removing this farm's record only; a VM it left on host {} stays until the host is purged\n",
-                    farm.host_id.as_deref().unwrap_or("(none)")
+                    farm.hosts().join(", ")
                 ),
-            )?,
+            )?
+            }
             // A farm from before host registration has no agent to remove its VM; drop the record.
             JobKind::Delete if farm.host_id.is_none() => self.log(
                 &farm.id,
@@ -1051,7 +1714,22 @@ impl FarmManager {
                 "this farm has no host; removing its record only (delete any leftover VM with msb)\n"
                     .into(),
             )?,
-            JobKind::Delete => self.backend_for(&farm)?.delete(farm.id).await?,
+            JobKind::Delete => {
+                // Each host removes its part; the farm is gone once every host has.
+                let mut failed = Vec::new();
+                if let Err(error) = self.backend_for(&farm)?.delete(farm.id.clone()).await {
+                    failed.push(format!("{}: {error:#}", farm.host_id.as_deref().unwrap_or_default()));
+                }
+                for (share, backend) in self.share_backends(&farm)? {
+                    if let Err(error) = backend.delete(farm.id.clone()).await {
+                        failed.push(format!("{}: {error:#}", share.host_id));
+                    }
+                }
+                if !failed.is_empty() {
+                    bail!("{}", failed.join("; "));
+                }
+                self.forget_uplinks(&farm.id)?;
+            }
             JobKind::Settle => {
                 let components = farm_components(&farm);
                 self.backend_for(&farm)?
@@ -1314,7 +1992,17 @@ impl FarmManager {
                 .farms
                 .values()
                 .filter(|f| f.status != FarmStatus::Deleted)
-                .filter_map(|f| Some((f.host_id.clone()?, f.agent_sha256.clone())))
+                .flat_map(|f| {
+                    f.host_id
+                        .clone()
+                        .map(|host| (host, f.agent_sha256.clone()))
+                        .into_iter()
+                        .chain(
+                            f.shares
+                                .iter()
+                                .map(|share| (share.host_id.clone(), share.agent_sha256.clone())),
+                        )
+                })
                 .collect();
             (store.revision, targets)
         };
@@ -1343,7 +2031,7 @@ impl FarmManager {
                     Ok(observed) => apply_inventory(state, observed, &host_id),
                     Err(error) => {
                         for farm in state.farms.values_mut().filter(|f| {
-                            f.host_id.as_deref() == Some(host_id.as_str())
+                            f.hosts().contains(&host_id.as_str())
                                 && f.status != FarmStatus::Deleted
                                 && f.active_job.is_none()
                         }) {
@@ -1366,13 +2054,24 @@ fn apply_inventory(
     for farm in state
         .farms
         .values_mut()
-        .filter(|f| f.host_id.as_deref() == Some(host_id))
+        .filter(|f| f.hosts().contains(&host_id))
     {
         if farm.active_job.is_some() {
             observed.remove(&farm.id);
             continue;
         }
-        let nodes = observed.remove(&farm.id).unwrap_or_default();
+        let mut nodes = observed.remove(&farm.id).unwrap_or_default();
+        if !farm.shares.is_empty() {
+            // This host reports only its own VMs; the others keep what their hosts reported.
+            let elsewhere = farm.nodes.iter().filter(|node| {
+                node.role
+                    .and_then(|role| crate::farm::suffix(role, node.index))
+                    .and_then(|suffix| farm.host_of(&suffix))
+                    != Some(host_id)
+            });
+            nodes.extend(elsewhere.cloned().collect::<Vec<_>>());
+            nodes.sort_by(|a, b| a.name.cmp(&b.name));
+        }
         if farm.status == FarmStatus::Deleted && nodes.is_empty() {
             continue;
         }
@@ -1491,6 +2190,81 @@ fn allocate_ports(
         }
     }
     Err(conflict("no free public TCP port blocks"))
+}
+
+#[derive(Default)]
+struct RelayListener {
+    /// Whether the daemon serves, so settings changes restart the listener.
+    serving: bool,
+    addr: Option<std::net::SocketAddr>,
+    task: Option<tokio::task::JoinHandle<()>>,
+    /// cloudflared, for a relay behind a tunnel this coordinator runs.
+    tunnel: Option<crate::link::cloudflared::Tunnel>,
+    error: Option<String>,
+}
+
+const TUNNEL_TOKEN_AAD: &str = "farm-relay-tunnel-token";
+fn uplink_key_aad(farm: &str, host: &str) -> String {
+    format!("farm-uplink-key:{farm}:{host}")
+}
+
+/// The relay URL other hosts reach: the settings', or a quick tunnel's current address.
+fn effective_url(
+    settings: &crate::link::relay::RelaySettings,
+    tunnel: Option<&str>,
+) -> Option<String> {
+    match settings.mode {
+        crate::link::relay::RelayTlsMode::QuickTunnel => tunnel.map(str::to_owned),
+        _ => Some(settings.url.clone()),
+    }
+}
+
+/// The relay as the portal shows it.
+#[derive(Clone, Debug, serde::Serialize, utoipa::ToSchema)]
+pub struct RelayStatus {
+    pub settings: Option<crate::link::relay::RelaySettings>,
+    /// The URL new farms that span hosts get: the settings', or a quick tunnel's address.
+    pub url: Option<String>,
+    /// cloudflared, when the coordinator runs the tunnel.
+    pub tunnel: Option<crate::link::cloudflared::TunnelStatus>,
+    /// Where it listens, with defaults applied.
+    pub bind: Option<String>,
+    /// The address it listens on, once the daemon serves.
+    pub listening: Option<String>,
+    /// Why it does not listen.
+    pub error: Option<String>,
+    /// SHA-256 of the private CA's PEM, with private TLS.
+    pub ca_sha256: Option<String>,
+    /// Farms that span hosts; while any lives, the URL and mode stay.
+    pub spanning_farms: Vec<String>,
+}
+
+/// The relay's CA and server certificate for `settings`, with private TLS.
+fn relay_tls(
+    state_dir: &Path,
+    settings: &crate::link::relay::RelaySettings,
+) -> Result<Option<Arc<crate::link::tls::RelayTls>>> {
+    Ok(match settings.mode {
+        crate::link::relay::RelayTlsMode::Private => {
+            let host = crate::link::tls::url_host(&settings.url)?;
+            Some(Arc::new(crate::link::tls::RelayTls::open(
+                state_dir, &host,
+            )?))
+        }
+        _ => None,
+    })
+}
+
+/// A new ed25519 key pair in OpenSSH format: (private, public).
+fn new_ssh_key() -> Result<(String, String)> {
+    use russh::keys::ssh_key::{LineEnding, PrivateKey, private::Ed25519Keypair};
+    let mut seed = zeroize::Zeroizing::new([0u8; 32]);
+    getrandom::getrandom(&mut seed[..]).map_err(|e| anyhow!("no randomness: {e}"))?;
+    let key = PrivateKey::from(Ed25519Keypair::from_seed(&seed));
+    let private = key.to_openssh(LineEnding::LF)?.to_string();
+    let mut public = key.public_key().to_openssh()?;
+    public.push_str(" farm-kolla");
+    Ok((private, public))
 }
 
 #[cfg(test)]

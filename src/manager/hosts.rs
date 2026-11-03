@@ -34,11 +34,8 @@ impl FarmManager {
                             .state
                             .farms
                             .values()
-                            .filter(|f| {
-                                f.host_id.as_deref() == Some(&host.id)
-                                    && f.status != FarmStatus::Deleted
-                            })
-                            .map(FarmRecord::memory_mib)
+                            .filter(|f| f.status != FarmStatus::Deleted)
+                            .map(|f| f.memory_on(&host.id))
                             .sum(),
                     });
                 host.connected = match host.kind {
@@ -280,7 +277,7 @@ impl FarmManager {
             if state
                 .farms
                 .values()
-                .any(|f| f.host_id.as_deref() == Some(id) && f.status != FarmStatus::Deleted)
+                .any(|f| f.hosts().contains(&id) && f.status != FarmStatus::Deleted)
             {
                 return Err(conflict(
                     "delete all farms on this host before unregistering it",
@@ -300,7 +297,7 @@ impl FarmManager {
             if state
                 .farms
                 .values()
-                .any(|f| f.host_id.as_deref() == Some(&request.id) && f.active_job.is_some())
+                .any(|f| f.hosts().contains(&request.id.as_str()) && f.active_job.is_some())
             {
                 return Err(conflict("a farm operation is running on this host"));
             }
@@ -419,7 +416,7 @@ impl FarmManager {
             if state
                 .farms
                 .values()
-                .any(|f| f.host_id.as_deref() == Some(id) && f.active_job.is_some())
+                .any(|f| f.hosts().contains(&id) && f.active_job.is_some())
             {
                 return Err(conflict("a farm operation is running on this host"));
             }
@@ -490,7 +487,7 @@ impl FarmManager {
         let farms: Vec<String> = self
             .list()?
             .into_iter()
-            .filter(|farm| farm.host_id.as_deref() == Some(host_id.as_str()))
+            .filter(|farm| farm.hosts().contains(&host_id.as_str()))
             .map(|farm| farm.id)
             .collect();
         if !farms.is_empty() {
@@ -633,7 +630,8 @@ impl FarmManager {
         let Some(previous) = stored.host.inspection.as_ref() else {
             anyhow::bail!("host '{host_id}' has never been inspected; check it under Hosts");
         };
-        if stored.host.kind != HostKind::Ssh || now().saturating_sub(previous.checked_at) <= max_age {
+        if stored.host.kind != HostKind::Ssh || now().saturating_sub(previous.checked_at) <= max_age
+        {
             return Ok(false);
         }
         let credentials = self.0.vault.unseal(

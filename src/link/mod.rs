@@ -14,10 +14,21 @@
 //! one or more Ethernet frames, each prefixed by its length as a big-endian u16: writers send
 //! every frame queued so far in one message, which keeps the per-frame cost low at the
 //! 1500-byte MTU.
+//!
+//! A farm whose VMs sit on several hosts joins their switches through the coordinator
+//! ([`relay`]): each switch keeps an uplink per such farm open to `GET /api/v1/link-relay`,
+//! and the coordinator passes every message to the farm's other hosts. An uplink carries
+//! several segments, so each of its messages starts with the segment's name (see
+//! [`encode_trunk`]); the switches learn the MACs beyond it as they do a port's. Uplinks
+//! always use TLS, with the coordinator's own CA ([`tls`]).
 
+pub mod cloudflared;
 pub mod guest;
 pub mod host;
+pub mod relay;
+pub mod seal;
 pub mod switch;
+pub mod tls;
 
 use std::collections::BTreeMap;
 
@@ -27,6 +38,8 @@ use sha2::{Digest, Sha256};
 
 /// Path of the switch's WebSocket endpoint.
 pub const PATH: &str = "/link";
+/// Path of the coordinator's relay between hosts' switches.
+pub const RELAY_PATH: &str = "/api/v1/link-relay";
 /// Largest frame the length prefix can carry.
 pub const MAX_FRAME: usize = u16::MAX as usize;
 /// Bytes a writer collects before it sends them in one message.
@@ -44,6 +57,27 @@ pub const DEFAULT_MTU: u16 = 9000;
 pub struct Config {
     #[serde(default)]
     pub ports: BTreeMap<String, PortConfig>,
+    /// Uplinks to the coordinator's relay, by farm id.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub uplinks: BTreeMap<String, UplinkConfig>,
+}
+
+/// A switch's connection to the relay for one farm that spans hosts.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UplinkConfig {
+    /// `wss://<coordinator>/api/v1/link-relay?farm=<id>&host=<host>`.
+    pub url: String,
+    /// The coordinator's relay CA in PEM, which the uplink alone trusts; empty for a relay
+    /// behind a TLS proxy, whose certificate comes from a public CA.
+    #[serde(default)]
+    pub ca: String,
+    /// The relay checks it against the hash it keeps; the switch needs it in full.
+    pub token: String,
+    /// Seals the uplink's messages end to end with the relay, in hex ([`seal`]).
+    pub key: String,
+    /// The farm's segments this host carries over the uplink.
+    pub segments: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -108,6 +142,24 @@ pub fn new_token() -> Result<String> {
     Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }
 
+/// Start a trunk message for `segment`: its name's length as one byte, then the name.
+/// Frames follow as [`encode`] writes them.
+pub fn encode_trunk(buf: &mut Vec<u8>, segment: &str) {
+    debug_assert!(segment.len() <= 160);
+    buf.push(segment.len() as u8);
+    buf.extend_from_slice(segment.as_bytes());
+}
+
+/// The segment of a trunk message and its frames.
+pub fn decode_trunk(message: &bytes::Bytes) -> Result<(&str, Vec<bytes::Bytes>)> {
+    ensure!(!message.is_empty(), "empty trunk message");
+    let len = usize::from(message[0]);
+    ensure!(message.len() > len, "truncated segment name");
+    let segment = std::str::from_utf8(&message[1..1 + len])?;
+    validate_name(segment)?;
+    Ok((segment, decode(&message.slice(1 + len..))?))
+}
+
 /// Append one frame with its length prefix.
 pub fn encode(buf: &mut Vec<u8>, frame: &[u8]) {
     debug_assert!(frame.len() <= MAX_FRAME);
@@ -161,5 +213,17 @@ mod tests {
         assert_eq!(decode(&message).unwrap(), [&b"abc"[..], b"", b"de"]);
         assert!(decode(&message.slice(..message.len() - 1)).is_err());
         assert!(decode(&bytes::Bytes::from_static(&[0])).is_err());
+        let mut trunk = Vec::new();
+        encode_trunk(&mut trunk, "f/mgmt");
+        encode(&mut trunk, b"abc");
+        let trunk = bytes::Bytes::from(trunk);
+        let (segment, frames) = decode_trunk(&trunk).unwrap();
+        assert_eq!(
+            (segment, frames),
+            ("f/mgmt", vec![bytes::Bytes::from_static(b"abc")])
+        );
+        assert!(decode_trunk(&trunk.slice(..3)).is_err());
+        assert!(decode_trunk(&bytes::Bytes::from_static(b"\x02F/")).is_err());
+        assert!(decode_trunk(&bytes::Bytes::new()).is_err());
     }
 }

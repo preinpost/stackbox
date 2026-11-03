@@ -127,6 +127,11 @@ pub fn router(manager: FarmManager, token: Option<String>) -> Router {
         )
         .route("/api/v1/buckets/{id}/check", post(check_bucket))
         .route("/api/v1/buckets/{id}/objects", get(bucket_objects))
+        .route(
+            "/api/v1/relay",
+            get(relay_status).put(set_relay).delete(remove_relay),
+        )
+        .route("/api/v1/relay/cloudflared/update", post(update_cloudflared))
         .route("/api/v1/jobs", get(jobs))
         .route("/api/v1/jobs/{id}", get(job))
         .route("/api/v1/openapi.json", get(openapi))
@@ -179,6 +184,9 @@ pub struct HostInfo {
     pub memory_reserved_mib: u64,
     pub disk_available_mib: Option<u64>,
     pub state_dir: String,
+    /// The relay farms that span hosts join through (`FARM_RELAY_URL`); none disables them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_url: Option<String>,
 }
 #[utoipa::path(get, path="/api/v1/host", responses((status=200, body=HostInfo)))]
 async fn host(State(app): State<App>) -> Result<Json<HostInfo>, ApiError> {
@@ -226,6 +234,7 @@ async fn host(State(app): State<App>) -> Result<Json<HostInfo>, ApiError> {
         .map(FarmRecord::memory_mib)
         .sum();
     Ok(Json(HostInfo {
+        relay_url: app.manager.relay_url(),
         agent_artifact: app.manager.agent_artifact(),
         agent_artifacts: app.manager.agent_artifacts(),
         os: std::env::consts::OS.into(),
@@ -603,6 +612,31 @@ async fn delete(
         app.manager.delete(&id)?
     }))
 }
+#[utoipa::path(get, path="/api/v1/relay", responses((status=200, description="Where farms that span hosts join", body=crate::manager::RelayStatus)))]
+async fn relay_status(
+    State(app): State<App>,
+) -> Result<Json<crate::manager::RelayStatus>, ApiError> {
+    Ok(Json(app.manager.relay_status().await?))
+}
+#[utoipa::path(put, path="/api/v1/relay", request_body=crate::link::relay::RelaySettings, responses((status=200, description="Saved; the relay listens anew at once", body=crate::manager::RelayStatus), (status=400, body=ErrorBody), (status=409, description="Farms that span hosts hold the current URL and CA", body=ErrorBody)))]
+async fn set_relay(
+    State(app): State<App>,
+    value: Result<Json<crate::link::relay::RelaySettings>, JsonRejection>,
+) -> Result<Json<crate::manager::RelayStatus>, ApiError> {
+    Ok(Json(app.manager.set_relay(Some(body(value)?)).await?))
+}
+#[utoipa::path(post, path="/api/v1/relay/cloudflared/update", responses((status=200, description="Checked for a new cloudflared; the tunnel restarts on one", body=crate::manager::RelayStatus), (status=409, body=ErrorBody)))]
+async fn update_cloudflared(
+    State(app): State<App>,
+) -> Result<Json<crate::manager::RelayStatus>, ApiError> {
+    Ok(Json(app.manager.update_cloudflared().await?))
+}
+#[utoipa::path(delete, path="/api/v1/relay", responses((status=200, description="The relay is off; farms cannot span hosts", body=crate::manager::RelayStatus), (status=409, body=ErrorBody)))]
+async fn remove_relay(
+    State(app): State<App>,
+) -> Result<Json<crate::manager::RelayStatus>, ApiError> {
+    Ok(Json(app.manager.set_relay(None).await?))
+}
 #[utoipa::path(get, path="/api/v1/jobs", responses((status=200, body=Vec<Job>)))]
 async fn jobs(State(app): State<App>) -> Result<Json<Vec<Job>>, ApiError> {
     Ok(Json(app.manager.jobs()?))
@@ -945,7 +979,7 @@ async fn relay_shell(
 }
 
 #[derive(OpenApi)]
-#[openapi(paths(host, remote_hosts, remote_host, host_fingerprint, test_connection, register_host, register_local_host, register_agent_host, update_host_credentials, unregister_host, check_host, prepare_host, install_agent, host_jobs, host_job, catalog_handler, plan_handler, list, detail, create, deploy, settle, delete, endpoints, set_faults, logs, log_stream, freeze, snapshots, snapshot, delete_snapshot, export_snapshot, import_snapshot, buckets, bucket, register_bucket, update_bucket, unregister_bucket, test_bucket, check_bucket, bucket_objects, jobs, job), components(schemas(ErrorBody)), modifiers(&Security))]
+#[openapi(paths(host, remote_hosts, remote_host, host_fingerprint, test_connection, register_host, register_local_host, register_agent_host, update_host_credentials, unregister_host, check_host, prepare_host, install_agent, host_jobs, host_job, catalog_handler, plan_handler, list, detail, create, deploy, settle, delete, endpoints, set_faults, logs, log_stream, freeze, snapshots, snapshot, delete_snapshot, export_snapshot, import_snapshot, buckets, bucket, register_bucket, update_bucket, unregister_bucket, test_bucket, check_bucket, bucket_objects, relay_status, set_relay, remove_relay, update_cloudflared, jobs, job), components(schemas(ErrorBody)), modifiers(&Security))]
 struct ApiDoc;
 struct Security;
 impl utoipa::Modify for Security {
@@ -998,8 +1032,11 @@ pub async fn serve(
             if let Err(e) = reconcile_manager.reconcile().await {
                 eprintln!("reconcile failed: {e:#}");
             }
+            // A host that missed a quick tunnel's new address gets it again.
+            reconcile_manager.relink_missing().await;
         }
     });
+    manager.start_relay().await;
     let shutdown_manager = manager.clone();
     let result = axum::serve(listener, router(manager.clone(), token)).with_graceful_shutdown(async move {
         shutdown_signal().await;

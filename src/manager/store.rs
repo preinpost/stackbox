@@ -28,6 +28,15 @@ pub struct State {
     /// Multipart uploads to abort, by upload ID.
     #[serde(default)]
     pub uploads: BTreeMap<String, crate::s3::PendingUpload>,
+    /// Where farms that span hosts join; none disables them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay: Option<crate::link::relay::RelaySettings>,
+    /// A named relay tunnel's token, sealed by the vault.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_token: Option<crate::remote::SealedCredentials>,
+    /// Each farm that spans hosts' uplink keys, by host, sealed by the vault.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub relay_keys: BTreeMap<String, BTreeMap<String, crate::remote::SealedCredentials>>,
 }
 impl Default for State {
     fn default() -> Self {
@@ -41,6 +50,9 @@ impl Default for State {
             snapshots: BTreeMap::new(),
             buckets: BTreeMap::new(),
             uploads: BTreeMap::new(),
+            relay: None,
+            relay_token: None,
+            relay_keys: BTreeMap::new(),
         }
     }
 }

@@ -34,6 +34,45 @@ pub trait Backend: Send + Sync + 'static {
         sink: EventSink,
     ) -> BoxFuture<'_, Result<()>>;
     fn delete(&self, id: String) -> BoxFuture<'_, Result<()>>;
+    /// Create this host's part of a farm that spans hosts.
+    fn create_share(
+        &self,
+        _id: String,
+        _plan: Plan,
+        _exposure: Exposure,
+        _share: crate::remote::protocol::Share,
+    ) -> BoxFuture<'_, Result<Vec<FarmNode>>> {
+        Box::pin(async { Err(anyhow!("this backend runs farms on one host only")) })
+    }
+    /// Point this host's switch at the relay's new `url` for a farm that spans hosts.
+    fn relink(&self, _id: String, _url: String) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async { Err(anyhow!("this backend runs farms on one host only")) })
+    }
+    /// Ready this host's compute VMs of a farm that spans hosts for Kolla: what the
+    /// prepare phase does to computes, and Kolla's SSH key.
+    fn prepare(
+        &self,
+        _id: String,
+        _components: Vec<String>,
+        _ssh_public_key: String,
+    ) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async { Err(anyhow!("this backend runs farms on one host only")) })
+    }
+    /// Deploy a farm that spans hosts from its control VM's host. `remote` are the
+    /// compute VMs on other hosts, which [`Backend::prepare`] readied there.
+    #[allow(clippy::too_many_arguments)]
+    fn deploy_spanning(
+        &self,
+        _id: String,
+        _from: Phase,
+        _exposure: Option<Exposure>,
+        _components: Vec<String>,
+        _remote: Vec<u8>,
+        _ssh_private_key: String,
+        _sink: EventSink,
+    ) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async { Err(anyhow!("this backend runs farms on one host only")) })
+    }
     fn endpoints(
         &self,
         id: String,
@@ -131,6 +170,61 @@ impl Backend for MicrosandboxBackend {
                 &plan.components,
                 Some(&self.switch),
                 &[],
+                None,
+            )
+            .await
+        })
+    }
+    fn create_share(
+        &self,
+        id: String,
+        plan: Plan,
+        exposure: Exposure,
+        share: crate::remote::protocol::Share,
+    ) -> BoxFuture<'_, Result<Vec<FarmNode>>> {
+        Box::pin(async move {
+            farm::create_farm_with(
+                &id,
+                &plan.nodes,
+                Some(&exposure),
+                &plan.components,
+                Some(&self.switch),
+                &[],
+                Some(&share),
+            )
+            .await
+        })
+    }
+    fn relink(&self, id: String, url: String) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async move { self.switch.set_uplink_url(&id, &url) })
+    }
+    fn prepare(
+        &self,
+        id: String,
+        components: Vec<String>,
+        ssh_public_key: String,
+    ) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async move { kolla::prepare_share(&id, &components, &ssh_public_key).await })
+    }
+    fn deploy_spanning(
+        &self,
+        id: String,
+        from: Phase,
+        exposure: Option<Exposure>,
+        components: Vec<String>,
+        remote: Vec<u8>,
+        ssh_private_key: String,
+        sink: EventSink,
+    ) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async move {
+            kolla::deploy_spanning(
+                &id,
+                from,
+                exposure,
+                &components,
+                &remote,
+                &ssh_private_key,
+                sink,
             )
             .await
         })
@@ -253,6 +347,7 @@ PY"#).await;
                     &plan.components,
                     Some(&self.switch),
                     &sources,
+                    None,
                 )
                 .await;
             }

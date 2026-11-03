@@ -1602,6 +1602,124 @@
         }
       }
     },
+    "/api/v1/relay": {
+      "get": {
+        "tags": [],
+        "operationId": "relay_status",
+        "responses": {
+          "200": {
+            "description": "Where farms that span hosts join",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RelayStatus"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [],
+        "operationId": "set_relay",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RelaySettings"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Saved; the relay listens anew at once",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RelayStatus"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Farms that span hosts hold the current URL and CA",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [],
+        "operationId": "remove_relay",
+        "responses": {
+          "200": {
+            "description": "The relay is off; farms cannot span hosts",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RelayStatus"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/relay/cloudflared/update": {
+      "post": {
+        "tags": [],
+        "operationId": "update_cloudflared",
+        "responses": {
+          "200": {
+            "description": "Checked for a new cloudflared; the tunnel restarts on one",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RelayStatus"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/snapshots": {
       "get": {
         "tags": [],
@@ -2158,6 +2276,16 @@
               "null"
             ]
           },
+          "placement": {
+            "type": "object",
+            "description": "Compute VMs that run on another host than `host_id`, by VM (`compute-2` → host id).\nTheir links reach the control VM's host through the coordinator's relay.",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
           "snapshot_id": {
             "type": [
               "string",
@@ -2557,6 +2685,13 @@
               "null"
             ]
           },
+          "shares": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/HostShare"
+            },
+            "description": "Other hosts that run some of a multi-node farm's compute VMs. `host_id` runs the rest."
+          },
           "snapshot_id": {
             "type": [
               "string",
@@ -2578,6 +2713,13 @@
             "type": "integer",
             "format": "int64",
             "minimum": 0
+          },
+          "uplink_sha256": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "SHA-256 of the token `host_id`'s switch joins the relay with, for a farm with shares."
           }
         }
       },
@@ -2701,6 +2843,13 @@
           },
           "os": {
             "type": "string"
+          },
+          "relay_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The relay farms that span hosts join through (`FARM_RELAY_URL`); none disables them."
           },
           "state_dir": {
             "type": "string"
@@ -2884,6 +3033,39 @@
           "local",
           "agent"
         ]
+      },
+      "HostShare": {
+        "type": "object",
+        "description": "The compute VMs of a farm that one other host runs.",
+        "required": [
+          "host_id",
+          "nodes",
+          "uplink_sha256"
+        ],
+        "properties": {
+          "agent_sha256": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The agent this host's part was created with, for a remote host."
+          },
+          "host_id": {
+            "type": "string"
+          },
+          "nodes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "VM suffixes (`compute-2`, ...)."
+          },
+          "uplink_sha256": {
+            "type": "string",
+            "description": "SHA-256 of the token this host's switch joins the relay with."
+          }
+        },
+        "additionalProperties": false
       },
       "HostStatus": {
         "type": "string",
@@ -3403,6 +3585,112 @@
         },
         "additionalProperties": false
       },
+      "RelaySettings": {
+        "type": "object",
+        "description": "Where farms that span hosts join, set from the portal or `PUT /api/v1/relay`.",
+        "required": [
+          "mode"
+        ],
+        "properties": {
+          "bind": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Where it listens; `0.0.0.0:10011` with `private`, `127.0.0.1:10012` with `proxy`."
+          },
+          "mode": {
+            "$ref": "#/components/schemas/RelayTlsMode"
+          },
+          "url": {
+            "type": "string",
+            "description": "The relay as other hosts reach it: `https://<host>[:port]`. A quick tunnel's comes\nfrom Cloudflare, so it is left empty."
+          }
+        },
+        "additionalProperties": false
+      },
+      "RelayStatus": {
+        "type": "object",
+        "description": "The relay as the portal shows it.",
+        "required": [
+          "spanning_farms"
+        ],
+        "properties": {
+          "bind": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Where it listens, with defaults applied."
+          },
+          "ca_sha256": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "SHA-256 of the private CA's PEM, with private TLS."
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why it does not listen."
+          },
+          "listening": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The address it listens on, once the daemon serves."
+          },
+          "settings": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/RelaySettings"
+              }
+            ]
+          },
+          "spanning_farms": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Farms that span hosts; while any lives, the URL and mode stay."
+          },
+          "tunnel": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/TunnelStatus",
+                "description": "cloudflared, when the coordinator runs the tunnel."
+              }
+            ]
+          },
+          "url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The URL new farms that span hosts get: the settings', or a quick tunnel's address."
+          }
+        }
+      },
+      "RelayTlsMode": {
+        "type": "string",
+        "description": "Who terminates the relay's TLS.",
+        "enum": [
+          "private",
+          "proxy",
+          "quick_tunnel",
+          "named_tunnel"
+        ]
+      },
       "RemoteHost": {
         "type": "object",
         "required": [
@@ -3785,6 +4073,58 @@
           }
         },
         "additionalProperties": false
+      },
+      "TunnelStatus": {
+        "type": "object",
+        "required": [
+          "connected",
+          "unmanaged"
+        ],
+        "properties": {
+          "checked_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "UTC Unix seconds of the last release check.",
+            "minimum": 0
+          },
+          "connected": {
+            "type": "boolean",
+            "description": "Whether cloudflared runs and has registered the tunnel."
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "latest": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "unmanaged": {
+            "type": "boolean",
+            "description": "`FARM_CLOUDFLARED` names the binary; it is not updated."
+          },
+          "url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A quick tunnel's address, once Cloudflare gave it."
+          },
+          "version": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The cloudflared in use and the latest release last seen."
+          }
+        }
       }
     },
     "securitySchemes": {

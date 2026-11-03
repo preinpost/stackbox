@@ -393,6 +393,10 @@ pub struct CreateRequest {
     /// Start from this snapshot instead of an empty VM. Its services replace `components`.
     #[serde(default)]
     pub snapshot_id: Option<String>,
+    /// Compute VMs that run on another host than `host_id`, by VM (`compute-2` → host id).
+    /// Their links reach the control VM's host through the coordinator's relay.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub placement: BTreeMap<String, String>,
 }
 fn default_host() -> String {
     "localhost".into()
@@ -417,8 +421,24 @@ impl CreateRequest {
         if self.expires_at.is_some_and(|t| t <= now()) {
             bail!("expires_at must be in the future");
         }
+        for (node, host) in &self.placement {
+            validate_id(host)?;
+            let index = node
+                .strip_prefix("compute-")
+                .and_then(|i| i.parse::<u8>().ok())
+                .filter(|i| *i >= 1 && *i <= self.computes);
+            if index.is_none() || node != &format!("compute-{}", index.unwrap_or(0)) {
+                bail!(
+                    "placement names compute VMs, compute-1 to compute-{}; got '{node}'",
+                    self.computes
+                );
+            }
+        }
         if let Some(snapshot) = &self.snapshot_id {
             validate_id(snapshot)?;
+            if !self.placement.is_empty() {
+                bail!("a farm restored from a snapshot runs on one host; omit placement");
+            }
             if !self.components.is_empty() || self.computes > 0 || self.compute.is_some() {
                 bail!(
                     "a farm restored from a snapshot runs the snapshot's services and layout; omit components, computes and compute"
@@ -573,7 +593,28 @@ pub struct FarmRecord {
     /// Faults set on a multi-node farm's links, by VM (`control`, `compute-1`, ...).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub faults: BTreeMap<String, crate::link::Impair>,
+    /// Other hosts that run some of a multi-node farm's compute VMs. `host_id` runs the rest.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub shares: Vec<HostShare>,
+    /// SHA-256 of the token `host_id`'s switch joins the relay with, for a farm with shares.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uplink_sha256: Option<String>,
 }
+
+/// The compute VMs of a farm that one other host runs.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct HostShare {
+    pub host_id: String,
+    /// The agent this host's part was created with, for a remote host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_sha256: Option<String>,
+    /// VM suffixes (`compute-2`, ...).
+    pub nodes: Vec<String>,
+    /// SHA-256 of the token this host's switch joins the relay with.
+    pub uplink_sha256: String,
+}
+
 impl FarmRecord {
     pub fn memory_mib(&self) -> u64 {
         self.plan
@@ -581,6 +622,52 @@ impl FarmRecord {
             .map(|p| p.memory_mib)
             .unwrap_or_else(|| self.nodes.iter().map(|n| u64::from(n.memory_mib)).sum())
     }
+    /// The host that runs the VM with `suffix`.
+    pub fn host_of(&self, suffix: &str) -> Option<&str> {
+        self.shares
+            .iter()
+            .find(|share| share.nodes.iter().any(|n| n == suffix))
+            .map(|share| share.host_id.as_str())
+            .or(self.host_id.as_deref())
+    }
+    /// Every host the farm has VMs on: `host_id` first.
+    pub fn hosts(&self) -> Vec<&str> {
+        self.host_id
+            .as_deref()
+            .into_iter()
+            .chain(self.shares.iter().map(|share| share.host_id.as_str()))
+            .collect()
+    }
+    /// Memory the farm reserves on `host`.
+    pub fn memory_on(&self, host: &str) -> u64 {
+        if self.shares.is_empty() {
+            return if self.host_id.as_deref() == Some(host) {
+                self.memory_mib()
+            } else {
+                0
+            };
+        }
+        self.plan.as_ref().map_or(0, |plan| {
+            memory_on(plan, self.host_id.as_deref(), &self.shares, host)
+        })
+    }
+}
+
+/// Memory of the VMs of `plan` that run on `host`, with `shares` on other hosts than `primary`.
+pub fn memory_on(plan: &Plan, primary: Option<&str>, shares: &[HostShare], host: &str) -> u64 {
+    plan.nodes
+        .iter()
+        .filter(|spec| {
+            let suffix = crate::farm::suffix(spec.role, spec.index).unwrap_or_default();
+            shares
+                .iter()
+                .find(|share| share.nodes.contains(&suffix))
+                .map(|share| share.host_id.as_str())
+                .or(primary)
+                == Some(host)
+        })
+        .map(|spec| u64::from(spec.memory_mib))
+        .sum()
 }
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
 pub struct Job {
@@ -817,6 +904,7 @@ mod tests {
             owner: None,
             expires_at: None,
             snapshot_id: None,
+            placement: Default::default(),
         };
         assert!(legacy.validate().is_err());
         for unsupported in ["swift", "cinder"] {
@@ -931,6 +1019,7 @@ mod tests {
             owner: None,
             expires_at: None,
             snapshot_id: Some("snap".into()),
+            placement: Default::default(),
         };
         assert!(restore.validate().is_err());
     }

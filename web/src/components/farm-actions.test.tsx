@@ -545,3 +545,82 @@ test("deletes only the records when asked, without the host", async () => {
   );
   client.clear();
 });
+
+test("places compute VMs on other hosts when the coordinator has a relay", async () => {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+  });
+  let submitted: unknown;
+  const node = singleVmPlan().nodes[0];
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (path: string, options?: RequestInit) => {
+      if (path.endsWith("/catalog"))
+        return Response.json({
+          components: [{ id: "keystone" }, { id: "nova" }],
+        });
+      if (path.endsWith("/plans"))
+        return Response.json({
+          ...singleVmPlan(9728),
+          computes: 1,
+          nodes: [
+            { ...node, role: "control", memory_mib: 6656 },
+            { ...node, role: "compute", index: 1, memory_mib: 3072 },
+          ],
+        });
+      if (path.endsWith("/host"))
+        return Response.json({ relay_url: "https://10.0.0.5:10011" });
+      if (path.endsWith("/hosts"))
+        return Response.json(
+          ["local", "edge"].map((id) => ({
+            id,
+            kind: "local",
+            address: "localhost",
+            status: "ready",
+            // The control VM's host alone could not hold the whole farm.
+            capacity: { memory_budget_mib: 8000, memory_reserved_mib: 0 },
+          })),
+        );
+      if (options?.method === "POST") {
+        submitted = JSON.parse(String(options.body));
+        return Response.json({ id: "job", farm_id: "span", status: "queued" });
+      }
+      return Response.json([]);
+    }),
+  );
+  render(
+    <QueryClientProvider client={client}>
+      <Dialog.Root open>
+        <CreateFarmForm close={vi.fn()} onPending={vi.fn()} />
+      </Dialog.Root>
+    </QueryClientProvider>,
+  );
+  const user = userEvent.setup();
+  await user.type(screen.getByPlaceholderText("dev-openstack"), "span");
+  await user.click(screen.getByRole("combobox", { name: "VM 구성" }));
+  await user.click(
+    await screen.findByRole("option", {
+      name: "Control 1 + Compute 1 · VM 2대",
+    }),
+  );
+  await user.click(
+    await screen.findByRole("combobox", { name: "compute-1 호스트" }),
+  );
+  await user.click(
+    await screen.findByRole("option", { name: /compute-1 · edge/ }),
+  );
+  const create = screen.getByRole("button", {
+    name: "Farm 만들기",
+  }) as HTMLButtonElement;
+  await waitFor(() => expect(create.disabled).toBe(false));
+  await user.click(create);
+  await waitFor(() =>
+    expect(submitted).toMatchObject({
+      id: "span",
+      host_id: "local",
+      computes: 1,
+      placement: { "compute-1": "edge" },
+    }),
+  );
+  client.clear();
+});

@@ -16,7 +16,9 @@ use std::{
 use anyhow::{Context, Result, anyhow, bail};
 use fs2::FileExt;
 
-use super::{Config, HOST_NAME, Impair, PATH, PortConfig, new_token, token_hash, validate_name};
+use super::{
+    Config, HOST_NAME, Impair, PATH, PortConfig, UplinkConfig, new_token, token_hash, validate_name,
+};
 
 pub struct Switch {
     dir: PathBuf,
@@ -122,7 +124,8 @@ impl Switch {
         })?;
         Ok(token)
     }
-    /// Remove `prefix` and every port under it (`<prefix>/...`); returns how many.
+    /// Remove `prefix` and every port under it (`<prefix>/...`), and the uplink of the farm
+    /// `prefix`; returns how many ports.
     pub fn remove_ports(&self, prefix: &str) -> Result<usize> {
         let under = format!("{prefix}/");
         self.edit(|config| {
@@ -130,7 +133,46 @@ impl Switch {
             config
                 .ports
                 .retain(|name, _| name != prefix && !name.starts_with(&under));
+            config.uplinks.remove(prefix);
             Ok(before - config.ports.len())
+        })
+    }
+    /// Point the farm's uplink at the relay's new address, keeping its token and CA.
+    pub fn set_uplink_url(&self, farm: &str, url: &str) -> Result<()> {
+        anyhow::ensure!(url.starts_with("wss://"), "the relay URL must be wss://");
+        self.edit(|config| {
+            config
+                .uplinks
+                .get_mut(farm)
+                .with_context(|| format!("no uplink for farm {farm}"))?
+                .url = url.to_owned();
+            Ok(())
+        })
+    }
+    /// Join the farm's segments on this host to its other hosts through the relay.
+    pub fn set_uplink(&self, farm: &str, uplink: UplinkConfig) -> Result<()> {
+        validate_name(farm)?;
+        for segment in &uplink.segments {
+            validate_name(segment)?;
+            anyhow::ensure!(
+                segment.starts_with(&format!("{farm}/")),
+                "segment {segment} is not farm {farm}'s"
+            );
+        }
+        anyhow::ensure!(
+            uplink.url.starts_with("wss://"),
+            "the relay URL must be wss://"
+        );
+        if !uplink.ca.is_empty() {
+            super::tls::validate_ca(&uplink.ca)?;
+        }
+        anyhow::ensure!(
+            uplink.key.len() == 64 && uplink.key.bytes().all(|b| b.is_ascii_hexdigit()),
+            "invalid uplink key"
+        );
+        self.edit(|config| {
+            config.uplinks.insert(farm.to_owned(), uplink);
+            Ok(())
         })
     }
     pub fn impair(&self, name: &str, impair: Impair) -> Result<()> {
@@ -143,6 +185,37 @@ impl Switch {
                 .impair = impair;
             Ok(())
         })
+    }
+
+    /// Stop a switch built from another revision, which may not read this one's
+    /// configuration. Guests reconnect to its successor on the same address; their TAP
+    /// devices, and the services on them, stay up.
+    async fn retire_outdated(&self) -> Result<()> {
+        if !self.running()? {
+            return Ok(());
+        }
+        let build = fs::read_to_string(self.dir.join("build")).unwrap_or_default();
+        if build.trim() == crate::BUILD_ID {
+            return Ok(());
+        }
+        let pid: i32 = fs::read_to_string(self.dir.join("pid"))?
+            .trim()
+            .parse()
+            .context("invalid switch pid")?;
+        eprintln!("restarting the link switch built from '{}'", build.trim());
+        #[cfg(unix)]
+        // SAFETY: signals the process that holds the switch lock, recorded in its pid file.
+        unsafe {
+            libc::kill(pid, libc::SIGTERM);
+        }
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while self.running()? {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            Ok::<_, anyhow::Error>(())
+        })
+        .await
+        .map_err(|_| anyhow!("the outdated link switch (pid {pid}) did not stop"))?
     }
 
     pub fn running(&self) -> Result<bool> {
@@ -159,6 +232,7 @@ impl Switch {
     /// Start the switch with `command` (the agent binary and `agent switch`; the switch
     /// directory is appended) unless it runs, and return its guest endpoint.
     pub async fn ensure(&self, command: &[OsString]) -> Result<String> {
+        self.retire_outdated().await?;
         if !self.running()? {
             let (program, args) = command.split_first().context("no switch command")?;
             let log = self.file("switch.log", true)?;
@@ -217,6 +291,7 @@ impl Switch {
             bail!("the link switch already runs");
         }
         fs::write(self.dir.join("pid"), std::process::id().to_string())?;
+        fs::write(self.dir.join("build"), crate::BUILD_ID)?;
         let listener = match self.addr()? {
             // A restart may find the port in TIME_WAIT or briefly held; guests know only it.
             Some(addr) => {

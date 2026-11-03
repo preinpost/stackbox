@@ -262,13 +262,31 @@ impl server::Handler for Handler {
                         farms: self.observed.rpc_farms.lock().unwrap().clone(),
                     }
                 }
-                Operation::Create { farm_id, plan, .. } => {
+                Operation::Create {
+                    farm_id,
+                    plan,
+                    share,
+                    ..
+                } => {
+                    if let Some(share) = &share {
+                        self.observed
+                            .calls
+                            .lock()
+                            .unwrap()
+                            .push(format!("share:{}", share.nodes.join(",")));
+                    }
                     let nodes: Vec<_> = plan
                         .nodes
                         .into_iter()
+                        .filter(|node| {
+                            share.as_ref().is_none_or(|share| {
+                                crate::farm::suffix(node.role, node.index)
+                                    .is_some_and(|s| share.nodes.contains(&s))
+                            })
+                        })
                         .map(|node| crate::farm::FarmNode {
                             index: node.index,
-                            name: format!("{farm_id}-{}", node.role),
+                            name: crate::farm::node_name(&farm_id, node.role, node.index),
                             role: Some(node.role),
                             status: "running".into(),
                             memory_mib: node.memory_mib,
@@ -302,6 +320,22 @@ impl server::Handler for Handler {
                 }
                 Operation::Delete { farm_id, .. } => {
                     self.observed.rpc_farms.lock().unwrap().remove(&farm_id);
+                    Reply::Done
+                }
+                Operation::Relink { farm_id, url, .. } => {
+                    self.observed
+                        .calls
+                        .lock()
+                        .unwrap()
+                        .push(format!("relink:{farm_id}:{url}"));
+                    Reply::Done
+                }
+                Operation::Prepare { farm_id, .. } => {
+                    self.observed
+                        .calls
+                        .lock()
+                        .unwrap()
+                        .push(format!("prepare:{farm_id}"));
                     Reply::Done
                 }
                 Operation::Purge => {

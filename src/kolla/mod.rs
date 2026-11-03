@@ -115,12 +115,66 @@ pub async fn deploy_with(
     components: &[String],
     sink: EventSink,
 ) -> Result<()> {
-    let mut topology = Topology::from_nodes(&farm::get_farm(farm_id).await?)?;
+    deploy_on(farm_id, from, exposure, components, &[], None, sink).await
+}
+
+/// Deploy a farm that spans hosts from its control VM's host. The compute VMs numbered in
+/// `remote` run on other hosts, which [`prepare_share`] readied; Kolla reaches every compute
+/// with `ssh_private_key`.
+pub async fn deploy_spanning(
+    farm_id: &str,
+    from: Phase,
+    exposure: Option<Exposure>,
+    components: &[String],
+    remote: &[u8],
+    ssh_private_key: &str,
+    sink: EventSink,
+) -> Result<()> {
+    deploy_on(
+        farm_id,
+        from,
+        exposure,
+        components,
+        remote,
+        Some(ssh_private_key),
+        sink,
+    )
+    .await
+}
+
+async fn deploy_on(
+    farm_id: &str,
+    from: Phase,
+    exposure: Option<Exposure>,
+    components: &[String],
+    remote: &[u8],
+    ssh_private_key: Option<&str>,
+    sink: EventSink,
+) -> Result<()> {
+    let mut nodes = farm::get_farm(farm_id).await?;
+    // Computes on other hosts take their place in the layout; they are reached over SSH only.
+    nodes.extend(remote.iter().map(|index| farm::FarmNode {
+        name: String::new(),
+        role: Some(farm::Role::Compute),
+        index: Some(*index),
+        status: "running".into(),
+        memory_mib: 0,
+        ip: None,
+    }));
+    let mut topology = Topology::from_nodes(&nodes)?;
     let deployer = farm::connect(&topology.name).await?;
     let mut computes = Vec::new();
     let result = async {
         for compute in &topology.computes {
-            computes.push((compute.clone(), farm::connect(&compute.name).await?));
+            let sandbox = if compute.name.is_empty() {
+                None
+            } else {
+                Some(farm::connect(&compute.name).await?)
+            };
+            computes.push((compute.clone(), sandbox));
+        }
+        if let Some(key) = ssh_private_key {
+            install_ssh_key(&deployer, key).await?;
         }
         farm::wait_until_booted(&deployer).await?;
         // Farms created with a fixed guest identity bind every service to it; older farms use eth0.
@@ -153,10 +207,51 @@ pub async fn deploy_with(
     }
     .await;
     deployer.detach().await;
-    for (_, sandbox) in computes {
+    for (_, sandbox) in computes.into_iter().filter_map(|(c, s)| Some((c, s?))) {
         sandbox.detach().await;
     }
     result
+}
+
+/// Give the control VM the key Kolla reaches the computes with.
+async fn install_ssh_key(deployer: &Sandbox, key: &str) -> Result<()> {
+    anyhow::ensure!(
+        key.starts_with("-----BEGIN OPENSSH PRIVATE KEY-----"),
+        "invalid SSH private key"
+    );
+    run(deployer, "mkdir -p /root/.ssh && chmod 700 /root/.ssh").await?;
+    deployer.fs().write("/root/.ssh/id_ed25519", key).await?;
+    run(
+        deployer,
+        "chmod 600 /root/.ssh/id_ed25519 && ssh-keygen -y -f /root/.ssh/id_ed25519 > /root/.ssh/id_ed25519.pub",
+    )
+    .await?;
+    Ok(())
+}
+
+/// Ready this host's compute VMs of a farm that spans hosts, as the prepare phase readies
+/// computes, and let `ssh_public_key` in as root.
+pub async fn prepare_share(
+    farm_id: &str,
+    components: &[String],
+    ssh_public_key: &str,
+) -> Result<()> {
+    let neutron = components.iter().any(|c| c == "neutron");
+    let sink: EventSink = Arc::new(|_| Ok(()));
+    for node in farm::get_farm(farm_id).await? {
+        if node.role != Some(farm::Role::Compute) {
+            continue;
+        }
+        let sandbox = farm::connect(&node.name).await?;
+        let result = async {
+            prepare_host(&sandbox, neutron, &sink).await?;
+            authorize_key(&sandbox, ssh_public_key).await
+        }
+        .await;
+        sandbox.detach().await;
+        result.with_context(|| format!("prepare {}", node.name))?;
+    }
+    Ok(())
 }
 
 /// Reports a step inside the running phase.
@@ -169,7 +264,7 @@ async fn deploy_phases(
     farm_id: &str,
     from: Phase,
     deployer: &Sandbox,
-    computes: &[(Compute, Sandbox)],
+    computes: &[(Compute, Option<Sandbox>)],
     topology: &Topology,
     exposure: Option<&Exposure>,
     components: &[String],
@@ -232,13 +327,14 @@ async fn deploy_phases(
 /// external network; a multi-node farm's computes only run OVS, Nova and Docker.
 async fn prepare(
     deployer: &Sandbox,
-    computes: &[(Compute, Sandbox)],
+    computes: &[(Compute, Option<Sandbox>)],
     components: &[String],
     sink: &EventSink,
 ) -> Result<()> {
     let neutron = components.iter().any(|c| c == "neutron");
     prepare_host(deployer, neutron, sink).await?;
-    for (compute, sandbox) in computes {
+    // Computes on other hosts were prepared there.
+    for (compute, sandbox) in computes.iter().filter_map(|(c, s)| Some((c, s.as_ref()?))) {
         step(sink, format!("{} 준비", compute.hostname))?;
         prepare_host(sandbox, neutron, sink).await?;
     }
@@ -401,7 +497,7 @@ kolla-ansible --version"#
 
 async fn configure(
     deployer: &Sandbox,
-    computes: &[(Compute, Sandbox)],
+    computes: &[(Compute, Option<Sandbox>)],
     topology: &Topology,
     exposure: Option<&Exposure>,
     components: &[String],
@@ -424,13 +520,22 @@ async fn configure(
         distribute_ssh_key(deployer, computes).await?;
     }
     let arch = run(deployer, "uname -m").await?;
-    // Instances run where nova-compute does.
-    let hypervisor = computes.first().map_or(deployer, |(_, sandbox)| sandbox);
-    let kvm = run(
-        hypervisor,
-        "if [ -c /dev/kvm ]; then echo true; else echo false; fi",
-    )
-    .await?
+    // Instances run where nova-compute does; a compute on another host answers over SSH.
+    let probe = "if [ -c /dev/kvm ]; then echo true; else echo false; fi";
+    let kvm = match computes.first() {
+        None => run(deployer, probe).await?,
+        Some((_, Some(sandbox))) => run(sandbox, probe).await?,
+        Some((compute, None)) => {
+            run(
+                deployer,
+                &format!(
+                    "ssh -o BatchMode=yes -o ConnectTimeout=10 {} '{probe}'",
+                    compute.hostname
+                ),
+            )
+            .await?
+        }
+    }
     .trim()
         == "true";
     step(sink, "globals.yml 작성 (주소·서비스·게스트 제약 반영)")?;
@@ -547,7 +652,10 @@ async fn configure(
 }
 
 /// Let Kolla on the control VM reach every compute as root over the management link.
-async fn distribute_ssh_key(deployer: &Sandbox, computes: &[(Compute, Sandbox)]) -> Result<()> {
+async fn distribute_ssh_key(
+    deployer: &Sandbox,
+    computes: &[(Compute, Option<Sandbox>)],
+) -> Result<()> {
     let key = run(
         deployer,
         "[ -f /root/.ssh/id_ed25519 ] || ssh-keygen -q -t ed25519 -N '' -f /root/.ssh/id_ed25519; cat /root/.ssh/id_ed25519.pub",
@@ -559,18 +667,10 @@ async fn distribute_ssh_key(deployer: &Sandbox, computes: &[(Compute, Sandbox)])
         "unexpected SSH public key on the control VM"
     );
     for (compute, sandbox) in computes {
-        // An authorized_keys without a final newline would join the key to its last line.
-        run(
-            sandbox,
-            &format!(
-                r#"set -e
-mkdir -p /root/.ssh && chmod 700 /root/.ssh
-f=/root/.ssh/authorized_keys
-touch "$f" && chmod 600 "$f"
-grep -qxF '{key}' "$f" || {{ [ -s "$f" ] && [ -n "$(tail -c1 "$f")" ] && echo >> "$f"; echo '{key}' >> "$f"; }}"#
-            ),
-        )
-        .await?;
+        // A compute on another host got the key when it was prepared there.
+        if let Some(sandbox) = sandbox {
+            authorize_key(sandbox, key).await?;
+        }
         run(
             deployer,
             &format!(
@@ -581,6 +681,27 @@ grep -qxF '{key}' "$f" || {{ [ -s "$f" ] && [ -n "$(tail -c1 "$f")" ] && echo >>
         .await
         .with_context(|| format!("SSH from the control VM to {}", compute.hostname))?;
     }
+    Ok(())
+}
+
+/// Let `key` in as root.
+async fn authorize_key(sandbox: &Sandbox, key: &str) -> Result<()> {
+    anyhow::ensure!(
+        key.starts_with("ssh-ed25519 ") && !key.contains(['\'', '\n']),
+        "unexpected SSH public key"
+    );
+    // An authorized_keys without a final newline would join the key to its last line.
+    run(
+        sandbox,
+        &format!(
+            r#"set -e
+mkdir -p /root/.ssh && chmod 700 /root/.ssh
+f=/root/.ssh/authorized_keys
+touch "$f" && chmod 600 "$f"
+grep -qxF '{key}' "$f" || {{ [ -s "$f" ] && [ -n "$(tail -c1 "$f")" ] && echo >> "$f"; echo '{key}' >> "$f"; }}"#
+        ),
+    )
+    .await?;
     Ok(())
 }
 

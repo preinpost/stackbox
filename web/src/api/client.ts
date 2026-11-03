@@ -4,6 +4,8 @@ import type { components } from "./schema";
 type Schema = components["schemas"];
 export type Farm = Schema["FarmRecord"];
 export type Host = Schema["HostInfo"];
+export type RelayStatus = Schema["RelayStatus"];
+export type RelaySettings = Schema["RelaySettings"];
 export type Catalog = Schema["Catalog"];
 export type Plan = Schema["Plan"];
 export type ComputeSize = Schema["ComputeSize"];
@@ -81,6 +83,7 @@ export const keys = {
   host: ["host"] as const,
   hosts: ["remote-hosts"] as const,
   hostJobs: ["host-jobs"] as const,
+  relay: ["relay"] as const,
   snapshots: ["snapshots"] as const,
   buckets: ["buckets"] as const,
   bucketObjects: (id: string) => ["buckets", id, "objects"] as const,
@@ -106,6 +109,12 @@ export const hostQuery = () =>
     queryFn: ({ signal }) => request<Host>("/host", { signal }),
     refetchInterval: 15_000,
     staleTime: 10_000,
+  });
+export const relayQuery = () =>
+  queryOptions({
+    queryKey: keys.relay,
+    queryFn: ({ signal }) => request<RelayStatus>("/relay", { signal }),
+    refetchInterval: 15_000,
   });
 export const hostsQuery = () =>
   queryOptions({
@@ -216,6 +225,14 @@ export const api = {
       `/hosts/${encode(id)}?purge=true${snapshots ? "&snapshots=true" : ""}`,
       { method: "DELETE" },
     ),
+  /** Where farms that span hosts join; `null` turns it off. */
+  setRelay: (body: RelaySettings | null) =>
+    request<RelayStatus>("/relay", {
+      method: body ? "PUT" : "DELETE",
+      ...(body ? { body: JSON.stringify(body) } : {}),
+    }),
+  updateCloudflared: () =>
+    request<RelayStatus>("/relay/cloudflared/update", { method: "POST" }),
   create: (body: CreateRequest) =>
     request<Job>("/farms", { method: "POST", body: JSON.stringify(body) }),
   deploy: (id: string, from: Phase) =>

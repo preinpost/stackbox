@@ -109,6 +109,49 @@ farm fault mn compute-1 --loss 1                 # compute-1 고립
 farm fault mn compute-1                          # 복구
 ```
 
+### 여러 호스트에 걸친 farm
+
+compute VM을 control VM과 다른 호스트에 둘 수 있습니다. 생성 요청의 `placement`(`{"compute-2":"dev-01"}`),
+CLI `--place compute-2=dev-01`, 포털의 **Compute VM 배치**로 정합니다. 빠진 compute는 `host_id`(control VM의 호스트)에 둡니다.
+
+- **연결**: 호스트마다 스위치가 farm별 uplink를 coordinator의 relay(`wss://…/api/v1/link-relay`)에 열고, relay가
+  같은 farm의 다른 호스트로 프레임을 넘깁니다. 스위치에는 그 farm의 segment만 오갑니다.
+- **설정**: 포털 **Hosts** 아래 **호스트 간 relay**(또는 `PUT /api/v1/relay`)에서 URL, TLS 방식, listen 주소를 정합니다.
+  저장하면 재시작 없이 바로 다시 열립니다. `FARM_RELAY_URL`·`FARM_RELAY_TLS`·`FARM_RELAY_BIND`는 저장된 설정이 없을 때의 초기값입니다.
+  - `private`(기본): relay가 `0.0.0.0:10011`에서 coordinator 사설 CA로 TLS를 엽니다. 다른 호스트가 이 포트에 닿아야 합니다.
+  - **Cloudflare 임시 터널**(`quick_tunnel`): coordinator가 cloudflared를 직접 띄워 relay(`127.0.0.1:10012`)를
+    `*.trycloudflare.com`으로 내보냅니다. 계정과 포트 개방이 필요 없습니다. coordinator가 다시 뜰 때마다 주소가 바뀌며,
+    바뀐 주소는 여러 호스트에 걸친 farm의 각 호스트 스위치에 자동으로 전달됩니다(토큰과 CA는 그대로).
+  - **Cloudflare 고정 터널**(`named_tunnel`): 대시보드에서 만든 터널의 토큰과 Public hostname(URL)을 넣습니다.
+    서비스는 `http://127.0.0.1:10012`로 둡니다. 토큰은 vault로 암호화해 state에 둡니다.
+  - **cloudflared**: 시스템에 설치된 것은 쓰지 않습니다. GitHub 최신 릴리스를 `<state dir>/bin/`에 받아, GitHub가 공개한
+    SHA-256과 대조하고 macOS에서는 Cloudflare 코드 서명(Team ID `68WVV388M8`)도 확인합니다. 하루 한 번 새 릴리스를
+    확인해 바꾸고 터널을 다시 띄웁니다. 직전 버전 하나를 남깁니다. `FARM_CLOUDFLARED_VERSION`으로 버전을 고정하고,
+    `FARM_CLOUDFLARED`로 직접 관리하는 바이너리를 쓸 수 있습니다. 로그는 `<state dir>/cloudflared.log`입니다.
+  - `proxy`: relay가 `127.0.0.1:10012`에서 TLS 없이 열리고, 직접 띄운 프록시가 공인 인증서로 TLS를 맡습니다.
+    스위치는 공인 CA로 검증합니다. 예: `cloudflared tunnel --url http://127.0.0.1:10012`, URL은 `https://relay.<도메인>`.
+    프레임은 종단 간 암호화로 프록시에 보이지 않습니다. uplink는 30초마다 ping해 유휴 연결이 끊기지 않게 합니다.
+  - 여러 호스트에 걸친 farm이 있는 동안에는 URL과 TLS 방식을 바꿀 수 없습니다(스위치가 예전 값을 들고 있음).
+- **TLS**: coordinator가 처음 시작할 때 사설 CA를 만들어 `<state dir>/relay-tls/`에 둡니다. 시작할 때마다
+  `FARM_RELAY_URL`의 호스트로 서버 인증서를 새로 서명합니다. CA는 farm 생성 요청에 실려 각 호스트 agent로 가고,
+  스위치는 그 CA만 믿습니다. CA를 지우면 기존 farm의 링크가 끊기므로 다시 만들어야 합니다.
+- **종단 간 암호화**: TLS 방식과 상관없이 스위치와 relay 사이의 모든 메시지를 (farm, 호스트)마다 다른 32바이트 키로
+  XChaCha20-Poly1305 암호화합니다. 터널이나 프록시가 TLS를 끝내도 암호문만 봅니다. 연결마다 양쪽이 무작위 hello를
+  주고받고 순번을 붙여, 다른 연결의 메시지를 다시 보내거나 순서를 바꾸면 연결을 끊습니다. relay는 coordinator 안에서
+  메시지를 풀어 segment로 보낼 곳을 정하고 받는 호스트의 키로 다시 암호화합니다. 키는 farm 생성 요청에 실려 각 호스트로
+  가고, coordinator는 vault로 암호화해 두며 farm을 지우면 지웁니다.
+- **인증**: (farm, 호스트)마다 32바이트 uplink 토큰을 만들어 그 호스트의 스위치 설정(0600)에 두고, coordinator는
+  SHA-256만 저장합니다. 토큰은 그 farm의 segment에만 통하고, farm을 지우면 폐기합니다.
+- **배포**: control VM의 SSH 키는 coordinator가 만들어 control VM의 호스트에만 개인 키를 보냅니다. 배포는 다른
+  호스트의 compute VM을 그 호스트 agent로 먼저 준비하고(`prepare`), control VM의 호스트에서 Kolla를 돌립니다.
+- **제약**: 스냅샷으로 만들 수 없습니다. 각 호스트의 실행기는 coordinator와 같은 빌드여야 합니다.
+
+```bash
+# 포털 Hosts에서 relay URL을 저장한 뒤
+farm create span --host-id local --computes 2 --place compute-2=dev-01
+farm deploy span
+```
+
 ## 웹포탈
 
 Tailwind CSS·Base UI와 TanStack Router/Query/Table로 구성한 웹포탈은 `web/`에 있습니다.

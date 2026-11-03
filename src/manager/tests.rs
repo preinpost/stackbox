@@ -30,8 +30,49 @@ pub(crate) struct Fake {
     scan_delay: Mutex<Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>>,
     /// `(farm, node, impair)` of each fault set on a link.
     faults: Mutex<Vec<(String, String, crate::link::Impair)>>,
+    /// Shares created here and the remote computes of each spanning deploy.
+    shares: Mutex<Vec<crate::remote::protocol::Share>>,
+    relinked: Mutex<Vec<(String, String)>>,
+    spanning: Mutex<Vec<Vec<u8>>>,
 }
 impl Backend for Fake {
+    fn relink(&self, id: String, url: String) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async move {
+            self.relinked.lock().unwrap().push((id, url));
+            Ok(())
+        })
+    }
+    fn create_share(
+        &self,
+        id: String,
+        mut plan: Plan,
+        exposure: Exposure,
+        share: crate::remote::protocol::Share,
+    ) -> BoxFuture<'_, Result<Vec<FarmNode>>> {
+        Box::pin(async move {
+            plan.nodes.retain(|spec| {
+                crate::farm::suffix(spec.role, spec.index).is_some_and(|s| share.nodes.contains(&s))
+            });
+            self.shares.lock().unwrap().push(share);
+            self.create(id, plan, exposure).await
+        })
+    }
+    fn deploy_spanning(
+        &self,
+        id: String,
+        from: Phase,
+        exposure: Option<Exposure>,
+        components: Vec<String>,
+        remote: Vec<u8>,
+        key: String,
+        sink: EventSink,
+    ) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async move {
+            assert!(key.starts_with("-----BEGIN OPENSSH PRIVATE KEY-----"));
+            self.spanning.lock().unwrap().push(remote);
+            self.deploy(id, from, exposure, components, sink).await
+        })
+    }
     fn impair(
         &self,
         id: String,
@@ -280,6 +321,7 @@ fn options(dir: &Path) -> ManagerOptions {
         agent_binary: None,
         agent_url: None,
         public_bind: "127.0.0.1".parse().unwrap(),
+        relay: None,
     }
 }
 /// Registers this machine as a prepared host, as its check and preparation leave it.
@@ -330,6 +372,7 @@ fn request(id: &str) -> CreateRequest {
         owner: Some("test".into()),
         expires_at: None,
         snapshot_id: None,
+        placement: Default::default(),
     }
 }
 async fn done(manager: &FarmManager, job: &Job) -> Job {
@@ -1629,6 +1672,8 @@ async fn unreserved_vms_are_never_adopted_and_hostless_farms_can_only_be_removed
                 updated_at: now(),
                 snapshot_id: None,
                 faults: Default::default(),
+                shares: vec![],
+                uplink_sha256: None,
             };
             state.farms.insert("old".into(), farm);
             Ok(())
@@ -3201,5 +3246,275 @@ async fn a_deploy_that_loses_its_connection_follows_the_host_job_again() {
     assert_eq!(count(&manager, "flaky", "step: make images"), 1);
     assert_eq!(backend.deployed.load(Ordering::SeqCst), 1);
     assert_eq!(manager.get("flaky").unwrap().status, FarmStatus::Ready);
+    settle(&manager).await;
+}
+
+#[tokio::test]
+async fn a_farm_spans_hosts_with_its_computes_placed_elsewhere() {
+    use crate::remote::{AgentArtifactInfo, HostJobKind, InstalledAgent, test_server::Fixture};
+    let fixture = Fixture::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let backend = Arc::new(Fake::default());
+    let mut opts = options(dir.path());
+    opts.memory_budget_mib = 64 * 1024;
+    let manager = open_with(opts, backend.clone()).await;
+    if !cfg!(target_os = "linux") {
+        *manager.0.guest_agent.write().unwrap() = Some(dir.path().join("farm-agent"));
+    }
+    manager.register_host(fixture.registration("edge")).unwrap();
+    let prep = manager
+        .start_host_job("edge", HostJobKind::Prepare)
+        .unwrap();
+    assert_eq!(
+        host_done(&manager, &prep.id).await.status,
+        JobStatus::Succeeded
+    );
+    manager
+        .update(|state| {
+            state.hosts.get_mut("edge").unwrap().host.agent = Some(InstalledAgent {
+                artifact: AgentArtifactInfo {
+                    sha256: "a".repeat(64),
+                    os: "linux".into(),
+                    arch: std::env::consts::ARCH.into(),
+                    protocol: 1,
+                    supports_single_vm: true,
+                    build_id: crate::BUILD_ID.into(),
+                },
+                verified_at: now(),
+            });
+            Ok(())
+        })
+        .unwrap();
+    let spanning = CreateRequest {
+        computes: 2,
+        placement: [("compute-2".to_string(), "edge".to_string())].into(),
+        ..request("mn")
+    };
+    // Without a relay the hosts cannot reach each other.
+    let refused = manager.create(spanning.clone()).unwrap_err();
+    assert!(refused.to_string().contains("relay"), "{refused}");
+    use crate::link::relay::{RelaySettings, RelayTlsMode};
+    let private = RelaySettings {
+        url: "https://coordinator.example:10011".into(),
+        mode: RelayTlsMode::Private,
+        tunnel_token: None,
+        bind: Some("127.0.0.1:0".parse().unwrap()),
+    };
+    assert!(
+        manager
+            .set_relay(Some(RelaySettings {
+                url: "http://coordinator.example".into(),
+                ..private.clone()
+            }))
+            .await
+            .unwrap_err()
+            .is::<BadRequest>()
+    );
+    let status = manager.set_relay(Some(private.clone())).await.unwrap();
+    assert!(status.ca_sha256.is_some());
+    // The daemon does not serve in tests, so nothing listens yet.
+    assert!(status.listening.is_none());
+    manager.start_relay().await;
+    assert!(manager.relay_status().await.unwrap().listening.is_some());
+    assert!(
+        manager
+            .create(CreateRequest {
+                placement: [("compute-3".to_string(), "edge".to_string())].into(),
+                ..spanning.clone()
+            })
+            .is_err()
+    );
+    let job = manager.create(spanning).unwrap();
+    let finished = done(&manager, &job).await;
+    assert_eq!(
+        finished.status,
+        JobStatus::Succeeded,
+        "{:?}",
+        finished.error
+    );
+    let farm = manager.get("mn").unwrap();
+    assert_eq!(farm.shares.len(), 1);
+    assert_eq!(farm.shares[0].host_id, "edge");
+    assert_eq!(farm.shares[0].nodes, ["compute-2"]);
+    assert_eq!(farm.nodes.len(), 3, "{:?}", farm.nodes);
+    assert_eq!(farm.host_of("compute-2"), Some("edge"));
+    assert_eq!(farm.host_of("compute-1"), Some("local"));
+    // Each host got its part; only the control VM's host holds the private key.
+    let local_share = backend.shares.lock().unwrap()[0].clone();
+    assert_eq!(local_share.nodes, ["control", "compute-1"]);
+    assert!(local_share.ssh_private_key.is_some());
+    assert_eq!(
+        local_share.uplink.url,
+        "wss://coordinator.example:10011/api/v1/link-relay?farm=mn&host=local"
+    );
+    assert!(
+        fixture
+            .observed
+            .calls
+            .lock()
+            .unwrap()
+            .contains(&"share:compute-2".to_string())
+    );
+    // Uplink keys are kept sealed: never in the state file, nor in the API's farm record.
+    assert_eq!(local_share.uplink.key.len(), 64);
+    let state_file = std::fs::read_to_string(dir.path().join("state.json")).unwrap();
+    assert!(!state_file.contains(&local_share.uplink.key));
+    assert!(
+        !serde_json::to_string(&farm)
+            .unwrap()
+            .contains(&local_share.uplink.key)
+    );
+    assert_eq!(manager.read(|s| s.relay_keys["mn"].len()).unwrap(), 2);
+    // Each host's switch may join the relay with its own token only.
+    assert!(
+        manager
+            .relay()
+            .accept("mn", "local", &local_share.uplink.token)
+            .is_ok()
+    );
+    assert!(
+        manager
+            .relay()
+            .accept("mn", "edge", &local_share.uplink.token)
+            .is_err()
+    );
+    // Memory counts on the host that runs each VM.
+    let edge_memory = farm.memory_on("edge");
+    assert!(edge_memory > 0 && edge_memory + farm.memory_on("local") == farm.memory_mib());
+
+    let deploy = manager.deploy("mn", DeployRequest::default()).unwrap();
+    let finished = done(&manager, &deploy).await;
+    assert_eq!(
+        finished.status,
+        JobStatus::Succeeded,
+        "{:?}",
+        finished.error
+    );
+    assert!(
+        fixture
+            .observed
+            .calls
+            .lock()
+            .unwrap()
+            .contains(&"prepare:mn".to_string())
+    );
+    assert_eq!(*backend.spanning.lock().unwrap(), [vec![2u8]]);
+
+    let cut = crate::link::Impair {
+        delay_ms: 0,
+        loss: 1.0,
+    };
+    manager.impair("mn", "compute-1", cut).await.unwrap();
+    assert_eq!(backend.faults.lock().unwrap().len(), 1);
+
+    // A new relay address, as a quick tunnel gets, reaches each host's switch.
+    manager.relink("https://calm-river.trycloudflare.com").await;
+    assert_eq!(
+        *backend.relinked.lock().unwrap(),
+        [(
+            "mn".to_string(),
+            "wss://calm-river.trycloudflare.com/api/v1/link-relay?farm=mn&host=local".to_string()
+        )]
+    );
+    assert!(
+        fixture.observed.calls.lock().unwrap().contains(
+            &"relink:mn:wss://calm-river.trycloudflare.com/api/v1/link-relay?farm=mn&host=edge"
+                .to_string()
+        )
+    );
+    // A host that missed the new address gets it again from the reconciler. The local
+    // host's uplink was accepted above, so only edge, which never joined, is retried.
+    assert_eq!(manager.relay().connected("mn"), ["local"]);
+    *manager.0.tunnel_url.lock().unwrap() = Some("https://new-river.trycloudflare.com".into());
+    manager.relink_missing().await;
+    assert_eq!(backend.relinked.lock().unwrap().len(), 1);
+    assert!(
+        fixture.observed.calls.lock().unwrap().iter().any(|c| c
+            == "relink:mn:wss://new-river.trycloudflare.com/api/v1/link-relay?farm=mn&host=edge")
+    );
+    *manager.0.tunnel_url.lock().unwrap() = None;
+    // A quick tunnel's URL comes from Cloudflare; a named one needs its token.
+    assert!(
+        manager
+            .set_relay(Some(RelaySettings {
+                url: "https://x.example".into(),
+                mode: RelayTlsMode::QuickTunnel,
+                tunnel_token: None,
+                bind: None,
+            }))
+            .await
+            .unwrap_err()
+            .is::<BadRequest>()
+    );
+    // Its switches hold the relay's URL and CA, so only the listen address may change.
+    let proxy = RelaySettings {
+        url: "https://relay.example".into(),
+        mode: RelayTlsMode::Proxy,
+        tunnel_token: None,
+        bind: None,
+    };
+    assert!(
+        manager
+            .set_relay(Some(proxy.clone()))
+            .await
+            .unwrap_err()
+            .is::<Conflict>()
+    );
+    manager
+        .set_relay(Some(RelaySettings {
+            bind: Some("127.0.0.1:0".parse().unwrap()),
+            ..private.clone()
+        }))
+        .await
+        .unwrap();
+
+    let delete = manager.delete("mn").unwrap();
+    assert_eq!(done(&manager, &delete).await.status, JobStatus::Succeeded);
+    assert!(
+        fixture
+            .observed
+            .rpc_farms
+            .lock()
+            .unwrap()
+            .get("mn")
+            .is_none()
+    );
+    assert!(!backend.farms.lock().unwrap().contains_key("mn"));
+    assert!(!manager.read(|s| s.relay_keys.contains_key("mn")).unwrap());
+    assert!(
+        manager
+            .relay()
+            .accept("mn", "local", &local_share.uplink.token)
+            .is_err()
+    );
+    // Behind a proxy, new farms' switches trust public CAs.
+    let status = manager
+        .set_relay(Some(RelaySettings {
+            bind: Some("127.0.0.1:0".parse().unwrap()),
+            ..proxy
+        }))
+        .await
+        .unwrap();
+    assert!(status.ca_sha256.is_none());
+    let job = manager
+        .create(CreateRequest {
+            computes: 1,
+            placement: [("compute-1".to_string(), "edge".to_string())].into(),
+            ..request("px")
+        })
+        .unwrap();
+    assert_eq!(done(&manager, &job).await.status, JobStatus::Succeeded);
+    {
+        let shares = backend.shares.lock().unwrap();
+        let last = shares.last().unwrap();
+        assert!(last.uplink.ca.is_empty());
+        assert!(
+            last.uplink
+                .url
+                .starts_with("wss://relay.example/api/v1/link-relay?farm=px")
+        );
+    }
+    let delete = manager.delete("px").unwrap();
+    assert_eq!(done(&manager, &delete).await.status, JobStatus::Succeeded);
     settle(&manager).await;
 }

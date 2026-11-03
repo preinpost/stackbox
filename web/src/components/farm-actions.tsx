@@ -135,6 +135,8 @@ export function CreateFarmForm({
   // Compute VMs beside a control VM; 0 is one all-in-one VM. Compute VMs bring Nova.
   const [computes, setComputes] = useState(0);
   const [sizeIndex, setSizeIndex] = useState(0);
+  // Compute VMs placed on another host than the control VM's (`compute-2` → host id).
+  const [placed, setPlaced] = useState<Record<string, string>>({});
   const compute = computes > 0 ? computeSizes[sizeIndex].size : undefined;
   const requested =
     computes > 0 && !selected.includes("nova")
@@ -148,6 +150,17 @@ export function CreateFarmForm({
   const [editedHostName, setHostName] = useState<string>();
   const hostName = editedHostName ?? publicHostName(hostId ?? "", hosts.data);
   const target = hosts.data?.find((h) => h.id === hostId);
+  // Only the computes that exist, on hosts other than the control VM's.
+  const placement = Object.fromEntries(
+    Object.entries(placed).filter(
+      ([node, host]) =>
+        host !== hostId && Number(node.slice("compute-".length)) <= computes,
+    ),
+  );
+  const canSpan =
+    computes > 0 &&
+    !!coordinator.data?.relay_url &&
+    (hosts.data ?? []).filter((h) => hostReady(h, buildId)).length > 1;
   const farms = useQuery(farmsQuery());
   const components = resolveComponents(
     catalog.data?.components ?? [],
@@ -174,8 +187,14 @@ export function CreateFarmForm({
   const remaining = capacity
     ? capacity.memory_budget_mib - capacity.memory_reserved_mib
     : null;
+  // Computes placed elsewhere count against their own host.
+  const placedMemory = plan.data
+    ? Object.keys(placement).length * (plan.data.nodes[1]?.memory_mib ?? 0)
+    : 0;
   const overBudget =
-    remaining !== null && plan.data && plan.data.memory_mib > remaining;
+    remaining !== null &&
+    plan.data &&
+    plan.data.memory_mib - placedMemory > remaining;
   const targetError = hosts.error || coordinator.error;
   const noHosts = hosts.isSuccess && !hosts.data.length;
   const hostUnavailable = !target || !hostReady(target, buildId);
@@ -195,6 +214,7 @@ export function CreateFarmForm({
             components,
             computes,
             ...(compute ? { compute } : {}),
+            ...(Object.keys(placement).length ? { placement } : {}),
             external_host: hostName,
             host_id: hostId,
             ...(owner.trim() ? { owner: owner.trim() } : {}),
@@ -320,6 +340,38 @@ export function CreateFarmForm({
                 0.8 GiB를 쓰고 나머지가 인스턴스 몫입니다. 인스턴스 디스크는
                 디스크 크기 안에 만들어지며, 처음 쓰는 디스크 크기는 호스트에서
                 golden image를 한 번 더 만듭니다(약 35초).
+              </p>
+            </div>
+          )}
+          {canSpan && (
+            <div>
+              <span className="field-label">Compute VM 배치</span>
+              <div className="grid gap-3 sm:grid-cols-2">
+                {Array.from({ length: computes }, (_, i) => {
+                  const node = `compute-${i + 1}`;
+                  return (
+                    <SelectInput
+                      key={node}
+                      value={placement[node] ?? hostId ?? ""}
+                      onChange={(value) =>
+                        setPlaced((current) => ({ ...current, [node]: value }))
+                      }
+                      disabled={mutation.isPending}
+                      label={`${node} 호스트`}
+                      items={(hosts.data ?? [])
+                        .filter((h) => hostReady(h, buildId))
+                        .map((h) => ({
+                          value: h.id,
+                          label: `${node} · ${hostLabel(h)}${h.id === hostId ? " (control과 같은 호스트)" : ""}`,
+                        }))}
+                    />
+                  );
+                })}
+              </div>
+              <p className="field-hint mt-2">
+                다른 호스트에 둔 compute VM은 coordinator의 relay(
+                {coordinator.data?.relay_url})를 거쳐 control VM과 같은 망에
+                연결됩니다. 링크는 coordinator의 사설 CA로 TLS 암호화됩니다.
               </p>
             </div>
           )}

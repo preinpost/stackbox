@@ -87,7 +87,48 @@ impl Backend for AgentBackend {
             generation: self.generation.clone(),
             plan,
             exposure,
+            share: None,
         }))
+    }
+    fn create_share(
+        &self,
+        id: String,
+        plan: Plan,
+        exposure: Exposure,
+        share: super::protocol::Share,
+    ) -> BoxFuture<'_, Result<Vec<FarmNode>>> {
+        Box::pin(self.nodes(Operation::Create {
+            farm_id: id,
+            generation: self.generation.clone(),
+            plan,
+            exposure,
+            share: Some(Box::new(share)),
+        }))
+    }
+    fn relink(&self, id: String, url: String) -> BoxFuture<'_, Result<()>> {
+        Box::pin(self.done(
+            Operation::Relink {
+                farm_id: id,
+                generation: self.generation.clone(),
+                url,
+            },
+            None,
+        ))
+    }
+    fn prepare(
+        &self,
+        id: String,
+        // The agent prepares with what it recorded at create.
+        _: Vec<String>,
+        _: String,
+    ) -> BoxFuture<'_, Result<()>> {
+        Box::pin(self.done(
+            Operation::Prepare {
+                farm_id: id,
+                generation: self.generation.clone(),
+            },
+            None,
+        ))
     }
     fn deploy(
         &self,

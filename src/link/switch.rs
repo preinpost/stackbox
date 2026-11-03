@@ -1,5 +1,7 @@
 //! The host's learning switch. Each WebSocket connection is one port; the port's segment
 //! decides which other ports see its frames. Delay and loss apply per port, as on the PoC switch.
+//! Each uplink joins its segments to the same segments on other hosts, through the relay: to
+//! the switch it is one more port in each of them, whose MACs are learned like any other's.
 
 use std::{
     collections::HashMap,
@@ -24,27 +26,48 @@ use futures::{SinkExt, StreamExt, stream::SplitSink};
 use serde::Deserialize;
 use tokio::{net::TcpListener, sync::mpsc, task::AbortHandle};
 
-use super::{BATCH, Config, Impair, MAX_MESSAGE, PATH, decode, encode, token_hash};
+use super::{
+    BATCH, Config, Impair, MAX_MESSAGE, PATH, UplinkConfig, decode, decode_trunk, encode,
+    encode_trunk, token_hash,
+};
 
 /// Frames queued for a port before the switch drops, like a real switch's buffer.
 const QUEUE: usize = 4096;
 const RELOAD_EVERY: Duration = Duration::from_millis(500);
 
 type Queued = (Option<Instant>, Bytes);
+/// Frames for an uplink, with the segment each belongs to.
+type Trunked = (Arc<str>, Bytes);
+
+/// Uplinks appear among the ports under this prefix and their segment; no port name has a `:`.
+const UPLINK: &str = "uplink:";
+
+enum Egress {
+    Port(mpsc::Sender<Queued>),
+    Uplink(Arc<str>, mpsc::Sender<Trunked>),
+}
 
 struct Live {
     segment: String,
     impair: Impair,
-    tx: mpsc::Sender<Queued>,
-    /// Ends the connection's reader when the port is replaced or removed.
-    reader: AbortHandle,
+    tx: Egress,
+    /// Ends the connection's reader when the port is replaced or removed; uplinks end with
+    /// their own task.
+    reader: Option<AbortHandle>,
     id: u64,
+}
+
+struct Uplink {
+    config: UplinkConfig,
+    task: AbortHandle,
 }
 
 #[derive(Default)]
 struct State {
     config: Config,
     ports: HashMap<String, Live>,
+    /// Running uplinks by farm id.
+    uplinks: HashMap<String, Uplink>,
     /// MAC → port, per segment.
     macs: HashMap<String, HashMap<[u8; 6], String>>,
     rng: u64,
@@ -62,7 +85,9 @@ impl State {
     }
     fn drop_port(&mut self, name: &str) {
         if let Some(live) = self.ports.remove(name) {
-            live.reader.abort();
+            if let Some(reader) = live.reader {
+                reader.abort();
+            }
             if let Some(macs) = self.macs.get_mut(&live.segment) {
                 macs.retain(|_, port| port != name);
             }
@@ -103,7 +128,12 @@ impl State {
                 let due = (impair.delay_ms > 0)
                     .then(|| Instant::now() + Duration::from_millis(impair.delay_ms));
                 // A full queue drops the frame, as a switch does.
-                let _ = self.ports[&target].tx.try_send((due, frame.clone()));
+                let _ = match &self.ports[&target].tx {
+                    Egress::Port(tx) => tx.try_send((due, frame.clone())).is_ok(),
+                    Egress::Uplink(segment, tx) => {
+                        tx.try_send((segment.clone(), frame.clone())).is_ok()
+                    }
+                };
             }
         }
     }
@@ -113,10 +143,11 @@ impl State {
             .ports
             .iter()
             .filter(|(name, live)| {
-                config
-                    .ports
-                    .get(*name)
-                    .is_none_or(|p| p.segment != live.segment)
+                !name.starts_with(UPLINK)
+                    && config
+                        .ports
+                        .get(*name)
+                        .is_none_or(|p| p.segment != live.segment)
             })
             .map(|(name, _)| name.clone())
             .collect();
@@ -125,7 +156,9 @@ impl State {
             self.drop_port(&name);
         }
         for (name, live) in &mut self.ports {
-            live.impair = config.ports[name].impair;
+            if let Some(port) = config.ports.get(name) {
+                live.impair = port.impair;
+            }
         }
         // A changed token ends the connection that used the old one.
         let rotated: Vec<String> = self
@@ -154,6 +187,7 @@ pub async fn serve(listener: TcpListener, config: PathBuf) -> Result<()> {
         rng: 0x9E37_79B9_7F4A_7C15 ^ u64::from(std::process::id()),
         ..Default::default()
     }));
+    sync_uplinks(&state);
     tokio::spawn(follow(state.clone(), config));
     let app = Router::new().route(PATH, get(upgrade)).with_state(state);
     use axum::serve::ListenerExt;
@@ -189,7 +223,10 @@ async fn follow(state: Shared, path: PathBuf) {
         }
         seen = now;
         match read_config(&path) {
-            Ok(config) => state.lock().unwrap().apply(config),
+            Ok(config) => {
+                state.lock().unwrap().apply(config);
+                sync_uplinks(&state);
+            }
             // The agent replaces the file whole, so this is a broken edit; keep the last one.
             Err(error) => eprintln!("link: {error:#}"),
         }
@@ -256,8 +293,8 @@ async fn connection(
             Live {
                 segment,
                 impair,
-                tx,
-                reader: reader.abort_handle(),
+                tx: Egress::Port(tx),
+                reader: Some(reader.abort_handle()),
                 id,
             },
         );
@@ -356,6 +393,217 @@ async fn send(
     sink.send(Message::Binary(message.into())).await
 }
 
+/// Start the configured uplinks that do not run, and stop those that left the configuration
+/// or changed.
+fn sync_uplinks(state: &Shared) {
+    let mut guard = state.lock().unwrap();
+    let wanted = guard.config.uplinks.clone();
+    let stale: Vec<String> = guard
+        .uplinks
+        .iter()
+        .filter(|(farm, running)| wanted.get(*farm) != Some(&running.config))
+        .map(|(farm, _)| farm.clone())
+        .collect();
+    for farm in stale {
+        let running = guard.uplinks.remove(&farm).expect("listed above");
+        running.task.abort();
+        for segment in &running.config.segments {
+            guard.drop_port(&format!("{UPLINK}{segment}"));
+        }
+        eprintln!("uplink {farm} removed");
+    }
+    for (farm, config) in wanted {
+        if guard.uplinks.contains_key(&farm) {
+            continue;
+        }
+        let task = tokio::spawn(uplink(state.clone(), farm.clone(), config.clone()));
+        guard.uplinks.insert(
+            farm,
+            Uplink {
+                config,
+                task: task.abort_handle(),
+            },
+        );
+    }
+}
+
+/// Keep the uplink to the relay open, reconnecting with backoff, until it is aborted.
+async fn uplink(state: Shared, farm: String, config: UplinkConfig) {
+    let mut delay = Duration::from_secs(1);
+    loop {
+        let started = Instant::now();
+        match uplink_session(&state, &config).await {
+            Ok(()) => eprintln!("uplink {farm}: the relay closed the connection"),
+            Err(error) => eprintln!("uplink {farm}: {error:#}"),
+        }
+        if started.elapsed() > Duration::from_secs(30) {
+            delay = Duration::from_secs(1);
+        }
+        tokio::time::sleep(delay).await;
+        delay = (delay * 2).min(Duration::from_secs(30));
+    }
+}
+
+async fn uplink_session(state: &Shared, config: &UplinkConfig) -> Result<()> {
+    use tokio_tungstenite::tungstenite::{
+        self, client::IntoClientRequest, protocol::WebSocketConfig,
+    };
+    let mut request = config.url.as_str().into_client_request()?;
+    request
+        .headers_mut()
+        .insert(AUTHORIZATION, format!("Bearer {}", config.token).parse()?);
+    anyhow::ensure!(config.url.starts_with("wss://"), "uplinks use TLS");
+    let ws = WebSocketConfig::default()
+        .max_message_size(Some(MAX_MESSAGE + 256))
+        .max_frame_size(Some(MAX_MESSAGE + 256));
+    // The coordinator's own CA, and no other, vouches for the relay; without one, a proxy
+    // in front of it shows a certificate from a public CA.
+    let connector = if config.ca.is_empty() {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        None
+    } else {
+        Some(tokio_tungstenite::Connector::Rustls(super::tls::client(
+            &config.ca,
+        )?))
+    };
+    let socket =
+        match tokio_tungstenite::connect_async_tls_with_config(request, Some(ws), true, connector)
+            .await
+        {
+            Ok((socket, _)) => socket,
+            Err(tungstenite::Error::Http(response)) => {
+                anyhow::bail!("the relay refused the uplink: {}", response.status())
+            }
+            Err(error) => return Err(error).context("connect to the relay"),
+        };
+    let (mut sink, mut stream) = socket.split();
+    // Each side's hello first; every later message is sealed against the other's.
+    let (mut sealer, mut opener) = {
+        use super::seal::{Direction, Opener, Sealer, hello, read_hello};
+        let own = hello()?;
+        sink.send(tungstenite::Message::Binary(Bytes::copy_from_slice(&own)))
+            .await?;
+        let peer = loop {
+            match tokio::time::timeout(Duration::from_secs(15), stream.next())
+                .await
+                .context("the relay sent no hello")?
+            {
+                Some(Ok(tungstenite::Message::Binary(data))) => break read_hello(&data)?,
+                Some(Ok(tungstenite::Message::Close(_)) | Err(_)) | None => {
+                    anyhow::bail!("the relay closed before its hello")
+                }
+                Some(Ok(_)) => continue,
+            }
+        };
+        (
+            Sealer::new(&config.key, Direction::ToRelay, peer)?,
+            Opener::new(&config.key, Direction::ToSwitch, own)?,
+        )
+    };
+    let (tx, mut rx) = mpsc::channel::<Trunked>(QUEUE);
+    let ids: Vec<(String, u64)> = {
+        let mut state = state.lock().unwrap();
+        config
+            .segments
+            .iter()
+            .map(|segment| {
+                let name = format!("{UPLINK}{segment}");
+                state.drop_port(&name);
+                state.next_id += 1;
+                let id = state.next_id;
+                state.ports.insert(
+                    name.clone(),
+                    Live {
+                        segment: segment.clone(),
+                        impair: Impair::default(),
+                        tx: Egress::Uplink(segment.as_str().into(), tx.clone()),
+                        reader: None,
+                        id,
+                    },
+                );
+                (name, id)
+            })
+            .collect()
+    };
+    drop(tx);
+    eprintln!(
+        "uplink to {} up",
+        config.url.split('?').next().unwrap_or_default()
+    );
+    // Frames of one segment share a message; a frame of another starts the next. A quiet
+    // uplink pings, so proxies keep it open.
+    let writer = async {
+        let mut buf = Vec::with_capacity(MAX_MESSAGE + 256);
+        let mut ping = tokio::time::interval(super::relay::PING_EVERY);
+        ping.tick().await;
+        let mut pending = None;
+        loop {
+            if pending.is_none() {
+                pending = tokio::select! {
+                    next = rx.recv() => match next {
+                        Some(next) => Some(next),
+                        None => break,
+                    },
+                    _ = ping.tick() => {
+                        sink.send(tungstenite::Message::Ping(Bytes::new())).await?;
+                        continue;
+                    }
+                };
+            }
+            let Some((segment, frame)) = pending.take() else {
+                continue;
+            };
+            encode_trunk(&mut buf, &segment);
+            encode(&mut buf, &frame);
+            while buf.len() < BATCH {
+                match rx.try_recv() {
+                    Ok((next, frame)) if next == segment => encode(&mut buf, &frame),
+                    Ok(other) => {
+                        pending = Some(other);
+                        break;
+                    }
+                    Err(_) => break,
+                }
+            }
+            let message = std::mem::replace(&mut buf, Vec::with_capacity(MAX_MESSAGE + 256));
+            sink.send(tungstenite::Message::Binary(sealer.seal(&message)?.into()))
+                .await?;
+        }
+        Ok::<_, anyhow::Error>(())
+    };
+    let reader = async {
+        while let Some(message) = stream.next().await {
+            let data = match message? {
+                tungstenite::Message::Binary(data) => data,
+                tungstenite::Message::Close(_) => break,
+                _ => continue,
+            };
+            let data = Bytes::from(opener.open(&data)?);
+            let (segment, frames) = decode_trunk(&data)?;
+            anyhow::ensure!(
+                config.segments.iter().any(|s| s == segment),
+                "the relay sent segment {segment}, which this uplink does not carry"
+            );
+            state
+                .lock()
+                .unwrap()
+                .forward(&format!("{UPLINK}{segment}"), frames);
+        }
+        Ok::<_, anyhow::Error>(())
+    };
+    let result = tokio::select! {
+        result = writer => result,
+        result = reader => result,
+    };
+    let mut state = state.lock().unwrap();
+    for (name, id) in ids {
+        if state.ports.get(&name).is_some_and(|live| live.id == id) {
+            state.drop_port(&name);
+        }
+    }
+    result
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -443,6 +691,7 @@ pub(crate) mod tests {
                     )
                 })
                 .collect(),
+            ..Default::default()
         }
     }
 
@@ -553,5 +802,125 @@ pub(crate) mod tests {
             .await
             .unwrap();
         assert!(a.closed().await);
+    }
+
+    /// Two hosts' switches, joined through the relay, carry one farm's segment between them.
+    #[tokio::test]
+    async fn uplinks_join_switches_through_the_relay() {
+        use crate::link::relay::Relay;
+        use axum::extract::Query;
+        let relay = Arc::new(Relay::default());
+        let (k1, k2) = (
+            crate::link::seal::new_key().unwrap(),
+            crate::link::seal::new_key().unwrap(),
+        );
+        relay.authorize("f", "h1", &token_hash("u1"), &k1);
+        relay.authorize("f", "h2", &token_hash("u2"), &k2);
+        #[derive(Deserialize)]
+        struct Q {
+            farm: String,
+            host: String,
+        }
+        let app = Router::new()
+            .route(
+                crate::link::RELAY_PATH,
+                get(
+                    |Extract(relay): Extract<Arc<Relay>>,
+                     Query(q): Query<Q>,
+                     headers: HeaderMap,
+                     ws: WebSocketUpgrade| async move {
+                        let token = headers
+                            .get(AUTHORIZATION)
+                            .and_then(|v| v.to_str().ok())
+                            .and_then(|v| v.strip_prefix("Bearer "))
+                            .unwrap_or_default();
+                        match relay.accept(&q.farm, &q.host, token) {
+                            Ok(accepted) => ws
+                                .on_upgrade(move |socket| relay.serve(accepted, socket))
+                                .into_response(),
+                            Err(_) => StatusCode::UNAUTHORIZED.into_response(),
+                        }
+                    },
+                ),
+            )
+            .with_state(relay.clone());
+        let certs = tempfile::tempdir().unwrap();
+        let tls = crate::link::tls::RelayTls::open(certs.path(), "127.0.0.1").unwrap();
+        // Another coordinator's CA, which must not vouch for this relay.
+        let other = tempfile::tempdir().unwrap();
+        let foreign = crate::link::tls::RelayTls::open(other.path(), "127.0.0.1").unwrap();
+        assert_ne!(tls.ca_pem, foreign.ca_pem);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let relay_addr = listener.local_addr().unwrap();
+        let listener = crate::link::tls::TlsListener::new(listener, tls.server.clone()).unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await });
+        let uplink = |host: &str, token: &str, ca: &str, key: &str| crate::link::UplinkConfig {
+            key: key.into(),
+            url: format!(
+                "wss://{relay_addr}{}?farm=f&host={host}",
+                crate::link::RELAY_PATH
+            ),
+            ca: ca.into(),
+            token: token.into(),
+            segments: vec!["f/m".into()],
+        };
+        let mut one = config(&[("f/a/m", "f/m", "ta"), ("g/x/m", "g/m", "tx")]);
+        one.uplinks
+            .insert("f".into(), uplink("h1", "u1", &tls.ca_pem, &k1));
+        let mut two = config(&[("f/b/m", "f/m", "tb"), ("g/y/m", "g/m", "ty")]);
+        two.uplinks
+            .insert("f".into(), uplink("h2", "u2", &foreign.ca_pem, &k2));
+        let (addr1, _, _d1) = start(&one).await;
+        let (addr2, path2, _d2) = start(&two).await;
+        // A relay its CA does not vouch for keeps h2 off; the right CA, written later, joins it.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert_eq!(relay.connected("f"), ["h1"]);
+        // With the right CA but another host's key, h2 cannot seal or open a message.
+        two.uplinks
+            .insert("f".into(), uplink("h2", "u2", &tls.ca_pem, &k1));
+        let tmp = path2.with_extension("tmp");
+        std::fs::write(&tmp, serde_json::to_vec(&two).unwrap()).unwrap();
+        std::fs::rename(&tmp, &path2).unwrap();
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        {
+            let mut a = Guest::connect(addr1, "f/a/m", "ta").await.unwrap();
+            let mut b = Guest::connect(addr2, "f/b/m", "tb").await.unwrap();
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            b.send(&[frame(BROADCAST, 2, b"forged")]).await;
+            assert!(a.recv_within(Duration::from_millis(500)).await.is_none());
+        }
+        two.uplinks
+            .insert("f".into(), uplink("h2", "u2", &tls.ca_pem, &k2));
+        let tmp = path2.with_extension("tmp");
+        std::fs::write(&tmp, serde_json::to_vec(&two).unwrap()).unwrap();
+        std::fs::rename(&tmp, &path2).unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while relay.connected("f").len() < 2 {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let mut a = Guest::connect(addr1, "f/a/m", "ta").await.unwrap();
+        let mut b = Guest::connect(addr2, "f/b/m", "tb").await.unwrap();
+        let mut x = Guest::connect(addr1, "g/x/m", "tx").await.unwrap();
+        let mut y = Guest::connect(addr2, "g/y/m", "ty").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        a.send(&[frame(BROADCAST, 1, b"hello")]).await;
+        assert_eq!(&b.recv().await.unwrap()[14..], b"hello");
+        // b learned nothing yet of a's MAC beyond the uplink, so answer it by unicast.
+        let batch: Vec<_> = (0..50u8).map(|i| frame(1, 2, &[i])).collect();
+        b.send(&batch).await;
+        for i in 0..50u8 {
+            assert_eq!(&a.recv().await.unwrap()[14..], [i]);
+        }
+        // Segments without an uplink stay on their host.
+        x.send(&[frame(BROADCAST, 9, b"local")]).await;
+        assert!(y.recv().await.is_none());
+        // Forgetting the farm cuts the hosts apart.
+        relay.forget("f");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        a.send(&[frame(BROADCAST, 1, b"gone")]).await;
+        assert!(b.recv().await.is_none());
     }
 }

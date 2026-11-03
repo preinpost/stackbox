@@ -33,12 +33,14 @@ pub const NETWORKS: [(&str, &str, bool); 2] = [("farm0", "mgmt", true), ("farm1"
 
 /// Create the farm's single all-in-one VM and confirm it boots.
 pub async fn create_farm(farm_id: &str, template: &[NodeSpec]) -> Result<Vec<FarmNode>> {
-    create_farm_with(farm_id, template, None, &[], None, &[]).await
+    create_farm_with(farm_id, template, None, &[], None, &[], None).await
 }
 
 /// `components` selects which service ports the farm publishes. A multi-node farm needs
 /// `switch`, the host's link switch, to join its VMs. `sources` are msb snapshots to boot
 /// each VM of `template` from, in its order; empty boots them all from the golden image.
+/// With `share`, the farm spans hosts: only the share's VMs are created here, and the
+/// switch joins their networks to the other hosts through the relay.
 pub async fn create_farm_with(
     farm_id: &str,
     template: &[NodeSpec],
@@ -46,6 +48,7 @@ pub async fn create_farm_with(
     components: &[String],
     switch: Option<&crate::link::host::Switch>,
     sources: &[String],
+    share: Option<&crate::remote::protocol::Share>,
 ) -> Result<Vec<FarmNode>> {
     let computes = layout(template)?;
     if !sources.is_empty() && sources.len() != template.len() {
@@ -63,10 +66,21 @@ pub async fn create_farm_with(
         };
         return Ok(vec![create_node(farm_id, template[0], &setup).await?]);
     }
+    if share.is_some() && !sources.is_empty() {
+        bail!("a farm that spans hosts cannot start from snapshots");
+    }
     let switch = switch.context("multi-node farms need the host's link switch")?;
+    if let Some(share) = share {
+        switch.set_uplink(farm_id, share.uplink.clone())?;
+    }
     let url = switch.ensure(&switch_command()?).await?;
+    let here = |spec: &NodeSpec| {
+        share.is_none_or(|share| {
+            suffix(spec.role, spec.index).is_some_and(|s| share.nodes.contains(&s))
+        })
+    };
     let mut setups = Vec::new();
-    for (i, spec) in template.iter().enumerate() {
+    for (i, spec) in template.iter().enumerate().filter(|(_, spec)| here(spec)) {
         let suffix = suffix(spec.role, spec.index).context("multi-node VMs have a suffix")?;
         let mut links = Vec::new();
         for (dev, network, addressed) in NETWORKS {
@@ -102,6 +116,7 @@ pub async fn create_farm_with(
     try_join_all(
         template
             .iter()
+            .filter(|spec| here(spec))
             .zip(&setups)
             .map(|(spec, setup)| create_node(farm_id, *spec, setup)),
     )

@@ -484,6 +484,38 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/v1/relay": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get: operations["relay_status"];
+    put: operations["set_relay"];
+    post?: never;
+    delete: operations["remove_relay"];
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/v1/relay/cloudflared/update": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    post: operations["update_cloudflared"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/v1/snapshots": {
     parameters: {
       query?: never;
@@ -669,6 +701,13 @@ export interface components {
       host_id?: string | null;
       id: string;
       owner?: string | null;
+      /**
+       * @description Compute VMs that run on another host than `host_id`, by VM (`compute-2` → host id).
+       *     Their links reach the control VM's host through the coordinator's relay.
+       */
+      placement?: {
+        [key: string]: string;
+      };
       /** @description Start from this snapshot instead of an empty VM. Its services replace `components`. */
       snapshot_id?: string | null;
     };
@@ -775,6 +814,8 @@ export interface components {
       phase?: null | components["schemas"]["Phase"];
       plan?: null | components["schemas"]["Plan"];
       remote_generation?: string | null;
+      /** @description Other hosts that run some of a multi-node farm's compute VMs. `host_id` runs the rest. */
+      shares?: components["schemas"]["HostShare"][];
       /** @description Snapshot this farm was restored from. */
       snapshot_id?: string | null;
       status: components["schemas"]["FarmStatus"];
@@ -782,6 +823,8 @@ export interface components {
       step?: string | null;
       /** Format: int64 */
       updated_at: number;
+      /** @description SHA-256 of the token `host_id`'s switch joins the relay with, for a farm with shares. */
+      uplink_sha256?: string | null;
     };
     /** @enum {string} */
     FarmStatus:
@@ -823,6 +866,8 @@ export interface components {
       memory_total_mib: number;
       msb_available: boolean;
       os: string;
+      /** @description The relay farms that span hosts join through (`FARM_RELAY_URL`); none disables them. */
+      relay_url?: string | null;
       state_dir: string;
     };
     HostInspection: {
@@ -876,6 +921,16 @@ export interface components {
      * @enum {string}
      */
     HostKind: "ssh" | "local" | "agent";
+    /** @description The compute VMs of a farm that one other host runs. */
+    HostShare: {
+      /** @description The agent this host's part was created with, for a remote host. */
+      agent_sha256?: string | null;
+      host_id: string;
+      /** @description VM suffixes (`compute-2`, ...). */
+      nodes: string[];
+      /** @description SHA-256 of the token this host's switch joins the relay with. */
+      uplink_sha256: string;
+    };
     /** @enum {string} */
     HostStatus:
       | "registered"
@@ -1062,6 +1117,39 @@ export interface components {
     RegisterLocalHost: {
       id?: string;
     };
+    /** @description Where farms that span hosts join, set from the portal or `PUT /api/v1/relay`. */
+    RelaySettings: {
+      /** @description Where it listens; `0.0.0.0:10011` with `private`, `127.0.0.1:10012` with `proxy`. */
+      bind?: string | null;
+      mode: components["schemas"]["RelayTlsMode"];
+      /**
+       * @description The relay as other hosts reach it: `https://<host>[:port]`. A quick tunnel's comes
+       *     from Cloudflare, so it is left empty.
+       */
+      url?: string;
+    };
+    /** @description The relay as the portal shows it. */
+    RelayStatus: {
+      /** @description Where it listens, with defaults applied. */
+      bind?: string | null;
+      /** @description SHA-256 of the private CA's PEM, with private TLS. */
+      ca_sha256?: string | null;
+      /** @description Why it does not listen. */
+      error?: string | null;
+      /** @description The address it listens on, once the daemon serves. */
+      listening?: string | null;
+      settings?: null | components["schemas"]["RelaySettings"];
+      /** @description Farms that span hosts; while any lives, the URL and mode stay. */
+      spanning_farms: string[];
+      tunnel?: null | components["schemas"]["TunnelStatus"];
+      /** @description The URL new farms that span hosts get: the settings', or a quick tunnel's address. */
+      url?: string | null;
+    };
+    /**
+     * @description Who terminates the relay's TLS.
+     * @enum {string}
+     */
+    RelayTlsMode: "private" | "proxy" | "quick_tunnel" | "named_tunnel";
     RemoteHost: {
       active_job?: string | null;
       /** @description SSH address; `localhost` for the local host. */
@@ -1176,6 +1264,23 @@ export interface components {
       address: string;
       /** Format: int32 */
       port?: number;
+    };
+    TunnelStatus: {
+      /**
+       * Format: int64
+       * @description UTC Unix seconds of the last release check.
+       */
+      checked_at?: number | null;
+      /** @description Whether cloudflared runs and has registered the tunnel. */
+      connected: boolean;
+      error?: string | null;
+      latest?: string | null;
+      /** @description `FARM_CLOUDFLARED` names the binary; it is not updated. */
+      unmanaged: boolean;
+      /** @description A quick tunnel's address, once Cloudflare gave it. */
+      url?: string | null;
+      /** @description The cloudflared in use and the latest release last seen. */
+      version?: string | null;
     };
   };
   responses: never;
@@ -2402,6 +2507,123 @@ export interface operations {
         };
       };
       400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorBody"];
+        };
+      };
+    };
+  };
+  relay_status: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Where farms that span hosts join */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["RelayStatus"];
+        };
+      };
+    };
+  };
+  set_relay: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["RelaySettings"];
+      };
+    };
+    responses: {
+      /** @description Saved; the relay listens anew at once */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["RelayStatus"];
+        };
+      };
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorBody"];
+        };
+      };
+      /** @description Farms that span hosts hold the current URL and CA */
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorBody"];
+        };
+      };
+    };
+  };
+  remove_relay: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description The relay is off; farms cannot span hosts */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["RelayStatus"];
+        };
+      };
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorBody"];
+        };
+      };
+    };
+  };
+  update_cloudflared: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Checked for a new cloudflared; the tunnel restarts on one */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["RelayStatus"];
+        };
+      };
+      409: {
         headers: {
           [name: string]: unknown;
         };
