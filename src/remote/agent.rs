@@ -6,7 +6,7 @@ use super::{
 use crate::{
     farm::{TerminalInput, TerminalIo, TerminalSize},
     manager::{Backend, MicrosandboxBackend},
-    model::{Exposure, Plan, PlanRequest, plan, validate_id},
+    model::{Exposure, Plan, PlanRequest, layout, validate_id},
 };
 use anyhow::{Context, Result, bail, ensure};
 use base64::{Engine, engine::general_purpose::STANDARD};
@@ -234,7 +234,8 @@ impl Agent {
             self.limits.virtualization,
             "this host has no usable hypervisor (/dev/kvm on Linux)"
         );
-        let canonical = plan(&PlanRequest {
+        // The coordinator applies plan()'s policy; restored snapshots keep an older layout.
+        let canonical = layout(&PlanRequest {
             components: requested.components.clone(),
             computes: requested.computes,
         })?;
@@ -968,7 +969,7 @@ mod tests {
         Operation::Create {
             farm_id: id.into(),
             generation: generation.into(),
-            plan: plan(&PlanRequest::default()).unwrap(),
+            plan: layout(&PlanRequest::default()).unwrap(),
             exposure: Exposure {
                 host: "target.example".into(),
                 bind: "0.0.0.0".parse().unwrap(),
@@ -1080,7 +1081,7 @@ mod tests {
         backend
             .create(
                 "foreign".into(),
-                plan(&PlanRequest::default()).unwrap(),
+                layout(&PlanRequest::default()).unwrap(),
                 Exposure {
                     host: "localhost".into(),
                     bind: "127.0.0.1".parse().unwrap(),

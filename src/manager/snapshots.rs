@@ -156,7 +156,8 @@ fn parse_labels(labels: &BTreeMap<String, String>) -> Result<Imported> {
     Ok(Imported {
         arch: arch.clone(),
         platform: labels.get(label::PLATFORM).cloned(),
-        plan: plan(&PlanRequest {
+        // Snapshots are of all-in-one VMs, Nova included from before plan() split it off.
+        plan: layout(&PlanRequest {
             components,
             computes: 0,
         })?,

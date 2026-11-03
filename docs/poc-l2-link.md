@@ -225,6 +225,9 @@ FARM_GUEST_AGENT=$PWD/dist/agent/aarch64/farm-agent \
 - **C. msb 커널에 NFS·iSCSI를 넣기**: libkrunfw 커널을 다시 빌드해야 하므로 범위 밖으로 둔다.
 
 **제품에 넣을 것**
+- Ceph는 farm마다 하나를 control VM에 띄우고 그 farm의 compute들이 RBD로 함께 쓴다. compute에는 keyring과
+  `ceph.conf`만 둔다. 여러 farm이 한 Ceph를 나눠 쓰면 삭제·스냅샷·장애가 farm 밖에 묶이므로 피한다.
+  `osd_memory_target`을 1 GiB 정도로 낮추는 것은 아직 시험하지 않았다.
 - plan과 생성 요청에 `storage`(`none` | `rbd` | 나중에 `fuse`)를 넣는다. multinode farm에서만 고를 수 있게 한다.
 - 메모리 예산과 디스크 예산에 스토리지 몫을 더한다. 포털 생성 화면에 선택 항목을 둔다.
 - 배포에 cephadm 단계를 넣고, globals.yml에 외부 Ceph 설정(`nova_backend_ceph`, `glance_backend_ceph`)을 쓴다.
@@ -232,6 +235,55 @@ FARM_GUEST_AGENT=$PWD/dist/agent/aarch64/farm-agent \
 
 **먼저 확인할 것**: control VM 하나에서 cephadm 단일 노드 + loop OSD가 뜨는지, Nova가 그 pool로 Cirros를
 부팅하는지, evacuate 뒤 디스크가 유지되는지.
+
+**확인 결과 (2026-11-03, Apple M5 Pro 24 GiB, farm `ceph` = control 1 + compute 2)**: 세 가지 모두 된다. 제품 배포를
+끝낸 뒤 control VM에서 손으로 했다.
+
+| 단계 | 결과 |
+|---|---|
+| `cephadm --docker bootstrap --mon-ip 10.254.0.10 --single-host-defaults --skip-dashboard --skip-monitoring-stack` (tentacle 20.2.5, `rpm-tentacle/el10`) | MON·MGR up |
+| `/var/lib/ceph-osd-img/osd0.img`(20 GiB) → `losetup` → OSD spec `method: raw` | OSD 1개 up |
+| pool `vms`·`images`, `size 1` (`mon_allow_pool_size_one`) | `HEALTH_WARN`(OSD 1개)뿐 |
+| `globals.yml`에 외부 Ceph 설정, `kolla-ansible reconfigure -t glance,nova,nova-cell` | compute의 `images_type = rbd`, Glance `default_backend = rbd` |
+| Cirros를 compute-1에 부팅 | 30초 만에 ACTIVE, 디스크는 `vms/<id>_disk` |
+| compute-1 `farm fault --loss 1` → `--down` → `server evacuate --host farm-compute-2` | 40초 안에 down, evacuate 20초 뒤 ACTIVE |
+| 디스크 유지 확인 | 첫 부팅 때 만든 SSH host key가 evacuate 뒤에도 같다(이미지로 다시 만들면 바뀐다) |
+| 링크 복구, `--up`, c1 `nova_compute` 재시작 | c1의 원래 인스턴스를 nova가 지움, 두 compute 모두 up |
+
+게스트 환경 때문에 우회한 것(제품에 넣을 것):
+- **udev 데이터가 없다**: ceph-volume이 `No udev data could be retrieved for /sys/block/vda`로 멈춘다.
+  `systemd-udev`를 설치하고 `systemctl start systemd-udevd; udevadm trigger --subsystem-match=block`.
+- **device-mapper가 없다**: 기본 `lvm batch`는 못 쓴다. OSD spec에 `method: raw`를 쓴다.
+- **`/`가 shared mount가 아니다**: docker가 ceph-volume의 `/:/rootfs:rslave`를 거부한다. `mount --make-rshared /`.
+- **Cinder 없이도 nova-cell이 cinder keyring을 찾는다**(`Copy over ceph cinder keyring file`의 `.stat` 오류).
+  `cinder_backend_ceph: "yes"`, `ceph_cinder_user: "nova"`로 nova keyring을 쓰게 한다. 함께 쓴 값은
+  `glance_backend_ceph`·`nova_backend_ceph: "yes"`, `ceph_glance_user: glance`, `ceph_nova_user: nova`이고, keyring과
+  `ceph config generate-minimal-conf`(탭 제거)를 `/etc/kolla/config/{glance,nova}/`에 둔다.
+- **재부팅 뒤**: loop 장치, shared mount, udevd가 다시 올라와야 한다. 아직 시험하지 않았다(systemd 유닛 예정).
+- **메모리**: Ceph와 서비스를 올린 control VM이 6.4 GiB 중 5.2 GiB를 쓰고 여유가 121 MiB였다. `rbd`를 고르면
+  control을 8 GiB 이상으로 잡는다.
+
+함께 드러난 것(Ceph와 무관해 보인다):
+- 인스턴스로 **ping은 되지만 TCP(22)는 timeout**이었다. SYN은 인스턴스에 닿지만 SYN-ACK가 Neutron OVS 방화벽
+  (`firewall_driver = openvswitch`)의 conntrack에서 `+inv`로 판정돼 table 93에서 버려진다. 원인은 checksum offload다.
+  virtio 게스트가 TCP checksum을 비워 보내는데 userspace conntrack이 이를 검사해 틀렸다고 본다
+  (`ovs-appctl coverage/show`의 `conntrack_l4csum_err`가 시도마다 늘었다). ICMP는 게스트가 checksum을 채워 통과한다.
+  **해결**: compute의 OVS에 `ovs-vsctl set Open_vSwitch . other_config:userspace-tso-enable=true`를 넣고
+  `openvswitch_vswitchd`를 재시작한 뒤 인스턴스를 hard reboot하면(tap을 다시 만들어야 한다) TCP·SSH가 된다.
+  **control(network 노드)에는 넣으면 안 된다**: 세 VM 모두에 넣었더니 인스턴스가 DHCP를 못 받고 ping도 끊겼다.
+  control에서만 빼자 DHCP·ping·TCP가 모두 돌아왔다(compute 2대는 켠 채). qrouter·DHCP의 internal 포트와
+  `farm1` 링크 중 어디가 깨지는지는 확인하지 않았다.
+  - vswitchd를 재시작하면 control의 `qr-`·`qg-`·DHCP `tap` 포트가 DOWN으로 남는다. OVS와 netns에서 포트를 지우고
+    `neutron_l3_agent`·`neutron_dhcp_agent`를 재시작하면 다시 만든다. 제품은 인스턴스보다 먼저 설정하므로 해당 없다.
+  - 제품(`src/kolla/mod.rs`의 OVS 호환 패치): Kolla의 OVS `other_config` 단계에 넣되 netdev이면서 `compute`
+    그룹이고 `network` 그룹이 아닌 노드에만 켠다. verify는 ping 다음에 인스턴스의 TCP 22를 확인한다.
+    새 multinode farm(`tso`, control 1 + compute 2) 배포에서 verify의 TCP 검사가 통과했다(2026-11-03). verify의 TCP 22 규칙은
+    현재 프로젝트의 `default` 그룹 ID에 넣는다(프로젝트마다 `default`가 생겨 이름만으로는 규칙 생성이 실패한다).
+  - **all-in-one farm에는 Nova를 두지 않는다**: compute이면서 network 노드라 TSO를 켤 수 없다. `plan`은 Nova를 고르면
+    compute VM을 1대 붙이고(포털도 같이), 배치를 그대로 계산하는 `layout`은 예전 Nova all-in-one 스냅샷 복원과 agent의
+    배치 검사에 쓴다. 그래서 Nova farm은 여러 VM 스냅샷이 나올 때까지 새로 얼릴 수 없다.
+- evacuate 직후 nova가 `bringing vm to original state: 'stopped'`로 VM을 껐다. event 목록에 stop은 없다. 고립된 c1의
+  power state 동기화를 의심한다. `server start`로 켜면 된다.
 
 ### 2. 여러 VM 스냅샷
 
@@ -279,8 +331,8 @@ FARM_GUEST_AGENT=$PWD/dist/agent/aarch64/farm-agent \
 ### 남은 검증
 
 - multinode farm을 **원격 Linux 호스트**에서 만들고 배포하는 것은 아직 돌려보지 않았다(로컬 macOS 호스트만 확인).
-- **nested KVM**이 있는 머신(M5 Pro, Linux/KVM)에서 compute VM의 Nova가 `virt_type=kvm`으로 도는지 확인하지 않았다.
-  M1 Max는 TCG였다.
+- ~~**nested KVM**~~: M5 Pro에서 compute VM에 `/dev/kvm`이 있고 `virt_type = kvm`으로 배포됐다(2026-11-03). M1 Max는 TCG였다.
+  Linux/KVM 호스트는 아직이다.
 - multinode farm의 **VM 재시작 뒤 settle**을 실제 VM으로 돌려보지 않았다. fake backend 테스트만 있다.
   **삭제**는 실제 `mn` farm으로 확인했다: `farm delete mn`이 2초 만에 VM 3대와 스위치 포트 6개를 정리했다.
 - Horizon을 넣은 multinode farm은 배포해 보지 않았다.

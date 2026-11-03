@@ -354,6 +354,18 @@ if patched not in text:
     if text.count(marker) != 1:
         raise RuntimeError("unexpected Kolla OVS bridge task; review the datapath_type patch")
     path.write_text(text.replace(marker, patched, 1))
+# Virtio instances leave TCP checksums to the host. The userspace conntrack behind Neutron's OVS firewall
+# checks them as they arrive and drops the replies as invalid, so only ICMP gets through. With
+# userspace TSO, OVS reads the tap's offload flags instead. vswitchd applies it at start, before instances.
+# Only on compute-only VMs: on the network node it breaks the router and DHCP ports and the farm link,
+# so all-in-one farms still drop instance TCP.
+text = path.read_text()
+marker = "    - {{ col: \"other_config\", name: \"hw-offload\", value: true, state: \"{{{{ 'present' if openvswitch_hw_offload | bool else 'absent' }}}}\" }}\n"
+patched = marker + "    - {{ col: \"other_config\", name: \"userspace-tso-enable\", value: true, state: \"{{{{ 'present' if ovs_datapath == 'netdev' and inventory_hostname in groups['compute'] and inventory_hostname not in groups['network'] else 'absent' }}}}\" }}\n"
+if patched not in text:
+    if text.count(marker) != 1:
+        raise RuntimeError("unexpected Kolla OVS other_config task; review the userspace TSO patch")
+    path.write_text(text.replace(marker, patched, 1))
 # The same kernel has no openvswitch module; farms run OVS with the userspace (netdev) datapath.
 path = Path("{VENV}/share/kolla-ansible/ansible/roles/openvswitch/tasks/config-host.yml")
 text = path.read_text()
@@ -887,7 +899,10 @@ done
     ) + r#"
 $os flavor show m1.tiny >/dev/null 2>&1 || $os flavor create --ram 512 --disk 1 --vcpus 1 m1.tiny >/dev/null
 step "Cirros 인스턴스 생성과 라우터 경유 ping 검증"
-$os security group rule create --ingress --protocol icmp --ethertype IPv4 default >/dev/null 2>&1 || true
+# Other projects get their own "default" group once Neutron sees them, so the name alone is ambiguous.
+sg=$($os security group list --project "$($os token issue -f value -c project_id)" -f value -c ID -c Name | awk '$2 == "default" {print $1}')
+$os security group rule create --ingress --protocol icmp --ethertype IPv4 "$sg" >/dev/null 2>&1 || true
+$os security group rule create --ingress --protocol tcp --dst-port 22 --ethertype IPv4 "$sg" >/dev/null 2>&1 || true
 arch=$(uname -m)
 case "$arch" in
   aarch64|arm64)
@@ -936,9 +951,16 @@ for _ in $(seq 60); do
   sleep 10
 done
 ip netns exec "qrouter-$router_id" ping -c3 -W2 "$fixed"
+# ICMP passes even when the OVS firewall drops TCP as invalid, so also open Cirros's SSH port.
+tcp=''
+for _ in $(seq 30); do
+  if ip netns exec "qrouter-$router_id" timeout 3 bash -c "echo > /dev/tcp/$fixed/22" 2>/dev/null; then tcp=ok; break; fi
+  sleep 5
+done
+[ -n "$tcp" ] || { echo "instance answered ping but not TCP port 22" >&2; exit 1; }
 extra_cleanup
 server_id=''; router_id=''; net_id=''
-echo "nova OK: $name at $fixed answered from the router"
+echo "nova OK: $name at $fixed answered ping and TCP from the router"
 "#
 }
 

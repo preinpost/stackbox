@@ -253,7 +253,23 @@ pub fn resolve_components(requested: &[String]) -> Result<Vec<&'static Component
 /// farm the compute VMs carry it.
 const NOVA_COMPUTE_MIB: u32 = 1024;
 
+/// Plans a new farm. Nova always gets a compute VM apart from the network node: on one VM,
+/// Neutron's userspace firewall drops instance TCP (see the OVS patch in kolla).
 pub fn plan(request: &PlanRequest) -> Result<Plan> {
+    let mut request = request.clone();
+    if request.computes == 0
+        && resolve_components(&request.components)?
+            .iter()
+            .any(|c| c.id == "nova")
+    {
+        request.computes = 1;
+    }
+    layout(&request)
+}
+
+/// Lays out the VMs exactly as requested, so farms and snapshots made before [`plan`] moved
+/// Nova off the all-in-one VM keep their layout.
+pub fn layout(request: &PlanRequest) -> Result<Plan> {
     if request.computes > MAX_COMPUTES {
         bail!("a farm has at most {MAX_COMPUTES} compute VMs");
     }
@@ -263,8 +279,9 @@ pub fn plan(request: &PlanRequest) -> Result<Plan> {
         requested.push("nova".into());
     }
     let components = resolve_components(&requested)?;
+    let computes = request.computes;
     let footprint = components.iter().map(|c| c.footprint_mib).sum::<u32>();
-    let nodes = if request.computes == 0 {
+    let nodes = if computes == 0 {
         let mut node = ALL_IN_ONE;
         node.memory_mib += footprint;
         vec![node]
@@ -272,23 +289,23 @@ pub fn plan(request: &PlanRequest) -> Result<Plan> {
         let mut control = CONTROL;
         control.memory_mib += footprint - NOVA_COMPUTE_MIB;
         std::iter::once(control)
-            .chain((1..=request.computes).map(|index| NodeSpec {
+            .chain((1..=computes).map(|index| NodeSpec {
                 index: Some(index),
                 ..COMPUTE
             }))
             .collect()
     };
     let mut warnings = catalog().constraints;
-    if request.computes > 0 {
+    if computes > 0 {
         warnings[0] = format!(
             "The farm runs its control plane, network node and Kolla on one control VM and Nova instances on {} compute VM(s), joined by the host's link switch.",
-            request.computes
+            computes
         );
         warnings.push("Multi-node farms cannot be frozen into snapshots yet.".into());
     }
     Ok(Plan {
         components: components.iter().map(|c| c.id.to_owned()).collect(),
-        computes: request.computes,
+        computes,
         memory_mib: nodes.iter().map(|n| u64::from(n.memory_mib)).sum(),
         disk_mib: nodes
             .iter()
@@ -782,12 +799,17 @@ mod tests {
         assert_eq!(urls["placement"], "http://farm.example:15022");
         assert_eq!(urls["horizon"], "http://farm.example:15023/");
         assert_eq!(urls["neutron"], "http://farm.example:15024");
+        // Nova gets a compute VM; snapshots from before that keep their all-in-one layout.
         let with_nova = plan(&request(&["nova"])).unwrap();
         assert_eq!(
             with_nova.components,
             ["keystone", "glance", "placement", "neutron", "nova"]
         );
-        assert_eq!(with_nova.memory_mib, 3072 + 256 + 2304 + 2048);
+        assert_eq!(with_nova.computes, 1);
+        assert_eq!(with_nova.memory_mib, 6656 + 3072);
+        let old_nova = layout(&request(&["nova"])).unwrap();
+        assert_eq!(old_nova.nodes.len(), 1);
+        assert_eq!(old_nova.memory_mib, 3072 + 256 + 2304 + 2048);
         assert_eq!(
             exposure.urls(Some(&with_nova.components))["nova"],
             "http://farm.example:15025/v2.1"
