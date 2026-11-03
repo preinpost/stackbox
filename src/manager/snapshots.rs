@@ -108,6 +108,9 @@ fn labels(snapshot: &SnapshotRecord) -> BTreeMap<String, String> {
     if let Some(note) = &snapshot.note {
         labels.insert(label::NOTE.into(), note.clone());
     }
+    if snapshot.plan.computes > 0 {
+        labels.insert(label::COMPUTES.into(), snapshot.plan.computes.to_string());
+    }
     labels
 }
 
@@ -254,14 +257,13 @@ impl FarmManager {
                     "farms imported from older versions cannot be frozen",
                 ));
             };
-            if plan.computes > 0 {
-                return Err(conflict("multi-node farms cannot be frozen yet"));
-            }
-            if farm.nodes.len() != 1
-                || farm.nodes[0].role != Some(Role::AllInOne)
-                || farm.nodes[0].status != "running"
-            {
-                return Err(conflict("the farm's VM must be running to freeze it"));
+            let layout_matches = if plan.computes > 0 {
+                crate::farm::observed_layout(&farm.nodes) == Some(plan.computes)
+            } else {
+                farm.nodes.len() == 1 && farm.nodes[0].role == Some(Role::AllInOne)
+            };
+            if !layout_matches || farm.nodes.iter().any(|node| node.status != "running") {
+                return Err(conflict("the farm's VMs must be running to freeze it"));
             }
             let snapshot = SnapshotRecord {
                 id: request.id.clone(),
@@ -274,6 +276,7 @@ impl FarmManager {
                 source_exposure: exposure.clone(),
                 note: request.note.clone().filter(|n| !n.trim().is_empty()),
                 reference: None,
+                nodes: Vec::new(),
                 size_bytes: None,
                 archive: None,
                 transfer: None,
@@ -322,6 +325,7 @@ impl FarmManager {
             s.status = SnapshotStatus::Ready;
             s.reference = Some(frozen.reference);
             s.size_bytes = frozen.size_bytes;
+            s.nodes = frozen.nodes;
         })?;
         self.log(
             &farm.id,
@@ -371,7 +375,13 @@ impl FarmManager {
         )?;
         let backend = self.backend_for(&farm)?;
         let nodes = backend
-            .restore(farm.id.clone(), reference, plan.clone(), exposure.clone())
+            .restore(
+                farm.id.clone(),
+                reference,
+                snapshot.nodes.clone(),
+                plan.clone(),
+                exposure.clone(),
+            )
             .await?;
         self.update(|state| {
             state.farms.get_mut(&farm.id).context("farm missing")?.nodes = nodes;
@@ -447,6 +457,9 @@ impl FarmManager {
                 (SnapshotStatus::Ready, Some(reference)) => reference.clone(),
                 _ => return Err(conflict(format!("snapshot '{id}' is not ready"))),
             };
+            if !snapshot.nodes.is_empty() {
+                return Err(conflict("multi-node snapshots cannot be exported yet"));
+            }
             snapshot.status = SnapshotStatus::Exporting;
             snapshot.error = None;
             snapshot.transfer = match &target {
@@ -709,6 +722,7 @@ impl FarmManager {
                 },
                 note: None,
                 reference: None,
+                nodes: Vec::new(),
                 size_bytes: None,
                 archive: None,
                 transfer,
@@ -811,7 +825,7 @@ impl FarmManager {
         self.remove_snapshot(id, true).await
     }
     async fn remove_snapshot(&self, id: &str, forget: bool) -> Result<()> {
-        let (reference, previous) = self.update(|state| {
+        let (references, previous) = self.update(|state| {
             self.ensure_accepting()?;
             if state
                 .jobs
@@ -832,14 +846,25 @@ impl FarmManager {
             let previous = snapshot.status;
             snapshot.status = SnapshotStatus::Deleting;
             snapshot.updated_at = now();
-            Ok((snapshot.reference.clone(), previous))
+            let references: Vec<String> = if snapshot.nodes.is_empty() {
+                snapshot.reference.iter().cloned().collect()
+            } else {
+                snapshot.nodes.iter().map(|n| n.reference.clone()).collect()
+            };
+            Ok((references, previous))
         })?;
-        if let Some(reference) = reference.filter(|_| !forget)
-            && let Err(error) = match self.local_backend() {
-                Ok(backend) => backend.remove_snapshot(reference).await,
-                Err(error) => Err(error),
+        let removed = async {
+            if forget {
+                return Ok(());
             }
-        {
+            let backend = self.local_backend()?;
+            for reference in references {
+                backend.remove_snapshot(reference).await?;
+            }
+            Ok::<_, anyhow::Error>(())
+        }
+        .await;
+        if let Err(error) = removed {
             let message = format!("{error:#}");
             self.update_snapshot(id, |s| {
                 s.status = previous;

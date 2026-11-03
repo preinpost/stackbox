@@ -932,6 +932,14 @@ export interface components {
       /** Format: int64 */
       timestamp: number;
     };
+    /** @description One VM's disks in a multi-node snapshot. */
+    NodeSnapshot: {
+      /** @description The VM it was taken from: `control`, `compute-1`, ... */
+      node: string;
+      reference: string;
+      /** Format: int64 */
+      size_bytes?: number | null;
+    };
     NodeSpec: {
       /**
        * Format: int32
@@ -1095,11 +1103,15 @@ export interface components {
       deployed: boolean;
       error?: string | null;
       id: string;
+      nodes?: components["schemas"]["NodeSnapshot"][];
       note?: string | null;
       plan: components["schemas"]["Plan"];
       /** @description Host OS that froze it (`macos`, `linux`); recorded for the operator, not enforced. */
       platform?: string | null;
-      /** @description msb snapshot reference; set once captured or imported. */
+      /**
+       * @description msb snapshot reference; set once captured or imported. A multi-node snapshot's is
+       *     its control VM's, and `nodes` holds every VM's.
+       */
       reference?: string | null;
       /** Format: int64 */
       size_bytes?: number | null;

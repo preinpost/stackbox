@@ -63,6 +63,8 @@ pub struct NodeSetup<'a> {
     /// The farm's other VMs, as (address, hostname).
     pub peers: Vec<(String, String)>,
     pub links: Vec<LinkConf>,
+    /// msb snapshot to boot from instead of the golden image, as when restoring a farm.
+    pub source: Option<String>,
 }
 
 // msb's default root is an overlay; Docker's overlayfs cannot nest on it,
@@ -198,6 +200,11 @@ pub async fn install_links(sandbox: &Sandbox, binary: &Path, links: &[LinkConf])
 chmod 755 {GUEST_AGENT}
 chmod 600 /etc/farm/link-*.conf
 systemctl daemon-reload
+# A VM booted with its links off (a restored snapshot) may have got farm-identity's dummy
+# farm0, which would keep the link from creating its TAP.
+for dev in {devs}; do
+  if ip -d link show "$dev" 2>/dev/null | grep -qw dummy; then ip link del "$dev"; fi
+done
 systemctl enable {units}
 systemctl restart {units}
 for dev in {devs}; do
@@ -223,8 +230,11 @@ pub async fn create_node(farm_id: &str, spec: NodeSpec, setup: &NodeSetup<'_>) -
     let name = node_name(farm_id, spec.role, spec.index);
     let hostname = spec.hostname();
     let os = golden::DEFAULT_OS;
-    // The golden snapshot supplies the root and container disks.
-    let image = golden::ensure(os, &spec).await?;
+    // The golden snapshot, or the farm snapshot restored from, supplies the root and container disks.
+    let image = match &setup.source {
+        Some(reference) => reference.clone(),
+        None => golden::ensure(os, &spec).await?,
+    };
     let build = || {
         let builder = Sandbox::builder(&name)
             .override_snapshot(&image)

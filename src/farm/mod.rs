@@ -18,7 +18,7 @@ pub use node::{
     wait_until_booted,
 };
 pub use snapshot::{
-    FrozenSnapshot, ImportedSnapshot, export_snapshot, freeze_farm, import_snapshot,
+    FrozenSnapshot, ImportedSnapshot, NodeSnapshot, export_snapshot, freeze_farm, import_snapshot,
     remove_snapshot, restore_farm,
 };
 pub use template::{
@@ -33,19 +33,24 @@ pub const NETWORKS: [(&str, &str, bool); 2] = [("farm0", "mgmt", true), ("farm1"
 
 /// Create the farm's single all-in-one VM and confirm it boots.
 pub async fn create_farm(farm_id: &str, template: &[NodeSpec]) -> Result<Vec<FarmNode>> {
-    create_farm_with(farm_id, template, None, &[], None).await
+    create_farm_with(farm_id, template, None, &[], None, &[]).await
 }
 
 /// `components` selects which service ports the farm publishes. A multi-node farm needs
-/// `switch`, the host's link switch, to join its VMs.
+/// `switch`, the host's link switch, to join its VMs. `sources` are msb snapshots to boot
+/// each VM of `template` from, in its order; empty boots them all from the golden image.
 pub async fn create_farm_with(
     farm_id: &str,
     template: &[NodeSpec],
     exposure: Option<&crate::model::Exposure>,
     components: &[String],
     switch: Option<&crate::link::host::Switch>,
+    sources: &[String],
 ) -> Result<Vec<FarmNode>> {
     let computes = layout(template)?;
+    if !sources.is_empty() && sources.len() != template.len() {
+        bail!("{} snapshots for {} VMs", sources.len(), template.len());
+    }
     if !farm_handles(farm_id).await?.is_empty() {
         bail!("farm '{farm_id}' already exists");
     }
@@ -53,6 +58,7 @@ pub async fn create_farm_with(
         let setup = NodeSetup {
             exposure,
             public_ports: public_ports(components),
+            source: sources.first().cloned(),
             ..Default::default()
         };
         return Ok(vec![create_node(farm_id, template[0], &setup).await?]);
@@ -60,7 +66,7 @@ pub async fn create_farm_with(
     let switch = switch.context("multi-node farms need the host's link switch")?;
     let url = switch.ensure(&switch_command()?).await?;
     let mut setups = Vec::new();
-    for spec in template {
+    for (i, spec) in template.iter().enumerate() {
         let suffix = suffix(spec.role, spec.index).context("multi-node VMs have a suffix")?;
         let mut links = Vec::new();
         for (dev, network, addressed) in NETWORKS {
@@ -90,6 +96,7 @@ pub async fn create_farm_with(
                 .map(|other| (other.address(), other.hostname()))
                 .collect(),
             links,
+            source: sources.get(i).cloned(),
         });
     }
     try_join_all(

@@ -1,8 +1,9 @@
-//! Disk snapshots of a farm's all-in-one VM, and farms restored from them.
+//! Disk snapshots of a farm's VMs, and farms restored from them.
 
 use std::{collections::BTreeMap, path::Path, time::Duration};
 
 use anyhow::{Context, Result, bail};
+use futures::future::{join_all, try_join_all};
 use microsandbox::snapshot::{LoadOpts, SaveOpts, Snapshot, SnapshotReference};
 use microsandbox::{NetworkPolicy, NetworkProfile, Sandbox};
 
@@ -10,8 +11,8 @@ use super::node::{
     FARM_LABEL, FarmNode, GUEST_HOSTNAME, IDENTITY_CONF, ROLE_LABEL, connect, create_nested,
     node_name, wait_until_booted,
 };
-use super::template::NodeSpec;
-use crate::model::Exposure;
+use super::template::{NodeSpec, Role, suffix};
+use crate::model::{Exposure, snapshot_labels};
 use crate::shell::run;
 
 /// Clean shutdown of every Kolla container fits well within this.
@@ -23,6 +24,17 @@ pub struct FrozenSnapshot {
     pub size_bytes: Option<u64>,
     /// The capture succeeded, but the source VM did not start again.
     pub restart_error: Option<String>,
+    /// A multi-node farm's VMs, control first; `reference` is then the control VM's.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub nodes: Vec<NodeSnapshot>,
+}
+/// One VM's disks in a multi-node snapshot.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
+pub struct NodeSnapshot {
+    /// The VM it was taken from: `control`, `compute-1`, ...
+    pub node: String,
+    pub reference: String,
+    pub size_bytes: Option<u64>,
 }
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ImportedSnapshot {
@@ -43,6 +55,10 @@ pub async fn freeze_farm(
     snapshot_id: &str,
     labels: &BTreeMap<String, String>,
 ) -> Result<FrozenSnapshot> {
+    let nodes = super::get_farm(farm_id).await?;
+    if super::observed_layout(&nodes).is_some_and(|computes| computes > 0) {
+        return freeze_nodes(farm_id, snapshot_id, labels, nodes).await;
+    }
     let name = super::all_in_one_name(farm_id).await?;
     let sandbox = connect(&name).await?;
     let identity = run(
@@ -75,6 +91,7 @@ pub async fn freeze_farm(
             reference: snapshot.reference().value().to_owned(),
             size_bytes: snapshot.size_bytes(),
             restart_error: None,
+            nodes: Vec::new(),
         })
     }
     .await;
@@ -90,6 +107,144 @@ pub async fn freeze_farm(
             Err(e.context(format!("{name} also did not start again: {restart}")))
         }
     }
+}
+
+/// The `farm-link@` units of a multi-node VM's links.
+fn link_units() -> String {
+    super::NETWORKS
+        .iter()
+        .map(|(dev, _, _)| format!("farm-link@{dev}"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+async fn run_in(name: &str, script: &str) -> Result<()> {
+    let sandbox = connect(name).await?;
+    let result = run(&sandbox, script).await;
+    sandbox.detach().await;
+    result.map(drop).with_context(|| format!("{name}: {script}"))
+}
+
+/// Freeze a multi-node farm: computes stop before the control VM, so nova-compute leaves
+/// RabbitMQ before it goes, every VM's disks are captured into the snapshot's group, and the
+/// control VM starts again before the computes.
+///
+/// A restored VM must not join its source farm's links: the switch hands a port to whoever
+/// connects to it last. So the links are disabled on disk while frozen; the source VMs
+/// enable them again after they boot, and a restored copy only once it has its own ports.
+async fn freeze_nodes(
+    farm_id: &str,
+    snapshot_id: &str,
+    labels: &BTreeMap<String, String>,
+    mut nodes: Vec<super::FarmNode>,
+) -> Result<FrozenSnapshot> {
+    nodes.sort_by_key(|node| (node.role != Some(Role::Control), node.index));
+    let vms: Vec<(String, String)> = nodes
+        .iter()
+        .map(|node| {
+            let role = node.role.context("multi-node VM has no role")?;
+            let suffix = suffix(role, node.index).context("multi-node VM has no suffix")?;
+            Ok((node_name(farm_id, role, node.index), suffix))
+        })
+        .collect::<Result<_>>()?;
+    let units = link_units();
+    let (disable, enable) = (
+        format!("systemctl disable {units}"),
+        format!("systemctl enable {units}"),
+    );
+    let disabled = try_join_all(vms.iter().map(|(name, _)| run_in(name, &disable))).await;
+    if let Err(error) = disabled {
+        join_all(vms.iter().map(|(name, _)| run_in(name, &enable))).await;
+        return Err(error.context("disable the links before freezing"));
+    }
+    let (control, computes) = vms.split_first().context("farm has no VMs")?;
+    let stopped = async {
+        try_join_all(computes.iter().map(|(name, _)| stop(name))).await?;
+        stop(&control.0).await
+    }
+    .await;
+    let captured = match stopped {
+        Ok(()) => capture_nodes(snapshot_id, labels, &vms).await,
+        Err(error) => Err(error),
+    };
+    // Bring the source farm back whether or not the capture succeeded.
+    let mut restart_errors = Vec::new();
+    if let Err(error) = start_with_links(&control.0, &units).await {
+        restart_errors.push(format!("{error:#}"));
+    }
+    for result in join_all(
+        computes
+            .iter()
+            .map(|(name, _)| start_with_links(name, &units)),
+    )
+    .await
+    {
+        if let Err(error) = result {
+            restart_errors.push(format!("{error:#}"));
+        }
+    }
+    let restart_error = (!restart_errors.is_empty()).then(|| restart_errors.join("; "));
+    match (captured, restart_error) {
+        (Ok(nodes), restart_error) => Ok(FrozenSnapshot {
+            reference: nodes[0].reference.clone(),
+            size_bytes: nodes.iter().map(|n| n.size_bytes).sum(),
+            restart_error,
+            nodes,
+        }),
+        (Err(e), None) => Err(e),
+        (Err(e), Some(restart)) => Err(e.context(format!("the farm also did not start again: {restart}"))),
+    }
+}
+
+async fn stop(name: &str) -> Result<()> {
+    Sandbox::get(name)
+        .await
+        .with_context(|| format!("find {name}"))?
+        .stop_with_timeout(STOP_TIMEOUT)
+        .await
+        .with_context(|| format!("stop {name}"))
+}
+
+/// Capture each VM in order, removing what was captured if one fails.
+async fn capture_nodes(
+    snapshot_id: &str,
+    labels: &BTreeMap<String, String>,
+    vms: &[(String, String)],
+) -> Result<Vec<NodeSnapshot>> {
+    let mut nodes = Vec::new();
+    for (name, suffix) in vms {
+        let mut builder = Snapshot::builder(format!("{snapshot_id}-{suffix}"))
+            .group(group(snapshot_id))
+            .from_sandbox(name)
+            .label(snapshot_labels::NODE, suffix);
+        for (key, value) in labels {
+            builder = builder.label(key, value);
+        }
+        match builder.create().await {
+            Ok(snapshot) => nodes.push(NodeSnapshot {
+                node: suffix.clone(),
+                reference: snapshot.reference().value().to_owned(),
+                size_bytes: snapshot.size_bytes(),
+            }),
+            Err(error) => {
+                for node in &nodes {
+                    let _ = remove_snapshot(&node.reference).await;
+                }
+                return Err(anyhow::Error::from(error).context(format!("capture {name}")));
+            }
+        }
+    }
+    Ok(nodes)
+}
+
+async fn start_with_links(name: &str, units: &str) -> Result<()> {
+    start(name).await?;
+    // farm-identity ran without farm0 at boot, so publish the ports again once it exists.
+    run_in(
+        name,
+        &format!("for dev in farm0 farm1; do if ip -d link show $dev 2>/dev/null | grep -qw dummy; then ip link del $dev; fi; done\nsystemctl enable --now {units} && systemctl restart farm-identity farm-hostname"),
+    )
+    .await
 }
 
 async fn start(name: &str) -> Result<()> {

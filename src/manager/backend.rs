@@ -4,7 +4,7 @@ use crate::{
     kolla::{self, EventSink, Phase},
     model::{Datastore, Endpoints, Exposure, Plan},
 };
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use futures::future::BoxFuture;
 use std::{
     collections::BTreeMap,
@@ -49,10 +49,13 @@ pub trait Backend: Send + Sync + 'static {
     ) -> BoxFuture<'_, Result<FrozenSnapshot>> {
         unsupported()
     }
+    /// Boot the farm from a snapshot: `reference` for an all-in-one VM, `nodes` for a
+    /// multi-node farm's VMs.
     fn restore(
         &self,
         _id: String,
         _reference: String,
+        _nodes: Vec<farm::NodeSnapshot>,
         _plan: Plan,
         _exposure: Exposure,
     ) -> BoxFuture<'_, Result<Vec<FarmNode>>> {
@@ -125,6 +128,7 @@ impl Backend for MicrosandboxBackend {
                 Some(&exposure),
                 &plan.components,
                 Some(&self.switch),
+                &[],
             )
             .await
         })
@@ -221,10 +225,35 @@ PY"#).await;
         &self,
         id: String,
         reference: String,
+        nodes: Vec<farm::NodeSnapshot>,
         plan: Plan,
         exposure: Exposure,
     ) -> BoxFuture<'_, Result<Vec<FarmNode>>> {
         Box::pin(async move {
+            if plan.computes > 0 {
+                // Each VM boots from the disks taken from the VM in its place.
+                let sources = plan
+                    .nodes
+                    .iter()
+                    .map(|spec| {
+                        let suffix = farm::suffix(spec.role, spec.index);
+                        nodes
+                            .iter()
+                            .find(|n| Some(&n.node) == suffix.as_ref())
+                            .map(|n| n.reference.clone())
+                            .with_context(|| format!("snapshot has no disks for {suffix:?}"))
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                return farm::create_farm_with(
+                    &id,
+                    &plan.nodes,
+                    Some(&exposure),
+                    &plan.components,
+                    Some(&self.switch),
+                    &sources,
+                )
+                .await;
+            }
             let [spec] = plan.nodes[..] else {
                 anyhow::bail!("snapshots hold exactly one all-in-one VM");
             };

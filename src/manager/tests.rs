@@ -141,16 +141,34 @@ impl Backend for Fake {
             if self.fail.load(Ordering::SeqCst) {
                 bail!("intentional freeze failure");
             }
-            assert!(self.farms.lock().unwrap().contains_key(&id));
-            let reference = format!("fake/{snapshot_id}");
-            self.snapshots
-                .lock()
-                .unwrap()
-                .insert(reference.clone(), labels);
+            let vms = self.farms.lock().unwrap()[&id].clone();
+            // A multi-node farm's VMs are captured one by one, control first.
+            let nodes: Vec<_> = vms
+                .iter()
+                .filter_map(|vm| crate::farm::suffix(vm.role?, vm.index))
+                .map(|node| crate::farm::NodeSnapshot {
+                    reference: format!("fake/{snapshot_id}-{node}"),
+                    node,
+                    size_bytes: Some(4096),
+                })
+                .collect();
+            let mut snapshots = self.snapshots.lock().unwrap();
+            for node in &nodes {
+                snapshots.insert(node.reference.clone(), labels.clone());
+            }
+            let reference = match nodes.first() {
+                Some(control) => control.reference.clone(),
+                None => {
+                    let reference = format!("fake/{snapshot_id}");
+                    snapshots.insert(reference.clone(), labels);
+                    reference
+                }
+            };
             Ok(crate::farm::FrozenSnapshot {
                 reference,
-                size_bytes: Some(4096),
+                size_bytes: Some(4096 * nodes.len().max(1) as u64),
                 restart_error: None,
+                nodes,
             })
         })
     }
@@ -158,11 +176,15 @@ impl Backend for Fake {
         &self,
         id: String,
         reference: String,
+        nodes: Vec<crate::farm::NodeSnapshot>,
         plan: Plan,
         exposure: Exposure,
     ) -> BoxFuture<'_, Result<Vec<FarmNode>>> {
         Box::pin(async move {
             assert!(self.snapshots.lock().unwrap().contains_key(&reference));
+            for node in &nodes {
+                assert!(self.snapshots.lock().unwrap().contains_key(&node.reference));
+            }
             self.create(id, plan, exposure).await
         })
     }
@@ -1222,19 +1244,47 @@ async fn multi_node_farms_are_created_deployed_and_faulted_per_vm() {
             .unwrap_err()
             .is::<Conflict>()
     );
-    // Nor can a multi-node farm be frozen yet.
+    // A multi-node farm freezes every VM and restores into a farm of the same layout.
+    let job = manager
+        .freeze(
+            "mn",
+            SnapshotRequest {
+                id: "mn-snap".into(),
+                note: None,
+            },
+        )
+        .unwrap();
+    assert_eq!(done(&manager, &job).await.status, JobStatus::Succeeded);
+    let snapshot = manager.snapshot("mn-snap").unwrap();
+    assert_eq!(snapshot.plan.computes, 2);
+    let nodes: Vec<_> = snapshot.nodes.iter().map(|n| n.node.as_str()).collect();
+    assert_eq!(nodes, ["control", "compute-1", "compute-2"]);
+    assert_eq!(snapshot.reference.as_deref(), Some("fake/mn-snap-control"));
+    assert_eq!(
+        backend.snapshots.lock().unwrap()["fake/mn-snap-compute-2"][crate::model::snapshot_labels::COMPUTES],
+        "2"
+    );
     assert!(
         manager
-            .freeze(
-                "mn",
-                SnapshotRequest {
-                    id: "mn-snap".into(),
-                    note: None,
-                },
-            )
+            .export_snapshot("mn-snap", ExportRequest::default())
             .unwrap_err()
             .is::<Conflict>()
     );
+    let job = manager
+        .create(CreateRequest {
+            snapshot_id: Some("mn-snap".into()),
+            ..request("mn2")
+        })
+        .unwrap();
+    assert_eq!(done(&manager, &job).await.status, JobStatus::Succeeded);
+    let restored = manager.get("mn2").unwrap();
+    assert_eq!(restored.plan.as_ref().unwrap().computes, 2);
+    assert_eq!(restored.status, FarmStatus::Ready);
+    assert_eq!(restored.nodes.len(), 3);
+    let job = manager.delete("mn2").unwrap();
+    assert_eq!(done(&manager, &job).await.status, JobStatus::Succeeded);
+    manager.delete_snapshot("mn-snap").await.unwrap();
+    assert!(backend.snapshots.lock().unwrap().is_empty());
     // Over HTTP too.
     let app = api::router(manager.clone(), None);
     let response = app

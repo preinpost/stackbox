@@ -3070,6 +3070,31 @@
           }
         }
       },
+      "NodeSnapshot": {
+        "type": "object",
+        "description": "One VM's disks in a multi-node snapshot.",
+        "required": [
+          "node",
+          "reference"
+        ],
+        "properties": {
+          "node": {
+            "type": "string",
+            "description": "The VM it was taken from: `control`, `compute-1`, ..."
+          },
+          "reference": {
+            "type": "string"
+          },
+          "size_bytes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
       "NodeSpec": {
         "type": "object",
         "required": [
@@ -3552,6 +3577,12 @@
           "id": {
             "type": "string"
           },
+          "nodes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NodeSnapshot"
+            }
+          },
           "note": {
             "type": [
               "string",
@@ -3573,7 +3604,7 @@
               "string",
               "null"
             ],
-            "description": "msb snapshot reference; set once captured or imported."
+            "description": "msb snapshot reference; set once captured or imported. A multi-node snapshot's is\nits control VM's, and `nodes` holds every VM's."
           },
           "size_bytes": {
             "type": [

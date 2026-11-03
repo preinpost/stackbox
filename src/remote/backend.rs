@@ -159,6 +159,7 @@ impl Backend for AgentBackend {
         &self,
         id: String,
         reference: String,
+        nodes: Vec<crate::farm::NodeSnapshot>,
         plan: Plan,
         exposure: Exposure,
     ) -> BoxFuture<'_, Result<Vec<FarmNode>>> {
@@ -166,6 +167,7 @@ impl Backend for AgentBackend {
             farm_id: id,
             generation: self.generation.clone(),
             reference,
+            nodes,
             plan,
             exposure,
         }))

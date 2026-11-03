@@ -76,6 +76,9 @@ pub enum Operation {
         farm_id: String,
         generation: String,
         reference: String,
+        /// A multi-node snapshot's VMs.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        nodes: Vec<crate::farm::NodeSnapshot>,
         plan: Plan,
         exposure: Exposure,
     },

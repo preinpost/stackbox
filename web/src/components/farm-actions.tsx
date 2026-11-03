@@ -286,7 +286,7 @@ export function CreateFarmForm({
             />
             <p className="field-hint mt-2">
               {computes > 0
-                ? "control VM이 API·DB·MQ·네트워크 노드와 Kolla를 맡고, compute VM에서 Nova 인스턴스가 실행됩니다. VM끼리는 호스트의 링크 스위치로 연결되며, 상세 화면에서 compute VM을 고립시켜 evacuate를 시험할 수 있습니다. 아직 스냅샷은 지원하지 않습니다."
+                ? "control VM이 API·DB·MQ·네트워크 노드와 Kolla를 맡고, compute VM에서 Nova 인스턴스가 실행됩니다. VM끼리는 호스트의 링크 스위치로 연결되며, 상세 화면에서 compute VM을 고립시켜 evacuate를 시험할 수 있습니다."
                 : "모든 서비스를 VM 한 대에 설치합니다. Nova를 고르면 compute VM이 1대 붙습니다."}
             </p>
           </div>

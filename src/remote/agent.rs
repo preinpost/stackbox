@@ -714,6 +714,7 @@ impl Agent {
             }
             Operation::Restore {
                 reference,
+                nodes,
                 plan: requested,
                 exposure,
                 ..
@@ -730,6 +731,7 @@ impl Agent {
                         .restore(
                             id.into(),
                             reference.clone(),
+                            nodes.clone(),
                             requested.clone(),
                             exposure.clone(),
                         )

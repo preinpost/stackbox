@@ -301,7 +301,6 @@ pub fn layout(request: &PlanRequest) -> Result<Plan> {
             "The farm runs its control plane, network node and Kolla on one control VM and Nova instances on {} compute VM(s), joined by the host's link switch.",
             computes
         );
-        warnings.push("Multi-node farms cannot be frozen into snapshots yet.".into());
     }
     Ok(Plan {
         components: components.iter().map(|c| c.id.to_owned()).collect(),
@@ -671,8 +670,11 @@ pub struct SnapshotRecord {
     /// Public ports the source farm's catalog was registered with; restores rewrite them.
     pub source_exposure: Exposure,
     pub note: Option<String>,
-    /// msb snapshot reference; set once captured or imported.
+    /// msb snapshot reference; set once captured or imported. A multi-node snapshot's is
+    /// its control VM's, and `nodes` holds every VM's.
     pub reference: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub nodes: Vec<crate::farm::NodeSnapshot>,
     pub size_bytes: Option<u64>,
     /// Most recent export.
     pub archive: Option<SnapshotArchive>,
@@ -695,6 +697,10 @@ pub mod snapshot_labels {
     pub const ARCH: &str = "farm.snapshot.arch";
     pub const PLATFORM: &str = "farm.snapshot.platform";
     pub const NOTE: &str = "farm.snapshot.note";
+    /// Compute VMs of a multi-node snapshot's farm; absent on all-in-one snapshots.
+    pub const COMPUTES: &str = "farm.snapshot.computes";
+    /// The VM a multi-node snapshot's disk was taken from (`control`, `compute-1`, ...).
+    pub const NODE: &str = "farm.snapshot.node";
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]

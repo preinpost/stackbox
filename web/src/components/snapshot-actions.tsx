@@ -35,7 +35,8 @@ import {
   dateTime,
   hostNotice,
   hostReady,
-  isAllInOneFarm,
+  farmNodesRunning,
+  isDeployableFarm,
   memory,
   snapshotHost,
 } from "../lib";
@@ -80,10 +81,9 @@ export const canFreeze = (farm: Farm, localHostId?: string) =>
   farm.host_id === localHostId &&
   !farm.active_job &&
   Boolean(farm.plan && farm.exposure) &&
-  isAllInOneFarm(farm) &&
+  isDeployableFarm(farm) &&
   ["created", "ready", "failed"].includes(farm.status) &&
-  farm.nodes.length === 1 &&
-  farm.nodes[0].status === "running";
+  farmNodesRunning(farm);
 
 export function FreezeFarmDialog({ farm }: { farm: Farm }) {
   const client = useQueryClient();
@@ -182,7 +182,8 @@ export function FreezeFarmDialog({ farm }: { farm: Farm }) {
             </label>
             <div className="warning-notice">
               데이터베이스를 깨끗하게 저장하기 위해 VM을 잠시 정지했다가 다시
-              시작합니다. 서비스가 다시 응답할 때까지 몇 분 정도 걸립니다. 이
+              시작합니다. 여러 VM farm은 compute를 먼저 멈추고 control을 먼저
+              켭니다. 서비스가 다시 응답할 때까지 몇 분 정도 걸립니다. 이
               스냅샷은{" "}
               {snapshotHost({
                 arch: host.data?.arch ?? undefined,
@@ -475,7 +476,18 @@ export function ExportSnapshotDialog({ snapshot }: { snapshot: Snapshot }) {
   return (
     <Dialog.Root open={dialog.open} onOpenChange={dialog.onOpenChange}>
       <Dialog.Trigger
-        render={<Button disabled={snapshot.status !== "ready"} />}
+        render={
+          <Button
+            disabled={
+              snapshot.status !== "ready" || Boolean(snapshot.nodes?.length)
+            }
+          />
+        }
+        title={
+          snapshot.nodes?.length
+            ? "여러 VM 스냅샷은 아직 내보낼 수 없습니다."
+            : undefined
+        }
       >
         <Download size={14} />
         내보내기
