@@ -325,6 +325,7 @@ fn request(id: &str) -> CreateRequest {
         host_id: Some("local".into()),
         components: vec![],
         computes: 0,
+        compute: None,
         external_host: "localhost".into(),
         owner: Some("test".into()),
         expires_at: None,
@@ -1264,7 +1265,8 @@ async fn multi_node_farms_are_created_deployed_and_faulted_per_vm() {
     assert_eq!(nodes, ["control", "compute-1", "compute-2"]);
     assert_eq!(snapshot.reference.as_deref(), Some("fake/mn-snap-control"));
     assert_eq!(
-        backend.snapshots.lock().unwrap()["fake/mn-snap-compute-2"][crate::model::snapshot_labels::COMPUTES],
+        backend.snapshots.lock().unwrap()["fake/mn-snap-compute-2"]
+            [crate::model::snapshot_labels::COMPUTES],
         "2"
     );
     assert!(

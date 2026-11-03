@@ -238,6 +238,7 @@ impl Agent {
         let canonical = layout(&PlanRequest {
             components: requested.components.clone(),
             computes: requested.computes,
+            compute: requested.compute,
         })?;
         ensure!(
             serde_json::to_value(requested)? == serde_json::to_value(&canonical)?,
@@ -257,6 +258,7 @@ impl Agent {
             host_id: None,
             components: requested.components.clone(),
             computes: requested.computes,
+            compute: requested.compute,
             external_host: exposure.host.clone(),
             owner: None,
             expires_at: None,

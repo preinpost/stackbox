@@ -24,6 +24,7 @@ import {
   hostQuery,
   hostsQuery,
   keys,
+  type ComputeSize,
   type Farm,
   type Job,
   type Phase,
@@ -66,6 +67,14 @@ function publicHostName(hostId: string, hosts: RemoteHost[] = []) {
   if (chosen?.kind === "local") return "localhost";
   return chosen && /^[a-z0-9.-]+$/i.test(chosen.address) ? chosen.address : "";
 }
+/** Compute VM sizes the create form offers. Few disk sizes keep few golden images per host. */
+export const computeSizes: { name: string; size: ComputeSize }[] = [
+  { name: "기본", size: { cpus: 2, memory_mib: 3072, disk_mib: 32768 } },
+  { name: "중간", size: { cpus: 4, memory_mib: 6144, disk_mib: 65536 } },
+  { name: "큰", size: { cpus: 4, memory_mib: 10240, disk_mib: 65536 } },
+  { name: "최대", size: { cpus: 8, memory_mib: 16384, disk_mib: 131072 } },
+];
+
 export function CreateFarmDialog({
   prominent = false,
   hostId,
@@ -125,6 +134,8 @@ export function CreateFarmForm({
   const [selected, setSelected] = useState<string[]>([]);
   // Compute VMs beside a control VM; 0 is one all-in-one VM. Compute VMs bring Nova.
   const [computes, setComputes] = useState(0);
+  const [sizeIndex, setSizeIndex] = useState(0);
+  const compute = computes > 0 ? computeSizes[sizeIndex].size : undefined;
   const requested =
     computes > 0 && !selected.includes("nova")
       ? [...selected, "nova"]
@@ -143,8 +154,8 @@ export function CreateFarmForm({
     requested,
   );
   const plan = useQuery({
-    queryKey: ["plan", components, computes],
-    queryFn: ({ signal }) => api.plan(components, computes, signal),
+    queryKey: ["plan", components, computes, compute],
+    queryFn: ({ signal }) => api.plan(components, computes, signal, compute),
     enabled: catalog.isSuccess,
     staleTime: Infinity,
   });
@@ -183,6 +194,7 @@ export function CreateFarmForm({
             id: name,
             components,
             computes,
+            ...(compute ? { compute } : {}),
             external_host: hostName,
             host_id: hostId,
             ...(owner.trim() ? { owner: owner.trim() } : {}),
@@ -290,6 +302,27 @@ export function CreateFarmForm({
                 : "모든 서비스를 VM 한 대에 설치합니다. Nova를 고르면 compute VM이 1대 붙습니다."}
             </p>
           </div>
+          {computes > 0 && (
+            <div>
+              <span className="field-label">Compute VM 사양</span>
+              <SelectInput
+                value={String(sizeIndex)}
+                onChange={(value) => setSizeIndex(Number(value))}
+                disabled={mutation.isPending}
+                label="Compute VM 사양"
+                items={computeSizes.map(({ name, size }, index) => ({
+                  value: String(index),
+                  label: `${name} · ${size.cpus} vCPU · 메모리 ${memory(size.memory_mib)} · 디스크 ${memory(size.disk_mib)}`,
+                }))}
+              />
+              <p className="field-hint mt-2">
+                compute VM마다 같은 사양입니다. nova-compute·libvirt·OVS가 약
+                0.8 GiB를 쓰고 나머지가 인스턴스 몫입니다. 인스턴스 디스크는
+                디스크 크기 안에 만들어지며, 처음 쓰는 디스크 크기는 호스트에서
+                golden image를 한 번 더 만듭니다(약 35초).
+              </p>
+            </div>
+          )}
           <div>
             <span className="field-label">OpenStack 서비스</span>
             <div className="component-options">

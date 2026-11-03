@@ -163,6 +163,7 @@ fn parse_labels(labels: &BTreeMap<String, String>) -> Result<Imported> {
         plan: layout(&PlanRequest {
             components,
             computes: 0,
+            compute: None,
         })?,
         deployed: get(label::DEPLOYED)? == "true",
         source_exposure: Exposure {
@@ -851,7 +852,12 @@ impl FarmManager {
             } else {
                 // The control VM's disks were captured first and head the group, which msb
                 // removes only once it is the last member.
-                snapshot.nodes.iter().rev().map(|n| n.reference.clone()).collect()
+                snapshot
+                    .nodes
+                    .iter()
+                    .rev()
+                    .map(|n| n.reference.clone())
+                    .collect()
             };
             Ok((references, previous))
         })?;

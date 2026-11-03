@@ -614,6 +614,27 @@ export interface components {
       required: boolean;
       requires_data_plane: boolean;
     };
+    /** @description A compute VM's size. Omitted fields keep the default compute VM's value. */
+    ComputeSize: {
+      /**
+       * Format: int32
+       * @description vCPUs, 1-16.
+       * @default 2
+       */
+      cpus: number;
+      /**
+       * Format: int32
+       * @description Each container disk, 16384-524288 MiB; Nova keeps instance disks on Docker's.
+       * @default 32768
+       */
+      disk_mib: number;
+      /**
+       * Format: int32
+       * @description Guest memory, 3072-65536 MiB; nova-compute, libvirt and OVS take about 0.8 GiB of it.
+       * @default 3072
+       */
+      memory_mib: number;
+    };
     ConnectionTest: {
       /** @description `uname -srm` from the remote host. No credential material. */
       identity: string;
@@ -629,6 +650,7 @@ export interface components {
     };
     CreateRequest: {
       components?: string[];
+      compute?: null | components["schemas"]["ComputeSize"];
       /**
        * Format: int32
        * @description Compute VMs beside a control VM (see [`PlanRequest::computes`]).
@@ -971,6 +993,7 @@ export interface components {
       | "verify";
     Plan: {
       components: string[];
+      compute?: null | components["schemas"]["ComputeSize"];
       /**
        * Format: int32
        * @description Compute VMs beside the control VM; 0 for an all-in-one farm.
@@ -989,6 +1012,8 @@ export interface components {
     PlanRequest: {
       /** @default [] */
       components: string[];
+      /** @default null */
+      compute: null | components["schemas"]["ComputeSize"];
       /**
        * Format: int32
        * @description Compute VMs beside a control VM, up to 3; 0 runs everything in one all-in-one VM.

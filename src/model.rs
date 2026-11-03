@@ -25,6 +25,44 @@ pub struct PlanRequest {
     /// Compute VMs beside a control VM, up to 3; 0 runs everything in one all-in-one VM.
     /// A multi-node farm always runs Nova and Neutron.
     pub computes: u8,
+    /// Size of every compute VM; omitted for the default. Only for farms with compute VMs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub compute: Option<ComputeSize>,
+}
+
+/// A compute VM's size. Omitted fields keep the default compute VM's value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct ComputeSize {
+    /// vCPUs, 1-16.
+    pub cpus: u8,
+    /// Guest memory, 3072-65536 MiB; nova-compute, libvirt and OVS take about 0.8 GiB of it.
+    pub memory_mib: u32,
+    /// Each container disk, 16384-524288 MiB; Nova keeps instance disks on Docker's.
+    pub disk_mib: u32,
+}
+impl Default for ComputeSize {
+    fn default() -> Self {
+        Self {
+            cpus: COMPUTE.cpus,
+            memory_mib: COMPUTE.memory_mib,
+            disk_mib: COMPUTE.container_disk_mib.unwrap_or(0),
+        }
+    }
+}
+impl ComputeSize {
+    fn validate(self) -> Result<Self> {
+        if !(1..=16).contains(&self.cpus) {
+            bail!("a compute VM has 1-16 vCPUs");
+        }
+        if !(3072..=65536).contains(&self.memory_mib) {
+            bail!("a compute VM has 3072-65536 MiB of memory");
+        }
+        if !(16384..=524288).contains(&self.disk_mib) {
+            bail!("a compute VM's container disk is 16384-524288 MiB");
+        }
+        Ok(self)
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
@@ -33,6 +71,9 @@ pub struct Plan {
     /// Compute VMs beside the control VM; 0 for an all-in-one farm.
     #[serde(default)]
     pub computes: u8,
+    /// The compute VMs' size when it is not the default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compute: Option<ComputeSize>,
     pub nodes: Vec<NodeSpec>,
     pub memory_mib: u64,
     /// Includes both container disks for each container host. Sparse disks consume less initially.
@@ -280,6 +321,13 @@ pub fn layout(request: &PlanRequest) -> Result<Plan> {
     }
     let components = resolve_components(&requested)?;
     let computes = request.computes;
+    // The default size is stored as none, so a farm planned before sizes keeps its plan.
+    let compute = match request.compute {
+        Some(_) if computes == 0 => bail!("compute size needs compute VMs"),
+        Some(size) => Some(size.validate()?).filter(|size| *size != ComputeSize::default()),
+        None => None,
+    };
+    let size = compute.unwrap_or_default();
     let footprint = components.iter().map(|c| c.footprint_mib).sum::<u32>();
     let nodes = if computes == 0 {
         let mut node = ALL_IN_ONE;
@@ -291,6 +339,9 @@ pub fn layout(request: &PlanRequest) -> Result<Plan> {
         std::iter::once(control)
             .chain((1..=computes).map(|index| NodeSpec {
                 index: Some(index),
+                cpus: size.cpus,
+                memory_mib: size.memory_mib,
+                container_disk_mib: Some(size.disk_mib),
                 ..COMPUTE
             }))
             .collect()
@@ -305,6 +356,7 @@ pub fn layout(request: &PlanRequest) -> Result<Plan> {
     Ok(Plan {
         components: components.iter().map(|c| c.id.to_owned()).collect(),
         computes,
+        compute,
         memory_mib: nodes.iter().map(|n| u64::from(n.memory_mib)).sum(),
         disk_mib: nodes
             .iter()
@@ -328,6 +380,9 @@ pub struct CreateRequest {
     /// Compute VMs beside a control VM (see [`PlanRequest::computes`]).
     #[serde(default)]
     pub computes: u8,
+    /// Size of every compute VM (see [`PlanRequest::compute`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compute: Option<ComputeSize>,
     #[serde(default = "default_host")]
     pub external_host: String,
     #[serde(default)]
@@ -364,9 +419,9 @@ impl CreateRequest {
         }
         if let Some(snapshot) = &self.snapshot_id {
             validate_id(snapshot)?;
-            if !self.components.is_empty() || self.computes > 0 {
+            if !self.components.is_empty() || self.computes > 0 || self.compute.is_some() {
                 bail!(
-                    "a farm restored from a snapshot runs the snapshot's services and layout; omit components and computes"
+                    "a farm restored from a snapshot runs the snapshot's services and layout; omit components, computes and compute"
                 );
             }
         }
@@ -385,6 +440,7 @@ impl CreateRequest {
         plan(&PlanRequest {
             components: self.components.clone(),
             computes: self.computes,
+            compute: self.compute,
         })
     }
 }
@@ -756,6 +812,7 @@ mod tests {
             host_id: None,
             components: vec![],
             computes: 0,
+            compute: None,
             external_host: default_host(),
             owner: None,
             expires_at: None,
@@ -767,6 +824,7 @@ mod tests {
                 plan(&PlanRequest {
                     components: vec![unsupported.into()],
                     computes: 0,
+                    compute: None,
                 })
                 .is_err()
             );
@@ -783,6 +841,7 @@ mod tests {
         let request = |components: &[&str]| PlanRequest {
             components: components.iter().map(|c| (*c).into()).collect(),
             computes: 0,
+            compute: None,
         };
         let both = plan(&request(&["placement", "horizon", "keystone"])).unwrap();
         assert_eq!(
@@ -831,6 +890,7 @@ mod tests {
         let request = |components: &[&str], computes| PlanRequest {
             components: components.iter().map(|c| (*c).into()).collect(),
             computes,
+            compute: None,
         };
         // Compute VMs bring Nova, and Nova its dependencies.
         let two = plan(&request(&[], 2)).unwrap();
@@ -866,12 +926,72 @@ mod tests {
             host_id: None,
             components: vec![],
             computes: 1,
+            compute: None,
             external_host: default_host(),
             owner: None,
             expires_at: None,
             snapshot_id: Some("snap".into()),
         };
         assert!(restore.validate().is_err());
+    }
+
+    #[test]
+    fn compute_vms_take_the_requested_size() {
+        let sized = |computes, compute| {
+            plan(&PlanRequest {
+                components: vec![],
+                computes,
+                compute,
+            })
+        };
+        let size = ComputeSize {
+            cpus: 4,
+            memory_mib: 8192,
+            disk_mib: 65536,
+        };
+        let big = sized(2, Some(size)).unwrap();
+        assert_eq!(big.compute, Some(size));
+        for node in &big.nodes[1..] {
+            assert_eq!(
+                (node.cpus, node.memory_mib, node.container_disk_mib),
+                (4, 8192, Some(65536))
+            );
+        }
+        assert_eq!(big.nodes[0].memory_mib, 6656);
+        assert_eq!(big.memory_mib, 6656 + 2 * 8192);
+        assert_eq!(big.disk_mib, (20480 + 2 * 32768) + 2 * (20480 + 2 * 65536));
+        // The default size plans like an unsized farm, so its plan stays as before.
+        let default = sized(1, Some(ComputeSize::default())).unwrap();
+        assert_eq!(default.compute, None);
+        assert_eq!(
+            serde_json::to_value(&default).unwrap(),
+            serde_json::to_value(sized(1, None).unwrap()).unwrap()
+        );
+        // Partial sizes keep the default for what they omit.
+        let partial: ComputeSize = serde_json::from_str(r#"{"memory_mib":6144}"#).unwrap();
+        assert_eq!((partial.cpus, partial.disk_mib), (2, 32768));
+        for bad in [
+            ComputeSize { cpus: 0, ..size },
+            ComputeSize {
+                memory_mib: 2048,
+                ..size
+            },
+            ComputeSize {
+                disk_mib: 8192,
+                ..size
+            },
+        ] {
+            assert!(sized(1, Some(bad)).is_err());
+        }
+        // Only compute VMs have a compute size.
+        assert!(
+            layout(&PlanRequest {
+                components: vec![],
+                computes: 0,
+                compute: Some(size),
+            })
+            .is_err()
+        );
     }
 
     #[test]

@@ -6,6 +6,7 @@ export type Farm = Schema["FarmRecord"];
 export type Host = Schema["HostInfo"];
 export type Catalog = Schema["Catalog"];
 export type Plan = Schema["Plan"];
+export type ComputeSize = Schema["ComputeSize"];
 export type Phase = Schema["Phase"];
 export type Job = Schema["Job"];
 export type LogEntry = Schema["LogEntry"];
@@ -227,10 +228,15 @@ export const api = {
     request<Job>(`/farms/${encode(id)}${forget ? "?forget=true" : ""}`, {
       method: "DELETE",
     }),
-  plan: (components: string[], computes = 0, signal?: AbortSignal) =>
+  plan: (
+    components: string[],
+    computes = 0,
+    signal?: AbortSignal,
+    compute?: ComputeSize,
+  ) =>
     request<Plan>("/plans", {
       method: "POST",
-      body: JSON.stringify({ components, computes }),
+      body: JSON.stringify({ components, computes, compute }),
       signal,
     }),
   /** No delay and no loss heals the VM. */

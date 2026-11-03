@@ -2031,6 +2031,34 @@
           }
         }
       },
+      "ComputeSize": {
+        "type": "object",
+        "description": "A compute VM's size. Omitted fields keep the default compute VM's value.",
+        "properties": {
+          "cpus": {
+            "type": "integer",
+            "format": "int32",
+            "description": "vCPUs, 1-16.",
+            "default": 2,
+            "minimum": 0
+          },
+          "disk_mib": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Each container disk, 16384-524288 MiB; Nova keeps instance disks on Docker's.",
+            "default": 32768,
+            "minimum": 0
+          },
+          "memory_mib": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Guest memory, 3072-65536 MiB; nova-compute, libvirt and OVS take about 0.8 GiB of it.",
+            "default": 3072,
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
       "ConnectionTest": {
         "type": "object",
         "required": [
@@ -2084,6 +2112,17 @@
             "items": {
               "type": "string"
             }
+          },
+          "compute": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ComputeSize",
+                "description": "Size of every compute VM (see [`PlanRequest::compute`])."
+              }
+            ]
           },
           "computes": {
             "type": "integer",
@@ -3171,6 +3210,17 @@
               "type": "string"
             }
           },
+          "compute": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ComputeSize",
+                "description": "The compute VMs' size when it is not the default."
+              }
+            ]
+          },
           "computes": {
             "type": "integer",
             "format": "int32",
@@ -3211,6 +3261,18 @@
               "type": "string"
             },
             "default": []
+          },
+          "compute": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ComputeSize",
+                "description": "Size of every compute VM; omitted for the default. Only for farms with compute VMs."
+              }
+            ],
+            "default": null
           },
           "computes": {
             "type": "integer",

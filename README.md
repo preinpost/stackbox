@@ -80,7 +80,12 @@ farm settle demo                         # VM 재시작 뒤 배포 없이 서비
 Nova와 그 의존성(Placement, Neutron)이 자동으로 들어갑니다.
 
 - **VM**: `<farm>-control`(4 vCPU, 서비스에 따라 6.5 GiB 안팎)은 API·DB·MQ·네트워크 노드(L3·DHCP)와 Kolla를,
-  `<farm>-compute-<n>`(2 vCPU, 3 GiB)은 nova-compute·libvirt·OVS agent를 맡습니다. 공개 포트는 control VM만 엽니다.
+  `<farm>-compute-<n>`(기본 2 vCPU, 3 GiB)은 nova-compute·libvirt·OVS agent를 맡습니다. 공개 포트는 control VM만 엽니다.
+- **compute 사양**: 생성 요청의 `compute`(`{"cpus":4,"memory_mib":8192,"disk_mib":65536}`, 빠진 값은 기본값),
+  CLI `--compute-cpus`·`--compute-memory-mib`·`--compute-disk-mib`, 포털의 **Compute VM 사양**으로 모든 compute VM의
+  크기를 정합니다. nova-compute·libvirt·OVS가 약 0.8 GiB를 쓰고 나머지가 인스턴스 몫입니다. `disk_mib`는 컨테이너
+  디스크 하나의 크기이고 Nova의 인스턴스 디스크가 여기에 들어갑니다. 디스크 크기는 golden image의 일부라 처음 쓰는
+  크기는 호스트에서 golden image를 한 번 더 만듭니다.
 - **고정 정체성**: hostname과 관리망 주소는 모든 farm에서 같습니다. `farm-control` 10.254.0.10,
   `farm-compute-<n>` 10.254.0.(10+n). 서로의 이름은 `/etc/hosts`에 넣습니다.
 - **네트워크**: VM마다 링크가 두 개입니다. `farm0`(관리망, Kolla의 network·api 인터페이스)과 `farm1`(주소 없음,
@@ -97,6 +102,7 @@ Nova와 그 의존성(Placement, Neutron)이 자동으로 들어갑니다.
 
 ```bash
 farm create mn --host-id local --computes 2      # 약 12.5 GiB
+# 더 큰 compute: --compute-cpus 4 --compute-memory-mib 8192 --compute-disk-mib 65536
 farm deploy mn                                   # M1 Max에서 약 15분
 farm fault mn compute-1 --loss 1                 # compute-1 고립
 # control VM에서: compute service set --down, server evacuate --host farm-compute-2 ...

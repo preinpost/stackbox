@@ -1,13 +1,13 @@
 use anyhow::{Result, bail};
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use farm::remote::{HostJobKind, RegisterLocalHost};
 use farm::{
     api,
     kolla::Phase,
     manager::{FarmManager, ManagerOptions, default_state_dir},
     model::{
-        self, CreateRequest, DeployRequest, ExportRequest, ImportRequest, Job, JobStatus,
-        PlanRequest, SnapshotRecord, SnapshotRequest, SnapshotStatus,
+        self, ComputeSize, CreateRequest, DeployRequest, ExportRequest, ImportRequest, Job,
+        JobStatus, PlanRequest, SnapshotRecord, SnapshotRequest, SnapshotStatus,
     },
 };
 use std::{
@@ -26,6 +26,36 @@ struct Cli {
     #[command(subcommand)]
     command: Command,
 }
+/// Size of every compute VM; an omitted flag keeps the default compute VM's value.
+#[derive(Args)]
+struct ComputeArgs {
+    /// vCPUs of each compute VM (1-16)
+    #[arg(long)]
+    compute_cpus: Option<u8>,
+    /// Memory of each compute VM in MiB (3072-65536)
+    #[arg(long)]
+    compute_memory_mib: Option<u32>,
+    /// Each container disk of a compute VM in MiB (16384-524288); holds Nova's instance disks
+    #[arg(long)]
+    compute_disk_mib: Option<u32>,
+}
+impl ComputeArgs {
+    fn size(&self) -> Option<ComputeSize> {
+        if self.compute_cpus.is_none()
+            && self.compute_memory_mib.is_none()
+            && self.compute_disk_mib.is_none()
+        {
+            return None;
+        }
+        let default = ComputeSize::default();
+        Some(ComputeSize {
+            cpus: self.compute_cpus.unwrap_or(default.cpus),
+            memory_mib: self.compute_memory_mib.unwrap_or(default.memory_mib),
+            disk_mib: self.compute_disk_mib.unwrap_or(default.disk_mib),
+        })
+    }
+}
+
 #[derive(Subcommand)]
 enum Command {
     /// Run the REST API daemon (FARM_API_TOKEN enables bearer authentication)
@@ -46,6 +76,8 @@ enum Command {
         /// Compute VMs beside a control VM (0-3); 0 is one all-in-one VM
         #[arg(long, default_value_t = 0)]
         computes: u8,
+        #[command(flatten)]
+        compute: ComputeArgs,
         #[arg(long)]
         json: bool,
     },
@@ -59,6 +91,8 @@ enum Command {
         /// Compute VMs beside a control VM (0-3); 0 is one all-in-one VM. Adds Nova.
         #[arg(long, default_value_t = 0, conflicts_with = "snapshot")]
         computes: u8,
+        #[command(flatten)]
+        compute: ComputeArgs,
         #[arg(long, default_value = "localhost")]
         external_host: String,
         #[arg(long)]
@@ -318,11 +352,13 @@ async fn main() -> Result<()> {
         Command::Plan {
             components,
             computes,
+            compute,
             json,
         } => {
             let p = model::plan(&PlanRequest {
                 components: components.clone(),
                 computes: *computes,
+                compute: compute.size(),
             })?;
             if *json {
                 return print_json(&p);
@@ -434,6 +470,7 @@ async fn main() -> Result<()> {
             host_id,
             components,
             computes,
+            compute,
             external_host,
             owner,
             expires_at,
@@ -444,6 +481,7 @@ async fn main() -> Result<()> {
                 host_id: Some(host_id),
                 components,
                 computes,
+                compute: compute.size(),
                 external_host,
                 owner,
                 expires_at,
