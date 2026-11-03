@@ -849,7 +849,9 @@ impl FarmManager {
             let references: Vec<String> = if snapshot.nodes.is_empty() {
                 snapshot.reference.iter().cloned().collect()
             } else {
-                snapshot.nodes.iter().map(|n| n.reference.clone()).collect()
+                // The control VM's disks were captured first and head the group, which msb
+                // removes only once it is the last member.
+                snapshot.nodes.iter().rev().map(|n| n.reference.clone()).collect()
             };
             Ok((references, previous))
         })?;
