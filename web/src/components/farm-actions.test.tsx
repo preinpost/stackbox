@@ -609,6 +609,15 @@ test("places compute VMs on other hosts when the coordinator has a relay", async
   await user.click(
     await screen.findByRole("option", { name: /compute-1 · edge/ }),
   );
+  // The control VM's host is chosen beside the computes, the same as 실행 호스트.
+  await user.click(screen.getByRole("combobox", { name: "control 호스트" }));
+  await user.click(
+    await screen.findByRole("option", { name: /control · edge/ }),
+  );
+  await user.click(screen.getByRole("combobox", { name: "compute-1 호스트" }));
+  await user.click(
+    await screen.findByRole("option", { name: /compute-1 · local/ }),
+  );
   const create = screen.getByRole("button", {
     name: "Farm 만들기",
   }) as HTMLButtonElement;
@@ -617,9 +626,9 @@ test("places compute VMs on other hosts when the coordinator has a relay", async
   await waitFor(() =>
     expect(submitted).toMatchObject({
       id: "span",
-      host_id: "local",
+      host_id: "edge",
       computes: 1,
-      placement: { "compute-1": "edge" },
+      placement: { "compute-1": "local" },
     }),
   );
   client.clear();

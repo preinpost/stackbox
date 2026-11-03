@@ -157,6 +157,7 @@ export function CreateFarmForm({
         host !== hostId && Number(node.slice("compute-".length)) <= computes,
     ),
   );
+  const readyHosts = (hosts.data ?? []).filter((h) => hostReady(h, buildId));
   const canSpan =
     computes > 0 &&
     !!coordinator.data?.relay_url &&
@@ -345,8 +346,22 @@ export function CreateFarmForm({
           )}
           {canSpan && (
             <div>
-              <span className="field-label">Compute VM 배치</span>
+              <span className="field-label">VM 배치</span>
               <div className="grid gap-3 sm:grid-cols-2">
+                {/* The control VM's host is the farm's host, the same choice as 실행 호스트. */}
+                <SelectInput
+                  value={hostId ?? ""}
+                  onChange={(value) => {
+                    setPicked(value);
+                    setHostName(undefined);
+                  }}
+                  disabled={mutation.isPending}
+                  label="control 호스트"
+                  items={readyHosts.map((h) => ({
+                    value: h.id,
+                    label: `control · ${hostLabel(h)}`,
+                  }))}
+                />
                 {Array.from({ length: computes }, (_, i) => {
                   const node = `compute-${i + 1}`;
                   return (
@@ -358,20 +373,19 @@ export function CreateFarmForm({
                       }
                       disabled={mutation.isPending}
                       label={`${node} 호스트`}
-                      items={(hosts.data ?? [])
-                        .filter((h) => hostReady(h, buildId))
-                        .map((h) => ({
-                          value: h.id,
-                          label: `${node} · ${hostLabel(h)}${h.id === hostId ? " (control과 같은 호스트)" : ""}`,
-                        }))}
+                      items={readyHosts.map((h) => ({
+                        value: h.id,
+                        label: `${node} · ${hostLabel(h)}${h.id === hostId ? " (control과 같은 호스트)" : ""}`,
+                      }))}
                     />
                   );
                 })}
               </div>
               <p className="field-hint mt-2">
-                다른 호스트에 둔 compute VM은 coordinator의 relay(
+                control VM의 호스트는 위의 실행 호스트와 같습니다. 다른 호스트에
+                둔 compute VM은 coordinator의 relay(
                 {coordinator.data?.relay_url})를 거쳐 control VM과 같은 망에
-                연결됩니다. 링크는 coordinator의 사설 CA로 TLS 암호화됩니다.
+                연결되며, 링크는 종단 간 암호화됩니다.
               </p>
             </div>
           )}
