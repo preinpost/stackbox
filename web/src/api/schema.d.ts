@@ -1149,7 +1149,7 @@ export interface components {
      * @description Who terminates the relay's TLS.
      * @enum {string}
      */
-    RelayTlsMode: "private" | "proxy" | "quick_tunnel" | "named_tunnel";
+    RelayTlsMode: "private" | "proxy" | "quick_tunnel";
     RemoteHost: {
       active_job?: string | null;
       /** @description SSH address; `localhost` for the local host. */

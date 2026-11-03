@@ -3297,7 +3297,6 @@ async fn a_farm_spans_hosts_with_its_computes_placed_elsewhere() {
     let private = RelaySettings {
         url: "https://coordinator.example:10011".into(),
         mode: RelayTlsMode::Private,
-        tunnel_token: None,
         bind: Some("127.0.0.1:0".parse().unwrap()),
     };
     assert!(
@@ -3433,13 +3432,12 @@ async fn a_farm_spans_hosts_with_its_computes_placed_elsewhere() {
             == "relink:mn:wss://new-river.trycloudflare.com/api/v1/link-relay?farm=mn&host=edge")
     );
     *manager.0.tunnel_url.lock().unwrap() = None;
-    // A quick tunnel's URL comes from Cloudflare; a named one needs its token.
+    // A quick tunnel's URL comes from Cloudflare, so none may be given.
     assert!(
         manager
             .set_relay(Some(RelaySettings {
                 url: "https://x.example".into(),
                 mode: RelayTlsMode::QuickTunnel,
-                tunnel_token: None,
                 bind: None,
             }))
             .await
@@ -3450,7 +3448,6 @@ async fn a_farm_spans_hosts_with_its_computes_placed_elsewhere() {
     let proxy = RelaySettings {
         url: "https://relay.example".into(),
         mode: RelayTlsMode::Proxy,
-        tunnel_token: None,
         bind: None,
     };
     assert!(

@@ -6,7 +6,6 @@ import { RadioGroup } from "@base-ui/react/radio-group";
 import {
   Check,
   Cloud,
-  CloudCog,
   LoaderCircle,
   Network,
   ShieldCheck,
@@ -28,14 +27,9 @@ const modes = [
   {
     value: "quick_tunnel",
     title: "Cloudflare 임시 터널",
-    hint: "계정·포트 개방 없이 바로",
+    hint: "계정·포트 개방 없이 바로 씁니다. 다른 망의 호스트도 이어집니다.",
     icon: Cloud,
-  },
-  {
-    value: "named_tunnel",
-    title: "Cloudflare 고정 터널",
-    hint: "내 도메인, 주소 고정",
-    icon: CloudCog,
+    recommended: true,
   },
   {
     value: "private",
@@ -93,10 +87,9 @@ function RelaySettingsForm() {
   const [url, setUrl] = useState<string>();
   const [mode, setMode] = useState<Mode>();
   const [bind, setBind] = useState<string>();
-  const [token, setToken] = useState("");
   const current = {
     url: url ?? saved?.url ?? "",
-    mode: mode ?? saved?.mode ?? "private",
+    mode: mode ?? saved?.mode ?? "quick_tunnel",
     bind: bind ?? saved?.bind ?? "",
   };
   const mutation = useMutation({
@@ -105,7 +98,6 @@ function RelaySettingsForm() {
       setUrl(undefined);
       setMode(undefined);
       setBind(undefined);
-      setToken("");
       await Promise.all([
         client.invalidateQueries({ queryKey: keys.relay }),
         client.invalidateQueries({ queryKey: keys.host }),
@@ -118,7 +110,6 @@ function RelaySettingsForm() {
   });
   const locked = !!relay.data?.spanning_farms?.length;
   const quick = current.mode === "quick_tunnel";
-  const named = current.mode === "named_tunnel";
   const tunnel = relay.data?.tunnel;
   const stage = tunnelStage(relay.data);
   const checked = tunnel?.checked_at
@@ -144,7 +135,6 @@ function RelaySettingsForm() {
           mutation.mutate({
             url: quick ? "" : current.url.trim(),
             mode: current.mode,
-            ...(named && token.trim() ? { tunnel_token: token.trim() } : {}),
             ...(current.bind.trim() ? { bind: current.bind.trim() } : {}),
           });
         }}
@@ -165,12 +155,21 @@ function RelaySettingsForm() {
               disabled={mutation.isPending || locked}
               className="relay-modes"
             >
-              {modes.map(({ value, title, hint, icon: Icon }) => (
-                <label key={value} className="relay-mode">
+              {modes.map(({ value, title, hint, icon: Icon, ...mode }) => (
+                <label
+                  key={value}
+                  className="relay-mode"
+                  data-wide={"recommended" in mode || undefined}
+                >
                   <Radio.Root value={value} className="sr-only" />
                   <Icon size={18} className="relay-mode-icon" />
                   <span>
-                    <strong>{title}</strong>
+                    <strong>
+                      {title}
+                      {"recommended" in mode && (
+                        <span className="relay-mode-badge">추천</span>
+                      )}
+                    </strong>
                     <small>{hint}</small>
                   </span>
                 </label>
@@ -187,11 +186,9 @@ function RelaySettingsForm() {
               placeholder={
                 quick
                   ? "저장하면 Cloudflare가 주소를 발급합니다"
-                  : named
-                    ? "https://relay.example.com (터널의 Public hostname)"
-                    : current.mode === "private"
-                      ? "https://192.168.0.10:10011"
-                      : "https://relay.example.com"
+                  : current.mode === "private"
+                    ? "https://192.168.0.10:10011"
+                    : "https://relay.example.com"
               }
               disabled={mutation.isPending || locked}
               required={!quick}
@@ -202,29 +199,6 @@ function RelaySettingsForm() {
                 : "다른 호스트가 닿을 수 있는 주소입니다."}
             </small>
           </label>
-          {named && (
-            <label className="field">
-              <span>
-                터널 토큰{" "}
-                {saved?.mode === "named_tunnel" && (
-                  <span className="optional">저장됨 · 바꿀 때만 입력</span>
-                )}
-              </span>
-              <Input
-                value={token}
-                onValueChange={setToken}
-                type="password"
-                className="input font-mono"
-                placeholder="Cloudflare 대시보드 → Tunnels → 토큰"
-                disabled={mutation.isPending}
-                required={saved?.mode !== "named_tunnel"}
-              />
-              <small>
-                터널의 서비스는 http://{current.bind || "127.0.0.1:10012"}로
-                두세요. 토큰은 암호화해 저장합니다.
-              </small>
-            </label>
-          )}
           <details className="relay-advanced">
             <summary>고급</summary>
             <label className="field mt-3">

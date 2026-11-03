@@ -51,9 +51,6 @@ pub enum RelayTlsMode {
     /// A Cloudflare quick tunnel the coordinator runs: no account, a new
     /// `*.trycloudflare.com` address each start, which the coordinator hands the switches.
     QuickTunnel,
-    /// A named Cloudflare tunnel the coordinator runs with its dashboard token; `url` is the
-    /// hostname routed to it, with `http://<bind>` as its service.
-    NamedTunnel,
 }
 impl RelayTlsMode {
     /// Whether the relay listens without TLS, behind something that has it.
@@ -61,7 +58,7 @@ impl RelayTlsMode {
         self != Self::Private
     }
     pub fn tunnel(self) -> bool {
-        matches!(self, Self::QuickTunnel | Self::NamedTunnel)
+        self == Self::QuickTunnel
     }
 }
 
@@ -74,9 +71,6 @@ pub struct RelaySettings {
     #[serde(default)]
     pub url: String,
     pub mode: RelayTlsMode,
-    /// A named tunnel's token, only in requests; it is stored sealed, never in settings.
-    #[serde(default, skip_serializing)]
-    pub tunnel_token: Option<String>,
     /// Where it listens; `0.0.0.0:10011` with `private`, `127.0.0.1:10012` with `proxy`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(value_type = Option<String>)]

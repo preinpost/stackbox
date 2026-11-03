@@ -4,9 +4,8 @@
 //! publishes for the asset and, on macOS, against Cloudflare's code signature, and keeps it under
 //! `<state dir>/bin/`. `FARM_CLOUDFLARED` names a binary to use instead, unmanaged.
 //!
-//! [`Tunnel`] runs it until dropped: a quick tunnel (`*.trycloudflare.com`, a new address each
-//! start) or a named tunnel with a token from the Cloudflare dashboard. It checks for a new
-//! release once a day and restarts the tunnel on it.
+//! [`Tunnel`] runs it until dropped as a quick tunnel (`*.trycloudflare.com`, no account, a new
+//! address each start). It checks for a new release once a day and restarts the tunnel on it.
 
 use std::{
     path::{Path, PathBuf},
@@ -44,12 +43,6 @@ pub struct TunnelStatus {
     pub error: Option<String>,
     /// `FARM_CLOUDFLARED` names the binary; it is not updated.
     pub unmanaged: bool,
-}
-
-#[derive(Clone)]
-pub enum Kind {
-    Quick,
-    Named { token: String },
 }
 
 struct Release {
@@ -350,7 +343,6 @@ impl Tunnel {
     /// tunnel address.
     pub fn start(
         state_dir: &Path,
-        kind: Kind,
         origin: String,
         on_url: Arc<dyn Fn(String) + Send + Sync>,
     ) -> Self {
@@ -364,7 +356,6 @@ impl Tunnel {
         let log = state_dir.join("cloudflared.log");
         let task = tokio::spawn(supervise(
             installer.clone(),
-            kind,
             origin,
             status.clone(),
             restart.clone(),
@@ -471,7 +462,6 @@ async fn reap(pid_file: &Path, binary: &Path) {
 
 async fn supervise(
     installer: Arc<Installer>,
-    kind: Kind,
     origin: String,
     status: Arc<Mutex<TunnelStatus>>,
     restart: Arc<Notify>,
@@ -494,7 +484,7 @@ async fn supervise(
             let pid_file = log.with_file_name("cloudflared.pid");
             reap(&pid_file, &binary).await;
             let mut command = tokio::process::Command::new(&binary);
-            command.args(["tunnel", "--no-autoupdate"]);
+            command.args(["tunnel", "--no-autoupdate", "--url", &origin]);
             #[cfg(target_os = "linux")]
             // SAFETY: prctl is async-signal-safe and touches no memory of the parent. The
             // signal comes when the spawning thread ends; tokio's workers live as long as
@@ -507,11 +497,6 @@ async fn supervise(
                     Ok(())
                 });
             }
-            match &kind {
-                Kind::Quick => command.args(["--url", &origin]),
-                // The token stays out of the process list.
-                Kind::Named { token } => command.args(["run"]).env("TUNNEL_TOKEN", token),
-            };
             let mut child = command
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::null())
@@ -535,9 +520,7 @@ async fn supervise(
                         let Some(line) = line? else { break };
                         use std::io::Write;
                         let _ = writeln!(file, "{line}");
-                        if let Kind::Quick = kind
-                            && let Some(url) = quick_url(&line)
-                        {
+                        if let Some(url) = quick_url(&line) {
                             found = Some(url);
                         }
                         if line.contains("Registered tunnel connection") {
@@ -572,9 +555,7 @@ async fn supervise(
         {
             let mut s = status.lock().unwrap();
             s.connected = false;
-            if let Kind::Quick = kind {
-                s.url = None;
-            }
+            s.url = None;
             match result {
                 Ok(()) => delay = Duration::from_secs(2),
                 Err(error) => {
@@ -676,7 +657,6 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let tunnel = Tunnel::start(
             dir.path(),
-            Kind::Quick,
             origin,
             Arc::new(move |url| {
                 let _ = tx.send(url);

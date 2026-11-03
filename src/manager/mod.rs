@@ -57,10 +57,8 @@ impl ManagerOptions {
                     url,
                     mode: match std::env::var("FARM_RELAY_TLS").as_deref() {
                         Ok("proxy") => crate::link::relay::RelayTlsMode::Proxy,
-                        Ok("named-tunnel") => crate::link::relay::RelayTlsMode::NamedTunnel,
                         _ => crate::link::relay::RelayTlsMode::Private,
                     },
-                    tunnel_token: std::env::var("FARM_RELAY_TUNNEL_TOKEN").ok(),
                     bind: std::env::var("FARM_RELAY_BIND")
                         .ok()
                         .and_then(|bind| bind.parse().ok()),
@@ -240,7 +238,6 @@ impl FarmManager {
             &options.state_dir,
             store.state.hosts.values().any(|h| h.credentials.is_some())
                 || !store.state.buckets.is_empty()
-                || store.state.relay_token.is_some()
                 || !store.state.relay_keys.is_empty(),
         )?;
         for host in store.state.hosts.values() {
@@ -1045,28 +1042,22 @@ impl FarmManager {
                 listener.addr = Some(addr);
                 listener.task = Some(task);
                 if settings.mode.tunnel() {
-                    match self.tunnel_kind(&settings) {
-                        Ok(kind) => {
-                            let manager = Arc::downgrade(&self.0);
-                            let on_url: Arc<dyn Fn(String) + Send + Sync> = Arc::new(move |url| {
-                                let Some(inner) = manager.upgrade() else {
-                                    return;
-                                };
-                                let manager = FarmManager(inner);
-                                if let Ok(mut current) = manager.0.tunnel_url.lock() {
-                                    *current = Some(url.clone());
-                                }
-                                tokio::spawn(async move { manager.relink(&url).await });
-                            });
-                            listener.tunnel = Some(crate::link::cloudflared::Tunnel::start(
-                                &self.0.options.state_dir,
-                                kind,
-                                format!("http://{addr}"),
-                                on_url,
-                            ));
+                    let manager = Arc::downgrade(&self.0);
+                    let on_url: Arc<dyn Fn(String) + Send + Sync> = Arc::new(move |url| {
+                        let Some(inner) = manager.upgrade() else {
+                            return;
+                        };
+                        let manager = FarmManager(inner);
+                        if let Ok(mut current) = manager.0.tunnel_url.lock() {
+                            *current = Some(url.clone());
                         }
-                        Err(error) => listener.error = Some(format!("{error:#}")),
-                    }
+                        tokio::spawn(async move { manager.relink(&url).await });
+                    });
+                    listener.tunnel = Some(crate::link::cloudflared::Tunnel::start(
+                        &self.0.options.state_dir,
+                        format!("http://{addr}"),
+                        on_url,
+                    ));
                 }
             }
             Err(error) => {
@@ -1118,32 +1109,13 @@ impl FarmManager {
     /// address may change.
     pub async fn set_relay(
         &self,
-        mut settings: Option<crate::link::relay::RelaySettings>,
+        settings: Option<crate::link::relay::RelaySettings>,
     ) -> Result<RelayStatus> {
         if let Some(settings) = &settings {
             settings
                 .validate()
                 .map_err(|e| bad_request(e.to_string()))?;
         }
-        // A named tunnel's token is sealed apart from the settings; a change keeps the stored one.
-        let token = settings
-            .as_mut()
-            .and_then(|s| s.tunnel_token.take())
-            .filter(|t| !t.trim().is_empty());
-        let named = settings
-            .as_ref()
-            .is_some_and(|s| s.mode == crate::link::relay::RelayTlsMode::NamedTunnel);
-        let sealed = match (&token, named) {
-            (Some(token), true) => Some(
-                self.0
-                    .vault
-                    .seal(&token.trim().to_owned(), TUNNEL_TOKEN_AAD)?,
-            ),
-            (None, true) => Some(self.read(|state| state.relay_token.clone())?.ok_or_else(
-                || bad_request("a named tunnel needs its token from the Cloudflare dashboard"),
-            )?),
-            _ => None,
-        };
         let current = self.relay_settings();
         let same_link = |a: &Option<crate::link::relay::RelaySettings>,
                          b: &Option<crate::link::relay::RelaySettings>| {
@@ -1162,7 +1134,6 @@ impl FarmManager {
         };
         self.update(|state| {
             state.relay = settings.clone();
-            state.relay_token = sealed.clone();
             Ok(())
         })?;
         *self
@@ -1183,22 +1154,6 @@ impl FarmManager {
             .lock()
             .map_err(|_| anyhow!("state mutex poisoned"))?
             .state))
-    }
-    fn tunnel_kind(
-        &self,
-        settings: &crate::link::relay::RelaySettings,
-    ) -> Result<crate::link::cloudflared::Kind> {
-        Ok(match settings.mode {
-            crate::link::relay::RelayTlsMode::NamedTunnel => {
-                let sealed = self
-                    .read(|state| state.relay_token.clone())?
-                    .context("the named tunnel has no token")?;
-                crate::link::cloudflared::Kind::Named {
-                    token: self.0.vault.unseal(&sealed, TUNNEL_TOKEN_AAD)?,
-                }
-            }
-            _ => crate::link::cloudflared::Kind::Quick,
-        })
     }
     /// Check for a new cloudflared now and restart the tunnel on one.
     pub async fn update_cloudflared(&self) -> Result<RelayStatus> {
@@ -2203,7 +2158,6 @@ struct RelayListener {
     error: Option<String>,
 }
 
-const TUNNEL_TOKEN_AAD: &str = "farm-relay-tunnel-token";
 fn uplink_key_aad(farm: &str, host: &str) -> String {
     format!("farm-uplink-key:{farm}:{host}")
 }

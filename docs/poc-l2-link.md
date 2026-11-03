@@ -313,7 +313,7 @@ FARM_GUEST_AGENT=$PWD/dist/agent/aarch64/farm-agent \
 - 배치: `placement`, `FarmRecord.shares`, agent의 `Share`와 `Prepare` 작업, 호스트별 메모리 예산.
 - MTU는 바꾸지 않았다. 중계 구간이 TCP(WebSocket)라 9000 프레임도 그대로 실린다. 1380은 2단계 UDP 경로에서 필요하다.
 - uplink 메시지는 TLS와 별개로 (farm, 호스트) 키로 종단 간 암호화한다(`src/link/seal.rs`). Cloudflare 터널(coordinator가
-  관리하는 cloudflared, 임시·고정 터널)이나 프록시가 TLS를 끝내도 프레임을 볼 수 없다.
+  관리하는 cloudflared의 임시 터널)이나 프록시가 TLS를 끝내도 프레임을 볼 수 없다.
 - 1단계의 relay는 같은 farm의 다른 호스트 모두에 넘긴다(MAC 학습 없음). 호스트가 셋 이상이면 flood가 늘어난다.
 
 **목표**: control은 한 호스트에 두고 compute만 다른 호스트(다른 지역 포함)에 두어, 실제 WAN 지연·손실에서

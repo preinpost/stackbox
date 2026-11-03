@@ -3687,8 +3687,7 @@
         "enum": [
           "private",
           "proxy",
-          "quick_tunnel",
-          "named_tunnel"
+          "quick_tunnel"
         ]
       },
       "RemoteHost": {
