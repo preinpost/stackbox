@@ -23,7 +23,7 @@ cargo build --release
 
 ./target/release/farm catalog --json
 ./target/release/farm plan --components horizon --json
-./target/release/farm serve      # http://127.0.0.1:8080
+./target/release/farm serve      # http://127.0.0.1:10010
 ```
 
 포탈 없이 CLI만으로도 같은 관리 로직을 사용할 수 있습니다.
@@ -133,10 +133,10 @@ cargo run -- serve
 # 터미널 2
 cd web
 npm ci
-npm run dev                     # http://127.0.0.1:5180
+npm run dev                     # http://127.0.0.1:10020
 ```
 
-운영 실행은 `web/`에서 `npm run build && npm start`입니다 (기본 `127.0.0.1:3000`).
+운영 실행은 `web/`에서 `npm run build && npm start`입니다 (기본 `127.0.0.1:10020`).
 API 주소와 token은 `web/.env`의 `FARM_API_URL`, `FARM_API_TOKEN`으로 설정합니다.
 개발·운영 서버가 API를 프록시하고 token과 관리자 인증정보를 브라우저에서 제외합니다.
 자세한 실행 방법과 서버 구성은 [web/README.md](web/README.md)를 참고하세요.
@@ -165,15 +165,15 @@ Hosts에서 환경 준비를 완료하면 실행기도 설치합니다. 이미 �
 
 ```bash
 # VM 생성은 바로 job을 반환하고, OpenStack 배포는 별도로 요청합니다.
-curl -sS -X POST http://127.0.0.1:8080/api/v1/farms \
+curl -sS -X POST http://127.0.0.1:10010/api/v1/farms \
   -H 'Content-Type: application/json' \
   -d '{"id":"demo","external_host":"localhost","owner":"portal"}'
 
-curl -sS http://127.0.0.1:8080/api/v1/jobs/<job-id>
+curl -sS http://127.0.0.1:10010/api/v1/jobs/<job-id>
 # create job이 succeeded가 된 뒤:
-curl -sS -X POST http://127.0.0.1:8080/api/v1/farms/demo/deploy \
+curl -sS -X POST http://127.0.0.1:10010/api/v1/farms/demo/deploy \
   -H 'Content-Type: application/json' -d '{}'
-curl -N http://127.0.0.1:8080/api/v1/farms/demo/logs/stream
+curl -N http://127.0.0.1:10010/api/v1/farms/demo/logs/stream
 ```
 
 | Method | Path (`/api/v1` 기준) | 반환 |
@@ -245,7 +245,7 @@ Farm 작업 생성은 `202 Accepted`와 `Location: /api/v1/jobs/{id}`를 반환�
 
 ```bash
 export FARM_API_TOKEN='<운영용-token>'
-farm serve --bind 0.0.0.0:8080 --public-bind 0.0.0.0
+farm serve --bind 0.0.0.0:10010 --public-bind 0.0.0.0
 # POST /farms에서 external_host를 이 호스트의 DNS 이름/IPv4로 지정
 # 이후 API 호출에 Authorization: Bearer <운영용-token> 헤더 추가
 ```

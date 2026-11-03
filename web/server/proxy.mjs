@@ -13,7 +13,7 @@ const json = (res, status, error) => {
 /** farmd URL for the request's path and query, or null when FARM_API_URL is unusable. */
 function upstreamUrl(req, env) {
   try {
-    const url = new URL(env.FARM_API_URL || "http://127.0.0.1:8080");
+    const url = new URL(env.FARM_API_URL || "http://127.0.0.1:10010");
     if (
       !["http:", "https:"].includes(url.protocol) ||
       url.username ||

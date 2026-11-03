@@ -22,14 +22,14 @@ cargo run -- serve
 cd web
 npm ci
 npm run dev
-# http://127.0.0.1:5180
+# http://127.0.0.1:10020
 ```
 
-기본 farmd 주소는 `http://127.0.0.1:8080`입니다. 다른 호스트나 token을 쓰는 경우
+기본 farmd 주소는 `http://127.0.0.1:10010`입니다. 다른 호스트나 token을 쓰는 경우
 `web/.env`를 만드세요 (`.env.example` 참고).
 
 ```dotenv
-FARM_API_URL=http://127.0.0.1:8080
+FARM_API_URL=http://127.0.0.1:10010
 FARM_API_TOKEN=server-token
 ```
 
@@ -66,7 +66,7 @@ cd web
 npm ci
 npm run build
 npm start
-# http://127.0.0.1:3000
+# http://127.0.0.1:10020
 ```
 
 운영 서버도 `.env`를 읽습니다. `PORT=3001 npm start`로 포트를 변경할 수 있습니다.

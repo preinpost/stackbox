@@ -28,7 +28,7 @@ tasks:
     cmds:
       - cargo build --release
   serve:
-    desc: Run the farm API daemon on 127.0.0.1:8080 (pass flags after --)
+    desc: Run the farm API daemon on 127.0.0.1:10010 (pass flags after --)
     cmds:
       - cargo run --release -- serve {{.CLI_ARGS}}
   dev:
@@ -71,6 +71,6 @@ tasks:
     cmds:
       - npm --prefix web run build
   portal-serve:
-    desc: Run the built web portal on 127.0.0.1:3000
+    desc: Run the built web portal on 127.0.0.1:10020
     cmds:
       - npm --prefix web start

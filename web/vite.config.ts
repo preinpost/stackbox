@@ -25,7 +25,7 @@ export default defineConfig(({ mode }) => {
         },
       },
     ],
-    server: { port: 5180, strictPort: true },
+    server: { port: 10020, strictPort: true },
     test: {
       environment: "jsdom",
       include: ["src/**/*.test.{ts,tsx}"],

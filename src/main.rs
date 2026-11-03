@@ -60,7 +60,7 @@ impl ComputeArgs {
 enum Command {
     /// Run the REST API daemon (FARM_API_TOKEN enables bearer authentication)
     Serve {
-        #[arg(long, default_value = "127.0.0.1:8080")]
+        #[arg(long, default_value = "127.0.0.1:10010")]
         bind: SocketAddr,
         /// Address on which newly created farms publish OpenStack services
         #[arg(long, default_value = "127.0.0.1")]

@@ -8,7 +8,7 @@ await stat(path.join(root, "index.html")).catch(() => {
   throw new Error("먼저 npm run build를 실행하세요.");
 });
 const server = createPortalServer({ root });
-const port = Number(process.env.PORT || 3000);
+const port = Number(process.env.PORT || 10020);
 server.listen(port, process.env.PORTAL_HOST || "127.0.0.1", () =>
   console.log(
     `farm portal: http://${process.env.PORTAL_HOST || "127.0.0.1"}:${server.address().port}`,
