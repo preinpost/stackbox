@@ -2286,6 +2286,9 @@ h2 {
 .check-missing {
   color: #7d653a;
 }
+.check-pending {
+  color: #7a857c;
+}
 .host-check h3 {
   font-size: 15px;
   font-weight: 500;

@@ -7,6 +7,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Check,
   CircleAlert,
+  CircleDashed,
   Fingerprint,
   KeyRound,
   LoaderCircle,
@@ -659,12 +660,11 @@ function HostInspection({
       ready: i.kvm_available,
     },
     { label: "msb 0.7.13", ready: i.msb_compatible },
-    // msb builds the golden image with the host's first farm; no host needs Docker.
+    // msb builds the golden image with the host's first farm, so a missing one is not a gap.
     {
-      label: i.golden_image_available
-        ? "Golden image"
-        : "Golden image · 첫 Farm 생성 때 빌드",
+      label: "Golden image",
       ready: i.golden_image_available,
+      pending: i.golden_image_available ? undefined : "첫 Farm 생성 때 빌드",
     },
     { label: "VM 부팅·실행 검증", ready: i.vm_boot_verified },
   ];
@@ -685,7 +685,9 @@ function HostInspection({
         !agentBuildMismatch(host.agent?.artifact, coordinatorBuildId),
     },
   ];
-  const checks = local ? runtime : [...runtime, ...agent];
+  const checks: { label: string; ready: boolean; pending?: string }[] = local
+    ? runtime
+    : [...runtime, ...agent];
   return (
     <>
       <HostResources resources={i} capacity={host.capacity} farms={farms} />
@@ -693,11 +695,25 @@ function HostInspection({
         {checks.map((check) => (
           <li
             key={check.label}
-            className={check.ready ? "check-ok" : "check-missing"}
+            className={
+              check.ready
+                ? "check-ok"
+                : check.pending
+                  ? "check-pending"
+                  : "check-missing"
+            }
           >
-            {check.ready ? <Check size={15} /> : <CircleAlert size={15} />}
+            {check.ready ? (
+              <Check size={15} />
+            ) : check.pending ? (
+              <CircleDashed size={15} />
+            ) : (
+              <CircleAlert size={15} />
+            )}
             <span>{check.label}</span>
-            <span>{check.ready ? "확인됨" : "확인 필요"}</span>
+            <span>
+              {check.ready ? "확인됨" : (check.pending ?? "확인 필요")}
+            </span>
           </li>
         ))}
       </ul>
