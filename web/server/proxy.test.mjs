@@ -365,6 +365,20 @@ test("tunnels the shell WebSocket with the server token and normalized query", a
   assert.equal(echo.toString(), "echo");
   socket.destroy();
 });
+test("keeps the shell's multi-node VM in the upstream query", async (t) => {
+  const address = await upgradeSetup(t, (req, socket) => {
+    assert.equal(req.url, "/api/v1/farms/demo/shell?rows=24&cols=80&node=compute-1");
+    socket.write(
+      "HTTP/1.1 101 Switching Protocols\r\nupgrade: websocket\r\nconnection: Upgrade\r\n\r\n",
+    );
+    socket.destroy();
+  });
+  const { response } = await openSocket(
+    address,
+    "/api/v1/farms/demo/shell?rows=24&cols=80&node=compute-1",
+  );
+  assert.equal(response.statusCode, 101);
+});
 test("refuses cross-origin, origin-less and unknown shell upgrades and relays farmd refusals", async (t) => {
   const address = await upgradeSetup(t);
   const path = "/api/v1/farms/demo/shell?rows=24&cols=80";
@@ -375,6 +389,7 @@ test("refuses cross-origin, origin-less and unknown shell upgrades and relays fa
   for (const other of [
     "/api/v1/farms/demo/logs?rows=24&cols=80",
     "/api/v1/farms/demo/shell?rows=x&cols=80",
+    "/api/v1/farms/demo/shell?rows=24&cols=80&node=../x",
   ]) {
     const { response } = await openSocket(address, other);
     assert.equal(response.statusCode, 404);

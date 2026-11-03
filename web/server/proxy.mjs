@@ -188,13 +188,15 @@ export function proxyUpgrade(req, socket, head, env = process.env) {
     return refuse(socket, 502, "서버의 FARM_API_URL 설정을 확인하세요.");
   const rows = url.searchParams.get("rows");
   const cols = url.searchParams.get("cols");
+  const node = url.searchParams.get("node");
   if (
     !/^\/api\/v1\/farms\/[a-z0-9-]+\/shell$/.test(url.pathname) ||
     !/^\d{1,4}$/.test(rows ?? "") ||
-    !/^\d{1,4}$/.test(cols ?? "")
+    !/^\d{1,4}$/.test(cols ?? "") ||
+    (node !== null && !/^(control|compute-\d{1,2})$/.test(node))
   )
     return refuse(socket, 404, "API 경로를 찾을 수 없습니다.");
-  url.search = `?rows=${rows}&cols=${cols}`;
+  url.search = `?rows=${rows}&cols=${cols}${node === null ? "" : `&node=${node}`}`;
   const headers = { connection: "Upgrade", upgrade: "websocket" };
   for (const name of [
     "sec-websocket-key",
