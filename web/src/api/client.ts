@@ -242,11 +242,15 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ from }),
     }),
-  /** Add the next compute VM; a host other than the farm's primary joins through the relay. */
-  addCompute: (id: string, hostId?: string) =>
+  /** Add the next compute VM; a host other than the farm's primary joins through the relay.
+   * `fromSnapshot` boots it from a compute template instead of installing it clean. */
+  addCompute: (id: string, hostId?: string, fromSnapshot?: string) =>
     request<Job>(`/farms/${encode(id)}/computes`, {
       method: "POST",
-      body: JSON.stringify({ host_id: hostId ?? null }),
+      body: JSON.stringify({
+        host_id: hostId ?? null,
+        ...(fromSnapshot ? { from_snapshot: fromSnapshot } : {}),
+      }),
     }),
   /** `forget` removes only the record, without asking the farm's host. */
   delete: (id: string, forget = false) =>

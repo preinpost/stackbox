@@ -24,11 +24,13 @@ import {
   hostQuery,
   hostsQuery,
   keys,
+  snapshotsQuery,
   type ComputeSize,
   type Farm,
   type Job,
   type Phase,
   type RemoteHost,
+  type Snapshot,
 } from "../api/client";
 import {
   componentInfo,
@@ -62,6 +64,20 @@ async function refresh(client: ReturnType<typeof useQueryClient>) {
     client.invalidateQueries({ queryKey: keys.hosts }),
   ]);
 }
+/** Compute templates a new compute of `farm` can boot from; the API also checks the
+ * OpenStack release. */
+export const computeTemplatesFor = (
+  farm: Farm,
+  snapshots: Snapshot[] = [],
+  arch?: string | null,
+) =>
+  snapshots.filter(
+    (s) =>
+      s.compute_template &&
+      ["ready", "exporting"].includes(s.status) &&
+      (!arch || s.arch === arch) &&
+      s.plan.components.join(",") === (farm.plan?.components ?? []).join(","),
+  );
 function publicHostName(hostId: string, hosts: RemoteHost[] = []) {
   const chosen = hosts.find((h) => h.id === hostId);
   if (chosen?.kind === "local") return "localhost";
@@ -703,9 +719,23 @@ export function AddComputeDialog({
   const [hostId, setHostId] = useState(
     lastJob?.target_host ?? farm.host_id ?? "",
   );
+  const resumedTemplate = resumable ? (lastJob?.snapshot_id ?? "") : "";
+  const [mode, setMode] = useState<"clean" | "snapshot">(
+    resumedTemplate ? "snapshot" : "clean",
+  );
+  const [template, setTemplate] = useState(resumedTemplate);
   const client = useQueryClient();
   const hosts = useQuery(hostsQuery());
   const coordinator = useQuery(hostQuery());
+  const snapshots = useQuery(snapshotsQuery());
+  const templates = computeTemplatesFor(
+    farm,
+    snapshots.data,
+    coordinator.data?.arch,
+  );
+  const localHost = hosts.data?.find((host) => host.kind === "local");
+  // Templates are kept on the local host, beside a control VM that runs there.
+  const templateHost = farm.host_id === localHost?.id;
   const plan = farm.plan;
   const computes = plan?.computes ?? 0;
   const next = computes + 1;
@@ -718,12 +748,21 @@ export function AddComputeDialog({
     isDeployableFarm(farm) &&
     (farm.status === "ready" || (farm.status === "failed" && resumable)) &&
     !farm.active_job &&
-    !farm.snapshot_id &&
     computes > 0 &&
     computes < 3;
-  const canSubmit = allowed && Boolean(hostId) && (!remote || Boolean(relay));
+  const fromSnapshot = mode === "snapshot";
+  const canSubmit =
+    allowed &&
+    Boolean(hostId) &&
+    (!remote || Boolean(relay)) &&
+    (!fromSnapshot || (Boolean(template) && !remote && templateHost));
   const mutation = useMutation({
-    mutationFn: () => api.addCompute(farm.id, hostId || undefined),
+    mutationFn: () =>
+      api.addCompute(
+        farm.id,
+        hostId || undefined,
+        fromSnapshot ? template : undefined,
+      ),
     onSuccess: async () => {
       await refresh(client);
       setOpen(false);
@@ -738,6 +777,8 @@ export function AddComputeDialog({
           if (value) {
             mutation.reset();
             setHostId(lastJob?.target_host ?? farm.host_id ?? "");
+            setMode(resumedTemplate ? "snapshot" : "clean");
+            setTemplate(resumedTemplate);
           }
         }
       }}
@@ -779,6 +820,70 @@ export function AddComputeDialog({
                 </p>
               </div>
             </div>
+            <div className="field">
+              <span>설치 방식</span>
+              <div className="segmented-control" role="radiogroup">
+                {(
+                  [
+                    { value: "clean", label: "클린 설치" },
+                    { value: "snapshot", label: "스냅샷에서" },
+                  ] as const
+                ).map((item) => (
+                  <button
+                    key={item.value}
+                    type="button"
+                    role="radio"
+                    aria-checked={mode === item.value}
+                    className={`flex-1 ${mode === item.value ? "selected" : ""}`}
+                    disabled={mutation.isPending || resumable}
+                    onClick={() => {
+                      setMode(item.value);
+                      if (item.value === "snapshot") {
+                        setHostId(farm.host_id ?? "");
+                        if (!template && templates[0])
+                          setTemplate(templates[0].id);
+                      }
+                    }}
+                  >
+                    {item.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+            {fromSnapshot && (
+              <label className="field">
+                <span>Compute 템플릿</span>
+                <SelectInput
+                  label="compute 템플릿 스냅샷"
+                  value={template}
+                  onChange={setTemplate}
+                  items={(resumedTemplate && !templates.length
+                    ? [{ id: resumedTemplate }]
+                    : templates
+                  ).map((snapshot) => ({
+                    value: snapshot.id,
+                    label: snapshot.id,
+                  }))}
+                  disabled={mutation.isPending || resumable}
+                />
+                <small>
+                  이 farm과 같은 서비스로 얼린 compute 템플릿만 보입니다.
+                  OpenStack 릴리스가 다르면 추가가 거부됩니다.
+                </small>
+              </label>
+            )}
+            {fromSnapshot && !templates.length && !resumedTemplate && (
+              <div className="warning-notice">
+                쓸 수 있는 compute 템플릿이 없습니다. 배포된 farm의 얼리기에서
+                compute VM 하나를 템플릿으로 얼려두세요.
+              </div>
+            )}
+            {fromSnapshot && !templateHost && (
+              <div className="warning-notice">
+                compute 템플릿은 로컬 호스트에 있으므로, control VM이 로컬
+                호스트에서 도는 farm에만 쓸 수 있습니다.
+              </div>
+            )}
             <label className="field">
               <span>호스트</span>
               <SelectInput
@@ -789,7 +894,7 @@ export function AddComputeDialog({
                   value: host.id,
                   label: hostLabel(host),
                 }))}
-                disabled={mutation.isPending || resumable}
+                disabled={mutation.isPending || resumable || fromSnapshot}
               />
             </label>
             {remote && !relay && (
@@ -802,16 +907,18 @@ export function AddComputeDialog({
               <div className="info-notice">
                 <RefreshCw size={18} />
                 <div>
-                  <strong>실패한 확장을 이어서 진행합니다.</strong> 새 VM은
-                  이미 만들어졌을 수 있으며, 이 작업은 준비와 Kolla 등록부터
-                  다시 실행합니다.
+                  <strong>실패한 확장을 이어서 진행합니다.</strong> 새 VM은 이미
+                  만들어졌을 수 있으며, 이 작업은 준비와 Kolla 등록부터 다시
+                  실행합니다.
                 </div>
               </div>
             )}
             <p className="field-hint">
               새 VM은 farm의 링크에 붙고, control VM의 Kolla inventory에
               추가됩니다. 기존 인스턴스는 새 compute로 자동 이동하지 않습니다.
-              다른 호스트를 고르면 중계 링크를 거칩니다.
+              {fromSnapshot
+                ? " 템플릿 디스크로 부팅해 노드 identity를 지우고, 이미지 pull 없이 Kolla reconfigure만 실행합니다."
+                : " 다른 호스트를 고르면 중계 링크를 거칩니다."}
             </p>
             {mutation.error && <ErrorNotice error={mutation.error} />}
           </div>

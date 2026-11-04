@@ -75,6 +75,19 @@ function useDialog(pending: boolean, onOpen?: () => void) {
   };
 }
 
+/** Compute VMs of a deployed multi-node farm that can be frozen as compute templates:
+ * those on the farm's own host, which keeps its snapshots. */
+export const templateNodes = (farm: Farm) =>
+  farm.status === "ready" && (farm.plan?.computes ?? 0) > 0
+    ? (farm.plan?.nodes ?? [])
+        .filter((spec) => spec.role === "compute" && spec.index)
+        .map((spec) => `compute-${spec.index}`)
+        .filter(
+          (suffix) =>
+            !farm.shares?.some((share) => share.nodes.includes(suffix)),
+        )
+    : [];
+
 /** Snapshots live with this machine's host, so only its farms can be frozen. */
 export const canFreeze = (farm: Farm, localHostId?: string) =>
   Boolean(localHostId) &&
@@ -92,14 +105,21 @@ export function FreezeFarmDialog({ farm }: { farm: Farm }) {
     (h) => h.kind === "local",
   );
   const snapshots = useQuery(snapshotsQuery());
-  const suggested = `${farm.id.slice(0, 42)}-${farm.status === "ready" ? "clean" : "base"}`;
+  const [node, setNode] = useState("");
+  const suggest = (node: string) =>
+    node
+      ? `${farm.id.slice(0, 36)}-${node}-tpl`
+      : `${farm.id.slice(0, 42)}-${farm.status === "ready" ? "clean" : "base"}`;
+  const suggested = suggest("");
   const [id, setId] = useState(suggested);
   const [note, setNote] = useState("");
+  const templates = templateNodes(farm);
   const mutation = useMutation({
     mutationFn: () =>
       api.freeze(farm.id, {
         id,
         ...(note.trim() ? { note: note.trim() } : {}),
+        ...(node ? { node } : {}),
       }),
     onSuccess: async () => {
       await refresh(client);
@@ -107,6 +127,7 @@ export function FreezeFarmDialog({ farm }: { farm: Farm }) {
     },
   });
   const dialog = useDialog(mutation.isPending, () => {
+    setNode("");
     setId(suggested);
     setNote("");
     mutation.reset();
@@ -140,14 +161,39 @@ export function FreezeFarmDialog({ farm }: { farm: Farm }) {
             <div className="action-context">
               <Snowflake size={20} />
               <div>
-                <strong className="font-mono">{farm.id}</strong>
+                <strong className="font-mono">
+                  {node ? `${farm.id}-${node}` : farm.id}
+                </strong>
                 <p>
-                  {farm.status === "ready"
-                    ? "배포된 OpenStack을 그대로 저장합니다. 복원한 farm은 바로 Ready가 됩니다."
-                    : "OpenStack 배포 전 상태입니다. 복원한 farm은 VM 준비됨 상태로 시작합니다."}
+                  {node
+                    ? "이 compute VM 하나를 compute 템플릿으로 저장합니다. 같은 서비스와 릴리스의 farm에 compute를 빠르게 추가할 때 씁니다."
+                    : farm.status === "ready"
+                      ? "배포된 OpenStack을 그대로 저장합니다. 복원한 farm은 바로 Ready가 됩니다."
+                      : "OpenStack 배포 전 상태입니다. 복원한 farm은 VM 준비됨 상태로 시작합니다."}
                 </p>
               </div>
             </div>
+            {templates.length > 0 && (
+              <label className="field">
+                <span>대상</span>
+                <SelectInput
+                  label="얼릴 대상"
+                  value={node}
+                  onChange={(value) => {
+                    setNode(value);
+                    setId(suggest(value));
+                  }}
+                  items={[
+                    { value: "", label: "farm 전체" },
+                    ...templates.map((suffix) => ({
+                      value: suffix,
+                      label: `${suffix} (compute 템플릿)`,
+                    })),
+                  ]}
+                  disabled={mutation.isPending}
+                />
+              </label>
+            )}
             <label className="field">
               <span>스냅샷 ID</span>
               <Input
@@ -180,17 +226,26 @@ export function FreezeFarmDialog({ farm }: { farm: Farm }) {
                 disabled={mutation.isPending}
               />
             </label>
-            <div className="warning-notice">
-              데이터베이스를 깨끗하게 저장하기 위해 VM을 잠시 정지했다가 다시
-              시작합니다. 여러 VM farm은 compute를 먼저 멈추고 control을 먼저
-              켭니다. 서비스가 다시 응답할 때까지 몇 분 정도 걸립니다. 이
-              스냅샷은{" "}
-              {snapshotHost({
-                arch: host.data?.arch ?? undefined,
-                platform: host.data?.os,
-              })}
-              에서만 복원할 수 있습니다.
-            </div>
+            {node ? (
+              <div className="warning-notice">
+                {node}만 잠시 정지했다가 다시 시작합니다. 인스턴스가 있는
+                compute는 템플릿으로 얼릴 수 없습니다. 노드 identity(Nova
+                compute_id, machine-id, OVS system-id)는 템플릿으로 compute를
+                추가할 때 지워집니다.
+              </div>
+            ) : (
+              <div className="warning-notice">
+                데이터베이스를 깨끗하게 저장하기 위해 VM을 잠시 정지했다가 다시
+                시작합니다. 여러 VM farm은 compute를 먼저 멈추고 control을 먼저
+                켭니다. 서비스가 다시 응답할 때까지 몇 분 정도 걸립니다. 이
+                스냅샷은{" "}
+                {snapshotHost({
+                  arch: host.data?.arch ?? undefined,
+                  platform: host.data?.os,
+                })}
+                에서만 복원할 수 있습니다.
+              </div>
+            )}
             {mutation.error && <ErrorNotice error={mutation.error} />}
           </div>
           <div className="modal-footer justify-end">

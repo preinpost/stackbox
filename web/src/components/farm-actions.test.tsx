@@ -10,7 +10,7 @@ import {
   DeleteFarmDialog,
   DeployFarmDialog,
 } from "./farm-actions";
-import { DeleteSnapshotDialog } from "./snapshot-actions";
+import { DeleteSnapshotDialog, FreezeFarmDialog } from "./snapshot-actions";
 
 const { navigate } = vi.hoisted(() => ({
   navigate: vi.fn().mockResolvedValue(undefined),
@@ -573,6 +573,154 @@ test("adds the next compute to the farm's primary host by default", async () => 
   await user.click(screen.getByRole("button", { name: "Compute 추가" }));
   await user.click(await screen.findByRole("button", { name: "추가" }));
   await waitFor(() => expect(submitted).toEqual({ host_id: "local" }));
+  cleanup();
+});
+
+/** A deployed farm with a control VM and one compute on the local host. */
+function grownFarm(): Farm {
+  const spec = singleVmPlan().nodes[0];
+  return {
+    id: "grow",
+    host_id: "local",
+    created_at: 0,
+    updated_at: 0,
+    status: "ready",
+    active_job: null,
+    exposure: { host: "localhost", bind: "127.0.0.1", port_base: 15000 },
+    plan: {
+      ...singleVmPlan(),
+      computes: 1,
+      nodes: [
+        { ...spec, role: "control" },
+        { ...spec, role: "compute", index: 1 },
+      ],
+    },
+    nodes: [
+      {
+        name: "grow-control",
+        role: "control",
+        status: "running",
+        memory_mib: 6656,
+      },
+      {
+        name: "grow-compute-1",
+        role: "compute",
+        index: 1,
+        status: "running",
+        memory_mib: 3072,
+      },
+    ],
+  };
+}
+/** Answers the portal's reads around a farm's actions, and records the POST to `post`. */
+function stubFarmApi(post: string, snapshots: unknown[] = []) {
+  const posted: { body?: unknown } = {};
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (path: string, options?: RequestInit) => {
+      if (path.endsWith("/hosts"))
+        return Response.json([
+          {
+            id: "local",
+            kind: "local",
+            address: "localhost",
+            status: "ready",
+            inspection: { checked_at: Date.now() / 1000 },
+            capacity: { memory_budget_mib: 8000, memory_reserved_mib: 0 },
+          },
+        ]);
+      if (path.endsWith("/host"))
+        return Response.json({
+          msb_available: true,
+          memory_budget_mib: 0,
+          memory_reserved_mib: 0,
+          relay_url: null,
+        });
+      if (path.endsWith("/snapshots") && options?.method !== "POST")
+        return Response.json(snapshots);
+      if (path.endsWith(post) && options?.method === "POST") {
+        posted.body = JSON.parse(String(options.body));
+        return Response.json({ id: "job", farm_id: "grow", status: "queued" });
+      }
+      return Response.json([]);
+    }),
+  );
+  return posted;
+}
+
+test("adds a compute from a compatible compute template", async () => {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+  });
+  const user = userEvent.setup();
+  const plan = { ...singleVmPlan(), computes: 1 };
+  const posted = stubFarmApi("/computes", [
+    { id: "whole", status: "ready", arch: "aarch64", plan },
+    {
+      id: "other-services",
+      status: "ready",
+      arch: "aarch64",
+      compute_template: true,
+      plan: { ...plan, components: ["keystone", "glance", "horizon"] },
+    },
+    {
+      id: "tpl",
+      status: "ready",
+      arch: "aarch64",
+      compute_template: true,
+      release: "2026.2",
+      plan,
+    },
+  ]);
+  render(
+    <QueryClientProvider client={client}>
+      <AddComputeDialog farm={grownFarm()} />
+    </QueryClientProvider>,
+  );
+  await user.click(screen.getByRole("button", { name: "Compute 추가" }));
+  await user.click(await screen.findByRole("radio", { name: "스냅샷에서" }));
+  const select = await screen.findByRole("combobox", {
+    name: "compute 템플릿 스냅샷",
+  });
+  await waitFor(() => expect(select.textContent).toContain("tpl"));
+  await user.click(select);
+  const options = await screen.findAllByRole("option");
+  expect(options.map((option) => option.textContent)).toEqual(["tpl"]);
+  await user.keyboard("{Escape}");
+  await user.click(screen.getByRole("button", { name: "추가" }));
+  await waitFor(() =>
+    expect(posted.body).toEqual({ host_id: "local", from_snapshot: "tpl" }),
+  );
+  cleanup();
+});
+
+test("freezes one compute VM of a deployed farm as a compute template", async () => {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+  });
+  const user = userEvent.setup();
+  const posted = stubFarmApi("/farms/grow/snapshots");
+  render(
+    <QueryClientProvider client={client}>
+      <FreezeFarmDialog farm={grownFarm()} />
+    </QueryClientProvider>,
+  );
+  const trigger = screen.getByRole("button", { name: "얼리기" });
+  await waitFor(() =>
+    expect((trigger as HTMLButtonElement).disabled).toBe(false),
+  );
+  await user.click(trigger);
+  await user.click(await screen.findByRole("combobox", { name: "얼릴 대상" }));
+  await user.click(
+    await screen.findByRole("option", { name: "compute-1 (compute 템플릿)" }),
+  );
+  await user.click(screen.getByRole("button", { name: "얼리기 시작" }));
+  await waitFor(() =>
+    expect(posted.body).toEqual({
+      id: "grow-compute-1-tpl",
+      node: "compute-1",
+    }),
+  );
   cleanup();
 });
 

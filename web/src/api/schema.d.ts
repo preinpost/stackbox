@@ -602,6 +602,13 @@ export interface components {
   schemas: {
     AddComputeRequest: {
       /**
+       * @description Compute template snapshot to boot the new VM from instead of installing it clean.
+       *     Kolla then only reconfigures it; the template must match the farm's OpenStack
+       *     release, components and CPU architecture.
+       * @default null
+       */
+      from_snapshot: string | null;
+      /**
        * @description Host for the new compute VM; omitted for the farm's primary host. A compute on
        *     another host joins the farm through its link relay.
        * @default null
@@ -1245,6 +1252,11 @@ export interface components {
       /** @description CPU architecture of the frozen guest; its disks cannot boot on another one. */
       arch?: string;
       archive?: null | components["schemas"]["SnapshotArchive"];
+      /**
+       * @description A single compute VM frozen to boot new computes of farms from; no farm restores
+       *     from it.
+       */
+      compute_template?: boolean;
       /** Format: int64 */
       created_at: number;
       /** @description Whether OpenStack was deployed when frozen. Restored farms then start `ready`. */
@@ -1261,6 +1273,8 @@ export interface components {
        *     its control VM's, and `nodes` holds every VM's.
        */
       reference?: string | null;
+      /** @description OpenStack release the guest was deployed with; unknown for older snapshots. */
+      release?: string | null;
       /** Format: int64 */
       size_bytes?: number | null;
       /** @description Public ports the source farm's catalog was registered with; restores rewrite them. */
@@ -1275,6 +1289,11 @@ export interface components {
     SnapshotRequest: {
       /** @description Snapshot ID: 1-48 lowercase letters, digits or hyphens. */
       id: string;
+      /**
+       * @description Freeze only this compute VM (`compute-1`, ...) of a deployed multi-node farm, as a
+       *     compute template that later expansions boot new computes from.
+       */
+      node?: string | null;
       note?: string | null;
     };
     /** @enum {string} */
