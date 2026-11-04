@@ -57,7 +57,13 @@ impl ManagerOptions {
                     url,
                     mode: match std::env::var("FARM_RELAY_TLS").as_deref() {
                         Ok("proxy") => crate::link::relay::RelayTlsMode::Proxy,
-                        _ => crate::link::relay::RelayTlsMode::Private,
+                        Ok("private") | Err(_) => crate::link::relay::RelayTlsMode::Private,
+                        Ok(other) => {
+                            eprintln!(
+                                "relay: FARM_RELAY_TLS={other} is not private or proxy; using private"
+                            );
+                            crate::link::relay::RelayTlsMode::Private
+                        }
                     },
                     bind: std::env::var("FARM_RELAY_BIND")
                         .ok()

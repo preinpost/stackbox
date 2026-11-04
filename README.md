@@ -117,12 +117,14 @@ CLI `--place compute-2=dev-01`, 포털의 **Compute VM 배치**로 정합니다.
 - **연결**: 호스트마다 스위치가 farm별 uplink를 coordinator의 relay(`wss://…/api/v1/link-relay`)에 열고, relay가
   같은 farm의 다른 호스트로 프레임을 넘깁니다. 스위치에는 그 farm의 segment만 오갑니다.
 - **설정**: 포털 **Hosts** 아래 **호스트 간 relay**(또는 `PUT /api/v1/relay`)에서 URL, TLS 방식, listen 주소를 정합니다.
-  저장하면 재시작 없이 바로 다시 열립니다. `FARM_RELAY_URL`·`FARM_RELAY_TLS`·`FARM_RELAY_BIND`는 저장된 설정이 없을 때의 초기값입니다.
-  - `private`(기본): relay가 `0.0.0.0:10011`에서 coordinator 사설 CA로 TLS를 엽니다. 다른 호스트가 이 포트에 닿아야 합니다.
-  - **Cloudflare 임시 터널**(`quick_tunnel`): coordinator가 cloudflared를 직접 띄워 relay(`127.0.0.1:10012`)를
+  저장하면 재시작 없이 바로 다시 열립니다. 포털은 처음에 Cloudflare 임시 터널을 골라 둡니다.
+  `FARM_RELAY_URL`·`FARM_RELAY_TLS`·`FARM_RELAY_BIND`는 저장된 설정이 없을 때의 초기값이며, `FARM_RELAY_URL`이 있어야
+  쓰입니다. `FARM_RELAY_TLS`는 `private`(기본)와 `proxy`만 받고, 다른 값은 경고를 남기고 `private`로 씁니다.
+  - **Cloudflare 임시 터널**(`quick_tunnel`, 포털 기본): coordinator가 cloudflared를 직접 띄워 relay(`127.0.0.1:10012`)를
     `*.trycloudflare.com`(Cloudflare Quick Tunnel)으로 내보냅니다. 계정과 포트 개방이 필요 없습니다. Cloudflare는
     개발·시험용으로 제공하며 가용성을 보장하지 않습니다. 고정 주소가 필요하면 `proxy`로 직접 띄운 터널을 씁니다. coordinator가 다시 뜰 때마다 주소가 바뀌며,
     바뀐 주소는 여러 호스트에 걸친 farm의 각 호스트 스위치에 자동으로 전달됩니다(토큰과 CA는 그대로).
+  - `private`: relay가 `0.0.0.0:10011`에서 coordinator 사설 CA로 TLS를 엽니다. 다른 호스트가 이 포트에 닿아야 합니다.
   - **cloudflared**: 시스템에 설치된 것은 쓰지 않습니다. GitHub 최신 릴리스를 `<state dir>/bin/`에 받아, GitHub가 공개한
     SHA-256과 대조하고 macOS에서는 Cloudflare 코드 서명(Team ID `68WVV388M8`)도 확인합니다. 하루 한 번 새 릴리스를
     확인해 바꾸고 터널을 다시 띄웁니다. 직전 버전 하나를 남깁니다. `FARM_CLOUDFLARED_VERSION`으로 버전을 고정하고,
