@@ -486,6 +486,14 @@ pub struct DeployRequest {
     pub from: Phase,
 }
 
+#[derive(Clone, Debug, Default, Serialize, Deserialize, ToSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct AddComputeRequest {
+    /// Host for the new compute VM; omitted for the farm's primary host. A compute on
+    /// another host joins the farm through its link relay.
+    pub host_id: Option<String>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
 pub struct Exposure {
     pub host: String,
@@ -537,6 +545,8 @@ pub enum FarmStatus {
 pub enum JobKind {
     Create,
     Deploy,
+    /// Add the next compute VM to an existing multi-node farm
+    Expand,
     Delete,
     /// Freeze the farm's VM into a snapshot
     Snapshot,
@@ -693,6 +703,12 @@ pub struct Job {
     /// Progress events of the host-side job already recorded here.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub remote_frames: u64,
+    /// Host that receives the VM of a compute-expansion job.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_host: Option<String>,
+    /// Suffix of the compute VM a compute-expansion job adds (`compute-2`, ...).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_node: Option<String>,
 }
 fn is_zero(value: &u64) -> bool {
     *value == 0

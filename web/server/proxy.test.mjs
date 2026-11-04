@@ -270,13 +270,18 @@ test("forwards local host registration and service checks", async (t) => {
     res.writeHead(202, { "content-type": "application/json" });
     res.end("{}");
   });
-  for (const path of ["/api/v1/local-host", "/api/v1/farms/demo/settle"]) {
+  for (const path of [
+    "/api/v1/local-host",
+    "/api/v1/farms/demo/settle",
+    "/api/v1/farms/demo/computes",
+  ]) {
     const response = await fetch(address + path, { method: "POST" });
     assert.equal(response.status, 202, path);
   }
   assert.deepEqual(seen, [
     "POST /api/v1/local-host",
     "POST /api/v1/farms/demo/settle",
+    "POST /api/v1/farms/demo/computes",
   ]);
 });
 test("streams SSE and propagates resume cursors without buffering", async (t) => {

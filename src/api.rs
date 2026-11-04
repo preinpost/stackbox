@@ -105,6 +105,7 @@ pub fn router(manager: FarmManager, token: Option<String>) -> Router {
         .route("/api/v1/farms", get(list).post(create))
         .route("/api/v1/farms/{id}", get(detail).delete(delete))
         .route("/api/v1/farms/{id}/deploy", post(deploy))
+        .route("/api/v1/farms/{id}/computes", post(add_compute))
         .route("/api/v1/farms/{id}/settle", post(settle))
         .route("/api/v1/farms/{id}/endpoints", get(endpoints))
         .route("/api/v1/farms/{id}/nodes/{node}/faults", put(set_faults))
@@ -589,6 +590,14 @@ async fn deploy(
 ) -> Result<Response, ApiError> {
     Ok(accepted(app.manager.deploy(&id, body(value)?)?))
 }
+#[utoipa::path(post, path="/api/v1/farms/{id}/computes", params(("id"=String, Path)), request_body=AddComputeRequest, responses((status=202, description="Add the next compute VM to a deployed multi-node farm, on the given host or the farm's primary host", body=Job), (status=400, body=ErrorBody), (status=404, body=ErrorBody), (status=409, body=ErrorBody)))]
+async fn add_compute(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    value: Result<Json<AddComputeRequest>, JsonRejection>,
+) -> Result<Response, ApiError> {
+    Ok(accepted(app.manager.add_compute(&id, body(value)?)?))
+}
 #[utoipa::path(post, path="/api/v1/farms/{id}/settle", params(("id"=String, Path)), responses((status=202, description="Wait for the farm's services to answer again after its VM started from disk; no deployment runs", body=Job), (status=409, body=ErrorBody)))]
 async fn settle(State(app): State<App>, Path(id): Path<String>) -> Result<Response, ApiError> {
     Ok(accepted(app.manager.settle(&id)?))
@@ -979,7 +988,7 @@ async fn relay_shell(
 }
 
 #[derive(OpenApi)]
-#[openapi(paths(host, remote_hosts, remote_host, host_fingerprint, test_connection, register_host, register_local_host, register_agent_host, update_host_credentials, unregister_host, check_host, prepare_host, install_agent, host_jobs, host_job, catalog_handler, plan_handler, list, detail, create, deploy, settle, delete, endpoints, set_faults, logs, log_stream, freeze, snapshots, snapshot, delete_snapshot, export_snapshot, import_snapshot, buckets, bucket, register_bucket, update_bucket, unregister_bucket, test_bucket, check_bucket, bucket_objects, relay_status, set_relay, remove_relay, update_cloudflared, jobs, job), components(schemas(ErrorBody)), modifiers(&Security))]
+#[openapi(paths(host, remote_hosts, remote_host, host_fingerprint, test_connection, register_host, register_local_host, register_agent_host, update_host_credentials, unregister_host, check_host, prepare_host, install_agent, host_jobs, host_job, catalog_handler, plan_handler, list, detail, create, deploy, add_compute, settle, delete, endpoints, set_faults, logs, log_stream, freeze, snapshots, snapshot, delete_snapshot, export_snapshot, import_snapshot, buckets, bucket, register_bucket, update_bucket, unregister_bucket, test_bucket, check_bucket, bucket_objects, relay_status, set_relay, remove_relay, update_cloudflared, jobs, job), components(schemas(ErrorBody)), modifiers(&Security))]
 struct ApiDoc;
 struct Security;
 impl utoipa::Modify for Security {

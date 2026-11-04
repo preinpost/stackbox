@@ -34,6 +34,10 @@ pub struct State {
     /// Each farm that spans hosts' uplink keys, by host, sealed by the vault.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub relay_keys: BTreeMap<String, BTreeMap<String, crate::remote::SealedCredentials>>,
+    /// A compute expansion's share while its new host is being created, sealed by the
+    /// vault. A retry sends the same share, so the host can replay the request safely.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub pending_shares: BTreeMap<String, BTreeMap<String, crate::remote::SealedCredentials>>,
 }
 impl Default for State {
     fn default() -> Self {
@@ -49,6 +53,7 @@ impl Default for State {
             uploads: BTreeMap::new(),
             relay: None,
             relay_keys: BTreeMap::new(),
+            pending_shares: BTreeMap::new(),
         }
     }
 }

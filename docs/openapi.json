@@ -579,6 +579,74 @@
         }
       }
     },
+    "/api/v1/farms/{id}/computes": {
+      "post": {
+        "tags": [],
+        "operationId": "add_compute",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AddComputeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Add the next compute VM to a deployed multi-node farm, on the given host or the farm's primary host",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Job"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/farms/{id}/deploy": {
       "post": {
         "tags": [],
@@ -1943,6 +2011,20 @@
   },
   "components": {
     "schemas": {
+      "AddComputeRequest": {
+        "type": "object",
+        "properties": {
+          "host_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Host for the new compute VM; omitted for the farm's primary host. A compute on\nanother host joins the farm through its link relay.",
+            "default": null
+          }
+        },
+        "additionalProperties": false
+      },
       "AgentArtifactInfo": {
         "type": "object",
         "required": [
@@ -3230,6 +3312,20 @@
           },
           "status": {
             "$ref": "#/components/schemas/JobStatus"
+          },
+          "target_host": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Host that receives the VM of a compute-expansion job."
+          },
+          "target_node": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Suffix of the compute VM a compute-expansion job adds (`compute-2`, ...)."
           }
         }
       },
@@ -3238,6 +3334,7 @@
         "enum": [
           "create",
           "deploy",
+          "expand",
           "delete",
           "snapshot",
           "restore",

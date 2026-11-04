@@ -38,6 +38,7 @@ import {
   type Impair,
 } from "../api/client";
 import {
+  AddComputeDialog,
   CheckServicesButton,
   DeleteFarmDialog,
   DeployFarmDialog,
@@ -163,6 +164,10 @@ export function FarmDetailPage({ id }: { id: string }) {
           {farm.status !== "deleted" && (
             <>
               <DeployFarmDialog farm={farm} lastJob={latestDeployment} />
+              <AddComputeDialog
+                farm={farm}
+                lastJob={history.find((j) => j.kind === "expand")}
+              />
               <CheckServicesButton farm={farm} deployed={deployed} />
               {host?.kind === "local" && <FreezeFarmDialog farm={farm} />}
               <DeleteFarmDialog farm={farm} />
@@ -236,6 +241,18 @@ export function FarmDetailPage({ id }: { id: string }) {
             </strong>{" "}
             VM이 부팅되면 public endpoint를 이 farm의 포트로 옮기고 서비스가
             응답할 때까지 기다립니다.
+          </div>
+        </div>
+      )}
+      {activeJob?.kind === "expand" && (
+        <div className="info-notice">
+          <Cpu size={18} />
+          <div>
+            <strong>
+              {activeJob.target_node ?? "compute"}을(를) 추가하는 중입니다.
+            </strong>{" "}
+            새 VM을 만들고 control VM의 Kolla inventory에 등록합니다. 기존
+            서비스는 그대로 동작합니다.
           </div>
         </div>
       )}

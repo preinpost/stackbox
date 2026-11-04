@@ -338,6 +338,54 @@ impl server::Handler for Handler {
                         .push(format!("prepare:{farm_id}"));
                     Reply::Done
                 }
+                Operation::Expand {
+                    farm_id,
+                    plan,
+                    add,
+                    ..
+                } => {
+                    self.observed
+                        .calls
+                        .lock()
+                        .unwrap()
+                        .push(format!("expand:{farm_id}:{}", add.join(",")));
+                    let nodes: Vec<_> = plan
+                        .nodes
+                        .iter()
+                        .filter(|node| {
+                            crate::farm::suffix(node.role, node.index)
+                                .is_some_and(|suffix| add.iter().any(|add| add == &suffix))
+                        })
+                        .map(|node| crate::farm::FarmNode {
+                            index: node.index,
+                            name: crate::farm::node_name(&farm_id, node.role, node.index),
+                            role: Some(node.role),
+                            status: "running".into(),
+                            memory_mib: node.memory_mib,
+                            ip: Some("10.250.0.1".into()),
+                        })
+                        .collect();
+                    self.observed
+                        .rpc_farms
+                        .lock()
+                        .unwrap()
+                        .entry(farm_id)
+                        .or_default()
+                        .extend(nodes.clone());
+                    Reply::Nodes { nodes }
+                }
+                Operation::SshKeys { .. } => Reply::SshKeys {
+                    public_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFixture".into(),
+                    private_key: "-----BEGIN OPENSSH PRIVATE KEY-----\nfixture\n-----END OPENSSH PRIVATE KEY-----\n".into(),
+                },
+                Operation::DeployCompute { farm_id, index, .. } => {
+                    self.observed
+                        .calls
+                        .lock()
+                        .unwrap()
+                        .push(format!("deploy-compute:{farm_id}:{index}"));
+                    Reply::Done
+                }
                 Operation::Purge => {
                     let removed = self.observed.rpc_farms.lock().unwrap().len();
                     self.observed.rpc_farms.lock().unwrap().clear();

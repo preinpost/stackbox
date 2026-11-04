@@ -151,7 +151,30 @@ CLI `--place compute-2=dev-01`, 포털의 **Compute VM 배치**로 정합니다.
 # 포털 Hosts에서 relay URL을 저장한 뒤
 farm create span --host-id local --computes 2 --place compute-2=dev-01
 farm deploy span
+farm add-compute span --host-id dev-01   # 배포된 farm에 compute를 한 대 더
 ```
+
+### 배포된 farm에 Compute 추가
+
+배포가 끝난 다중 VM farm에는 compute VM을 한 대씩 더 붙일 수 있습니다.
+`POST /api/v1/farms/{id}/computes`(CLI `farm add-compute`)에 `host_id`를 넘기면 그 호스트에,
+생략하면 farm의 primary 호스트에 다음 `compute-N`을 만듭니다.
+
+- **같은 호스트**: farm의 링크 스위치에 포트만 추가하고, control VM의 Kolla inventory에 새 VM을 넣습니다.
+- **이미 farm에 참여한 원격 호스트**: 그 호스트의 기존 share와 uplink를 그대로 씁니다.
+- **처음 붙는 원격 호스트**: 새 share와 uplink를 만들고, farm이 전부 한 호스트에 있었다면
+  control VM의 호스트도 그때 relay에 붙입니다. control VM의 기존 SSH 키와 공개키를 그대로 쓰므로
+  이미 배포된 compute의 접속이 끊기지 않습니다.
+
+Kolla는 passwords와 globals를 다시 만들지 않고 inventory만 갱신한 뒤, 새 compute에만
+`bootstrap-servers`와 `deploy --limit farm-compute-N`을 실행합니다. nova cell 등록은 Kolla의
+compute 배치 작업이 control의 conductor로 위임해 처리하고, 마지막에 `openstack compute service list`와
+network agent로 새 compute가 올라왔는지 확인합니다. farm의 plan은 Kolla가 성공한 뒤에만 갱신되므로,
+실패한 작업은 같은 `farm add-compute` 명령으로 이어서 재시도할 수 있습니다.
+
+지금은 compute가 최대 3대이고, all-in-one farm과 스냅샷에서 복원한 farm은 대상이 아닙니다.
+새 호스트는 control VM과 같은 CPU 아키텍처이고, 기존 farm이 KVM이면 `/dev/kvm`도 있어야 합니다.
+기존 인스턴스는 새 compute로 자동 이동하지 않으므로 필요하면 live migration을 따로 실행합니다.
 
 ## 웹포탈
 
@@ -236,6 +259,7 @@ curl -N http://127.0.0.1:10010/api/v1/farms/demo/logs/stream
 | GET / POST | `/farms` | 목록 / 생성 job (`host_id` 필수) |
 | GET / DELETE | `/farms/{id}` | farm 상태 / 삭제 job |
 | POST | `/farms/{id}/deploy` | 배포 job (`{"from":"prechecks"}`로 재개) |
+| POST | `/farms/{id}/computes` | 배포된 다중 VM farm에 다음 compute VM 추가 job (`{"host_id":"dev-01"}`; 생략 시 primary 호스트) |
 | POST | `/farms/{id}/settle` | VM 재시작 뒤 서비스 응답 확인 job |
 | GET | `/farms/{id}/endpoints` | public 서비스 URL과 admin 인증정보 |
 | PUT | `/farms/{id}/nodes/{node}/faults` | 다중 VM farm의 VM 링크에 지연·손실 설정(`{}`이면 복구), 갱신된 farm |

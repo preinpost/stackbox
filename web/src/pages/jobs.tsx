@@ -2,6 +2,7 @@ import { Link } from "@tanstack/react-router";
 import {
   ArrowRight,
   CopyPlus,
+  Cpu,
   Play,
   Plus,
   ShieldCheck,
@@ -17,6 +18,7 @@ export const jobLabel = (kind: Job["kind"]) => jobKindLabels[kind];
 const jobIcons = {
   create: Plus,
   deploy: Play,
+  expand: Cpu,
   delete: Trash2,
   snapshot: Snowflake,
   restore: CopyPlus,

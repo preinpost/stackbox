@@ -839,6 +839,187 @@ impl Agent {
                     .await?;
                 Ok(Reply::Done)
             }
+            Operation::Expand {
+                plan: requested,
+                nodes,
+                add,
+                uplink,
+                ..
+            } => {
+                let entry = self.owned(&request, id, generation)?;
+                // The coordinator applies plan()'s policy; expansion must keep every
+                // existing VM's spec and only append compute VMs.
+                let canonical = layout(&PlanRequest {
+                    components: requested.components.clone(),
+                    computes: requested.computes,
+                    compute: requested.compute,
+                })?;
+                ensure!(
+                    serde_json::to_value(requested)? == serde_json::to_value(&canonical)?,
+                    "farm plan differs from the supported layout"
+                );
+                ensure!(
+                    requested.computes >= entry.plan.computes,
+                    "an expansion adds compute VMs"
+                );
+                ensure!(
+                    requested.nodes.len() >= entry.plan.nodes.len()
+                        && serde_json::to_value(&requested.nodes[..entry.plan.nodes.len()])?
+                            == serde_json::to_value(&entry.plan.nodes)?,
+                    "an expansion cannot change the farm's existing VMs"
+                );
+                let suffixes: Vec<String> = requested
+                    .nodes
+                    .iter()
+                    .filter_map(|spec| crate::farm::suffix(spec.role, spec.index))
+                    .collect();
+                let ordered: Vec<String> = suffixes
+                    .iter()
+                    .filter(|suffix| nodes.contains(suffix))
+                    .cloned()
+                    .collect();
+                ensure!(
+                    ordered.len() == nodes.len()
+                        && nodes.iter().all(|node| suffixes.contains(node))
+                        && add.iter().all(|node| ordered.contains(node)),
+                    "the expansion names VMs the farm does not have"
+                );
+                let mut share = entry.share.clone();
+                if let Some(uplink) = uplink {
+                    // The control VM's host joins the relay for the first time. Keep the
+                    // farm's existing Kolla key so computes prepared earlier still trust it.
+                    share = Some(match share {
+                        Some(mut share) => {
+                            share.uplink = uplink.clone();
+                            share.nodes = ordered.clone();
+                            share
+                        }
+                        None => {
+                            let (public_key, private_key) =
+                                self.backend.ssh_keys(id.into()).await?;
+                            crate::remote::protocol::Share {
+                                nodes: ordered.clone(),
+                                uplink: uplink.clone(),
+                                ssh_public_key: public_key,
+                                ssh_private_key: Some(private_key),
+                            }
+                        }
+                    });
+                } else if let Some(share) = &mut share {
+                    share.nodes = ordered.clone();
+                }
+                if let Some(share) = &share {
+                    share.validate(id, requested)?;
+                }
+                let new_memory = share_memory(requested, share.as_ref());
+                {
+                    let registry = LockedRegistry::open(&self.dir)?;
+                    let reserved: u64 = registry
+                        .state
+                        .farms
+                        .values()
+                        .filter(|r| !r.deleted && r.generation != generation)
+                        .map(Reservation::memory_mib)
+                        .sum();
+                    let foreign: u64 = self
+                        .backend
+                        .scan()
+                        .await?
+                        .iter()
+                        .filter(|(farm, _)| {
+                            !registry.state.farms.get(*farm).is_some_and(|r| !r.deleted)
+                        })
+                        .flat_map(|(_, nodes)| nodes)
+                        .map(|n| u64::from(n.memory_mib))
+                        .sum();
+                    ensure!(
+                        reserved.saturating_add(foreign).saturating_add(new_memory)
+                            <= self.limits.memory_budget_mib,
+                        "remote host memory reservation budget exceeded"
+                    );
+                    ensure!(
+                        new_memory <= self.limits.available_mib,
+                        "remote host available memory is insufficient"
+                    );
+                    drop(registry);
+                }
+                let created = self
+                    .backend
+                    .expand(
+                        id.into(),
+                        requested.clone(),
+                        ordered.clone(),
+                        add.clone(),
+                        uplink.clone(),
+                    )
+                    .await?;
+                let mut registry = LockedRegistry::open(&self.dir)?;
+                let entry = registry
+                    .state
+                    .farms
+                    .get_mut(id)
+                    .context("remote farm reservation disappeared")?;
+                ensure!(
+                    entry.coordinator == request.coordinator_id
+                        && entry.generation == generation
+                        && !entry.deleted,
+                    "farm reservation changed while expanding"
+                );
+                entry.plan = requested.clone();
+                entry.share = share;
+                registry.save()?;
+                Ok(Reply::Nodes { nodes: created })
+            }
+            Operation::SshKeys { .. } => {
+                let entry = self.owned(&request, id, generation)?;
+                ensure!(entry.publishes(), "farm '{id}' is served from another host");
+                let (public_key, private_key) = match &entry.share {
+                    Some(share) => (
+                        share.ssh_public_key.clone(),
+                        share
+                            .ssh_private_key
+                            .clone()
+                            .context("the control VM's SSH key is missing")?,
+                    ),
+                    None => self.backend.ssh_keys(id.into()).await?,
+                };
+                Ok(Reply::SshKeys {
+                    public_key,
+                    private_key,
+                })
+            }
+            Operation::DeployCompute { index, .. } => {
+                let entry = self.owned(&request, id, generation)?;
+                ensure!(entry.publishes(), "farm '{id}' is served from another host");
+                ensure!(
+                    entry.plan.nodes.iter().any(|spec| {
+                        spec.role == crate::farm::Role::Compute && spec.index == Some(*index)
+                    }),
+                    "farm '{id}' has no compute-{index}"
+                );
+                let nodes = entry.share.as_ref().map_or_else(
+                    || {
+                        entry
+                            .plan
+                            .nodes
+                            .iter()
+                            .filter_map(|spec| crate::farm::suffix(spec.role, spec.index))
+                            .collect()
+                    },
+                    |share| share.nodes.clone(),
+                );
+                self.backend
+                    .deploy_compute(
+                        id.into(),
+                        entry.plan.clone(),
+                        *index,
+                        nodes,
+                        entry.plan.components.clone(),
+                        progress(emit),
+                    )
+                    .await?;
+                Ok(Reply::Done)
+            }
             Operation::Restore {
                 reference,
                 nodes,

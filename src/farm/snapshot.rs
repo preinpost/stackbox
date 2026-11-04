@@ -122,7 +122,9 @@ async fn run_in(name: &str, script: &str) -> Result<()> {
     let sandbox = connect(name).await?;
     let result = run(&sandbox, script).await;
     sandbox.detach().await;
-    result.map(drop).with_context(|| format!("{name}: {script}"))
+    result
+        .map(drop)
+        .with_context(|| format!("{name}: {script}"))
 }
 
 /// Freeze a multi-node farm: computes stop before the control VM, so nova-compute leaves
@@ -192,7 +194,9 @@ async fn freeze_nodes(
             nodes,
         }),
         (Err(e), None) => Err(e),
-        (Err(e), Some(restart)) => Err(e.context(format!("the farm also did not start again: {restart}"))),
+        (Err(e), Some(restart)) => {
+            Err(e.context(format!("the farm also did not start again: {restart}")))
+        }
     }
 }
 

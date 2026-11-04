@@ -44,6 +44,35 @@ pub trait Backend: Send + Sync + 'static {
     ) -> BoxFuture<'_, Result<Vec<FarmNode>>> {
         Box::pin(async { Err(anyhow!("this backend runs farms on one host only")) })
     }
+    /// Add compute VMs to an existing farm on this host. `nodes` are the farm's VMs this
+    /// host runs after the change; `add` are the suffixes to create. `uplink` joins this
+    /// host's switch to the relay for the first time when a remote compute is added.
+    fn expand(
+        &self,
+        _id: String,
+        _plan: Plan,
+        _nodes: Vec<String>,
+        _add: Vec<String>,
+        _uplink: Option<crate::link::UplinkConfig>,
+    ) -> BoxFuture<'_, Result<Vec<FarmNode>>> {
+        Box::pin(async { Err(anyhow!("this backend cannot add a compute VM")) })
+    }
+    /// The SSH key pair the control VM uses to reach the farm's computes.
+    fn ssh_keys(&self, _id: String) -> BoxFuture<'_, Result<(String, String)>> {
+        Box::pin(async { Err(anyhow!("this backend has no control VM SSH key")) })
+    }
+    /// Deploy one new compute VM with Kolla, limited to that VM.
+    fn deploy_compute(
+        &self,
+        _id: String,
+        _plan: Plan,
+        _index: u8,
+        _nodes: Vec<String>,
+        _components: Vec<String>,
+        _sink: EventSink,
+    ) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async { Err(anyhow!("this backend cannot deploy a compute VM")) })
+    }
     /// Point this host's switch at the relay's new `url` for a farm that spans hosts.
     fn relink(&self, _id: String, _url: String) -> BoxFuture<'_, Result<()>> {
         Box::pin(async { Err(anyhow!("this backend runs farms on one host only")) })
@@ -193,6 +222,72 @@ impl Backend for MicrosandboxBackend {
                 Some(&share),
             )
             .await
+        })
+    }
+    fn expand(
+        &self,
+        id: String,
+        plan: Plan,
+        _nodes: Vec<String>,
+        add: Vec<String>,
+        uplink: Option<crate::link::UplinkConfig>,
+    ) -> BoxFuture<'_, Result<Vec<FarmNode>>> {
+        Box::pin(async move {
+            if let Some(uplink) = uplink {
+                self.switch.set_uplink(&id, uplink)?;
+            }
+            farm::add_nodes(&id, &plan.nodes, &add, &self.switch).await
+        })
+    }
+    fn ssh_keys(&self, id: String) -> BoxFuture<'_, Result<(String, String)>> {
+        Box::pin(async move {
+            let node = farm::get_farm(&id)
+                .await?
+                .into_iter()
+                .find(|node| node.role == Some(farm::Role::Control))
+                .context("the farm has no control VM")?;
+            let sandbox = farm::connect(&node.name).await?;
+            let result = async {
+                let private = crate::shell::run(
+                    &sandbox,
+                    "test -f /root/.ssh/id_ed25519 && cat /root/.ssh/id_ed25519",
+                )
+                .await
+                .context("the control VM has no SSH key; deploy the farm first")?;
+                let public = crate::shell::run(
+                    &sandbox,
+                    "test -f /root/.ssh/id_ed25519.pub && cat /root/.ssh/id_ed25519.pub",
+                )
+                .await
+                .context("the control VM has no SSH public key")?;
+                let private = private.trim().to_owned();
+                let public = public.trim().to_owned();
+                anyhow::ensure!(
+                    private.starts_with("-----BEGIN OPENSSH PRIVATE KEY-----"),
+                    "the control VM's SSH key is not OpenSSH private key material"
+                );
+                anyhow::ensure!(
+                    public.starts_with("ssh-ed25519 "),
+                    "the control VM's SSH public key is invalid"
+                );
+                Ok((public, private))
+            }
+            .await;
+            sandbox.detach().await;
+            result
+        })
+    }
+    fn deploy_compute(
+        &self,
+        id: String,
+        plan: Plan,
+        index: u8,
+        nodes: Vec<String>,
+        components: Vec<String>,
+        sink: EventSink,
+    ) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async move {
+            kolla::deploy_compute(&id, &plan, index, &nodes, &components, sink).await
         })
     }
     fn relink(&self, id: String, url: String) -> BoxFuture<'_, Result<()>> {

@@ -688,6 +688,155 @@ export function DeployFarmDialog({
     </Dialog.Root>
   );
 }
+export function AddComputeDialog({
+  farm,
+  lastJob,
+}: {
+  farm: Farm;
+  lastJob?: Job;
+}) {
+  const resumable =
+    lastJob?.kind === "expand" &&
+    ["failed", "interrupted"].includes(lastJob.status) &&
+    Boolean(lastJob.target_node);
+  const [open, setOpen] = useState(false);
+  const [hostId, setHostId] = useState(
+    lastJob?.target_host ?? farm.host_id ?? "",
+  );
+  const client = useQueryClient();
+  const hosts = useQuery(hostsQuery());
+  const coordinator = useQuery(hostQuery());
+  const plan = farm.plan;
+  const computes = plan?.computes ?? 0;
+  const next = computes + 1;
+  const ready = (hosts.data ?? []).filter((host) =>
+    hostReady(host, coordinator.data?.build_id),
+  );
+  const remote = hostId !== farm.host_id;
+  const relay = coordinator.data?.relay_url;
+  const allowed =
+    isDeployableFarm(farm) &&
+    (farm.status === "ready" || (farm.status === "failed" && resumable)) &&
+    !farm.active_job &&
+    !farm.snapshot_id &&
+    computes > 0 &&
+    computes < 3;
+  const canSubmit = allowed && Boolean(hostId) && (!remote || Boolean(relay));
+  const mutation = useMutation({
+    mutationFn: () => api.addCompute(farm.id, hostId || undefined),
+    onSuccess: async () => {
+      await refresh(client);
+      setOpen(false);
+    },
+  });
+  return (
+    <Dialog.Root
+      open={open}
+      onOpenChange={(value) => {
+        if (!mutation.isPending) {
+          setOpen(value);
+          if (value) {
+            mutation.reset();
+            setHostId(lastJob?.target_host ?? farm.host_id ?? "");
+          }
+        }
+      }}
+    >
+      <Dialog.Trigger
+        render={<Button disabled={!allowed} />}
+        title={
+          computes >= 3
+            ? "한 farm에는 compute VM을 3대까지 둘 수 있습니다."
+            : computes === 0
+              ? "all-in-one farm에는 compute를 추가할 수 없습니다. control과 compute로 이루어진 farm을 새로 만드세요."
+              : "배포가 끝난 farm에 다음 compute VM을 추가합니다."
+        }
+      >
+        <Cpu size={15} />
+        Compute 추가
+      </Dialog.Trigger>
+      <Modal
+        title={`Compute ${next} 추가`}
+        description="control VM은 그대로 두고, 새 compute VM만 준비해 Kolla에 등록합니다."
+        closeDisabled={mutation.isPending}
+      >
+        <form
+          onSubmit={(event) => {
+            event.preventDefault();
+            if (canSubmit) mutation.mutate();
+          }}
+        >
+          <div className="modal-body space-y-5">
+            <div className="action-context">
+              <Cpu size={20} />
+              <div>
+                <strong className="font-mono">
+                  {farm.id}-{lastJob?.target_node ?? `compute-${next}`}
+                </strong>
+                <p>
+                  기존 compute와 같은 크기 · {plan?.compute?.cpus ?? 2} vCPU ·{" "}
+                  {memory(plan?.compute?.memory_mib ?? 3072)}
+                </p>
+              </div>
+            </div>
+            <label className="field">
+              <span>호스트</span>
+              <SelectInput
+                label={`compute-${next} 호스트`}
+                value={hostId}
+                onChange={setHostId}
+                items={ready.map((host) => ({
+                  value: host.id,
+                  label: hostLabel(host),
+                }))}
+                disabled={mutation.isPending || resumable}
+              />
+            </label>
+            {remote && !relay && (
+              <div className="warning-notice">
+                다른 호스트의 compute를 붙이려면 먼저 Hosts에서 호스트 간
+                relay를 설정하세요.
+              </div>
+            )}
+            {resumable && (
+              <div className="info-notice">
+                <RefreshCw size={18} />
+                <div>
+                  <strong>실패한 확장을 이어서 진행합니다.</strong> 새 VM은
+                  이미 만들어졌을 수 있으며, 이 작업은 준비와 Kolla 등록부터
+                  다시 실행합니다.
+                </div>
+              </div>
+            )}
+            <p className="field-hint">
+              새 VM은 farm의 링크에 붙고, control VM의 Kolla inventory에
+              추가됩니다. 기존 인스턴스는 새 compute로 자동 이동하지 않습니다.
+              다른 호스트를 고르면 중계 링크를 거칩니다.
+            </p>
+            {mutation.error && <ErrorNotice error={mutation.error} />}
+          </div>
+          <div className="modal-footer justify-end">
+            <Dialog.Close render={<Button disabled={mutation.isPending} />}>
+              취소
+            </Dialog.Close>
+            <Button
+              type="submit"
+              variant="primary"
+              disabled={!canSubmit || mutation.isPending}
+            >
+              {mutation.isPending ? (
+                <LoaderCircle size={15} className="animate-spin" />
+              ) : (
+                <Plus size={15} />
+              )}
+              추가
+            </Button>
+          </div>
+        </form>
+      </Modal>
+    </Dialog.Root>
+  );
+}
 export function DeleteFarmDialog({ farm }: { farm: Farm }) {
   const [open, setOpen] = useState(false);
   const [confirm, setConfirm] = useState("");

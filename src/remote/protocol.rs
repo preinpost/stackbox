@@ -35,6 +35,32 @@ pub enum Operation {
         farm_id: String,
         generation: String,
     },
+    /// Add a compute VM to an existing multi-node farm on this host, or update the
+    /// reservation's plan and the VMs this host runs after another host gained one.
+    /// `uplink` is set when the control VM's host joins the relay for the first time.
+    Expand {
+        farm_id: String,
+        generation: String,
+        plan: Plan,
+        /// Suffixes of the farm's VMs this host runs after the change.
+        nodes: Vec<String>,
+        /// Suffixes to create here; the others already exist or run elsewhere.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        add: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        uplink: Option<crate::link::UplinkConfig>,
+    },
+    /// Return the SSH key pair the control VM uses to reach the farm's computes.
+    SshKeys {
+        farm_id: String,
+        generation: String,
+    },
+    /// Deploy one new compute VM of a multi-node farm with Kolla, limited to that VM.
+    DeployCompute {
+        farm_id: String,
+        generation: String,
+        index: u8,
+    },
     /// Point this host's switch at the relay's new address for a farm that spans hosts.
     Relink {
         farm_id: String,
@@ -151,6 +177,20 @@ impl Operation {
                 farm_id,
                 generation,
             }
+            | Self::Expand {
+                farm_id,
+                generation,
+                ..
+            }
+            | Self::SshKeys {
+                farm_id,
+                generation,
+            }
+            | Self::DeployCompute {
+                farm_id,
+                generation,
+                ..
+            }
             | Self::Relink {
                 farm_id,
                 generation,
@@ -201,7 +241,11 @@ impl Operation {
             Self::Settle { .. }
             | Self::Freeze { .. }
             | Self::Restore { .. }
-            | Self::Prepare { .. } => 3600,
+            | Self::Prepare { .. }
+            | Self::Expand { .. } => 3600,
+            // Kolla pulls images and runs the compute play on the new host.
+            Self::DeployCompute { .. } => 7200,
+            Self::SshKeys { .. } => 300,
             // Each moves a whole VM disk.
             Self::ExportSnapshot { .. } | Self::ImportSnapshot { .. } => 7200,
             Self::RemoveSnapshot { .. } => 300,
@@ -340,6 +384,10 @@ pub enum Reply {
     Imported {
         snapshot: ImportedSnapshot,
     },
+    SshKeys {
+        public_key: String,
+        private_key: String,
+    },
     Done,
     Purged {
         /// Farms whose VMs were destroyed, including ones already deleted from the registry.
@@ -352,7 +400,10 @@ impl Operation {
     fn reports_progress(&self) -> bool {
         matches!(
             self,
-            Self::Deploy { .. } | Self::Attach { .. } | Self::Settle { .. }
+            Self::Deploy { .. }
+                | Self::Attach { .. }
+                | Self::Settle { .. }
+                | Self::DeployCompute { .. }
         )
     }
     /// Whether the agent may stream command output while running this operation.

@@ -317,6 +317,31 @@ impl FarmManager {
                     resumed.push(job.clone());
                     continue;
                 }
+                // An expansion commits its plan only after Kolla accepted the new compute.
+                // A stop between that commit and the job's own finish did all the work.
+                if job.kind == JobKind::Expand {
+                    let index = job
+                        .target_node
+                        .as_deref()
+                        .and_then(|node| node.strip_prefix("compute-"))
+                        .and_then(|index| index.parse::<u8>().ok());
+                    if let (Some(index), Some(farm)) = (index, state.farms.get_mut(&job.farm_id))
+                        && farm
+                            .plan
+                            .as_ref()
+                            .is_some_and(|plan| plan.computes >= index)
+                    {
+                        job.status = JobStatus::Succeeded;
+                        job.error = None;
+                        job.finished_at = Some(now());
+                        farm.active_job = None;
+                        farm.status = FarmStatus::Ready;
+                        farm.error = None;
+                        farm.step = None;
+                        farm.updated_at = now();
+                        continue;
+                    }
+                }
                 job.status = JobStatus::Interrupted;
                 job.error = Some(
                     "daemon stopped during this job; inspect the VMs and retry explicitly".into(),
@@ -865,11 +890,69 @@ impl FarmManager {
             })
             .collect()
     }
+    /// The next plan after one more compute VM, keeping every existing VM's spec.
+    fn expand_plan(&self, plan: &Plan) -> Result<Plan> {
+        let expanded = layout(&PlanRequest {
+            components: plan.components.clone(),
+            computes: plan.computes + 1,
+            compute: plan.compute,
+        })?;
+        if serde_json::to_value(&expanded.nodes[..plan.nodes.len()])?
+            != serde_json::to_value(&plan.nodes)?
+            || expanded.computes != plan.computes + 1
+        {
+            bail!("this farm's existing VM layout cannot be expanded; create a new farm instead");
+        }
+        Ok(expanded)
+    }
+    /// A new uplink for one host of a farm that is gaining a compute on another host.
+    fn next_uplink(
+        &self,
+        state: &State,
+        id: &str,
+        host: &str,
+    ) -> Result<crate::link::UplinkConfig> {
+        let settings = state
+            .relay
+            .as_ref()
+            .context("farms that span hosts need the relay; set it up under Hosts")?;
+        let tunnel = self
+            .0
+            .tunnel_url
+            .lock()
+            .map_err(|_| anyhow!("tunnel lock poisoned"))?
+            .clone();
+        let url = effective_url(settings, tunnel.as_deref())
+            .context("the relay's quick tunnel has no address yet; see Hosts and try again")?;
+        let ca = match settings.mode {
+            crate::link::relay::RelayTlsMode::Private => self
+                .0
+                .relay_tls
+                .read()
+                .map_err(|_| anyhow!("relay lock poisoned"))?
+                .as_ref()
+                .context("no relay CA")?
+                .ca_pem
+                .clone(),
+            _ => String::new(),
+        };
+        Ok(crate::link::UplinkConfig {
+            url: crate::link::relay::uplink_url(&url, id, host)?,
+            ca,
+            token: crate::link::new_token()?,
+            key: crate::link::seal::new_key()?,
+            segments: crate::farm::NETWORKS
+                .iter()
+                .map(|(_, network, _)| format!("{id}/{network}"))
+                .collect(),
+        })
+    }
     /// Close a deleted farm's uplinks and drop their keys.
     fn forget_uplinks(&self, id: &str) -> Result<()> {
         self.0.relay.forget(id);
         self.update(|state| {
             state.relay_keys.remove(id);
+            state.pending_shares.remove(id);
             Ok(())
         })
     }
@@ -1449,6 +1532,212 @@ impl FarmManager {
         self.spawn(job.clone(), Some(request));
         Ok(job)
     }
+    /// Add the next compute VM to a deployed multi-node farm. The VM runs on `host_id`, or
+    /// on the farm's primary host when it is omitted. A remote host joins the farm's link
+    /// segments through the coordinator's relay.
+    pub fn add_compute(&self, id: &str, request: AddComputeRequest) -> Result<Job> {
+        let tunnel_url = self
+            .0
+            .tunnel_url
+            .lock()
+            .map_err(|_| anyhow!("tunnel lock poisoned"))?
+            .clone();
+        let job = self.update(|state| {
+            self.ensure_accepting()?;
+            let farm = state
+                .farms
+                .get(id)
+                .ok_or_else(|| NotFound(format!("farm '{id}'")))?;
+            ensure_idle(farm)?;
+            let plan = farm
+                .plan
+                .as_ref()
+                .ok_or_else(|| conflict("farm has no plan to expand"))?
+                .clone();
+            if plan.computes == 0 {
+                return Err(conflict(
+                    "an all-in-one farm has no control VM to add a compute to; create a multi-node farm instead",
+                ));
+            }
+            if farm.snapshot_id.is_some() {
+                return Err(conflict(
+                    "a farm restored from a snapshot cannot gain a compute; create a new farm instead",
+                ));
+            }
+            if plan.computes >= crate::farm::MAX_COMPUTES {
+                return Err(conflict(format!(
+                    "a farm has at most {} compute VMs",
+                    crate::farm::MAX_COMPUTES
+                )));
+            }
+            let previous = state
+                .jobs
+                .values()
+                .filter(|job| {
+                    job.farm_id == id
+                        && job.kind == JobKind::Expand
+                        && matches!(job.status, JobStatus::Failed | JobStatus::Interrupted)
+                })
+                .max_by_key(|job| job.created_at)
+                .cloned();
+            let resuming = farm.status == FarmStatus::Failed;
+            let (target_host, target_node) = if resuming {
+                let previous = previous.as_ref().ok_or_else(|| {
+                    conflict(
+                        "this farm failed before a compute was added; deploy it or delete it first",
+                    )
+                })?;
+                (
+                    previous
+                        .target_host
+                        .clone()
+                        .context("the failed expansion has no host")?,
+                    previous
+                        .target_node
+                        .clone()
+                        .context("the failed expansion has no VM")?,
+                )
+            } else {
+                if farm.status != FarmStatus::Ready {
+                    return Err(conflict(
+                        "deploy the farm before adding a compute VM to it",
+                    ));
+                }
+                if farm.nodes.len() != plan.nodes.len()
+                    || farm.nodes.iter().any(|node| node.status != "running")
+                {
+                    return Err(conflict(
+                        "all of the farm's VMs must be running before adding a compute",
+                    ));
+                }
+                let host = request
+                    .host_id
+                    .clone()
+                    .or_else(|| farm.host_id.clone())
+                    .context("choose a host for the new compute")?;
+                validate_id(&host).map_err(|error| bad_request(error.to_string()))?;
+                (host, format!("compute-{}", plan.computes + 1))
+            };
+            let expected = format!("compute-{}", plan.computes + 1);
+            if target_node != expected {
+                return Err(conflict(format!(
+                    "the next compute is {expected}, not {target_node}; delete the farm or finish its deployment first"
+                )));
+            }
+            let new_plan = self
+                .expand_plan(&plan)
+                .map_err(|error| conflict(error.to_string()))?;
+            let new_spec = new_plan
+                .nodes
+                .last()
+                .context("the expanded plan has no new compute")?;
+            let primary = farm
+                .host_id
+                .clone()
+                .ok_or_else(|| conflict("farm has no primary host"))?;
+            let (budget, _, _, _) = self.admit_host(state, &target_host, true)?;
+            if target_host != primary {
+                let arch = |host: &str| {
+                    state
+                        .hosts
+                        .get(host)
+                        .and_then(|host| host.host.inspection.as_ref())
+                        .map(|inspection| inspection.arch.clone())
+                };
+                if let (Some(control), Some(target)) = (arch(&primary), arch(&target_host))
+                    && control != target
+                {
+                    return Err(conflict(format!(
+                        "host '{target_host}' is {target} but the farm's control VM runs {control}; Kolla images cannot mix CPU architectures"
+                    )));
+                }
+            }
+            let reserved: u64 = state
+                .farms
+                .values()
+                .filter(|other| other.status != FarmStatus::Deleted)
+                .map(|other| other.memory_on(&target_host))
+                .sum();
+            let added = u64::from(new_spec.memory_mib);
+            if reserved.saturating_add(added) > budget {
+                return Err(conflict(format!(
+                    "memory budget of host '{target_host}' exceeded: {reserved} MiB reserved + {added} MiB requested > {budget} MiB"
+                )));
+            }
+            if target_host != primary {
+                let relay = state
+                    .relay
+                    .as_ref()
+                    .context("a compute on another host needs the relay; set it up under Hosts")?;
+                effective_url(relay, tunnel_url.as_deref()).context(
+                    "the relay's quick tunnel has no address yet; see Hosts and try again",
+                )?;
+            }
+            // Move the farm to the hosts' current agents when they match this build, as
+            // deploy does, so an upgraded host can run the expansion protocol.
+            let mut repin_primary = None;
+            if let Some(agent) = farm
+                .host_id
+                .as_ref()
+                .and_then(|host| state.hosts.get(host))
+                .and_then(|host| host.host.agent.as_ref())
+            {
+                if agent.artifact.build_id != crate::BUILD_ID {
+                    return Err(conflict(format!(
+                        "the agent installed on {} was built from {} but this coordinator is {}; reinstall it from Hosts first",
+                        farm.host_id.as_deref().unwrap_or_default(),
+                        agent.artifact.build_id,
+                        crate::BUILD_ID
+                    )));
+                }
+                if farm.agent_sha256.as_deref() != Some(agent.artifact.sha256.as_str()) {
+                    repin_primary = Some(agent.artifact.sha256.clone());
+                }
+            }
+            let mut repin_shares = Vec::new();
+            for share in &farm.shares {
+                if let Some(agent) = state
+                    .hosts
+                    .get(&share.host_id)
+                    .and_then(|host| host.host.agent.as_ref())
+                {
+                    if agent.artifact.build_id != crate::BUILD_ID {
+                        return Err(conflict(format!(
+                            "the agent installed on {} was built from {} but this coordinator is {}; reinstall it from Hosts first",
+                            share.host_id, agent.artifact.build_id, crate::BUILD_ID
+                        )));
+                    }
+                    if share.agent_sha256.as_deref() != Some(agent.artifact.sha256.as_str()) {
+                        repin_shares.push((share.host_id.clone(), agent.artifact.sha256.clone()));
+                    }
+                }
+            }
+            let mut job = new_job(id, JobKind::Expand);
+            job.target_host = Some(target_host);
+            job.target_node = Some(target_node);
+            job.phase = Some(crate::kolla::Phase::Prepare);
+            let farm = state.farms.get_mut(id).context("farm disappeared")?;
+            if let Some(sha256) = repin_primary {
+                farm.agent_sha256 = Some(sha256);
+            }
+            for (host, sha256) in repin_shares {
+                if let Some(share) = farm.shares.iter_mut().find(|share| share.host_id == host) {
+                    share.agent_sha256 = Some(sha256);
+                }
+            }
+            farm.status = FarmStatus::Deploying;
+            farm.active_job = Some(job.id.clone());
+            farm.phase = Some(crate::kolla::Phase::Prepare);
+            farm.step = Some(format!("{} 추가", job.target_node.as_deref().unwrap_or("compute")));
+            farm.error = None;
+            farm.updated_at = now();
+            state.jobs.insert(job.id.clone(), job.clone());
+            Ok(job)
+        })?;
+        self.spawn(job.clone(), None);
+        Ok(job)
+    }
+
     /// Re-check a farm whose VM started from disk (or was restarted) without deploying again.
     pub fn settle(&self, id: &str) -> Result<Job> {
         let job = self.update(|state| {
@@ -1593,7 +1882,7 @@ impl FarmManager {
     async fn execute(&self, job: &Job, request: Option<DeployRequest>) -> Result<()> {
         let _permit = match job.kind {
             JobKind::Create | JobKind::Restore => Some(self.0.create_gate.acquire().await?),
-            JobKind::Deploy => Some(self.0.deploy_gate.acquire().await?),
+            JobKind::Deploy | JobKind::Expand => Some(self.0.deploy_gate.acquire().await?),
             JobKind::Snapshot => Some(self.0.snapshot_gate.acquire().await?),
             JobKind::Settle => Some(self.0.deploy_gate.acquire().await?),
             JobKind::Delete => None,
@@ -1616,10 +1905,10 @@ impl FarmManager {
         match job.kind {
             JobKind::Create => {
                 // An SSH host's inspection may be old by now; look at the host again first.
-                if let Some(host_id) = &farm.host_id {
-                    if self.refresh_ssh_inspection(host_id, 300).await? {
-                        self.log(&farm.id, &job.id, None, format!("re-inspected host {host_id} over SSH\n"))?;
-                    }
+                if let Some(host_id) = &farm.host_id
+                    && self.refresh_ssh_inspection(host_id, 300).await?
+                {
+                    self.log(&farm.id, &job.id, None, format!("re-inspected host {host_id} over SSH\n"))?;
                 }
                 let nodes = if farm.shares.is_empty() {
                     self.backend_for(&farm)?
@@ -1691,6 +1980,7 @@ impl FarmManager {
                 }
                 self.forget_uplinks(&farm.id)?;
             }
+            JobKind::Expand => self.expand_job(job, &farm).await?,
             JobKind::Settle => {
                 let components = farm_components(&farm);
                 self.backend_for(&farm)?
@@ -1702,6 +1992,295 @@ impl FarmManager {
         }
         Ok(())
     }
+    /// Add one compute VM to a deployed farm, then deploy it with Kolla. The farm's plan is
+    /// committed only after Kolla accepts the new compute, so a failure leaves the previous
+    /// plan and the same expansion can be retried.
+    async fn expand_job(&self, job: &Job, farm: &FarmRecord) -> Result<()> {
+        let id = farm.id.clone();
+        let old_plan = farm.plan.clone().context("farm has no plan")?;
+        let plan = self.expand_plan(&old_plan)?;
+        let target_host = job.target_host.clone().context("expansion has no host")?;
+        let target_node = job.target_node.clone().context("expansion has no VM")?;
+        let index: u8 = target_node
+            .strip_prefix("compute-")
+            .and_then(|index| index.parse().ok())
+            .context("expansion VM is not a compute")?;
+        let primary = farm.host_id.clone().context("farm has no primary host")?;
+        let generation = farm
+            .remote_generation
+            .clone()
+            .context("farm has no generation")?;
+        let exposure = farm.exposure.clone().context("farm has no exposure")?;
+        let components = farm_components(farm);
+        let primary_backend = self.backend_for(farm)?;
+        let mut shares = farm.shares.clone();
+        let target_share = shares
+            .iter()
+            .find(|share| share.host_id == target_host)
+            .cloned();
+        let keys = if target_host != primary {
+            Some(primary_backend.ssh_keys(id.clone()).await?)
+        } else {
+            None
+        };
+        if target_host != primary && target_share.is_none() {
+            // A new remote host: create its one-node share and start its switch on the relay.
+            let public_key = keys
+                .as_ref()
+                .context("a remote compute needs the control VM's SSH key")?
+                .0
+                .clone();
+            let pending = self.read(|state| {
+                state
+                    .pending_shares
+                    .get(&id)
+                    .and_then(|hosts| hosts.get(&target_host))
+                    .cloned()
+            })?;
+            let share = match pending {
+                Some(sealed) => self
+                    .0
+                    .vault
+                    .unseal(&sealed, &expansion_share_aad(&id, &target_host))?,
+                None => {
+                    let share = crate::remote::protocol::Share {
+                        nodes: vec![target_node.clone()],
+                        uplink: self.read(|state| self.next_uplink(state, &id, &target_host))??,
+                        ssh_public_key: public_key,
+                        ssh_private_key: None,
+                    };
+                    let sealed = self
+                        .0
+                        .vault
+                        .seal(&share, &expansion_share_aad(&id, &target_host))?;
+                    self.update(|state| {
+                        state
+                            .pending_shares
+                            .entry(id.clone())
+                            .or_default()
+                            .insert(target_host.clone(), sealed);
+                        Ok(())
+                    })?;
+                    share
+                }
+            };
+            let uplink = share.uplink.clone();
+            let (_, agent_sha256, _, _) =
+                self.read(|state| self.admit_host(state, &target_host, true))??;
+            let backend = self.agent_backend(&target_host, agent_sha256.as_deref(), &generation)?;
+            self.log(
+                &id,
+                &job.id,
+                Some(crate::kolla::Phase::Prepare),
+                format!("creating {target_node} on host {target_host}\n"),
+            )?;
+            let nodes = backend
+                .create_share(id.clone(), plan.clone(), exposure.clone(), share)
+                .await?;
+            self.log(
+                &id,
+                &job.id,
+                Some(crate::kolla::Phase::Prepare),
+                format!(
+                    "created {} on host {target_host}\n",
+                    nodes
+                        .iter()
+                        .map(|node| node.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            )?;
+            let record = HostShare {
+                host_id: target_host.clone(),
+                agent_sha256,
+                nodes: vec![target_node.clone()],
+                uplink_sha256: crate::link::token_hash(&uplink.token),
+            };
+            self.update(|state| {
+                let sealed = self
+                    .0
+                    .vault
+                    .seal(&uplink.key, &uplink_key_aad(&id, &target_host))?;
+                state
+                    .relay_keys
+                    .entry(id.clone())
+                    .or_default()
+                    .insert(target_host.clone(), sealed);
+                if let Some(hosts) = state.pending_shares.get_mut(&id) {
+                    hosts.remove(&target_host);
+                }
+                let farm = state.farms.get_mut(&id).context("farm missing")?;
+                farm.shares.push(record);
+                farm.updated_at = now();
+                Ok(())
+            })?;
+            shares.push(
+                self.get(&id)?
+                    .shares
+                    .last()
+                    .cloned()
+                    .context("new share disappeared")?,
+            );
+            backend
+                .prepare(
+                    id.clone(),
+                    components.clone(),
+                    keys.as_ref().context("no control key")?.0.clone(),
+                )
+                .await?;
+        } else if target_host != primary {
+            // A compute on a host the farm already uses: its uplink and key stay as they are.
+            let share = target_share.context("the target host's share disappeared")?;
+            let mut nodes = share.nodes.clone();
+            if !nodes.iter().any(|node| node == &target_node) {
+                nodes.push(target_node.clone());
+            }
+            let backend =
+                self.agent_backend(&target_host, share.agent_sha256.as_deref(), &generation)?;
+            self.log(
+                &id,
+                &job.id,
+                Some(crate::kolla::Phase::Prepare),
+                format!("creating {target_node} on host {target_host}\n"),
+            )?;
+            backend
+                .expand(
+                    id.clone(),
+                    plan.clone(),
+                    nodes.clone(),
+                    vec![target_node.clone()],
+                    None,
+                )
+                .await?;
+            self.update(|state| {
+                let farm = state.farms.get_mut(&id).context("farm missing")?;
+                let share = farm
+                    .shares
+                    .iter_mut()
+                    .find(|share| share.host_id == target_host)
+                    .context("the target host's share disappeared")?;
+                share.nodes = nodes.clone();
+                farm.updated_at = now();
+                Ok(())
+            })?;
+            if let Some(share) = shares.iter_mut().find(|share| share.host_id == target_host) {
+                share.nodes = nodes;
+            }
+            backend
+                .prepare(
+                    id.clone(),
+                    components.clone(),
+                    keys.as_ref().context("no control key")?.0.clone(),
+                )
+                .await?;
+        }
+        // The control VM's host joins the relay when the farm gains its first remote compute,
+        // or repairs an earlier attempt that did not record its uplink.
+        let primary_uplink = if target_host != primary && farm.uplink_sha256.is_none() {
+            Some(self.read(|state| self.next_uplink(state, &id, &primary))??)
+        } else {
+            None
+        };
+        let remote: std::collections::BTreeSet<String> = shares
+            .iter()
+            .flat_map(|share| share.nodes.iter().cloned())
+            .collect();
+        let primary_nodes: Vec<String> = plan
+            .nodes
+            .iter()
+            .filter_map(|spec| crate::farm::suffix(spec.role, spec.index))
+            .filter(|suffix| !remote.contains(suffix))
+            .collect();
+        let add = if target_host == primary {
+            vec![target_node.clone()]
+        } else {
+            Vec::new()
+        };
+        self.log(
+            &id,
+            &job.id,
+            Some(crate::kolla::Phase::Prepare),
+            format!(
+                "updating the farm plan on host {primary}{}\n",
+                if primary_uplink.is_some() {
+                    " and joining the relay"
+                } else {
+                    ""
+                }
+            ),
+        )?;
+        primary_backend
+            .expand(
+                id.clone(),
+                plan.clone(),
+                primary_nodes.clone(),
+                add,
+                primary_uplink.clone(),
+            )
+            .await?;
+        if let Some(uplink) = primary_uplink {
+            let token = crate::link::token_hash(&uplink.token);
+            let sealed = self
+                .0
+                .vault
+                .seal(&uplink.key, &uplink_key_aad(&id, &primary))?;
+            self.update(|state| {
+                let farm = state.farms.get_mut(&id).context("farm missing")?;
+                farm.uplink_sha256 = Some(token);
+                state
+                    .relay_keys
+                    .entry(id.clone())
+                    .or_default()
+                    .insert(primary.clone(), sealed);
+                farm.updated_at = now();
+                Ok(())
+            })?;
+        }
+        // Other hosts keep their reservation's plan in step with the farm's layout.
+        for share in &shares {
+            if share.host_id == target_host {
+                continue;
+            }
+            let backend =
+                self.agent_backend(&share.host_id, share.agent_sha256.as_deref(), &generation)?;
+            backend
+                .expand(
+                    id.clone(),
+                    plan.clone(),
+                    share.nodes.clone(),
+                    Vec::new(),
+                    None,
+                )
+                .await?;
+        }
+        self.authorize_uplinks(&self.get(&id)?);
+        self.log(
+            &id,
+            &job.id,
+            Some(crate::kolla::Phase::Deploy),
+            format!("deploying {target_node} with Kolla, limited to that VM\n"),
+        )?;
+        primary_backend
+            .deploy_compute(
+                id.clone(),
+                plan.clone(),
+                index,
+                primary_nodes,
+                components,
+                self.event_sink(job, None),
+            )
+            .await?;
+        self.update(|state| {
+            state.pending_shares.remove(&id);
+            let farm = state.farms.get_mut(&id).context("farm missing")?;
+            farm.plan = Some(plan);
+            farm.shares = shares;
+            farm.updated_at = now();
+            Ok(())
+        })?;
+        Ok(())
+    }
+
     /// Runs a deploy as a host-side job, which outlives this coordinator and its connection
     /// to the host. A lost connection, or a restart for a job recorded with its host-side
     /// id, follows that job again from the frames already recorded.
@@ -1886,7 +2465,7 @@ impl FarmManager {
                 (JobKind::Settle, false) => FarmStatus::Ready,
                 (_, true) => FarmStatus::Failed,
                 (JobKind::Create, false) => FarmStatus::Created,
-                (JobKind::Deploy, false) => FarmStatus::Ready,
+                (JobKind::Deploy | JobKind::Expand, false) => FarmStatus::Ready,
                 (JobKind::Delete, false) => FarmStatus::Deleted,
                 (JobKind::Restore, false) if deployed => FarmStatus::Ready,
                 (JobKind::Restore, false) => FarmStatus::Created,
@@ -2103,6 +2682,8 @@ fn new_job(farm: &str, kind: JobKind) -> Job {
         forget: false,
         remote_job_id: None,
         remote_frames: 0,
+        target_host: None,
+        target_node: None,
     }
 }
 fn farm_components(farm: &FarmRecord) -> Vec<String> {
@@ -2166,6 +2747,9 @@ struct RelayListener {
 
 fn uplink_key_aad(farm: &str, host: &str) -> String {
     format!("farm-uplink-key:{farm}:{host}")
+}
+fn expansion_share_aad(farm: &str, host: &str) -> String {
+    format!("farm-expansion-share:{farm}:{host}")
 }
 
 /// The relay URL other hosts reach: the settings', or a quick tunnel's current address.

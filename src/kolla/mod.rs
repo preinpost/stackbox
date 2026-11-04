@@ -214,6 +214,202 @@ async fn deploy_on(
 }
 
 /// Give the control VM the key Kolla reaches the computes with.
+/// Add one compute VM to a deployed farm with Kolla. `nodes` are the farm's VMs on this
+/// host; computes on other hosts were prepared there. Everything is limited to the new
+/// compute, so the control plane keeps running.
+pub async fn deploy_compute(
+    farm_id: &str,
+    plan: &crate::model::Plan,
+    index: u8,
+    nodes: &[String],
+    components: &[String],
+    sink: EventSink,
+) -> Result<()> {
+    let control_spec = plan
+        .nodes
+        .iter()
+        .find(|spec| spec.role == farm::Role::Control)
+        .context("a compute can only join a farm with a control VM")?;
+    let new_suffix = format!("compute-{index}");
+    let new_spec = plan
+        .nodes
+        .iter()
+        .find(|spec| spec.role == farm::Role::Compute && spec.index == Some(index))
+        .with_context(|| format!("farm plan has no {new_suffix}"))?;
+    let control_name = farm::node_name(farm_id, farm::Role::Control, None);
+    let control = farm::connect(&control_name).await?;
+    let mut sandboxes: Vec<Sandbox> = Vec::new();
+    let result = async {
+        farm::wait_until_booted(&control).await?;
+        let identity = run(
+            &control,
+            &format!(
+                "if [ -f {conf} ]; then . {conf}; echo \"{dummy} $FARM_ADDRESS\"; else echo \"eth0 $(ip -4 -o addr show dev eth0 | awk '{{split($4,a,\"/\"); print a[1]; exit}}')\"); fi",
+                conf = farm::IDENTITY_CONF,
+                dummy = farm::GUEST_INTERFACE,
+            ),
+        )
+        .await?;
+        let (interface, address) = identity
+            .trim()
+            .split_once(' ')
+            .context("cannot read the guest service address")?;
+        let mut topology = Topology {
+            name: control_name.clone(),
+            ip: Some(address.to_owned()),
+            interface: interface.to_owned(),
+            computes: plan
+                .nodes
+                .iter()
+                .filter(|spec| spec.role == farm::Role::Compute)
+                .map(|spec| Compute {
+                    name: farm::node_name(farm_id, spec.role, spec.index),
+                    hostname: spec.hostname(),
+                    address: spec.address(),
+                })
+                .collect(),
+        };
+        topology
+            .computes
+            .sort_by(|a, b| a.hostname.cmp(&b.hostname));
+        step(
+            &sink,
+            format!("control VM에 {new_suffix}의 hostname·주소 반영"),
+        )?;
+        farm::update_identity(&control, control_spec, &plan.nodes).await?;
+        let neutron = components.iter().any(|c| c == "neutron");
+        let mut computes: Vec<(Compute, Option<Sandbox>)> = Vec::new();
+        for compute in &topology.computes {
+            let suffix = compute
+                .hostname
+                .strip_prefix("farm-")
+                .context("compute hostname has no role prefix")?;
+            if !nodes.iter().any(|node| node == suffix) {
+                computes.push((compute.clone(), None));
+                continue;
+            }
+            let sandbox = farm::connect(&compute.name).await?;
+            if suffix == new_suffix {
+                step(&sink, format!("{new_suffix} prepare"))?;
+                prepare_host(&sandbox, neutron, &sink).await?;
+            }
+            computes.push((compute.clone(), Some(sandbox)));
+        }
+        for (_, sandbox) in computes.iter() {
+            if let Some(sandbox) = sandbox {
+                sandboxes.push(sandbox.clone());
+            }
+        }
+        step(&sink, "control VM에서 새 compute로 SSH 키 배포")?;
+        distribute_ssh_key(&control, &computes).await?;
+        step(&sink, "Kolla multinode inventory 갱신")?;
+        write_inventory(&control, &topology).await?;
+        let host = new_spec.hostname();
+        sink(DeployEvent::Phase(Phase::Bootstrap))?;
+        step(&sink, format!("kolla-ansible bootstrap-servers --limit {host}"))?;
+        stream(
+            &control,
+            &kolla_ansible_limited("bootstrap-servers", &host),
+            &format!("{LOG_DIR}/add-compute-{index}-bootstrap.log"),
+            &sink,
+        )
+        .await?;
+        sink(DeployEvent::Phase(Phase::Deploy))?;
+        step(&sink, format!("kolla-ansible deploy --limit {host}"))?;
+        stream(
+            &control,
+            &kolla_ansible_limited("deploy", &host),
+            &format!("{LOG_DIR}/add-compute-{index}-deploy.log"),
+            &sink,
+        )
+        .await?;
+        sink(DeployEvent::Phase(Phase::Verify))?;
+        step(&sink, format!("{host}의 nova-compute·network agent 확인"))?;
+        stream(
+            &control,
+            &verify_compute_script(&host, neutron),
+            &format!("{LOG_DIR}/add-compute-{index}-verify.log"),
+            &sink,
+        )
+        .await?;
+        Ok::<_, anyhow::Error>(())
+    }
+    .await;
+    control.detach().await;
+    for sandbox in sandboxes {
+        sandbox.detach().await;
+    }
+    result
+}
+
+/// Rewrite only Kolla's multinode inventory and Ansible concurrency, leaving passwords and
+/// globals alone so an expansion cannot disturb the running control plane.
+async fn write_inventory(deployer: &Sandbox, topology: &Topology) -> Result<()> {
+    let template = deployer
+        .fs()
+        .read_to_string(&format!(
+            "{VENV}/share/kolla-ansible/ansible/inventory/multinode"
+        ))
+        .await?;
+    let inventory = config::multinode_inventory(
+        &template,
+        &farm::hostname(farm::Role::Control, None),
+        &topology.computes,
+    )?;
+    let fs = deployer.fs();
+    fs.write(INVENTORY, inventory).await?;
+    run(deployer, "mkdir -p /etc/kolla/callback_plugins").await?;
+    fs.write(
+        "/etc/kolla/callback_plugins/farm.py",
+        include_str!("farm_callback.py"),
+    )
+    .await?;
+    let forks = 1 + topology.computes.len();
+    fs.write(
+        "/root/.ansible.cfg",
+        &format!(
+            "[defaults]\nhost_key_checking = False\nforks = {forks}\nstdout_callback = farm\ncallback_plugins = /etc/kolla/callback_plugins\n\n[ssh_connection]\npipelining = True\n"
+        ),
+    )
+    .await?;
+    Ok(())
+}
+
+fn kolla_ansible_limited(command: &str, host: &str) -> String {
+    format!("PATH={VENV}/bin:$PATH kolla-ansible {command} -i {INVENTORY} --limit {host}")
+}
+
+fn verify_compute_script(host: &str, neutron: bool) -> String {
+    let mut script = format!(
+        r#"set -euo pipefail
+. {CONFIG_DIR}/admin-openrc.sh
+os={OSC_VENV}/bin/openstack
+state=''
+for _ in $(seq 60); do
+  state=$($os compute service list --service nova-compute --host {host} -f value -c State 2>/dev/null || true)
+  [ "$state" = up ] && break
+  sleep 5
+done
+[ "$state" = up ] || {{ echo "nova-compute {host} is not up: ${{state:-missing}}" >&2; exit 1; }}
+echo "nova-compute {host} up"
+"#
+    );
+    if neutron {
+        script.push_str(&format!(
+            r#"alive=''
+for _ in $(seq 60); do
+  alive=$($os network agent list --host {host} --agent-type "Open vSwitch agent" -f value -c Alive 2>/dev/null || true)
+  [ "$alive" = True ] && break
+  sleep 5
+done
+[ "$alive" = True ] || {{ echo "Open vSwitch agent on {host} is not alive: ${{alive:-missing}}" >&2; exit 1; }}
+echo "Open vSwitch agent on {host} alive"
+"#
+        ));
+    }
+    script
+}
+
 async fn install_ssh_key(deployer: &Sandbox, key: &str) -> Result<()> {
     anyhow::ensure!(
         key.starts_with("-----BEGIN OPENSSH PRIVATE KEY-----"),

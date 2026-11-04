@@ -11,7 +11,8 @@ use futures::future::try_join_all;
 use microsandbox::Sandbox;
 use microsandbox::sandbox::SandboxHandle;
 
-use node::{FARM_LABEL, describe_node, destroy_node, label};
+use crate::shell::run;
+use node::{FARM_LABEL, describe_node, destroy_node, identity_conf, label};
 pub use node::{
     FarmNode, GUEST_ADDRESS, GUEST_INTERFACE, IDENTITY_CONF, LEGACY_ALL_IN_ONE_SUFFIX, NodeSetup,
     connect, create_node, install_guest_files, install_links, is_node_name, node_name,
@@ -121,6 +122,90 @@ pub async fn create_farm_with(
             .map(|(spec, setup)| create_node(farm_id, *spec, setup)),
     )
     .await
+}
+
+/// Add compute VMs to an existing multi-node farm on this host. The switch is already
+/// running, and new ports are picked up from its configuration file. An existing VM with
+/// the requested suffix is adopted instead of created again, so a retried expansion
+/// continues where the last attempt stopped.
+pub async fn add_nodes(
+    farm_id: &str,
+    template: &[NodeSpec],
+    add: &[String],
+    switch: &crate::link::host::Switch,
+) -> Result<Vec<FarmNode>> {
+    if add.is_empty() {
+        return Ok(Vec::new());
+    }
+    layout(template)?;
+    let url = switch.ensure(&switch_command()?).await?;
+    let existing: BTreeMap<String, FarmNode> = get_farm(farm_id)
+        .await?
+        .into_iter()
+        .map(|node| (node.name.clone(), node))
+        .collect();
+    let mut created = Vec::new();
+    for node in add {
+        let spec = template
+            .iter()
+            .find(|spec| suffix(spec.role, spec.index).as_ref() == Some(node))
+            .with_context(|| format!("the farm's plan has no VM '{node}'"))?;
+        let name = node_name(farm_id, spec.role, spec.index);
+        if let Some(node) = existing.get(&name) {
+            if node.status == "running" {
+                created.push(node.clone());
+                continue;
+            }
+            bail!(
+                "{name} exists but is {}; start or delete the farm's VM before retrying",
+                node.status
+            );
+        }
+        let mut links = Vec::new();
+        for (dev, network, addressed) in NETWORKS {
+            let port = format!("{farm_id}/{node}/{network}");
+            let token = switch.add_port(&port, &format!("{farm_id}/{network}"))?;
+            links.push(crate::link::guest::LinkConf {
+                dev: dev.into(),
+                switch: url.clone(),
+                port,
+                token,
+                mtu: crate::link::DEFAULT_MTU,
+                address: addressed.then(|| format!("{}/24", spec.address())),
+            });
+        }
+        let setup = NodeSetup {
+            peers: template
+                .iter()
+                .filter(|other| other.hostname() != spec.hostname())
+                .map(|other| (other.address(), other.hostname()))
+                .collect(),
+            links,
+            ..Default::default()
+        };
+        created.push(create_node(farm_id, *spec, &setup).await?);
+    }
+    Ok(created)
+}
+
+/// Refresh a VM's fixed identity and `/etc/hosts` peers after the farm gained a compute.
+pub async fn update_identity(
+    sandbox: &Sandbox,
+    spec: &NodeSpec,
+    template: &[NodeSpec],
+) -> Result<()> {
+    let publish = matches!(spec.role, Role::Control | Role::AllInOne);
+    let peers: Vec<(String, String)> = template
+        .iter()
+        .filter(|other| other.hostname() != spec.hostname())
+        .map(|other| (other.address(), other.hostname()))
+        .collect();
+    sandbox
+        .fs()
+        .write(IDENTITY_CONF, identity_conf(spec, publish, &peers))
+        .await?;
+    run(sandbox, "systemctl restart farm-hostname").await?;
+    Ok(())
 }
 
 /// `agent switch`, which both the `farm` and `farm-agent` binaries take.

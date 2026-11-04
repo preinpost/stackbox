@@ -2,6 +2,7 @@ import type { Farm, Job, Phase, RemoteHost } from "./api/client";
 export const jobKindLabels: Record<Job["kind"], string> = {
   create: "VM 생성",
   deploy: "OpenStack 배포",
+  expand: "Compute 추가",
   delete: "Farm 삭제",
   snapshot: "스냅샷 얼리기",
   restore: "스냅샷에서 복원",

@@ -1,5 +1,9 @@
 # Farm 단위 호스트 배치
 
+> 이 문서는 단일 VM 전환기의 설계 메모입니다. 지금은 control VM 1대와 compute VM 1~3대를
+> 한 farm으로 묶을 수 있고, compute를 다른 호스트에 두거나 배포 뒤에 한 대씩 추가할 수 있습니다.
+> 현재 동작은 [README](../README.md#다중-vm-farm)와 [portal-api](portal-api.md)를 따릅니다.
+
 현재 실행 단위는 **Farm당 all-in-one VM 1대**다. 사용자는 로컬 Coordinator 또는 등록한
 원격 Linux 호스트 중 하나를 선택하고, 선택한 OpenStack 컴포넌트를 그 VM에 함께 설치한다.
 같은 Farm의 컴포넌트를 여러 호스트로 나누던 이전 설계는 현재 구현 방향에서 제외했다.

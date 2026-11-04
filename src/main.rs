@@ -6,8 +6,9 @@ use farm::{
     kolla::Phase,
     manager::{FarmManager, ManagerOptions, default_state_dir},
     model::{
-        self, ComputeSize, CreateRequest, DeployRequest, ExportRequest, ImportRequest, Job,
-        JobStatus, PlanRequest, SnapshotRecord, SnapshotRequest, SnapshotStatus,
+        self, AddComputeRequest, ComputeSize, CreateRequest, DeployRequest, ExportRequest,
+        ImportRequest, Job, JobStatus, PlanRequest, SnapshotRecord, SnapshotRequest,
+        SnapshotStatus,
     },
 };
 use std::{
@@ -112,6 +113,14 @@ enum Command {
         id: String,
         #[arg(long, value_enum, default_value_t=Phase::Prepare)]
         from: Phase,
+    },
+    /// Add the next compute VM to a deployed multi-node farm
+    AddCompute {
+        id: String,
+        /// Host for the new VM; omit to use the farm's primary host. Another host joins
+        /// the farm through the coordinator's link relay.
+        #[arg(long)]
+        host_id: Option<String>,
     },
     /// Check that a deployed farm's services answer again after its VM started from disk
     Settle { id: String },
@@ -498,6 +507,11 @@ async fn main() -> Result<()> {
         }
         Command::Deploy { id, from } => {
             wait(&manager, manager.deploy(&id, DeployRequest { from })?).await?;
+        }
+        Command::AddCompute { id, host_id } => {
+            let job = manager.add_compute(&id, AddComputeRequest { host_id })?;
+            wait(&manager, job).await?;
+            print_json(&manager.get(&id)?)?;
         }
         Command::Settle { id } => {
             wait(&manager, manager.settle(&id)?).await?;

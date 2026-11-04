@@ -105,6 +105,61 @@ impl Backend for AgentBackend {
             share: Some(Box::new(share)),
         }))
     }
+    fn expand(
+        &self,
+        id: String,
+        plan: Plan,
+        nodes: Vec<String>,
+        add: Vec<String>,
+        uplink: Option<crate::link::UplinkConfig>,
+    ) -> BoxFuture<'_, Result<Vec<FarmNode>>> {
+        Box::pin(self.nodes(Operation::Expand {
+            farm_id: id,
+            generation: self.generation.clone(),
+            plan,
+            nodes,
+            add,
+            uplink,
+        }))
+    }
+    fn ssh_keys(&self, id: String) -> BoxFuture<'_, Result<(String, String)>> {
+        Box::pin(async move {
+            match self
+                .call(
+                    Operation::SshKeys {
+                        farm_id: id,
+                        generation: self.generation.clone(),
+                    },
+                    None,
+                )
+                .await?
+            {
+                Reply::SshKeys {
+                    public_key,
+                    private_key,
+                } => Ok((public_key, private_key)),
+                _ => bail!("unexpected farm-agent response"),
+            }
+        })
+    }
+    fn deploy_compute(
+        &self,
+        id: String,
+        _plan: Plan,
+        index: u8,
+        _nodes: Vec<String>,
+        _components: Vec<String>,
+        sink: EventSink,
+    ) -> BoxFuture<'_, Result<()>> {
+        Box::pin(self.done(
+            Operation::DeployCompute {
+                farm_id: id,
+                generation: self.generation.clone(),
+                index,
+            },
+            Some(sink),
+        ))
+    }
     fn relink(&self, id: String, url: String) -> BoxFuture<'_, Result<()>> {
         Box::pin(self.done(
             Operation::Relink {

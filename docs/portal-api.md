@@ -40,6 +40,25 @@ API prefix는 `/api/v1`입니다. token이 설정된 경우 모든 경로에
    호스트가 없어졌거나 접속되지 않으면 `DELETE /farms/{id}?forget=true`로 호스트에 묻지 않고
    기록만 지웁니다. 호스트에 남은 VM은 그대로이며, 호스트를 purge할 때 정리됩니다.
 
+### 배포된 farm에 compute 추가
+
+배포가 끝난 다중 VM farm에는 `POST /farms/{id}/computes`로 compute VM을 한 대 더 붙입니다.
+body의 `host_id`는 새 VM을 실행할 호스트이며, 생략하면 farm의 `host_id`를 씁니다. 응답은 `202`와
+`expand` job이고, `job.target_host`와 `job.target_node`가 대상 호스트와 `compute-N`을 가리킵니다.
+같은 호스트는 링크 포트만 추가하고, 원격 호스트는 새 share와 uplink를 만듭니다. 이미 farm에 참여한
+원격 호스트는 기존 uplink를 재사용합니다. farm이 전부 한 호스트에 있었는데 처음 원격 compute를 붙이면
+control VM의 호스트도 relay에 붙습니다.
+
+확장은 `passwords.yml`과 `globals.yml`을 다시 쓰지 않고 Kolla inventory만 갱신한 뒤 새 compute에만
+`bootstrap-servers`와 `deploy --limit farm-compute-N`을 실행합니다. farm의 `plan`은 Kolla 성공 뒤에만
+새 layout으로 바뀌므로, 실패한 `expand` job은 같은 farm에 `POST /farms/{id}/computes`를 다시 보내
+이어서 재시도할 수 있습니다. resume 요청은 마지막으로 실패한 `expand` job의 `target_host`와
+`target_node`를 그대로 씁니다.
+
+`ready` 상태이고 compute가 0대보다 많고 3대 미만일 때만 허용합니다. all-in-one farm, 스냅샷에서
+복원한 farm, 다른 작업이 진행 중인 farm은 `409`입니다. 대상 호스트의 메모리 예산을 넘거나 원격
+호스트인데 relay가 없어도 `409`입니다. 기존 인스턴스는 새 compute로 자동 이동하지 않습니다.
+
 farm 상태는 `creating`, `created`, `deploying`, `settling`, `ready`, `failed`, `broken`, `deleting`, `deleted`입니다.
 배포 중에는 `phase`와 함께 `step`이 채워집니다. `step`은 그 단계 안에서 지금 실행 중인 작업이며,
 설치·검증 등 farm이 직접 실행하는 구간은 단계 이름을, Kolla-Ansible 구간은 현재 Ansible task 이름을

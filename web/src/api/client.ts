@@ -242,6 +242,12 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ from }),
     }),
+  /** Add the next compute VM; a host other than the farm's primary joins through the relay. */
+  addCompute: (id: string, hostId?: string) =>
+    request<Job>(`/farms/${encode(id)}/computes`, {
+      method: "POST",
+      body: JSON.stringify({ host_id: hostId ?? null }),
+    }),
   /** `forget` removes only the record, without asking the farm's host. */
   delete: (id: string, forget = false) =>
     request<Job>(`/farms/${encode(id)}${forget ? "?forget=true" : ""}`, {

@@ -13,6 +13,9 @@ use futures::future::BoxFuture;
 use std::{collections::BTreeMap, sync::atomic::AtomicUsize, time::Duration};
 use tower::ServiceExt;
 
+/// One expansion the fake backend was asked to create.
+type Expansion = (String, Vec<String>, Vec<String>);
+
 #[derive(Default)]
 pub(crate) struct Fake {
     pub(crate) fail_create: AtomicBool,
@@ -34,6 +37,12 @@ pub(crate) struct Fake {
     shares: Mutex<Vec<crate::remote::protocol::Share>>,
     relinked: Mutex<Vec<(String, String)>>,
     spanning: Mutex<Vec<Vec<u8>>>,
+    /// `(farm, nodes on this host, added suffixes)` of each expansion.
+    expanded: Mutex<Vec<Expansion>>,
+    /// `(farm, index)` of each Kolla compute deployment.
+    computed: Mutex<Vec<(String, u8)>>,
+    pub(crate) fail_expand: AtomicBool,
+    pub(crate) fail_compute: AtomicBool,
 }
 impl Backend for Fake {
     fn relink(&self, id: String, url: String) -> BoxFuture<'_, Result<()>> {
@@ -55,6 +64,79 @@ impl Backend for Fake {
             });
             self.shares.lock().unwrap().push(share);
             self.create(id, plan, exposure).await
+        })
+    }
+    fn expand(
+        &self,
+        id: String,
+        plan: Plan,
+        nodes: Vec<String>,
+        add: Vec<String>,
+        _uplink: Option<crate::link::UplinkConfig>,
+    ) -> BoxFuture<'_, Result<Vec<FarmNode>>> {
+        Box::pin(async move {
+            if self.fail_expand.load(Ordering::SeqCst) {
+                bail!("intentional expand failure");
+            }
+            self.expanded
+                .lock()
+                .unwrap()
+                .push((id.clone(), nodes, add.clone()));
+            let mut farms = self.farms.lock().unwrap();
+            let existing = farms.entry(id.clone()).or_default();
+            let mut created = Vec::new();
+            for suffix in add {
+                let spec = plan
+                    .nodes
+                    .iter()
+                    .find(|spec| {
+                        crate::farm::suffix(spec.role, spec.index).as_deref()
+                            == Some(suffix.as_str())
+                    })
+                    .with_context(|| format!("no VM {suffix} in the plan"))?;
+                let name = crate::farm::node_name(&id, spec.role, spec.index);
+                if let Some(node) = existing.iter().find(|node| node.name == name) {
+                    created.push(node.clone());
+                    continue;
+                }
+                let node = FarmNode {
+                    name,
+                    index: spec.index,
+                    role: Some(spec.role),
+                    status: "running".into(),
+                    memory_mib: spec.memory_mib,
+                    ip: Some("10.250.0.1".into()),
+                };
+                existing.push(node.clone());
+                created.push(node);
+            }
+            Ok(created)
+        })
+    }
+    fn ssh_keys(&self, _: String) -> BoxFuture<'_, Result<(String, String)>> {
+        Box::pin(async {
+            Ok((
+                "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFake".into(),
+                "-----BEGIN OPENSSH PRIVATE KEY-----\nfake\n-----END OPENSSH PRIVATE KEY-----"
+                    .into(),
+            ))
+        })
+    }
+    fn deploy_compute(
+        &self,
+        id: String,
+        _: Plan,
+        index: u8,
+        _: Vec<String>,
+        _: Vec<String>,
+        _: EventSink,
+    ) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async move {
+            if self.fail_compute.load(Ordering::SeqCst) {
+                bail!("intentional compute deployment failure");
+            }
+            self.computed.lock().unwrap().push((id, index));
+            Ok(())
         })
     }
     fn deploy_spanning(
@@ -3247,6 +3329,362 @@ async fn a_deploy_that_loses_its_connection_follows_the_host_job_again() {
     assert_eq!(backend.deployed.load(Ordering::SeqCst), 1);
     assert_eq!(manager.get("flaky").unwrap().status, FarmStatus::Ready);
     settle(&manager).await;
+}
+
+#[tokio::test]
+async fn a_deployed_farm_can_gain_a_compute_on_the_same_host() {
+    let dir = tempfile::tempdir().unwrap();
+    let backend = Arc::new(Fake::default());
+    let manager = open_with(options(dir.path()), backend.clone()).await;
+    if !cfg!(target_os = "linux") {
+        *manager.0.guest_agent.write().unwrap() = Some(dir.path().join("farm-agent"));
+    }
+    let created = manager
+        .create(CreateRequest {
+            computes: 1,
+            ..request("grow")
+        })
+        .unwrap();
+    assert_eq!(done(&manager, &created).await.status, JobStatus::Succeeded);
+    let deployed = manager.deploy("grow", DeployRequest::default()).unwrap();
+    assert_eq!(done(&manager, &deployed).await.status, JobStatus::Succeeded);
+    assert_eq!(manager.get("grow").unwrap().status, FarmStatus::Ready);
+
+    let job = manager
+        .add_compute("grow", AddComputeRequest::default())
+        .unwrap();
+    assert_eq!(job.kind, JobKind::Expand);
+    assert_eq!(job.target_host.as_deref(), Some("local"));
+    assert_eq!(job.target_node.as_deref(), Some("compute-2"));
+    let finished = done(&manager, &job).await;
+    assert_eq!(
+        finished.status,
+        JobStatus::Succeeded,
+        "{:?}",
+        finished.error
+    );
+    let farm = manager.get("grow").unwrap();
+    assert_eq!(farm.status, FarmStatus::Ready);
+    assert_eq!(farm.plan.as_ref().unwrap().computes, 2);
+    assert_eq!(farm.nodes.len(), 3);
+    assert_eq!(farm.host_of("compute-2"), Some("local"));
+    assert_eq!(farm.memory_on("local"), farm.memory_mib());
+    assert_eq!(
+        backend.expanded.lock().unwrap().as_slice(),
+        &[(
+            "grow".into(),
+            vec!["control".into(), "compute-1".into(), "compute-2".into()],
+            vec!["compute-2".into()]
+        )]
+    );
+    assert_eq!(
+        backend.computed.lock().unwrap().as_slice(),
+        &[("grow".into(), 2)]
+    );
+    // The next deploy sees the expanded layout instead of refusing it.
+    let again = manager.deploy("grow", DeployRequest::default()).unwrap();
+    assert_eq!(done(&manager, &again).await.status, JobStatus::Succeeded);
+}
+
+#[tokio::test]
+async fn only_a_deployed_multi_node_farm_can_gain_a_compute() {
+    let dir = tempfile::tempdir().unwrap();
+    let backend = Arc::new(Fake::default());
+    let manager = open_with(options(dir.path()), backend.clone()).await;
+    if !cfg!(target_os = "linux") {
+        *manager.0.guest_agent.write().unwrap() = Some(dir.path().join("farm-agent"));
+    }
+    let created = manager.create(request("aio")).unwrap();
+    assert_eq!(done(&manager, &created).await.status, JobStatus::Succeeded);
+    let deployed = manager.deploy("aio", DeployRequest::default()).unwrap();
+    assert_eq!(done(&manager, &deployed).await.status, JobStatus::Succeeded);
+    let refused = manager
+        .add_compute("aio", AddComputeRequest::default())
+        .unwrap_err();
+    assert!(refused.to_string().contains("all-in-one"), "{refused}");
+
+    let created = manager
+        .create(CreateRequest {
+            computes: 1,
+            ..request("waiting")
+        })
+        .unwrap();
+    assert_eq!(done(&manager, &created).await.status, JobStatus::Succeeded);
+    let refused = manager
+        .add_compute("waiting", AddComputeRequest::default())
+        .unwrap_err();
+    assert!(refused.to_string().contains("deploy the farm"), "{refused}");
+}
+
+#[tokio::test]
+async fn a_failed_expansion_keeps_the_old_plan_and_resumes_on_retry() {
+    let dir = tempfile::tempdir().unwrap();
+    let backend = Arc::new(Fake::default());
+    let manager = open_with(options(dir.path()), backend.clone()).await;
+    if !cfg!(target_os = "linux") {
+        *manager.0.guest_agent.write().unwrap() = Some(dir.path().join("farm-agent"));
+    }
+    let created = manager
+        .create(CreateRequest {
+            computes: 1,
+            ..request("retry")
+        })
+        .unwrap();
+    assert_eq!(done(&manager, &created).await.status, JobStatus::Succeeded);
+    let deployed = manager.deploy("retry", DeployRequest::default()).unwrap();
+    assert_eq!(done(&manager, &deployed).await.status, JobStatus::Succeeded);
+    backend.fail_compute.store(true, Ordering::SeqCst);
+    let failed = manager
+        .add_compute("retry", AddComputeRequest::default())
+        .unwrap();
+    let finished = done(&manager, &failed).await;
+    assert_eq!(finished.status, JobStatus::Failed);
+    let farm = manager.get("retry").unwrap();
+    assert_eq!(farm.status, FarmStatus::Failed);
+    // The VM exists, but the plan still describes the deployed layout.
+    assert_eq!(farm.plan.as_ref().unwrap().computes, 1);
+    assert_eq!(farm.nodes.len(), 3);
+
+    backend.fail_compute.store(false, Ordering::SeqCst);
+    let retried = manager
+        .add_compute("retry", AddComputeRequest::default())
+        .unwrap();
+    assert_eq!(retried.target_node.as_deref(), Some("compute-2"));
+    let finished = done(&manager, &retried).await;
+    assert_eq!(
+        finished.status,
+        JobStatus::Succeeded,
+        "{:?}",
+        finished.error
+    );
+    let farm = manager.get("retry").unwrap();
+    assert_eq!(farm.status, FarmStatus::Ready);
+    assert_eq!(farm.plan.as_ref().unwrap().computes, 2);
+    assert_eq!(farm.nodes.len(), 3);
+    assert_eq!(manager.jobs().unwrap().len(), 4);
+}
+
+#[tokio::test]
+async fn a_farm_can_gain_a_compute_on_a_new_remote_host_and_another_on_its_primary_host() {
+    use crate::remote::{AgentArtifactInfo, HostJobKind, InstalledAgent, test_server::Fixture};
+    let fixture = Fixture::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let backend = Arc::new(Fake::default());
+    let mut opts = options(dir.path());
+    opts.memory_budget_mib = 64 * 1024;
+    let manager = open_with(opts, backend.clone()).await;
+    if !cfg!(target_os = "linux") {
+        *manager.0.guest_agent.write().unwrap() = Some(dir.path().join("farm-agent"));
+    }
+    manager.register_host(fixture.registration("edge")).unwrap();
+    let prep = manager
+        .start_host_job("edge", HostJobKind::Prepare)
+        .unwrap();
+    assert_eq!(
+        host_done(&manager, &prep.id).await.status,
+        JobStatus::Succeeded
+    );
+    manager
+        .update(|state| {
+            state.hosts.get_mut("edge").unwrap().host.agent = Some(InstalledAgent {
+                artifact: AgentArtifactInfo {
+                    sha256: "a".repeat(64),
+                    os: "linux".into(),
+                    arch: std::env::consts::ARCH.into(),
+                    protocol: 1,
+                    supports_single_vm: true,
+                    build_id: crate::BUILD_ID.into(),
+                },
+                verified_at: now(),
+            });
+            Ok(())
+        })
+        .unwrap();
+    use crate::link::relay::{RelaySettings, RelayTlsMode};
+    manager
+        .set_relay(Some(RelaySettings {
+            url: "https://coordinator.example:10011".into(),
+            mode: RelayTlsMode::Private,
+            bind: Some("127.0.0.1:0".parse().unwrap()),
+        }))
+        .await
+        .unwrap();
+    manager.start_relay().await;
+
+    let created = manager
+        .create(CreateRequest {
+            computes: 1,
+            ..request("span")
+        })
+        .unwrap();
+    assert_eq!(done(&manager, &created).await.status, JobStatus::Succeeded);
+    let deployed = manager.deploy("span", DeployRequest::default()).unwrap();
+    assert_eq!(done(&manager, &deployed).await.status, JobStatus::Succeeded);
+
+    let job = manager
+        .add_compute(
+            "span",
+            AddComputeRequest {
+                host_id: Some("edge".into()),
+            },
+        )
+        .unwrap();
+    let finished = done(&manager, &job).await;
+    assert_eq!(
+        finished.status,
+        JobStatus::Succeeded,
+        "{:?}",
+        finished.error
+    );
+    let farm = manager.get("span").unwrap();
+    assert_eq!(farm.plan.as_ref().unwrap().computes, 2);
+    assert_eq!(farm.shares.len(), 1);
+    assert_eq!(farm.shares[0].host_id, "edge");
+    assert_eq!(farm.shares[0].nodes, ["compute-2"]);
+    assert_eq!(farm.host_of("compute-2"), Some("edge"));
+    assert!(farm.uplink_sha256.is_some());
+    assert_eq!(farm.nodes.len(), 3);
+    assert_eq!(manager.read(|s| s.relay_keys["span"].len()).unwrap(), 2);
+    assert!(
+        !manager
+            .read(|s| s.pending_shares.contains_key("span"))
+            .unwrap()
+    );
+    assert!(
+        fixture
+            .observed
+            .calls
+            .lock()
+            .unwrap()
+            .contains(&"share:compute-2".to_string())
+    );
+    assert!(
+        fixture
+            .observed
+            .calls
+            .lock()
+            .unwrap()
+            .contains(&"prepare:span".to_string())
+    );
+    assert_eq!(
+        backend.computed.lock().unwrap().as_slice(),
+        &[("span".into(), 2)]
+    );
+
+    // A later compute on the primary host keeps the remote share and the relay as they are.
+    let job = manager
+        .add_compute("span", AddComputeRequest::default())
+        .unwrap();
+    let finished = done(&manager, &job).await;
+    assert_eq!(
+        finished.status,
+        JobStatus::Succeeded,
+        "{:?}",
+        finished.error
+    );
+    let farm = manager.get("span").unwrap();
+    assert_eq!(farm.plan.as_ref().unwrap().computes, 3);
+    assert_eq!(farm.shares[0].nodes, ["compute-2"]);
+    assert_eq!(farm.host_of("compute-3"), Some("local"));
+    assert_eq!(farm.nodes.len(), 4);
+    assert_eq!(manager.read(|s| s.relay_keys["span"].len()).unwrap(), 2);
+    assert_eq!(
+        backend.computed.lock().unwrap().as_slice(),
+        &[("span".into(), 2), ("span".into(), 3)]
+    );
+}
+
+#[tokio::test]
+async fn a_farm_can_gain_a_second_compute_on_a_remote_host_it_already_uses() {
+    use crate::remote::{AgentArtifactInfo, HostJobKind, InstalledAgent, test_server::Fixture};
+    let fixture = Fixture::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let backend = Arc::new(Fake::default());
+    let mut opts = options(dir.path());
+    opts.memory_budget_mib = 64 * 1024;
+    let manager = open_with(opts, backend.clone()).await;
+    if !cfg!(target_os = "linux") {
+        *manager.0.guest_agent.write().unwrap() = Some(dir.path().join("farm-agent"));
+    }
+    manager.register_host(fixture.registration("edge")).unwrap();
+    let prep = manager
+        .start_host_job("edge", HostJobKind::Prepare)
+        .unwrap();
+    assert_eq!(
+        host_done(&manager, &prep.id).await.status,
+        JobStatus::Succeeded
+    );
+    manager
+        .update(|state| {
+            state.hosts.get_mut("edge").unwrap().host.agent = Some(InstalledAgent {
+                artifact: AgentArtifactInfo {
+                    sha256: "a".repeat(64),
+                    os: "linux".into(),
+                    arch: std::env::consts::ARCH.into(),
+                    protocol: 1,
+                    supports_single_vm: true,
+                    build_id: crate::BUILD_ID.into(),
+                },
+                verified_at: now(),
+            });
+            Ok(())
+        })
+        .unwrap();
+    use crate::link::relay::{RelaySettings, RelayTlsMode};
+    manager
+        .set_relay(Some(RelaySettings {
+            url: "https://coordinator.example:10011".into(),
+            mode: RelayTlsMode::Private,
+            bind: Some("127.0.0.1:0".parse().unwrap()),
+        }))
+        .await
+        .unwrap();
+    manager.start_relay().await;
+
+    let created = manager
+        .create(CreateRequest {
+            computes: 1,
+            ..request("span")
+        })
+        .unwrap();
+    assert_eq!(done(&manager, &created).await.status, JobStatus::Succeeded);
+    let deployed = manager.deploy("span", DeployRequest::default()).unwrap();
+    assert_eq!(done(&manager, &deployed).await.status, JobStatus::Succeeded);
+    for host in ["edge", "edge"] {
+        let job = manager
+            .add_compute(
+                "span",
+                AddComputeRequest {
+                    host_id: Some(host.into()),
+                },
+            )
+            .unwrap();
+        let finished = done(&manager, &job).await;
+        assert_eq!(
+            finished.status,
+            JobStatus::Succeeded,
+            "{:?}",
+            finished.error
+        );
+    }
+    let farm = manager.get("span").unwrap();
+    assert_eq!(farm.plan.as_ref().unwrap().computes, 3);
+    assert_eq!(farm.shares[0].nodes, ["compute-2", "compute-3"]);
+    assert_eq!(farm.host_of("compute-3"), Some("edge"));
+    assert_eq!(farm.nodes.len(), 4);
+    assert_eq!(manager.read(|s| s.relay_keys["span"].len()).unwrap(), 2);
+    assert!(
+        fixture
+            .observed
+            .calls
+            .lock()
+            .unwrap()
+            .contains(&"expand:span:compute-3".to_string())
+    );
+    assert_eq!(
+        backend.computed.lock().unwrap().as_slice(),
+        &[("span".into(), 2), ("span".into(), 3)]
+    );
 }
 
 #[tokio::test]

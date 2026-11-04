@@ -5,6 +5,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, expect, test, vi } from "vitest";
 import { keys, type Farm, type Plan, type Snapshot } from "../api/client";
 import {
+  AddComputeDialog,
   CreateFarmForm,
   DeleteFarmDialog,
   DeployFarmDialog,
@@ -491,6 +492,88 @@ test("allows deployment only for a running all-in-one VM and preserves legacy fa
   );
   expect(deployButton().disabled).toBe(true);
   client.clear();
+});
+
+test("adds the next compute to the farm's primary host by default", async () => {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+  });
+  const user = userEvent.setup();
+  let submitted: unknown;
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (path: string, options?: RequestInit) => {
+      if (path.endsWith("/hosts"))
+        return Response.json([
+          {
+            id: "local",
+            kind: "local",
+            address: "localhost",
+            status: "ready",
+            inspection: { checked_at: Date.now() / 1000 },
+            capacity: { memory_budget_mib: 8000, memory_reserved_mib: 0 },
+          },
+        ]);
+      if (path.endsWith("/host"))
+        return Response.json({
+          msb_available: true,
+          memory_budget_mib: 0,
+          memory_reserved_mib: 0,
+          relay_url: null,
+        });
+      if (path.endsWith("/computes") && options?.method === "POST") {
+        submitted = JSON.parse(String(options.body));
+        return Response.json({
+          id: "job",
+          farm_id: "grow",
+          kind: "expand",
+          status: "queued",
+        });
+      }
+      return Response.json([]);
+    }),
+  );
+  const spec = singleVmPlan().nodes[0];
+  const farm: Farm = {
+    id: "grow",
+    host_id: "local",
+    created_at: 0,
+    updated_at: 0,
+    status: "ready",
+    active_job: null,
+    plan: {
+      ...singleVmPlan(),
+      computes: 1,
+      nodes: [
+        { ...spec, role: "control" },
+        { ...spec, role: "compute", index: 1 },
+      ],
+    },
+    nodes: [
+      {
+        name: "grow-control",
+        role: "control",
+        status: "running",
+        memory_mib: 6656,
+      },
+      {
+        name: "grow-compute-1",
+        role: "compute",
+        index: 1,
+        status: "running",
+        memory_mib: 3072,
+      },
+    ],
+  };
+  render(
+    <QueryClientProvider client={client}>
+      <AddComputeDialog farm={farm} />
+    </QueryClientProvider>,
+  );
+  await user.click(screen.getByRole("button", { name: "Compute 추가" }));
+  await user.click(await screen.findByRole("button", { name: "추가" }));
+  await waitFor(() => expect(submitted).toEqual({ host_id: "local" }));
+  cleanup();
 });
 
 test("deletes only the records when asked, without the host", async () => {
