@@ -61,7 +61,9 @@ body에 `from_snapshot`(compute 템플릿 스냅샷 ID)을 넣으면 새 VM을 �
 `{"id":"...","node":"compute-1"}`로 만듭니다(배포된 farm, farm의 primary 호스트에 있는 compute만).
 스냅샷의 `template`이 `"compute"`이고 `release`가 OpenStack 릴리스입니다(이전 버전의
 `compute_template: true` 기록은 읽을 때 `template: "compute"`로 바뀝니다). 템플릿이 아니거나 farm과
-릴리스·서비스·아키텍처가 다르거나, 대상이 로컬 호스트의 control VM 호스트가 아니면 `409`입니다. 실패한
+릴리스·서비스·아키텍처가 다르면 `409`입니다. `host_id`가 로컬 호스트가 아니면 job이 먼저 그 호스트에
+템플릿 복사본을 두고(진행은 job 로그), 스냅샷의 `copies`에 기록합니다. 그 호스트의 farm-agent가 복사를
+모르면 job이 `409`와 같은 메시지로 실패합니다([스냅샷 문서](snapshots.md#다른-호스트로-복사)). 실패한
 확장은 처음과 같은 `from_snapshot`으로만 재시도할 수 있습니다.
 
 `{"id":"...","node":"control"}`은 control VM만 **control 템플릿**(`template: "control"`)으로 얼립니다.
@@ -89,8 +91,8 @@ job 로그에 원본 compute 등록(nova-compute 서비스, placement, Neutron a
 각 VM은 `source`(`template`, `bucket`, `clean`), `snapshot_id`(버킷 템플릿은 가져올 ID), `bucket`/`key`,
 `reason`을 가집니다. 여러 템플릿이 맞으면 로컬 것 중 가장 최근, 없으면 버킷에서 가장 최근에 내보낸 것을
 고르며, 서비스(`components`를 주면 그 집합)와 아키텍처가 다른 템플릿은 제외하고 이유에 개수를 적습니다.
-템플릿은 로컬 호스트에만 있으므로 다른 호스트의 compute는 `clean`이고, control 호스트가 원격이면 farm
-전체가 클린 설치입니다(`control_template`을 지정했으면 `409`). control 템플릿 없이 이 coordinator의
+다른 호스트에 둔 VM도 템플릿으로 부팅하며, restore·expand 단계의 job이 템플릿을 그 호스트에 먼저
+복사합니다(이미 복사본이 있으면 재사용). control 템플릿 없이 이 coordinator의
 릴리스가 아니면 `409`입니다.
 
 `POST /releases/farms`는 같은 body로 계획을 다시 세운 뒤 `202`와 `assemble` job을 돌려줍니다. job의

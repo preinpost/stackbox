@@ -190,8 +190,10 @@ farm add-compute grow --from-snapshot grow-compute-tpl          # 생략하면 �
 
 - 템플릿에는 `farm.snapshot.role=compute`, OpenStack 릴리스, 서비스 목록, 아키텍처가 라벨로 남고,
   archive로 내보내고 가져와도 템플릿으로 남습니다. farm 복원에는 쓸 수 없습니다.
-- 추가할 때 farm과 릴리스·서비스·아키텍처가 다르면 `409`입니다. 템플릿은 로컬 호스트에만 있으므로
-  control VM이 로컬 호스트에 있는 farm에, 같은 호스트로만 붙일 수 있습니다.
+- 추가할 때 farm과 릴리스·서비스·아키텍처가 다르면 `409`입니다. 템플릿은 로컬 호스트에서 얼리지만,
+  `--host-id`로 다른 호스트에 붙이면 job이 먼저 그 호스트에 복사본을 둡니다(버킷에 있으면 호스트가
+  직접 내려받고, 아니면 coordinator가 agent 연결로 보냄). 다음부터는 그 복사본을 씁니다.
+  [docs/snapshots.md](docs/snapshots.md#다른-호스트로-복사) 참고.
 - 얼릴 때는 링크와 Docker를 디스크에서 꺼 둡니다(원본은 다시 켜서 시작). 템플릿으로 부팅한 VM은
   Docker가 뜨기 전에 Nova `compute_id`, 인스턴스와 libvirt domain, `authorized_keys`를 지우고
   machine-id를 새로 만든 뒤 Docker를 켜고 OVS system-id를 새 hostname으로 바꿉니다. 그 뒤
@@ -223,6 +225,8 @@ farm add-compute c13 --from-snapshot src-compute-tpl        # compute-2, 3: comp
   Kolla inventory의 `[compute]`와 control VM의 compute SSH host key도 비우므로 첫 확장은 compute-1입니다.
 - compute가 없는 farm은 다시 배포(`deploy`)할 수 없고 farm 전체로도 얼릴 수 없습니다(control 템플릿만).
   compute 템플릿은 여전히 farm 복원에 쓸 수 없습니다.
+- `farm create --host-id <원격 호스트> --snapshot <control 템플릿>`도 됩니다. compute 템플릿과 같이
+  그 호스트에 복사본을 먼저 둡니다.
 
 #### 릴리스로 만들기
 
@@ -242,8 +246,8 @@ farm create c13 --host-id local --release 2026.2 --computes 3 \
   `assemble` job 하나로 묶이며, 단계(`assembly`)마다 기존 job이 차례로 돕니다: 버킷 템플릿 가져오기 →
   control 템플릿 복원(`restore`) → compute마다 `expand`. 같은 아카이브를 가져오는 중인 import가 있으면
   새로 받지 않고 기다립니다.
-- 템플릿은 지금 로컬 호스트에만 있습니다. 그래서 다른 호스트의 compute는 클린 설치되고, control VM을
-  다른 호스트에 두면 farm 전체가 클린 설치됩니다. 계획의 `reason`에 그 이유가 적힙니다.
+- 다른 호스트에 둔 control이나 compute도 템플릿으로 부팅합니다. restore·expand 단계가 템플릿을 그
+  호스트에 먼저 복사하고, 이미 복사본이 있으면 그대로 씁니다(아래 "다른 호스트로 복사").
 - control 템플릿이 없거나 쓸 수 없으면 이 coordinator가 배포하는 릴리스(현재 2026.2)만 기존 경로대로
   클린 생성(`create`) → 배포(`deploy`)하고, 다른 릴리스는 `409`로 거절합니다.
 - 중간 단계가 실패하면 farm은 그때까지 붙은 VM을 유지합니다. 실패한 compute는 job 오류에 적힌 대로
@@ -340,7 +344,8 @@ curl -N http://127.0.0.1:10010/api/v1/farms/demo/logs/stream
 | GET | `/farms/{id}/logs/stream` | 로그 SSE (`Last-Event-ID`로 재연결) |
 | GET (WebSocket) | `/farms/{id}/shell?rows=24&cols=80[&node=compute-1]` | VM의 root 로그인 셸 (다중 노드는 `node`로 VM 선택) |
 | POST | `/farms/{id}/snapshots` | VM을 스냅샷으로 얼리는 job (`node`: `control`이면 control 템플릿, `compute-N`이면 compute 템플릿) |
-| GET / DELETE | `/snapshots`, `/snapshots/{id}` | 스냅샷 목록·상세 / 삭제 |
+| GET / DELETE | `/snapshots`, `/snapshots/{id}` | 스냅샷 목록·상세 / 삭제 (다른 호스트의 복사본 포함) |
+| DELETE | `/snapshots/{id}/copies/{host_id}` | 다른 호스트에 둔 스냅샷 복사본만 삭제 |
 | POST | `/snapshots/{id}/export`, `/snapshots/import` | `.msb` 아카이브 내보내기 / 가져오기 (파일 또는 S3 버킷) |
 | GET / POST / PUT / DELETE | `/buckets`, `/buckets/{id}` | 스냅샷을 옮길 S3 호환 버킷 등록·관리 |
 | GET / POST | `/buckets/{id}/objects`, `/buckets/{id}/index` | 버킷의 아카이브와 메타데이터 / `index.json` 다시 만들기 |

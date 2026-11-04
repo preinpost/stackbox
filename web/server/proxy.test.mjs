@@ -197,19 +197,22 @@ test("forwards snapshot routes and keeps others closed", async (t) => {
     ["POST", "/api/v1/snapshots/import"],
     ["DELETE", "/api/v1/snapshots/demo-clean"],
     ["POST", "/api/v1/snapshots/demo-clean/export"],
+    ["DELETE", "/api/v1/snapshots/demo-clean/copies/edge-1"],
   ]) {
     const response = await fetch(address + path, { method });
     assert.equal(response.status, 202, path);
   }
-  assert.equal(seen.length, 5);
+  assert.equal(seen.length, 6);
   for (const path of [
     "/api/v1/snapshots/demo/restore",
     "/api/v1/snapshots/Demo",
+    "/api/v1/snapshots/demo/copies",
+    "/api/v1/snapshots/demo/copies/Edge",
     "/api/v1/farms/demo/snapshots/x",
   ]) {
     assert.equal((await fetch(address + path)).status, 404, path);
   }
-  assert.equal(seen.length, 5);
+  assert.equal(seen.length, 6);
 });
 test("forwards bucket routes and keeps others closed", async (t) => {
   const seen = [];

@@ -198,13 +198,50 @@ S3 호환 서버마다 다른 동작을 피하려고 다음처럼 요청합니�
 `FARM_S3_REGION`, `FARM_S3_PREFIX`, `FARM_S3_PATH_STYLE`, `FARM_S3_CA_FILE`)를 지정하고
 `cargo test s3_live -- --ignored`를 실행합니다.
 
+## 다른 호스트로 복사
+
+스냅샷은 coordinator의 로컬 호스트에서 얼리고 가져옵니다. 단일 VM 스냅샷(all-in-one farm,
+control 템플릿, compute 템플릿)으로 다른 호스트에 farm을 만들거나 compute를 붙이면, job이 먼저
+그 호스트에 스냅샷 복사본을 둡니다. 다음 사용부터는 호스트에 남은 복사본을 그대로 씁니다.
+다중 VM farm 전체 스냅샷은 지금처럼 로컬 호스트에서만 복원합니다.
+
+1. 호스트의 farm-agent에 복사본이 아직 있는지 묻습니다(`FindSnapshot`). agent는 자기가 불러온
+   복사본을 coordinator별로 `cache.json`에 기록하고, msb에 그 스냅샷이 남아 있을 때만 있다고 답합니다.
+2. 없으면 버킷 아카이브를 찾습니다. 마지막 내보내기가 버킷이었거나 버킷에서 가져온 스냅샷, 또는
+   등록된 버킷의 메타데이터 파일이 같은 템플릿(스냅샷 ID·역할·VM·릴리스·서비스·아키텍처)을 가리키면
+   호스트가 직접 내려받습니다. coordinator는 그 객체 하나만 6시간 동안 읽을 수 있는 presigned GET
+   URL을 보내고, 버킷의 secret key는 vault 밖으로 나가지 않습니다. URL은 agent 연결(SSH, 접속해 오는
+   agent의 TLS 소켓) 안으로만 전달되고 어디에도 저장되지 않습니다. 사설 CA는 버킷의 `ca_pem`을 함께
+   보냅니다. agent는 메타데이터 파일의 크기와 SHA-256이 맞는지 확인합니다.
+3. 버킷 아카이브가 없거나, 호스트가 버킷에 닿지 못하거나, 받은 내용의 SHA-256이 다르면 job 로그에
+   이유를 남기고, coordinator가 로컬 호스트에서 내보낸 아카이브를 agent 연결로 직접 보냅니다(셸
+   입력과 같은 경로, 96 KiB씩). agent는 내보낸 아카이브의 크기·SHA-256과 비교합니다.
+4. 확인된 아카이브만 불러오고(`ImportArchive`), 스테이징 파일은 지웁니다.
+
+진행 상황은 job 로그에 나옵니다(`host edge downloads ... from bucket ...`, `streamed 256 of 1024 MiB
+to host edge`). 같은 스냅샷을 같은 호스트로 동시에 복사하는 작업은 차례로 실행되고, 뒤의 작업은
+앞의 복사본을 씁니다. 스냅샷 기록의 `copies`가 복사본이 있는 호스트(`host_id`), 그 호스트의 msb
+reference, 경로(`via`: `bucket`, `stream`, 또는 이미 있던 `found`)를 보여줍니다.
+
+`DELETE /snapshots/{id}/copies/{host_id}`(`farm snapshot uncache <id> --host <host>`, 포탈 스냅샷 카드의
+호스트 칩)는 그 호스트의 복사본만 지웁니다. 스냅샷을 삭제하면 로컬 디스크를 지운 뒤 복사본도
+지우고, 접속되지 않는 호스트의 복사본은 응답의 `copies_left`에 남깁니다(기록은 삭제됨). 호스트
+등록을 해제하면 그 호스트의 복사본 기록만 지웁니다.
+
+복사에는 이 기능을 아는 farm-agent가 필요합니다. agent의 `Hello` 응답에
+`supports_template_transfer`가 없으면 `409`와 함께 "the farm-agent on host '...' predates template
+transfers"로 거절하고, 호스트에는 새 요청을 보내지 않습니다. SSH 호스트는 Hosts에서 실행기를 다시
+설치하고, 접속해 오는 호스트는 farm-agent를 새 버전으로 바꿔 다시 연결하세요. 프로토콜 버전(`1`)은
+그대로이며, 새 작업은 기존 작업 옆에 추가되었습니다.
+
 ## API
 
 | Method | Path (`/api/v1` 기준) | 반환 |
 |---|---|---|
 | POST | `/farms/{id}/snapshots` | `{"id","note"}` → snapshot job (202) |
 | GET | `/snapshots`, `/snapshots/{id}` | 스냅샷 목록 / 상세 |
-| DELETE | `/snapshots/{id}` | 스냅샷 삭제 (`?forget=true`: 기록만 삭제) |
+| DELETE | `/snapshots/{id}` | 스냅샷과 다른 호스트의 복사본 삭제 (`?forget=true`: 기록만 삭제), 남은 복사본은 `copies_left` |
+| DELETE | `/snapshots/{id}/copies/{host_id}` | 그 호스트의 복사본만 삭제 → 갱신된 스냅샷 |
 | POST | `/snapshots/{id}/export` | `{"path"}` 또는 `{"bucket","key"}` 선택 → 내보내기 시작 (202) |
 | POST | `/snapshots/import` | `{"path","id"}` 또는 `{"bucket","key","id"}` → 가져오기 시작 (202) |
 | GET / POST | `/buckets` | S3 버킷 목록 / 등록 (secret은 응답에 없음) |

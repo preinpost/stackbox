@@ -644,6 +644,22 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/v1/snapshots/{id}/copies/{host_id}": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    post?: never;
+    delete: operations["delete_snapshot_copy"];
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/v1/snapshots/{id}/export": {
     parameters: {
       query?: never;
@@ -835,6 +851,8 @@ export interface components {
       port?: number;
       username: string;
     };
+    /** @enum {string} */
+    CopySource: "bucket" | "stream" | "found";
     CreateRequest: {
       components?: string[];
       compute?: null | components["schemas"]["ComputeSize"];
@@ -1458,6 +1476,11 @@ export interface components {
       id: string;
     };
     RemovedSnapshot: {
+      /**
+       * @description Copies on other hosts that could not be removed, as `<host>: <error>`; they stay
+       *     on those hosts until removed there.
+       */
+      copies_left?: string[];
       id: string;
     };
     /** @enum {string} */
@@ -1483,10 +1506,24 @@ export interface components {
       /** Format: int64 */
       size_bytes: number;
     };
+    /** @description A snapshot copied to another host, where its agent keeps it as an msb snapshot. */
+    SnapshotCopy: {
+      /** Format: int64 */
+      copied_at: number;
+      host_id: string;
+      /** @description msb snapshot reference on that host. */
+      reference: string;
+      /** Format: int64 */
+      size_bytes?: number | null;
+      /** @description How the archive got there. */
+      via: components["schemas"]["CopySource"];
+    };
     SnapshotRecord: {
       /** @description CPU architecture of the frozen guest; its disks cannot boot on another one. */
       arch?: string;
       archive?: null | components["schemas"]["SnapshotArchive"];
+      /** @description Copies kept on other hosts, which farms and computes there boot from. */
+      copies?: components["schemas"]["SnapshotCopy"][];
       /** Format: int64 */
       created_at: number;
       /** @description Whether OpenStack was deployed when frozen. Restored farms then start `ready`. */
@@ -3254,6 +3291,45 @@ export interface operations {
         };
         content: {
           "application/json": components["schemas"]["RemovedSnapshot"];
+        };
+      };
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorBody"];
+        };
+      };
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorBody"];
+        };
+      };
+    };
+  };
+  delete_snapshot_copy: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        id: string;
+        host_id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description The copy on that host was removed; the snapshot itself stays */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["SnapshotRecord"];
         };
       };
       404: {

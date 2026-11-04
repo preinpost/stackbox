@@ -7,7 +7,6 @@
 use super::{FarmManager, NotFound, bad_request, conflict, new_job, store::State};
 use crate::{
     model::*,
-    remote::HostKind,
     s3::catalog::{ArchiveMetadata, TemplateQuery},
 };
 use anyhow::{Context, Result, anyhow, bail};
@@ -91,15 +90,12 @@ fn ready(snapshot: &SnapshotRecord) -> bool {
     ) && snapshot.reference.is_some()
 }
 
-/// Whether a template can boot a VM on `host`. Templates are kept on the coordinator's
-/// local host only; this is the one place that decides it, so a transfer of templates to
-/// other hosts changes only this and [`FarmManager::ensure_template_on_host`].
+/// Whether a template can boot a VM on `host`. Any registered host can: the restore or
+/// expand step copies the template there first ([`FarmManager::ensure_snapshot_on_host`]),
+/// and reuses a copy the host already keeps.
 fn template_on_host(state: &State, host: &str) -> std::result::Result<(), String> {
-    match state.hosts.get(host).map(|stored| stored.host.kind) {
-        Some(HostKind::Local) => Ok(()),
-        Some(_) => Err(format!(
-            "templates are kept on the local host and are not copied to host '{host}' yet"
-        )),
+    match state.hosts.get(host) {
+        Some(_) => Ok(()),
         None => Err(format!("host '{host}' is not registered")),
     }
 }
@@ -491,12 +487,12 @@ impl FarmManager {
                 Ok(()) => Ok(pick),
                 Err(why) if request.control_template.is_some() => {
                     return Err(conflict(format!(
-                        "control template '{}' cannot start the control VM: {why}; choose the local host for it",
+                        "control template '{}' cannot start the control VM: {why}",
                         pick.id()
                     )));
                 }
                 Err(why) => Err(format!(
-                    "the control VM runs on host '{control_host}', and {why}; it is installed clean (choose the local host to start it from {})",
+                    "the control VM runs on host '{control_host}', and {why}; it is installed clean (register the host to start it from {})",
                     pick.describe()
                 )),
             },
@@ -865,8 +861,8 @@ impl FarmManager {
         Ok(())
     }
 
-    /// Make `snapshot` available to boot a VM on `host`. Templates are kept on the local
-    /// host and the plan only boots them there, so this checks that it still holds.
+    /// Check that `snapshot` can still boot a VM on `host`. The restore or expand job it
+    /// starts copies the template to a remote host itself, with its progress in that job.
     async fn ensure_template_on_host(&self, snapshot: &str, host: &str) -> Result<()> {
         self.snapshot(snapshot)?;
         self.read(|state| template_on_host(state, host))?

@@ -73,7 +73,7 @@ struct LockedRegistry {
     state: Registry,
     _lock: AgentLock,
 }
-struct AgentLock(File);
+pub(super) struct AgentLock(File);
 impl Drop for AgentLock {
     fn drop(&mut self) {
         // A concurrent fork can briefly inherit this file before exec closes it.
@@ -125,7 +125,7 @@ impl LockedRegistry {
         Ok(entry)
     }
 }
-fn lock(dir: &Path, name: &str) -> Result<AgentLock> {
+pub(super) fn lock(dir: &Path, name: &str) -> Result<AgentLock> {
     fs::create_dir_all(dir)?;
     #[cfg(unix)]
     {
@@ -416,13 +416,25 @@ impl Agent {
     }
 
     /// Relay a shell in the farm's VM: `TerminalFrame` lines in, `Frame::Terminal` out.
-    /// It takes no farm lock, so a shell can watch a running deployment.
+    /// It takes no farm lock, so a shell can watch a running deployment. An archive the
+    /// coordinator streams arrives the same way.
     pub async fn terminal<R>(&self, request: &Request, input: R, emit: Emitter) -> Result<Reply>
     where
         R: tokio::io::AsyncBufRead + Unpin,
     {
         use tokio::io::{AsyncBufReadExt, AsyncReadExt};
         Self::admit(request)?;
+        if let Operation::ReceiveArchive {
+            transfer_id,
+            sha256,
+            size_bytes,
+        } = &request.operation
+        {
+            // Links wait for this before streaming, as for a shell.
+            emit(Frame::Attached)?;
+            super::cache::receive(&self.dir, transfer_id, (sha256, *size_bytes), input).await?;
+            return Ok(Reply::Done);
+        }
         let Operation::Shell {
             farm_id: id,
             generation,
@@ -685,6 +697,7 @@ impl Agent {
             }
             Operation::RemoveSnapshot { reference } => {
                 self.backend.remove_snapshot(reference.clone()).await?;
+                super::cache::forget(&self.dir, reference).await?;
                 Ok(Reply::Done)
             }
             _ => bail!("not a snapshot storage operation"),
@@ -703,6 +716,7 @@ impl Agent {
                 arch: std::env::consts::ARCH.into(),
                 supports_single_vm: true,
                 build_id: crate::BUILD_ID.into(),
+                supports_template_transfer: true,
             });
         }
         if matches!(request.operation, Operation::Scan) {
@@ -755,6 +769,54 @@ impl Agent {
         ) {
             return self.snapshot_operation(&request.operation).await;
         }
+        match &request.operation {
+            Operation::FindSnapshot { snapshot_id } => {
+                return Ok(Reply::Found {
+                    reference: super::cache::find(
+                        &self.dir,
+                        self.backend.as_ref(),
+                        &request.coordinator_id,
+                        snapshot_id,
+                    )
+                    .await?,
+                });
+            }
+            Operation::FetchArchive {
+                transfer_id,
+                url,
+                ca_pem,
+                sha256,
+                size_bytes,
+            } => {
+                super::cache::fetch(
+                    &self.dir,
+                    transfer_id,
+                    url,
+                    ca_pem.as_deref(),
+                    (sha256, *size_bytes),
+                    &emit,
+                )
+                .await?;
+                return Ok(Reply::Done);
+            }
+            Operation::ImportArchive {
+                transfer_id,
+                snapshot_id,
+            } => {
+                return Ok(Reply::Imported {
+                    snapshot: super::cache::import(
+                        &self.dir,
+                        self.backend.as_ref(),
+                        &request.coordinator_id,
+                        transfer_id,
+                        snapshot_id,
+                    )
+                    .await?,
+                });
+            }
+            Operation::ReceiveArchive { .. } => bail!("an archive needs an input stream"),
+            _ => {}
+        }
         // A deploy outlives this request; its worker takes the farm's locks instead.
         if let Operation::Deploy { job_id, .. } = &request.operation {
             return self.deploy(&request, job_id, emit).await;
@@ -778,8 +840,13 @@ impl Agent {
                 plan: requested,
                 exposure,
                 share,
+                source,
                 ..
             } => {
+                ensure!(
+                    source.is_none() || share.is_some(),
+                    "only a share of a farm that spans hosts boots from a template on create"
+                );
                 if let Some(nodes) = self
                     .reserve(
                         &request,
@@ -797,8 +864,19 @@ impl Agent {
                     message: "Host capacity and public ports reserved; creating the farm VM\n"
                         .into(),
                 })?;
-                let nodes = match share {
-                    Some(share) => {
+                let nodes = match (share, source) {
+                    (Some(share), Some(source)) => {
+                        self.backend
+                            .create_share_from(
+                                id.into(),
+                                requested.clone(),
+                                exposure.clone(),
+                                (**share).clone(),
+                                source.clone(),
+                            )
+                            .await?
+                    }
+                    (Some(share), None) => {
                         self.backend
                             .create_share(
                                 id.into(),
@@ -808,7 +886,7 @@ impl Agent {
                             )
                             .await?
                     }
-                    None => {
+                    (None, _) => {
                         self.backend
                             .create(id.into(), requested.clone(), exposure.clone())
                             .await?
@@ -1316,7 +1394,7 @@ pub async fn serve_stdio() -> Result<()> {
     let emit = stdout_emitter();
     let agent = Agent::local();
     let result = match serde_json::from_slice::<Request>(&input) {
-        Ok(request) if matches!(request.operation, Operation::Shell { .. }) => {
+        Ok(request) if request.operation.streams_input() => {
             agent.terminal(&request, stdin, emit.clone()).await
         }
         Ok(request) => agent.execute(request, emit.clone()).await,
@@ -1349,6 +1427,7 @@ mod tests {
                 port_base: base,
             },
             share: None,
+            source: None,
         }
     }
     fn request(owner: &str, operation: Operation) -> Request {

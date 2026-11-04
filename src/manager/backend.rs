@@ -44,6 +44,18 @@ pub trait Backend: Send + Sync + 'static {
     ) -> BoxFuture<'_, Result<Vec<FarmNode>>> {
         Box::pin(async { Err(anyhow!("this backend runs farms on one host only")) })
     }
+    /// Create this host's part of a farm that spans hosts, booting its one compute from
+    /// the compute template snapshot `source` on this host.
+    fn create_share_from(
+        &self,
+        _id: String,
+        _plan: Plan,
+        _exposure: Exposure,
+        _share: crate::remote::protocol::Share,
+        _source: String,
+    ) -> BoxFuture<'_, Result<Vec<FarmNode>>> {
+        Box::pin(async { Err(anyhow!("this backend cannot boot a share from a template")) })
+    }
     /// Add compute VMs to an existing farm on this host. `nodes` are the farm's VMs this
     /// host runs after the change; `add` are the suffixes to create, from the compute
     /// template snapshot `source` if given. `uplink` joins this host's switch to the relay
@@ -171,6 +183,13 @@ pub trait Backend: Send + Sync + 'static {
     fn remove_snapshot(&self, _reference: String) -> BoxFuture<'_, Result<()>> {
         unsupported()
     }
+    /// The labels of the snapshot at `reference`, or `None` when it is gone.
+    fn snapshot_labels(
+        &self,
+        _reference: String,
+    ) -> BoxFuture<'_, Result<Option<BTreeMap<String, String>>>> {
+        unsupported()
+    }
     /// Add faults to the links of a multi-node farm's VM (`control`, `compute-1`, ...);
     /// `Impair::default()` heals them.
     fn impair(&self, _id: String, _node: String, _impair: Impair) -> BoxFuture<'_, Result<()>> {
@@ -237,6 +256,33 @@ impl Backend for MicrosandboxBackend {
                 &plan.components,
                 Some(&self.switch),
                 &[],
+                Some(&share),
+            )
+            .await
+        })
+    }
+    fn create_share_from(
+        &self,
+        id: String,
+        plan: Plan,
+        exposure: Exposure,
+        share: crate::remote::protocol::Share,
+        source: String,
+    ) -> BoxFuture<'_, Result<Vec<FarmNode>>> {
+        Box::pin(async move {
+            anyhow::ensure!(
+                share.nodes.len() == 1 && share.nodes[0].starts_with("compute-"),
+                "a compute template boots a share of one compute"
+            );
+            // Only the share's VM is created here, so every entry may name the template.
+            let sources = vec![source; plan.nodes.len()];
+            farm::create_farm_with(
+                &id,
+                &plan.nodes,
+                Some(&exposure),
+                &plan.components,
+                Some(&self.switch),
+                &sources,
                 Some(&share),
             )
             .await
@@ -529,6 +575,12 @@ PY"#).await;
     }
     fn remove_snapshot(&self, reference: String) -> BoxFuture<'_, Result<()>> {
         Box::pin(async move { farm::remove_snapshot(&reference).await })
+    }
+    fn snapshot_labels(
+        &self,
+        reference: String,
+    ) -> BoxFuture<'_, Result<Option<BTreeMap<String, String>>>> {
+        Box::pin(async move { farm::snapshot_labels(&reference).await })
     }
     fn terminal(
         &self,

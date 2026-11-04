@@ -307,72 +307,75 @@ impl Client {
         &self,
         key: &str,
         path: &Path,
-        mut progress: impl FnMut(u64, Option<u64>),
+        progress: impl FnMut(u64, Option<u64>),
     ) -> Result<Transferred> {
-        let mut file = tokio::fs::File::create(path).await?;
-        // A resumed range continues the hash; a restart from zero starts it over.
-        let mut hash = Sha256::new();
-        let mut done = 0;
-        let mut total = None;
-        let mut failures = 0;
-        loop {
-            let mut call = Call::new(Method::GET, Some(key)).timeout(None);
-            if done > 0 {
-                call = call.header("range", format!("bytes={done}-"));
-            }
-            let mut response = expect(self.send(call).await?, "download object").await?;
-            if response.status() == StatusCode::PARTIAL_CONTENT {
-                total = total.or_else(|| {
-                    let range = response.headers().get(header::CONTENT_RANGE)?;
-                    range.to_str().ok()?.rsplit_once('/')?.1.parse().ok()
-                });
-            } else {
-                // The whole object: the first request, or a server that ignored the range.
+        receive(
+            path,
+            |done| async move {
+                let mut call = Call::new(Method::GET, Some(key)).timeout(None);
                 if done > 0 {
-                    file.set_len(0).await?;
-                    file.rewind().await?;
-                    done = 0;
-                    hash = Sha256::new();
+                    call = call.header("range", format!("bytes={done}-"));
                 }
-                total = response
-                    .headers()
-                    .get(header::CONTENT_LENGTH)
-                    .and_then(|v| v.to_str().ok()?.parse().ok());
-            }
-            progress(done, total);
-            let streamed = async {
-                while let Some(chunk) = response.chunk().await? {
-                    file.write_all(&chunk).await?;
-                    hash.update(&chunk);
-                    done += chunk.len() as u64;
-                    progress(done, total);
-                }
-                Ok::<_, anyhow::Error>(())
-            }
-            .await;
-            match streamed {
-                Ok(()) => break,
-                Err(error)
-                    if failures + 1 < ATTEMPTS
-                        && error.downcast_ref::<reqwest::Error>().is_some() =>
-                {
-                    failures += 1;
-                    tokio::time::sleep(Duration::from_secs(1 << failures)).await;
-                }
-                Err(error) => return Err(error.context("download object")),
-            }
-        }
-        if let Some(total) = total {
-            ensure!(
-                done == total,
-                "download ended after {done} of {total} bytes"
-            );
-        }
-        file.sync_all().await?;
-        Ok(Transferred {
-            size: done,
-            sha256: hex(&hash.finalize()),
-        })
+                expect(self.send(call).await?, "download object").await
+            },
+            progress,
+        )
+        .await
+    }
+
+    /// A URL that lets whoever holds it read the object at `key` with a plain GET for
+    /// `expires` seconds (at most a week), without the bucket's secret key.
+    pub fn presign_get(&self, key: &str, expires: u64) -> Result<Url> {
+        ensure!(
+            (1..=7 * 24 * 3600).contains(&expires),
+            "a presigned URL lasts from 1 second to 7 days"
+        );
+        let mut url = self.base.clone();
+        url.set_path(&format!("{}/{}", self.root, encode(key, true)));
+        let host = match url.port() {
+            Some(port) => format!("{}:{port}", url.host_str().unwrap_or_default()),
+            None => url.host_str().unwrap_or_default().to_owned(),
+        };
+        let query = self.presigned_query(
+            "GET",
+            url.path(),
+            &host,
+            expires,
+            &amz_date(SystemTime::now()),
+        );
+        url.set_query(Some(&query));
+        Ok(url)
+    }
+    /// SigV4 query authentication of a request signing only its host, with an unsigned body.
+    fn presigned_query(
+        &self,
+        method: &str,
+        path: &str,
+        host: &str,
+        expires: u64,
+        date: &str,
+    ) -> String {
+        let scope = format!("{}/{}/s3/aws4_request", &date[..8], self.region);
+        let mut query = [
+            ("X-Amz-Algorithm", "AWS4-HMAC-SHA256".to_owned()),
+            (
+                "X-Amz-Credential",
+                format!("{}/{scope}", self.access_key_id),
+            ),
+            ("X-Amz-Date", date.to_owned()),
+            ("X-Amz-Expires", expires.to_string()),
+            ("X-Amz-SignedHeaders", "host".to_owned()),
+        ]
+        .iter()
+        .map(|(name, value)| format!("{}={}", encode(name, false), encode(value, false)))
+        .collect::<Vec<_>>();
+        query.sort();
+        let query = query.join("&");
+        let canonical = format!("{method}\n{path}\n{query}\nhost:{host}\n\nhost\nUNSIGNED-PAYLOAD");
+        format!(
+            "{query}&X-Amz-Signature={}",
+            self.signature(&canonical, date)
+        )
     }
 
     async fn send(&self, call: Call<'_>) -> Result<Response> {
@@ -472,6 +475,15 @@ impl Client {
             .join(";");
         let canonical =
             format!("{method}\n{path}\n{query}\n{canonical_headers}\n{signed}\n{payload}");
+        let scope = format!("{}/{}/s3/aws4_request", &date[..8], self.region);
+        format!(
+            "AWS4-HMAC-SHA256 Credential={}/{scope}, SignedHeaders={signed}, Signature={}",
+            self.access_key_id,
+            self.signature(&canonical, date)
+        )
+    }
+    /// Hex SigV4 signature of a canonical request made at `date`.
+    fn signature(&self, canonical: &str, date: &str) -> String {
         let day = &date[..8];
         let scope = format!("{day}/{}/s3/aws4_request", self.region);
         let to_sign = format!(
@@ -483,12 +495,121 @@ impl Client {
         for part in [self.region.as_str(), "s3", "aws4_request"] {
             key = hmac(&key, part.as_bytes());
         }
-        format!(
-            "AWS4-HMAC-SHA256 Credential={}/{scope}, SignedHeaders={signed}, Signature={}",
-            self.access_key_id,
-            hex(&hmac(&key, to_sign.as_bytes()))
-        )
+        hex(&hmac(&key, to_sign.as_bytes()))
     }
+}
+
+/// Read a presigned URL's object into `path`, like [`Client::download`]. `ca_pem` adds
+/// trusted certificates for a bucket behind a private CA.
+pub async fn fetch(
+    url: &Url,
+    ca_pem: Option<&str>,
+    path: &Path,
+    progress: impl FnMut(u64, Option<u64>),
+) -> Result<Transferred> {
+    ensure!(
+        matches!(url.scheme(), "http" | "https"),
+        "archive URLs must be http or https"
+    );
+    let mut builder = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .read_timeout(Duration::from_secs(120))
+        .redirect(reqwest::redirect::Policy::none());
+    if let Some(pem) = ca_pem {
+        builder = builder.tls_certs_merge(certificates(pem)?);
+    }
+    let http = builder.build()?;
+    receive(
+        path,
+        |done| {
+            let mut request = http.get(url.clone());
+            if done > 0 {
+                request = request.header(header::RANGE, format!("bytes={done}-"));
+            }
+            async move {
+                // The URL carries the signature; keep it out of errors.
+                let response = request
+                    .send()
+                    .await
+                    .map_err(|error| anyhow!("download archive: {}", error.without_url()))?;
+                expect(response, "download archive").await
+            }
+        },
+        progress,
+    )
+    .await
+}
+
+/// Write the body `request` answers into `path`, asking again from the received length
+/// when the connection drops. A resumed range continues the hash; a restart from zero
+/// starts it over.
+async fn receive<F, R>(
+    path: &Path,
+    mut request: R,
+    mut progress: impl FnMut(u64, Option<u64>),
+) -> Result<Transferred>
+where
+    R: FnMut(u64) -> F,
+    F: std::future::Future<Output = Result<Response>>,
+{
+    let mut file = tokio::fs::File::create(path).await?;
+    let mut hash = Sha256::new();
+    let mut done = 0;
+    let mut total = None;
+    let mut failures = 0;
+    loop {
+        let mut response = request(done).await?;
+        if response.status() == StatusCode::PARTIAL_CONTENT {
+            total = total.or_else(|| {
+                let range = response.headers().get(header::CONTENT_RANGE)?;
+                range.to_str().ok()?.rsplit_once('/')?.1.parse().ok()
+            });
+        } else {
+            // The whole object: the first request, or a server that ignored the range.
+            if done > 0 {
+                file.set_len(0).await?;
+                file.rewind().await?;
+                done = 0;
+                hash = Sha256::new();
+            }
+            total = response
+                .headers()
+                .get(header::CONTENT_LENGTH)
+                .and_then(|v| v.to_str().ok()?.parse().ok());
+        }
+        progress(done, total);
+        let streamed = async {
+            while let Some(chunk) = response.chunk().await? {
+                file.write_all(&chunk).await?;
+                hash.update(&chunk);
+                done += chunk.len() as u64;
+                progress(done, total);
+            }
+            Ok::<_, anyhow::Error>(())
+        }
+        .await;
+        match streamed {
+            Ok(()) => break,
+            Err(error)
+                if failures + 1 < ATTEMPTS && error.downcast_ref::<reqwest::Error>().is_some() =>
+            {
+                failures += 1;
+                tokio::time::sleep(Duration::from_secs(1 << failures)).await;
+            }
+            Err(error) => return Err(error.context("download object")),
+        }
+    }
+    if let Some(total) = total {
+        ensure!(
+            done == total,
+            "download ended after {done} of {total} bytes"
+        );
+    }
+    file.sync_all().await?;
+    Ok(Transferred {
+        size: done,
+        sha256: hex(&hash.finalize()),
+    })
 }
 
 struct Call<'a> {
@@ -768,6 +889,25 @@ mod tests {
             hex(&hmac(b"Jefe", b"what do ya want for nothing?")),
             "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
         );
+    }
+
+    #[test]
+    fn presigned_urls_match_the_aws_example() {
+        let query = example(false).presigned_query(
+            "GET",
+            "/test.txt",
+            "examplebucket.s3.amazonaws.com",
+            86400,
+            "20130524T000000Z",
+        );
+        assert_eq!(
+            query,
+            "X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=AKIAIOSFODNN7EXAMPLE%2F20130524%2Fus-east-1%2Fs3%2Faws4_request&X-Amz-Date=20130524T000000Z&X-Amz-Expires=86400&X-Amz-SignedHeaders=host&X-Amz-Signature=aeeed9bbccd4d02ee5c0109b86d86835f995330da4c265957d157751f604d404"
+        );
+        let url = example(true).presign_get("dir/a b.msb", 3600).unwrap();
+        assert_eq!(url.path(), "/examplebucket/dir/a%20b.msb");
+        assert!(!url.as_str().contains("wJalrXUtnFEMI"));
+        assert!(example(true).presign_get("a", 8 * 24 * 3600).is_err());
     }
 
     #[test]

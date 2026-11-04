@@ -20,6 +20,10 @@ pub struct Observed {
     pub calls: Mutex<Vec<String>>,
     pub rpc_farms: Mutex<std::collections::BTreeMap<String, Vec<crate::farm::FarmNode>>>,
     pub fail_scan: AtomicBool,
+    /// Answer `Hello` like an agent from before template transfers.
+    pub legacy_agent: AtomicBool,
+    /// Snapshot IDs this host keeps a copy of, with their references.
+    pub cached: Mutex<std::collections::BTreeMap<String, String>>,
 }
 pub fn client_key() -> PrivateKey {
     PrivateKey::from(Ed25519Keypair::from_seed(&[19; 32]))
@@ -239,7 +243,34 @@ impl server::Handler for Handler {
                     arch: std::env::consts::ARCH.into(),
                     supports_single_vm: true,
                     build_id: crate::BUILD_ID.into(),
+                    supports_template_transfer: !self.observed.legacy_agent.load(Ordering::SeqCst),
                 },
+                Operation::FindSnapshot { snapshot_id } => Reply::Found {
+                    reference: self.observed.cached.lock().unwrap().get(&snapshot_id).cloned(),
+                },
+                Operation::FetchArchive { url, .. } => {
+                    self.observed
+                        .calls
+                        .lock()
+                        .unwrap()
+                        .push(format!("fetch:{}", url.split('?').next().unwrap_or_default()));
+                    Reply::Done
+                }
+                Operation::ImportArchive { snapshot_id, .. } => {
+                    let reference = format!("ssh/{snapshot_id}");
+                    self.observed
+                        .cached
+                        .lock()
+                        .unwrap()
+                        .insert(snapshot_id, reference.clone());
+                    Reply::Imported {
+                        snapshot: crate::farm::ImportedSnapshot {
+                            reference,
+                            labels: Default::default(),
+                            size_bytes: Some(4096),
+                        },
+                    }
+                }
                 Operation::Scan => {
                     if self.observed.fail_scan.load(Ordering::SeqCst) {
                         session.data(
@@ -266,8 +297,16 @@ impl server::Handler for Handler {
                     farm_id,
                     plan,
                     share,
+                    source,
                     ..
                 } => {
+                    if let Some(source) = &source {
+                        self.observed
+                            .calls
+                            .lock()
+                            .unwrap()
+                            .push(format!("create-from:{source}"));
+                    }
                     if let Some(share) = &share {
                         self.observed
                             .calls
@@ -342,8 +381,16 @@ impl server::Handler for Handler {
                     farm_id,
                     plan,
                     add,
+                    source,
                     ..
                 } => {
+                    if let Some(source) = &source {
+                        self.observed
+                            .calls
+                            .lock()
+                            .unwrap()
+                            .push(format!("expand-from:{source}"));
+                    }
                     self.observed
                         .calls
                         .lock()
@@ -396,8 +443,23 @@ impl server::Handler for Handler {
                 | Operation::InstallMsb
                 | Operation::Settle { .. }
                 | Operation::ForgetComputes { .. }
-                | Operation::ExportSnapshot { .. }
-                | Operation::RemoveSnapshot { .. } => Reply::Done,
+                | Operation::ExportSnapshot { .. } => Reply::Done,
+                Operation::RemoveSnapshot { reference } => {
+                    self.observed
+                        .calls
+                        .lock()
+                        .unwrap()
+                        .push(format!("remove-snapshot:{reference}"));
+                    self.observed
+                        .cached
+                        .lock()
+                        .unwrap()
+                        .retain(|_, cached| *cached != reference);
+                    Reply::Done
+                }
+                Operation::ReceiveArchive { .. } => {
+                    unimplemented!("the SSH fixture does not take streamed archives")
+                }
                 Operation::Freeze { .. }
                 | Operation::Restore { .. }
                 | Operation::Impair { .. }

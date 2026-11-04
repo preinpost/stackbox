@@ -60,6 +60,123 @@ impl AgentBackend {
         self.done(Operation::Attach { job_id, offset }, Some(sink))
             .await
     }
+    /// Whether the host's agent takes the template transfer operations.
+    pub async fn supports_template_transfer(&self) -> Result<bool> {
+        match self.call(Operation::Hello, None).await? {
+            Reply::Hello {
+                supports_template_transfer,
+                ..
+            } => Ok(supports_template_transfer),
+            _ => bail!("unexpected farm-agent hello response"),
+        }
+    }
+    /// The reference of the copy of `snapshot_id` this coordinator left on the host.
+    pub async fn find_snapshot(&self, snapshot_id: String) -> Result<Option<String>> {
+        match self
+            .call(Operation::FindSnapshot { snapshot_id }, None)
+            .await?
+        {
+            Reply::Found { reference } => Ok(reference),
+            _ => bail!("unexpected farm-agent response"),
+        }
+    }
+    /// Have the host download an archive from a presigned URL into transfer `transfer_id`.
+    pub async fn fetch_archive(
+        &self,
+        transfer_id: String,
+        url: String,
+        ca_pem: Option<String>,
+        sha256: String,
+        size_bytes: u64,
+        sink: EventSink,
+    ) -> Result<()> {
+        self.done(
+            Operation::FetchArchive {
+                transfer_id,
+                url,
+                ca_pem,
+                sha256,
+                size_bytes,
+            },
+            Some(sink),
+        )
+        .await
+    }
+    /// Stream the archive at `path` to the host as transfer `transfer_id`; `progress` gets
+    /// the bytes sent so far.
+    pub async fn send_archive(
+        &self,
+        transfer_id: String,
+        path: PathBuf,
+        sha256: String,
+        size_bytes: u64,
+        mut progress: impl FnMut(u64) + Send,
+    ) -> Result<()> {
+        use tokio::io::AsyncReadExt;
+        // Base64 in a JSON line must stay under the frame limit.
+        const CHUNK: usize = 96 * 1024;
+        let (input, input_rx) = tokio::sync::mpsc::channel(8);
+        let (output, mut output_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(8);
+        let session = self.link.terminal(
+            self.request(Operation::ReceiveArchive {
+                transfer_id,
+                sha256,
+                size_bytes,
+            }),
+            crate::farm::TerminalIo {
+                input: input_rx,
+                output,
+            },
+        );
+        let feed = async move {
+            let mut file = tokio::fs::File::open(&path).await?;
+            let mut sent = 0;
+            loop {
+                let mut chunk = vec![0; CHUNK];
+                let read = file.read(&mut chunk).await?;
+                if read == 0 {
+                    break;
+                }
+                chunk.truncate(read);
+                if input
+                    .send(crate::farm::TerminalInput::Data(chunk))
+                    .await
+                    .is_err()
+                {
+                    // The session ended early; its result says why.
+                    break;
+                }
+                sent += read as u64;
+                progress(sent);
+            }
+            // Dropping `input` ends the stream.
+            Ok::<_, anyhow::Error>(())
+        };
+        let drain = async { while output_rx.recv().await.is_some() {} };
+        let (session, fed, ()) = tokio::join!(session, feed, drain);
+        session?;
+        fed
+    }
+    /// Load transfer `transfer_id`'s verified archive on the host as `snapshot_id`.
+    pub async fn import_archive(
+        &self,
+        transfer_id: String,
+        snapshot_id: String,
+    ) -> Result<ImportedSnapshot> {
+        match self
+            .call(
+                Operation::ImportArchive {
+                    transfer_id,
+                    snapshot_id,
+                },
+                None,
+            )
+            .await?
+        {
+            Reply::Imported { snapshot } => Ok(snapshot),
+            _ => bail!("unexpected farm-agent import response"),
+        }
+    }
     async fn nodes(&self, operation: Operation) -> Result<Vec<FarmNode>> {
         match self.call(operation, None).await? {
             Reply::Nodes { nodes } => Ok(nodes),
@@ -88,6 +205,7 @@ impl Backend for AgentBackend {
             plan,
             exposure,
             share: None,
+            source: None,
         }))
     }
     fn create_share(
@@ -103,6 +221,24 @@ impl Backend for AgentBackend {
             plan,
             exposure,
             share: Some(Box::new(share)),
+            source: None,
+        }))
+    }
+    fn create_share_from(
+        &self,
+        id: String,
+        plan: Plan,
+        exposure: Exposure,
+        share: super::protocol::Share,
+        source: String,
+    ) -> BoxFuture<'_, Result<Vec<FarmNode>>> {
+        Box::pin(self.nodes(Operation::Create {
+            farm_id: id,
+            generation: self.generation.clone(),
+            plan,
+            exposure,
+            share: Some(Box::new(share)),
+            source: Some(source),
         }))
     }
     fn expand(

@@ -327,6 +327,13 @@ enum SnapshotCommand {
         #[arg(long)]
         forget: bool,
     },
+    /// Remove the copy of a snapshot another host keeps; templates are copied to hosts
+    /// automatically when a farm or compute there starts from them
+    Uncache {
+        id: String,
+        #[arg(long)]
+        host: String,
+    },
 }
 fn print_json(value: &impl serde::Serialize) -> Result<()> {
     println!("{}", serde_json::to_string_pretty(value)?);
@@ -772,7 +779,7 @@ async fn main() -> Result<()> {
                 } else {
                     for s in snapshots {
                         println!(
-                            "{:<24} {:?} {:<8} from {} ({}{}{})",
+                            "{:<24} {:?} {:<8} from {} ({}{}{}){}",
                             s.id,
                             s.status,
                             s.arch,
@@ -783,6 +790,18 @@ async fn main() -> Result<()> {
                                 Some(model::TemplateRole::Control) => ", control template",
                                 Some(model::TemplateRole::Compute) => ", compute template",
                                 None => "",
+                            },
+                            if s.copies.is_empty() {
+                                String::new()
+                            } else {
+                                format!(
+                                    " copied to {}",
+                                    s.copies
+                                        .iter()
+                                        .map(|c| c.host_id.as_str())
+                                        .collect::<Vec<_>>()
+                                        .join(",")
+                                )
                             }
                         );
                     }
@@ -856,9 +875,14 @@ async fn main() -> Result<()> {
                 if forget {
                     manager.forget_snapshot(&id).await?;
                 } else {
-                    manager.delete_snapshot(&id).await?;
+                    for copy in manager.delete_snapshot(&id).await? {
+                        eprintln!("copy left on {copy}");
+                    }
                 }
                 println!("deleted snapshot '{id}'");
+            }
+            SnapshotCommand::Uncache { id, host } => {
+                print_json(&manager.remove_snapshot_copy(&id, &host).await?)?;
             }
         },
         Command::Catalog { .. }

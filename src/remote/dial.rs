@@ -19,7 +19,7 @@ use tokio_tungstenite::tungstenite::{Message, client::IntoClientRequest, http::H
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Envelope {
     /// Coordinator → agent: run a request.
-    Open { session: u64, request: Request },
+    Open { session: u64, request: Box<Request> },
     /// Coordinator → agent: keystrokes or a resize for a shell session.
     Input { session: u64, frame: TerminalFrame },
     /// Coordinator → agent: the shell's client left; hang it up.
@@ -94,7 +94,7 @@ pub async fn serve(url: &str, token: &str, agent: Arc<Agent>) -> Result<()> {
             };
             match serde_json::from_str::<Envelope>(&text).context("invalid coordinator message")? {
                 Envelope::Open { session, request } => {
-                    sessions.open(session, request, agent.clone(), outgoing.clone())
+                    sessions.open(session, *request, agent.clone(), outgoing.clone())
                 }
                 Envelope::Input { session, frame } => sessions.input(session, frame).await,
                 Envelope::Close { session } => sessions.close(session),
@@ -134,7 +134,7 @@ impl Sessions {
                     .map_err(|_| anyhow::anyhow!("coordinator connection closed"))
             })
         };
-        let shell = matches!(request.operation, super::protocol::Operation::Shell { .. });
+        let shell = request.operation.streams_input();
         let reader = shell.then(|| {
             let (reader, writer) = tokio::io::duplex(64 * 1024);
             self.inputs.insert(session, writer);

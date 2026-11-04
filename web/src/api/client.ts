@@ -321,12 +321,18 @@ export const api = {
       method: "POST",
       body: JSON.stringify(body),
     }),
-  /** `forget` removes only the record, without asking the host that keeps the disk. */
+  /** `forget` removes only the record, without asking the host that keeps the disk.
+   * Copies on other hosts are removed too; `copies_left` names those that were not. */
   deleteSnapshot: (id: string, forget = false) =>
-    request<{ id: string }>(
+    request<Schema["RemovedSnapshot"]>(
       `/snapshots/${encode(id)}${forget ? "?forget=true" : ""}`,
       { method: "DELETE" },
     ),
+  /** Remove the copy another host keeps; the snapshot stays. */
+  removeSnapshotCopy: (id: string, hostId: string) =>
+    request<Snapshot>(`/snapshots/${encode(id)}/copies/${encode(hostId)}`, {
+      method: "DELETE",
+    }),
   registerBucket: (body: RegisterBucket) =>
     request<Bucket>("/buckets", {
       method: "POST",

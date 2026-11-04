@@ -1,3 +1,5 @@
+mod transfers;
+
 use super::*;
 use crate::{
     api,
@@ -74,6 +76,20 @@ impl Backend for Fake {
             });
             self.shares.lock().unwrap().push(share);
             self.create(id, plan, exposure).await
+        })
+    }
+    fn create_share_from(
+        &self,
+        id: String,
+        plan: Plan,
+        exposure: Exposure,
+        share: crate::remote::protocol::Share,
+        source: String,
+    ) -> BoxFuture<'_, Result<Vec<FarmNode>>> {
+        Box::pin(async move {
+            assert!(self.snapshots.lock().unwrap().contains_key(&source));
+            self.expanded_from.lock().unwrap().push(Some(source));
+            self.create_share(id, plan, exposure, share).await
         })
     }
     fn expand(
@@ -450,6 +466,12 @@ impl Backend for Fake {
                 .context("no such snapshot")?;
             Ok(())
         })
+    }
+    fn snapshot_labels(
+        &self,
+        reference: String,
+    ) -> BoxFuture<'_, Result<Option<BTreeMap<String, String>>>> {
+        Box::pin(async move { Ok(self.snapshots.lock().unwrap().get(&reference).cloned()) })
     }
     /// Echoes input and reports resizes until the client closes its side.
     fn terminal(
@@ -1141,6 +1163,7 @@ impl crate::remote::link::AgentLink for MsbLink {
                     arch: std::env::consts::ARCH.into(),
                     supports_single_vm: true,
                     build_id: crate::BUILD_ID.into(),
+                    supports_template_transfer: true,
                 },
                 Operation::Inspect => {
                     let msb_version = self.msb.lock().unwrap().clone();
@@ -5089,7 +5112,7 @@ async fn a_release_plan_picks_the_newest_matching_templates_or_says_why_it_insta
     assert!(plan.components.contains(&"horizon".to_string()));
     assert!(plan.computes.iter().all(|c| c.source == NodeSource::Clean));
 
-    // A compute on another host is installed clean; templates stay on the local host.
+    // A compute on another host boots from the template too; its expand job copies it there.
     let fixture = Fixture::start().await;
     manager.register_host(fixture.registration("edge")).unwrap();
     let plan = manager
@@ -5102,15 +5125,8 @@ async fn a_release_plan_picks_the_newest_matching_templates_or_says_why_it_insta
     assert_eq!(plan.control.source, NodeSource::Template);
     assert_eq!(plan.computes[0].source, NodeSource::Template);
     assert_eq!(plan.computes[1].host_id, "edge");
-    assert_eq!(plan.computes[1].source, NodeSource::Clean);
-    assert!(
-        plan.computes[1]
-            .reason
-            .contains("not copied to host 'edge'"),
-        "{}",
-        plan.computes[1].reason
-    );
-    // So is a control VM on another host, with its computes.
+    assert_eq!(plan.computes[1].source, NodeSource::Template);
+    // So does a control VM on another host, named or not.
     let plan = manager
         .preview_release(&ReleaseCreateRequest {
             host_id: Some("edge".into()),
@@ -5118,23 +5134,16 @@ async fn a_release_plan_picks_the_newest_matching_templates_or_says_why_it_insta
         })
         .await
         .unwrap();
-    assert_eq!(plan.control.source, NodeSource::Clean);
-    assert!(
-        plan.control.reason.contains("choose the local host"),
-        "{}",
-        plan.control.reason
-    );
-    assert!(
-        manager
-            .preview_release(&ReleaseCreateRequest {
-                host_id: Some("edge".into()),
-                control_template: Some("ctl".into()),
-                ..by_release("r", 1)
-            })
-            .await
-            .unwrap_err()
-            .is::<Conflict>()
-    );
+    assert_eq!(plan.control.source, NodeSource::Template);
+    let plan = manager
+        .preview_release(&ReleaseCreateRequest {
+            host_id: Some("edge".into()),
+            control_template: Some("ctl".into()),
+            ..by_release("r", 1)
+        })
+        .await
+        .unwrap();
+    assert_eq!(plan.control.snapshot_id.as_deref(), Some("ctl"));
 
     // No compute template of the release: the computes are installed clean.
     manager

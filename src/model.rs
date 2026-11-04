@@ -1093,9 +1093,34 @@ pub struct SnapshotRecord {
     pub archive: Option<SnapshotArchive>,
     #[serde(default)]
     pub transfer: Option<SnapshotTransfer>,
+    /// Copies kept on other hosts, which farms and computes there boot from.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub copies: Vec<SnapshotCopy>,
     pub error: Option<String>,
     pub created_at: u64,
     pub updated_at: u64,
+}
+
+/// A snapshot copied to another host, where its agent keeps it as an msb snapshot.
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
+pub struct SnapshotCopy {
+    pub host_id: String,
+    /// msb snapshot reference on that host.
+    pub reference: String,
+    /// How the archive got there.
+    pub via: CopySource,
+    pub size_bytes: Option<u64>,
+    pub copied_at: u64,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CopySource {
+    /// The host downloaded the archive from a registered bucket itself.
+    Bucket,
+    /// The coordinator streamed the archive over the agent's connection.
+    Stream,
+    /// The host already had it when the coordinator looked.
+    Found,
 }
 
 /// Snapshot metadata kept in msb labels, which travel inside exported archives.
