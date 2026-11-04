@@ -32,6 +32,7 @@ export type Bucket = Schema["Bucket"];
 export type Impair = Schema["Impair"];
 export type RegisterBucket = Schema["RegisterBucket"];
 export type BucketObject = Schema["BucketObject"];
+export type ArchiveMetadata = Schema["ArchiveMetadata"];
 
 export class ApiError extends Error {
   constructor(

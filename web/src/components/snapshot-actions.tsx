@@ -30,6 +30,7 @@ import {
   type Snapshot,
 } from "../api/client";
 import {
+  archiveSummary,
   bytes,
   componentLabel,
   dateTime,
@@ -798,25 +799,39 @@ export function ImportSnapshotDialog() {
                       role="radiogroup"
                       aria-label="아카이브"
                     >
-                      {objects.data.map((object) => (
-                        <button
-                          type="button"
-                          role="radio"
-                          aria-checked={key === object.key}
-                          key={object.key}
-                          className={key === object.key ? "selected" : ""}
-                          disabled={mutation.isPending}
-                          onClick={() => setKey(object.key)}
-                        >
-                          <span className="font-mono">{object.key}</span>
-                          <small>
-                            {bytes(object.size_bytes)}
-                            {object.modified_at
-                              ? ` · ${dateTime(object.modified_at)}`
-                              : ""}
-                          </small>
-                        </button>
-                      ))}
+                      {objects.data.map((object) => {
+                        const summary = archiveSummary(object.metadata);
+                        return (
+                          <button
+                            type="button"
+                            role="radio"
+                            aria-checked={key === object.key}
+                            key={object.key}
+                            className={key === object.key ? "selected" : ""}
+                            disabled={mutation.isPending}
+                            onClick={() => setKey(object.key)}
+                          >
+                            <span className="font-mono">{object.key}</span>
+                            <span
+                              className={
+                                object.metadata ? "" : "bucket-object-legacy"
+                              }
+                            >
+                              {summary.title}
+                            </span>
+                            <small>
+                              {[
+                                summary.detail,
+                                bytes(object.size_bytes),
+                                object.modified_at &&
+                                  dateTime(object.modified_at),
+                              ]
+                                .filter(Boolean)
+                                .join(" · ")}
+                            </small>
+                          </button>
+                        );
+                      })}
                     </div>
                   )}
                 </div>

@@ -3960,6 +3960,9 @@ h2 {
   font-size: 12px;
   color: #7c8b80;
 }
+.bucket-objects .bucket-object-legacy {
+  color: #a0763c;
+}
 .snapshot-host-foreign {
   border-color: #f1e0d6;
   background: #fdf7f3;

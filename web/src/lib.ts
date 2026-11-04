@@ -1,4 +1,10 @@
-import type { Farm, Job, Phase, RemoteHost } from "./api/client";
+import type {
+  ArchiveMetadata,
+  Farm,
+  Job,
+  Phase,
+  RemoteHost,
+} from "./api/client";
 export const jobKindLabels: Record<Job["kind"], string> = {
   create: "VM 생성",
   deploy: "OpenStack 배포",
@@ -138,6 +144,24 @@ export const componentInfo: Record<
   },
 };
 export const componentLabel = (id: string) => componentInfo[id]?.label ?? id;
+/** What a bucket archive holds, from the metadata file its export wrote next to it.
+ * Archives exported before those files existed say so and can still be imported. */
+export function archiveSummary(metadata?: ArchiveMetadata | null) {
+  if (!metadata) return { title: "메타데이터 없음", detail: "" };
+  const role = metadata.role
+    ? `${metadata.role === "control" ? "Control" : "Compute"} 템플릿`
+    : "farm 스냅샷";
+  return {
+    title: [
+      metadata.release ? `OpenStack ${metadata.release}` : "릴리스 미상",
+      role,
+    ].join(" · "),
+    detail: [
+      metadata.components.map(componentLabel).join(", "),
+      metadata.arch,
+    ].join(" · "),
+  };
+}
 // Mirrors `model::COMPONENTS` public ports: each service is published at port_base + offset.
 export const publicServices: Record<
   string,
