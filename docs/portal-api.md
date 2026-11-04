@@ -55,8 +55,16 @@ control VM의 호스트도 relay에 붙습니다.
 이어서 재시도할 수 있습니다. resume 요청은 마지막으로 실패한 `expand` job의 `target_host`와
 `target_node`를 그대로 씁니다.
 
-`ready` 상태이고 compute가 0대보다 많고 3대 미만일 때만 허용합니다. all-in-one farm, 스냅샷에서
-복원한 farm, 다른 작업이 진행 중인 farm은 `409`입니다. 대상 호스트의 메모리 예산을 넘거나 원격
+body에 `from_snapshot`(compute 템플릿 스냅샷 ID)을 넣으면 새 VM을 그 디스크로 부팅하고, identity를
+지운 뒤 `reconfigure --limit`과 `nova-manage cell_v2 discover_hosts`만 실행합니다. job의 `snapshot_id`가
+그 템플릿이며, 실행 중에는 템플릿을 지울 수 없습니다. 템플릿은 `POST /farms/{id}/snapshots`에
+`{"id":"...","node":"compute-1"}`로 만듭니다(배포된 farm, farm의 primary 호스트에 있는 compute만).
+스냅샷의 `compute_template`이 `true`이고 `release`가 OpenStack 릴리스입니다. 템플릿이 아니거나 farm과
+릴리스·서비스·아키텍처가 다르거나, 대상이 로컬 호스트의 control VM 호스트가 아니면 `409`입니다. 실패한
+확장은 처음과 같은 `from_snapshot`으로만 재시도할 수 있습니다.
+
+`ready` 상태이고 compute가 0대보다 많고 3대 미만일 때만 허용합니다. 스냅샷에서 복원한 다중 VM farm도
+대상입니다. all-in-one farm, 다른 작업이 진행 중인 farm은 `409`입니다. 대상 호스트의 메모리 예산을 넘거나 원격
 호스트인데 relay가 없어도 `409`입니다. 기존 인스턴스는 새 compute로 자동 이동하지 않습니다.
 
 farm 상태는 `creating`, `created`, `deploying`, `settling`, `ready`, `failed`, `broken`, `deleting`, `deleted`입니다.

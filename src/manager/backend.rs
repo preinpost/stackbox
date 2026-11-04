@@ -45,8 +45,9 @@ pub trait Backend: Send + Sync + 'static {
         Box::pin(async { Err(anyhow!("this backend runs farms on one host only")) })
     }
     /// Add compute VMs to an existing farm on this host. `nodes` are the farm's VMs this
-    /// host runs after the change; `add` are the suffixes to create. `uplink` joins this
-    /// host's switch to the relay for the first time when a remote compute is added.
+    /// host runs after the change; `add` are the suffixes to create, from the compute
+    /// template snapshot `source` if given. `uplink` joins this host's switch to the relay
+    /// for the first time when a remote compute is added.
     fn expand(
         &self,
         _id: String,
@@ -54,6 +55,7 @@ pub trait Backend: Send + Sync + 'static {
         _nodes: Vec<String>,
         _add: Vec<String>,
         _uplink: Option<crate::link::UplinkConfig>,
+        _source: Option<String>,
     ) -> BoxFuture<'_, Result<Vec<FarmNode>>> {
         Box::pin(async { Err(anyhow!("this backend cannot add a compute VM")) })
     }
@@ -61,7 +63,9 @@ pub trait Backend: Send + Sync + 'static {
     fn ssh_keys(&self, _id: String) -> BoxFuture<'_, Result<(String, String)>> {
         Box::pin(async { Err(anyhow!("this backend has no control VM SSH key")) })
     }
-    /// Deploy one new compute VM with Kolla, limited to that VM.
+    /// Deploy one new compute VM with Kolla, limited to that VM. One booted from a compute
+    /// template (`from_template`) is only reconfigured.
+    #[allow(clippy::too_many_arguments)]
     fn deploy_compute(
         &self,
         _id: String,
@@ -69,6 +73,7 @@ pub trait Backend: Send + Sync + 'static {
         _index: u8,
         _nodes: Vec<String>,
         _components: Vec<String>,
+        _from_template: bool,
         _sink: EventSink,
     ) -> BoxFuture<'_, Result<()>> {
         Box::pin(async { Err(anyhow!("this backend cannot deploy a compute VM")) })
@@ -108,11 +113,13 @@ pub trait Backend: Send + Sync + 'static {
         exposure: Option<Exposure>,
         components: Vec<String>,
     ) -> BoxFuture<'_, Result<Endpoints>>;
-    /// Stop the farm's VM, capture its disks under `labels`, and start it again.
+    /// Stop the farm's VM, capture its disks under `labels`, and start it again. With
+    /// `node`, only that compute VM is captured, as a compute template.
     fn freeze(
         &self,
         _id: String,
         _snapshot_id: String,
+        _node: Option<String>,
         _labels: BTreeMap<String, String>,
     ) -> BoxFuture<'_, Result<FrozenSnapshot>> {
         unsupported()
@@ -231,12 +238,13 @@ impl Backend for MicrosandboxBackend {
         _nodes: Vec<String>,
         add: Vec<String>,
         uplink: Option<crate::link::UplinkConfig>,
+        source: Option<String>,
     ) -> BoxFuture<'_, Result<Vec<FarmNode>>> {
         Box::pin(async move {
             if let Some(uplink) = uplink {
                 self.switch.set_uplink(&id, uplink)?;
             }
-            farm::add_nodes(&id, &plan.nodes, &add, &self.switch).await
+            farm::add_nodes(&id, &plan.nodes, &add, &self.switch, source.as_deref()).await
         })
     }
     fn ssh_keys(&self, id: String) -> BoxFuture<'_, Result<(String, String)>> {
@@ -284,10 +292,11 @@ impl Backend for MicrosandboxBackend {
         index: u8,
         nodes: Vec<String>,
         components: Vec<String>,
+        from_template: bool,
         sink: EventSink,
     ) -> BoxFuture<'_, Result<()>> {
         Box::pin(async move {
-            kolla::deploy_compute(&id, &plan, index, &nodes, &components, sink).await
+            kolla::deploy_compute(&id, &plan, index, &nodes, &components, from_template, sink).await
         })
     }
     fn relink(&self, id: String, url: String) -> BoxFuture<'_, Result<()>> {
@@ -408,9 +417,15 @@ PY"#).await;
         &self,
         id: String,
         snapshot_id: String,
+        node: Option<String>,
         labels: BTreeMap<String, String>,
     ) -> BoxFuture<'_, Result<FrozenSnapshot>> {
-        Box::pin(async move { farm::freeze_farm(&id, &snapshot_id, &labels).await })
+        Box::pin(async move {
+            match node {
+                Some(node) => farm::freeze_compute(&id, &snapshot_id, &node, &labels).await,
+                None => farm::freeze_farm(&id, &snapshot_id, &labels).await,
+            }
+        })
     }
     fn restore(
         &self,

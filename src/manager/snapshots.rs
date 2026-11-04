@@ -35,8 +35,68 @@ pub(super) fn restorable<'a>(state: &'a State, id: &str) -> Result<&'a SnapshotR
     {
         return Err(conflict(format!("snapshot '{id}' is not ready")));
     }
+    if snapshot.compute_template {
+        return Err(conflict(format!(
+            "snapshot '{id}' is a compute template; add a compute from it to a deployed farm instead"
+        )));
+    }
     ensure_compatible(snapshot)?;
     Ok(snapshot)
+}
+
+/// A compute template a new compute of `farm` can boot from: Kolla only reconfigures that
+/// VM, so its containers must be the farm's release and services, on this architecture.
+pub(super) fn compute_template<'a>(
+    state: &'a State,
+    id: &str,
+    farm: &FarmRecord,
+) -> Result<&'a SnapshotRecord> {
+    let snapshot = state
+        .snapshots
+        .get(id)
+        .ok_or_else(|| NotFound(format!("snapshot '{id}'")))?;
+    if !snapshot.compute_template {
+        return Err(conflict(format!(
+            "snapshot '{id}' is not a compute template; freeze one of a farm's compute VMs as one"
+        )));
+    }
+    if !matches!(
+        snapshot.status,
+        SnapshotStatus::Ready | SnapshotStatus::Exporting
+    ) || snapshot.reference.is_none()
+    {
+        return Err(conflict(format!("snapshot '{id}' is not ready")));
+    }
+    ensure_compatible(snapshot)?;
+    let release = farm_release(state, farm);
+    if snapshot.release.as_deref() != Some(release.as_str()) {
+        return Err(conflict(format!(
+            "compute template '{id}' is OpenStack {} but the farm runs {release}",
+            snapshot
+                .release
+                .as_deref()
+                .unwrap_or("of an unknown release")
+        )));
+    }
+    let components = farm.plan.as_ref().map(|plan| &plan.components);
+    if components != Some(&snapshot.plan.components) {
+        return Err(conflict(format!(
+            "compute template '{id}' was frozen from a farm with {} but this farm has {}",
+            snapshot.plan.components.join(","),
+            components.map(|c| c.join(",")).unwrap_or_default()
+        )));
+    }
+    Ok(snapshot)
+}
+
+/// The OpenStack release a farm runs: its snapshot's when it was restored from one, or the
+/// one this coordinator deploys.
+fn farm_release(state: &State, farm: &FarmRecord) -> String {
+    farm.snapshot_id
+        .as_ref()
+        .and_then(|id| state.snapshots.get(id))
+        .and_then(|snapshot| snapshot.release.clone())
+        .unwrap_or_else(|| crate::kolla::OPENSTACK_RELEASE.into())
 }
 
 /// Operations cut short by a daemon stop cannot resume; leave each snapshot in a state the user can act on.
@@ -96,7 +156,10 @@ fn labels(snapshot: &SnapshotRecord) -> BTreeMap<String, String> {
         ),
         (
             label::RELEASE.into(),
-            crate::kolla::OPENSTACK_RELEASE.into(),
+            snapshot
+                .release
+                .clone()
+                .unwrap_or_else(|| crate::kolla::OPENSTACK_RELEASE.into()),
         ),
         // The guest image is built for the host architecture.
         (label::ARCH.into(), current_arch()),
@@ -108,7 +171,9 @@ fn labels(snapshot: &SnapshotRecord) -> BTreeMap<String, String> {
     if let Some(note) = &snapshot.note {
         labels.insert(label::NOTE.into(), note.clone());
     }
-    if snapshot.plan.computes > 0 {
+    if snapshot.compute_template {
+        labels.insert(label::ROLE.into(), Role::Compute.as_str().into());
+    } else if snapshot.plan.computes > 0 {
         labels.insert(label::COMPUTES.into(), snapshot.plan.computes.to_string());
     }
     labels
@@ -139,6 +204,8 @@ struct Imported {
     source_exposure: Exposure,
     source_farm: Option<String>,
     note: Option<String>,
+    compute_template: bool,
+    release: Option<String>,
 }
 fn parse_labels(labels: &BTreeMap<String, String>) -> Result<Imported> {
     let get = |key: &str| {
@@ -156,13 +223,19 @@ fn parse_labels(labels: &BTreeMap<String, String>) -> Result<Imported> {
         .split(',')
         .map(str::to_owned)
         .collect();
+    let compute_template = match labels.get(label::ROLE).map(String::as_str) {
+        None => false,
+        Some("compute") => true,
+        Some(role) => anyhow::bail!("archive holds a {role} VM, which farm cannot use"),
+    };
     Ok(Imported {
         arch: arch.clone(),
         platform: labels.get(label::PLATFORM).cloned(),
         // Snapshots are of all-in-one VMs, Nova included from before plan() split it off.
+        // A compute template's farm had at least one compute.
         plan: layout(&PlanRequest {
             components,
-            computes: 0,
+            computes: u8::from(compute_template),
             compute: None,
         })?,
         deployed: get(label::DEPLOYED)? == "true",
@@ -175,6 +248,8 @@ fn parse_labels(labels: &BTreeMap<String, String>) -> Result<Imported> {
         },
         source_farm: labels.get(label::SOURCE).cloned(),
         note: labels.get(label::NOTE).cloned(),
+        compute_template,
+        release: labels.get(label::RELEASE).cloned(),
     })
 }
 
@@ -258,6 +333,25 @@ impl FarmManager {
                     "farms imported from older versions cannot be frozen",
                 ));
             };
+            if let Some(node) = &request.node {
+                if plan.computes == 0
+                    || !plan.nodes.iter().any(|spec| {
+                        crate::farm::suffix(spec.role, spec.index).as_deref() == Some(node.as_str())
+                    })
+                {
+                    return Err(conflict(format!("the farm has no compute VM '{node}'")));
+                }
+                if farm.status != FarmStatus::Ready {
+                    return Err(conflict(
+                        "deploy the farm before freezing a compute template from it",
+                    ));
+                }
+                if farm.host_of(node) != farm.host_id.as_deref() {
+                    return Err(conflict(format!(
+                        "{node} runs on another host; only the local host keeps snapshots"
+                    )));
+                }
+            }
             let layout_matches = if plan.computes > 0 {
                 crate::farm::observed_layout(&farm.nodes) == Some(plan.computes)
             } else {
@@ -278,6 +372,8 @@ impl FarmManager {
                 note: request.note.clone().filter(|n| !n.trim().is_empty()),
                 reference: None,
                 nodes: Vec::new(),
+                compute_template: request.node.is_some(),
+                release: Some(crate::kolla::OPENSTACK_RELEASE.into()),
                 size_bytes: None,
                 archive: None,
                 transfer: None,
@@ -287,6 +383,7 @@ impl FarmManager {
             };
             let mut job = super::new_job(farm_id, JobKind::Snapshot);
             job.snapshot_id = Some(request.id.clone());
+            job.target_node = request.node.clone();
             farm.active_job = Some(job.id.clone());
             farm.error = None;
             farm.updated_at = now();
@@ -305,11 +402,19 @@ impl FarmManager {
             &farm.id,
             &job.id,
             None,
-            "stopping the VM to capture its disks\n".into(),
+            match &job.target_node {
+                Some(node) => format!("stopping {node} to capture it as a compute template\n"),
+                None => "stopping the VM to capture its disks\n".into(),
+            },
         )?;
         let backend = self.backend_for(&farm)?;
         let frozen = match backend
-            .freeze(farm.id.clone(), id.clone(), labels(&snapshot))
+            .freeze(
+                farm.id.clone(),
+                id.clone(),
+                job.target_node.clone(),
+                labels(&snapshot),
+            )
             .await
         {
             Ok(frozen) => frozen,
@@ -339,7 +444,8 @@ impl FarmManager {
                 "snapshot {id} is ready, but the farm's VM did not start again: {error}"
             ));
         }
-        if snapshot.deployed {
+        // A compute template stopped one compute only; the control plane kept answering.
+        if snapshot.deployed && !snapshot.compute_template {
             backend
                 .settle(
                     farm.id.clone(),
@@ -724,6 +830,8 @@ impl FarmManager {
                 note: None,
                 reference: None,
                 nodes: Vec::new(),
+                compute_template: false,
+                release: None,
                 size_bytes: None,
                 archive: None,
                 transfer,
@@ -752,6 +860,8 @@ impl FarmManager {
                         s.source_exposure = imported.source_exposure;
                         s.source_farm = imported.source_farm;
                         s.note = imported.note;
+                        s.compute_template = imported.compute_template;
+                        s.release = imported.release;
                         s.reference = Some(reference);
                         s.size_bytes = size_bytes;
                     }

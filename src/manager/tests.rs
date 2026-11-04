@@ -41,6 +41,10 @@ pub(crate) struct Fake {
     expanded: Mutex<Vec<Expansion>>,
     /// `(farm, index)` of each Kolla compute deployment.
     computed: Mutex<Vec<(String, u8)>>,
+    /// `(farm, index)` of each compute booted from a template that Kolla reconfigured.
+    reconfigured: Mutex<Vec<(String, u8)>>,
+    /// The compute template each expansion that created a VM booted it from.
+    expanded_from: Mutex<Vec<Option<String>>>,
     pub(crate) fail_expand: AtomicBool,
     pub(crate) fail_compute: AtomicBool,
 }
@@ -73,10 +77,17 @@ impl Backend for Fake {
         nodes: Vec<String>,
         add: Vec<String>,
         _uplink: Option<crate::link::UplinkConfig>,
+        source: Option<String>,
     ) -> BoxFuture<'_, Result<Vec<FarmNode>>> {
         Box::pin(async move {
             if self.fail_expand.load(Ordering::SeqCst) {
                 bail!("intentional expand failure");
+            }
+            if let Some(source) = &source {
+                assert!(self.snapshots.lock().unwrap().contains_key(source));
+            }
+            if !add.is_empty() {
+                self.expanded_from.lock().unwrap().push(source);
             }
             self.expanded
                 .lock()
@@ -129,11 +140,16 @@ impl Backend for Fake {
         index: u8,
         _: Vec<String>,
         _: Vec<String>,
+        from_template: bool,
         _: EventSink,
     ) -> BoxFuture<'_, Result<()>> {
         Box::pin(async move {
             if self.fail_compute.load(Ordering::SeqCst) {
                 bail!("intentional compute deployment failure");
+            }
+            if from_template {
+                self.reconfigured.lock().unwrap().push((id, index));
+                return Ok(());
             }
             self.computed.lock().unwrap().push((id, index));
             Ok(())
@@ -258,11 +274,32 @@ impl Backend for Fake {
         &self,
         id: String,
         snapshot_id: String,
-        labels: BTreeMap<String, String>,
+        node: Option<String>,
+        mut labels: BTreeMap<String, String>,
     ) -> BoxFuture<'_, Result<crate::farm::FrozenSnapshot>> {
         Box::pin(async move {
             if self.fail.load(Ordering::SeqCst) {
                 bail!("intentional freeze failure");
+            }
+            // A compute template is that one VM's disks.
+            if let Some(node) = node {
+                assert!(
+                    self.farms.lock().unwrap()[&id]
+                        .iter()
+                        .any(|vm| vm.name == format!("{id}-{node}"))
+                );
+                labels.insert(crate::model::snapshot_labels::NODE.into(), node);
+                let reference = format!("fake/{snapshot_id}");
+                self.snapshots
+                    .lock()
+                    .unwrap()
+                    .insert(reference.clone(), labels);
+                return Ok(crate::farm::FrozenSnapshot {
+                    reference,
+                    size_bytes: Some(4096),
+                    restart_error: None,
+                    nodes: Vec::new(),
+                });
             }
             let vms = self.farms.lock().unwrap()[&id].clone();
             // A multi-node farm's VMs are captured one by one, control first.
@@ -1380,6 +1417,7 @@ async fn multi_node_farms_are_created_deployed_and_faulted_per_vm() {
             SnapshotRequest {
                 id: "mn-snap".into(),
                 note: None,
+                node: None,
             },
         )
         .unwrap();
@@ -1794,6 +1832,7 @@ async fn snapshots_freeze_restore_export_import_and_delete() {
             SnapshotRequest {
                 id: id.into(),
                 note: Some("clean install".into()),
+                node: None,
             },
         )
     };
@@ -1959,6 +1998,7 @@ async fn snapshots_freeze_restore_export_import_and_delete() {
         SnapshotRequest {
             id: "local-arch".into(),
             note: None,
+            node: None,
         },
     );
     done(&manager, &local.unwrap()).await;
@@ -2138,6 +2178,7 @@ async fn snapshots_move_through_registered_buckets_with_sealed_keys() {
             SnapshotRequest {
                 id: "clean".into(),
                 note: Some("via s3".into()),
+                node: None,
             },
         )
         .unwrap();
@@ -2353,6 +2394,7 @@ async fn settle_rechecks_a_restored_farm_without_redeploying() {
             SnapshotRequest {
                 id: "frozen".into(),
                 note: None,
+                node: None,
             },
         )
         .unwrap();
@@ -2503,6 +2545,7 @@ async fn forgetting_removes_records_without_asking_the_host() {
             SnapshotRequest {
                 id: "clean".into(),
                 note: None,
+                node: None,
             },
         )
         .unwrap();
@@ -2557,6 +2600,7 @@ async fn purging_the_local_host_can_also_delete_its_snapshots() {
             SnapshotRequest {
                 id: "clean".into(),
                 note: None,
+                node: None,
             },
         )
         .unwrap();
@@ -3465,6 +3509,326 @@ async fn a_failed_expansion_keeps_the_old_plan_and_resumes_on_retry() {
 }
 
 #[tokio::test]
+async fn a_compute_template_boots_the_next_compute_and_kolla_only_reconfigures_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let backend = Arc::new(Fake::default());
+    let manager = open_with(options(dir.path()), backend.clone()).await;
+    if !cfg!(target_os = "linux") {
+        *manager.0.guest_agent.write().unwrap() = Some(dir.path().join("farm-agent"));
+    }
+    let created = manager
+        .create(CreateRequest {
+            computes: 1,
+            ..request("src")
+        })
+        .unwrap();
+    assert_eq!(done(&manager, &created).await.status, JobStatus::Succeeded);
+    let template = |node: &str| SnapshotRequest {
+        id: "tpl".into(),
+        note: None,
+        node: Some(node.into()),
+    };
+    // Only a deployed farm's compute VM can become a template.
+    assert!(
+        manager
+            .freeze("src", template("control"))
+            .unwrap_err()
+            .is::<BadRequest>()
+    );
+    assert!(
+        manager
+            .freeze("src", template("compute-1"))
+            .unwrap_err()
+            .is::<Conflict>()
+    );
+    let deployed = manager.deploy("src", DeployRequest::default()).unwrap();
+    assert_eq!(done(&manager, &deployed).await.status, JobStatus::Succeeded);
+    assert!(
+        manager
+            .freeze("src", template("compute-2"))
+            .unwrap_err()
+            .is::<Conflict>()
+    );
+    let job = manager.freeze("src", template("compute-1")).unwrap();
+    assert_eq!(job.target_node.as_deref(), Some("compute-1"));
+    assert_eq!(done(&manager, &job).await.status, JobStatus::Succeeded);
+    let snapshot = manager.snapshot("tpl").unwrap();
+    assert!(snapshot.compute_template);
+    assert!(snapshot.nodes.is_empty());
+    assert_eq!(snapshot.reference.as_deref(), Some("fake/tpl"));
+    assert_eq!(
+        snapshot.release.as_deref(),
+        Some(crate::kolla::OPENSTACK_RELEASE)
+    );
+    let labels = backend.snapshots.lock().unwrap()["fake/tpl"].clone();
+    assert_eq!(labels[crate::model::snapshot_labels::ROLE], "compute");
+    assert_eq!(labels[crate::model::snapshot_labels::NODE], "compute-1");
+    assert_eq!(
+        labels[crate::model::snapshot_labels::RELEASE],
+        crate::kolla::OPENSTACK_RELEASE
+    );
+    // Freezing one compute leaves the farm's control plane alone.
+    assert!(backend.settled.lock().unwrap().is_empty());
+    assert_eq!(manager.get("src").unwrap().status, FarmStatus::Ready);
+    // No farm restores from a template.
+    assert!(
+        manager
+            .create(CreateRequest {
+                snapshot_id: Some("tpl".into()),
+                ..request("nope")
+            })
+            .unwrap_err()
+            .is::<Conflict>()
+    );
+
+    let job = manager
+        .add_compute(
+            "src",
+            AddComputeRequest {
+                host_id: None,
+                from_snapshot: Some("tpl".into()),
+            },
+        )
+        .unwrap();
+    assert_eq!(job.snapshot_id.as_deref(), Some("tpl"));
+    // A template in use by an expansion stays.
+    assert!(manager.delete_snapshot("tpl").await.is_err());
+    let finished = done(&manager, &job).await;
+    assert_eq!(
+        finished.status,
+        JobStatus::Succeeded,
+        "{:?}",
+        finished.error
+    );
+    let farm = manager.get("src").unwrap();
+    assert_eq!(farm.plan.as_ref().unwrap().computes, 2);
+    assert_eq!(farm.nodes.len(), 3);
+    assert_eq!(
+        backend.expanded_from.lock().unwrap().as_slice(),
+        &[Some("fake/tpl".to_owned())]
+    );
+    assert_eq!(
+        backend.reconfigured.lock().unwrap().as_slice(),
+        &[("src".into(), 2)]
+    );
+    assert!(backend.computed.lock().unwrap().is_empty());
+    // A template travels as an archive and stays a template.
+    let archive = dir.path().join("tpl.msb");
+    manager
+        .export_snapshot(
+            "tpl",
+            ExportRequest {
+                path: Some(archive.display().to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    manager.wait_snapshot("tpl").await.unwrap();
+    manager
+        .import_snapshot(ImportRequest {
+            path: Some(archive.display().to_string()),
+            id: Some("tpl-copy".into()),
+            ..Default::default()
+        })
+        .unwrap();
+    let imported = manager.wait_snapshot("tpl-copy").await.unwrap();
+    assert_eq!(
+        imported.status,
+        SnapshotStatus::Ready,
+        "{:?}",
+        imported.error
+    );
+    assert!(imported.compute_template);
+    assert_eq!(imported.release, snapshot.release);
+    assert_eq!(imported.plan.components, snapshot.plan.components);
+
+    // A template must match the farm's OpenStack release and services.
+    manager
+        .update(|state| {
+            state.snapshots.get_mut("tpl").unwrap().release = Some("2024.1".into());
+            Ok(())
+        })
+        .unwrap();
+    let refused = manager
+        .add_compute(
+            "src",
+            AddComputeRequest {
+                host_id: None,
+                from_snapshot: Some("tpl".into()),
+            },
+        )
+        .unwrap_err();
+    assert!(refused.is::<Conflict>());
+    assert!(refused.to_string().contains("2024.1"), "{refused}");
+    manager
+        .update(|state| {
+            state.snapshots.get_mut("tpl").unwrap().release =
+                Some(crate::kolla::OPENSTACK_RELEASE.into());
+            Ok(())
+        })
+        .unwrap();
+    let mut other = request("other");
+    other.computes = 1;
+    other.components = vec!["horizon".into()];
+    assert_eq!(
+        done(&manager, &manager.create(other).unwrap()).await.status,
+        JobStatus::Succeeded
+    );
+    let deployed = manager.deploy("other", DeployRequest::default()).unwrap();
+    assert_eq!(done(&manager, &deployed).await.status, JobStatus::Succeeded);
+    let refused = manager
+        .add_compute(
+            "other",
+            AddComputeRequest {
+                host_id: None,
+                from_snapshot: Some("tpl".into()),
+            },
+        )
+        .unwrap_err();
+    assert!(refused.to_string().contains("horizon"), "{refused}");
+    // A farm snapshot is not a template.
+    let job = manager
+        .freeze(
+            "other",
+            SnapshotRequest {
+                id: "whole".into(),
+                note: None,
+                node: None,
+            },
+        )
+        .unwrap();
+    assert_eq!(done(&manager, &job).await.status, JobStatus::Succeeded);
+    let refused = manager
+        .add_compute(
+            "other",
+            AddComputeRequest {
+                host_id: None,
+                from_snapshot: Some("whole".into()),
+            },
+        )
+        .unwrap_err();
+    assert!(
+        refused.to_string().contains("not a compute template"),
+        "{refused}"
+    );
+}
+
+#[tokio::test]
+async fn a_failed_expansion_from_a_template_is_retried_the_same_way() {
+    let dir = tempfile::tempdir().unwrap();
+    let backend = Arc::new(Fake::default());
+    let manager = open_with(options(dir.path()), backend.clone()).await;
+    if !cfg!(target_os = "linux") {
+        *manager.0.guest_agent.write().unwrap() = Some(dir.path().join("farm-agent"));
+    }
+    let created = manager
+        .create(CreateRequest {
+            computes: 1,
+            ..request("retry")
+        })
+        .unwrap();
+    assert_eq!(done(&manager, &created).await.status, JobStatus::Succeeded);
+    let deployed = manager.deploy("retry", DeployRequest::default()).unwrap();
+    assert_eq!(done(&manager, &deployed).await.status, JobStatus::Succeeded);
+    let job = manager
+        .freeze(
+            "retry",
+            SnapshotRequest {
+                id: "tpl".into(),
+                note: None,
+                node: Some("compute-1".into()),
+            },
+        )
+        .unwrap();
+    assert_eq!(done(&manager, &job).await.status, JobStatus::Succeeded);
+    let from_template = AddComputeRequest {
+        host_id: None,
+        from_snapshot: Some("tpl".into()),
+    };
+    backend.fail_compute.store(true, Ordering::SeqCst);
+    let failed = manager.add_compute("retry", from_template.clone()).unwrap();
+    assert_eq!(done(&manager, &failed).await.status, JobStatus::Failed);
+    assert_eq!(manager.get("retry").unwrap().plan.unwrap().computes, 1);
+
+    backend.fail_compute.store(false, Ordering::SeqCst);
+    // The VM was booted from the template, so a clean retry would not install it.
+    let refused = manager
+        .add_compute("retry", AddComputeRequest::default())
+        .unwrap_err();
+    assert!(refused.to_string().contains("'tpl'"), "{refused}");
+    let retried = manager.add_compute("retry", from_template).unwrap();
+    let finished = done(&manager, &retried).await;
+    assert_eq!(
+        finished.status,
+        JobStatus::Succeeded,
+        "{:?}",
+        finished.error
+    );
+    assert_eq!(manager.get("retry").unwrap().plan.unwrap().computes, 2);
+    assert_eq!(
+        backend.reconfigured.lock().unwrap().as_slice(),
+        &[("retry".into(), 2)]
+    );
+}
+
+#[tokio::test]
+async fn a_farm_restored_from_a_snapshot_can_gain_a_compute() {
+    let dir = tempfile::tempdir().unwrap();
+    let backend = Arc::new(Fake::default());
+    let manager = open_with(options(dir.path()), backend.clone()).await;
+    if !cfg!(target_os = "linux") {
+        *manager.0.guest_agent.write().unwrap() = Some(dir.path().join("farm-agent"));
+    }
+    let created = manager
+        .create(CreateRequest {
+            computes: 1,
+            ..request("src")
+        })
+        .unwrap();
+    assert_eq!(done(&manager, &created).await.status, JobStatus::Succeeded);
+    let deployed = manager.deploy("src", DeployRequest::default()).unwrap();
+    assert_eq!(done(&manager, &deployed).await.status, JobStatus::Succeeded);
+    let job = manager
+        .freeze(
+            "src",
+            SnapshotRequest {
+                id: "snap".into(),
+                note: None,
+                node: None,
+            },
+        )
+        .unwrap();
+    assert_eq!(done(&manager, &job).await.status, JobStatus::Succeeded);
+    let restored = manager
+        .create(CreateRequest {
+            snapshot_id: Some("snap".into()),
+            ..request("copy")
+        })
+        .unwrap();
+    assert_eq!(done(&manager, &restored).await.status, JobStatus::Succeeded);
+    assert_eq!(manager.get("copy").unwrap().status, FarmStatus::Ready);
+
+    let job = manager
+        .add_compute("copy", AddComputeRequest::default())
+        .unwrap();
+    let finished = done(&manager, &job).await;
+    assert_eq!(
+        finished.status,
+        JobStatus::Succeeded,
+        "{:?}",
+        finished.error
+    );
+    let farm = manager.get("copy").unwrap();
+    assert_eq!(farm.snapshot_id.as_deref(), Some("snap"));
+    assert_eq!(farm.plan.as_ref().unwrap().computes, 2);
+    assert_eq!(farm.nodes.len(), 3);
+    assert_eq!(
+        backend.computed.lock().unwrap().as_slice(),
+        &[("copy".into(), 2)]
+    );
+}
+
+#[tokio::test]
 async fn a_farm_can_gain_a_compute_on_a_new_remote_host_and_another_on_its_primary_host() {
     use crate::remote::{AgentArtifactInfo, HostJobKind, InstalledAgent, test_server::Fixture};
     let fixture = Fixture::start().await;
@@ -3526,6 +3890,7 @@ async fn a_farm_can_gain_a_compute_on_a_new_remote_host_and_another_on_its_prima
             "span",
             AddComputeRequest {
                 host_id: Some("edge".into()),
+                from_snapshot: None,
             },
         )
         .unwrap();
@@ -3656,6 +4021,7 @@ async fn a_farm_can_gain_a_second_compute_on_a_remote_host_it_already_uses() {
                 "span",
                 AddComputeRequest {
                     host_id: Some(host.into()),
+                    from_snapshot: None,
                 },
             )
             .unwrap();

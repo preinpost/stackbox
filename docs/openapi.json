@@ -2014,6 +2014,14 @@
       "AddComputeRequest": {
         "type": "object",
         "properties": {
+          "from_snapshot": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Compute template snapshot to boot the new VM from instead of installing it clean.\nKolla then only reconfigures it; the template must match the farm's OpenStack\nrelease, components and CPU architecture.",
+            "default": null
+          },
           "host_id": {
             "type": [
               "string",
@@ -4005,6 +4013,10 @@
               }
             ]
           },
+          "compute_template": {
+            "type": "boolean",
+            "description": "A single compute VM frozen to boot new computes of farms from; no farm restores\nfrom it."
+          },
           "created_at": {
             "type": "integer",
             "format": "int64",
@@ -4051,6 +4063,13 @@
               "null"
             ],
             "description": "msb snapshot reference; set once captured or imported. A multi-node snapshot's is\nits control VM's, and `nodes` holds every VM's."
+          },
+          "release": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "OpenStack release the guest was deployed with; unknown for older snapshots."
           },
           "size_bytes": {
             "type": [
@@ -4100,6 +4119,13 @@
           "id": {
             "type": "string",
             "description": "Snapshot ID: 1-48 lowercase letters, digits or hyphens."
+          },
+          "node": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Freeze only this compute VM (`compute-1`, ...) of a deployed multi-node farm, as a\ncompute template that later expansions boot new computes from."
           },
           "note": {
             "type": [

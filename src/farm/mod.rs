@@ -19,8 +19,8 @@ pub use node::{
     wait_until_booted,
 };
 pub use snapshot::{
-    FrozenSnapshot, ImportedSnapshot, NodeSnapshot, export_snapshot, freeze_farm, import_snapshot,
-    remove_snapshot, restore_farm,
+    FrozenSnapshot, ImportedSnapshot, NodeSnapshot, export_snapshot, freeze_compute, freeze_farm,
+    import_snapshot, remove_snapshot, restore_farm,
 };
 pub use template::{
     ALL_IN_ONE, COMPUTE, CONTROL, MAX_COMPUTES, NodeSpec, Role, address, hostname, suffix,
@@ -127,12 +127,14 @@ pub async fn create_farm_with(
 /// Add compute VMs to an existing multi-node farm on this host. The switch is already
 /// running, and new ports are picked up from its configuration file. An existing VM with
 /// the requested suffix is adopted instead of created again, so a retried expansion
-/// continues where the last attempt stopped.
+/// continues where the last attempt stopped. `source` is a compute template snapshot to
+/// boot the new VMs from instead of the golden image.
 pub async fn add_nodes(
     farm_id: &str,
     template: &[NodeSpec],
     add: &[String],
     switch: &crate::link::host::Switch,
+    source: Option<&str>,
 ) -> Result<Vec<FarmNode>> {
     if add.is_empty() {
         return Ok(Vec::new());
@@ -181,6 +183,7 @@ pub async fn add_nodes(
                 .map(|other| (other.address(), other.hostname()))
                 .collect(),
             links,
+            source: source.map(str::to_owned),
             ..Default::default()
         };
         created.push(create_node(farm_id, *spec, &setup).await?);

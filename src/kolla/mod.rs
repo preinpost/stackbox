@@ -216,13 +216,16 @@ async fn deploy_on(
 /// Give the control VM the key Kolla reaches the computes with.
 /// Add one compute VM to a deployed farm with Kolla. `nodes` are the farm's VMs on this
 /// host; computes on other hosts were prepared there. Everything is limited to the new
-/// compute, so the control plane keeps running.
+/// compute, so the control plane keeps running. A compute booted from a compute template
+/// (`from_template`) already has Kolla's containers: its identity is wiped and Kolla only
+/// reconfigures it, skipping bootstrap-servers and the image pull.
 pub async fn deploy_compute(
     farm_id: &str,
     plan: &crate::model::Plan,
     index: u8,
     nodes: &[String],
     components: &[String],
+    from_template: bool,
     sink: EventSink,
 ) -> Result<()> {
     let control_spec = plan
@@ -289,7 +292,12 @@ pub async fn deploy_compute(
                 continue;
             }
             let sandbox = farm::connect(&compute.name).await?;
-            if suffix == new_suffix {
+            if suffix == new_suffix && from_template {
+                step(&sink, format!("{new_suffix}의 템플릿 identity 초기화"))?;
+                farm::wait_until_booted(&sandbox).await?;
+                farm::update_identity(&sandbox, new_spec, &plan.nodes).await?;
+                run(&sandbox, &wipe_template_script(&new_spec.hostname())).await?;
+            } else if suffix == new_suffix {
                 step(&sink, format!("{new_suffix} prepare"))?;
                 prepare_host(&sandbox, neutron, &sink).await?;
             }
@@ -305,24 +313,36 @@ pub async fn deploy_compute(
         step(&sink, "Kolla multinode inventory 갱신")?;
         write_inventory(&control, &topology).await?;
         let host = new_spec.hostname();
-        sink(DeployEvent::Phase(Phase::Bootstrap))?;
-        step(&sink, format!("kolla-ansible bootstrap-servers --limit {host}"))?;
-        stream(
-            &control,
-            &kolla_ansible_limited("bootstrap-servers", &host),
-            &format!("{LOG_DIR}/add-compute-{index}-bootstrap.log"),
-            &sink,
-        )
-        .await?;
-        sink(DeployEvent::Phase(Phase::Deploy))?;
-        step(&sink, format!("kolla-ansible deploy --limit {host}"))?;
-        stream(
-            &control,
-            &kolla_ansible_limited("deploy", &host),
-            &format!("{LOG_DIR}/add-compute-{index}-deploy.log"),
-            &sink,
-        )
-        .await?;
+        if from_template {
+            sink(DeployEvent::Phase(Phase::Deploy))?;
+            step(&sink, format!("kolla-ansible reconfigure --limit {host}"))?;
+            stream(
+                &control,
+                &kolla_ansible_limited("reconfigure", &host),
+                &format!("{LOG_DIR}/add-compute-{index}-reconfigure.log"),
+                &sink,
+            )
+            .await?;
+        } else {
+            sink(DeployEvent::Phase(Phase::Bootstrap))?;
+            step(&sink, format!("kolla-ansible bootstrap-servers --limit {host}"))?;
+            stream(
+                &control,
+                &kolla_ansible_limited("bootstrap-servers", &host),
+                &format!("{LOG_DIR}/add-compute-{index}-bootstrap.log"),
+                &sink,
+            )
+            .await?;
+            sink(DeployEvent::Phase(Phase::Deploy))?;
+            step(&sink, format!("kolla-ansible deploy --limit {host}"))?;
+            stream(
+                &control,
+                &kolla_ansible_limited("deploy", &host),
+                &format!("{LOG_DIR}/add-compute-{index}-deploy.log"),
+                &sink,
+            )
+            .await?;
+        }
         sink(DeployEvent::Phase(Phase::Verify))?;
         step(&sink, format!("{host}의 nova-compute·network agent 확인"))?;
         stream(
@@ -332,6 +352,17 @@ pub async fn deploy_compute(
             &sink,
         )
         .await?;
+        if from_template {
+            // deploy maps a new compute to its cell; reconfigure does not.
+            step(&sink, "nova-manage cell_v2 discover_hosts")?;
+            stream(
+                &control,
+                "docker exec nova_api nova-manage cell_v2 discover_hosts --verbose",
+                &format!("{LOG_DIR}/add-compute-{index}-discover.log"),
+                &sink,
+            )
+            .await?;
+        }
         Ok::<_, anyhow::Error>(())
     }
     .await;
@@ -373,6 +404,35 @@ async fn write_inventory(deployer: &Sandbox, topology: &Topology) -> Result<()> 
     )
     .await?;
     Ok(())
+}
+
+/// Make a compute booted from a compute template its own before its Docker starts: drop the
+/// source's Nova `compute_id`, instances, libvirt domains and SSH keys, and give it a new
+/// machine ID, which Kolla's libvirt host UUID follows on reconfigure. This runs once per
+/// VM, so a retried expansion keeps the identity Nova registered. Docker then starts the
+/// template's containers, and OVS takes the new hostname as its system-id.
+fn wipe_template_script(hostname: &str) -> String {
+    format!(
+        r#"set -euo pipefail
+marker=/etc/farm/template-wiped
+if [ ! -e $marker ]; then
+  systemctl stop docker.socket docker.service 2>/dev/null || true
+  volumes=/var/lib/docker/volumes
+  rm -f $volumes/nova_compute/_data/compute_id
+  rm -rf $volumes/nova_compute/_data/instances
+  rm -f $volumes/nova_libvirt_qemu/_data/*.xml $volumes/nova_libvirt_qemu/_data/autostart/*.xml
+  rm -f /etc/machine-id /var/lib/dbus/machine-id
+  systemd-machine-id-setup
+  : > /root/.ssh/authorized_keys 2>/dev/null || true
+  touch $marker
+fi
+systemctl enable docker.service docker.socket
+systemctl start docker.service
+if docker ps -a --format '{{{{.Names}}}}' | grep -qx openvswitch_db; then
+  for _ in $(seq 60); do docker exec openvswitch_db ovs-vsctl show >/dev/null 2>&1 && break; sleep 2; done
+  docker exec openvswitch_db ovs-vsctl set Open_vSwitch . external_ids:system-id={hostname}
+fi"#
+    )
 }
 
 fn kolla_ansible_limited(command: &str, host: &str) -> String {

@@ -172,9 +172,31 @@ compute 배치 작업이 control의 conductor로 위임해 처리하고, 마지�
 network agent로 새 compute가 올라왔는지 확인합니다. farm의 plan은 Kolla가 성공한 뒤에만 갱신되므로,
 실패한 작업은 같은 `farm add-compute` 명령으로 이어서 재시도할 수 있습니다.
 
-지금은 compute가 최대 3대이고, all-in-one farm과 스냅샷에서 복원한 farm은 대상이 아닙니다.
+지금은 compute가 최대 3대이고, all-in-one farm은 대상이 아닙니다. 스냅샷에서 복원한 다중 VM farm은
+복원된 plan과 control VM의 Kolla 설정을 그대로 쓰므로 똑같이 compute를 붙일 수 있습니다.
 새 호스트는 control VM과 같은 CPU 아키텍처이고, 기존 farm이 KVM이면 `/dev/kvm`도 있어야 합니다.
 기존 인스턴스는 새 compute로 자동 이동하지 않으므로 필요하면 live migration을 따로 실행합니다.
+
+#### Compute 템플릿에서 추가
+
+배포된 farm의 compute VM 하나를 **compute 템플릿**(단일 VM 스냅샷)으로 얼려두면, 다음 compute를
+이미지 pull과 `bootstrap-servers` 없이 그 디스크로 부팅해 붙일 수 있습니다.
+
+```bash
+farm snapshot create grow grow-compute-tpl --node compute-1   # compute-1만 잠시 멈췄다가 다시 시작
+farm add-compute grow --from-snapshot grow-compute-tpl          # 생략하면 지금처럼 클린 설치
+```
+
+- 템플릿에는 `farm.snapshot.role=compute`, OpenStack 릴리스, 서비스 목록, 아키텍처가 라벨로 남고,
+  archive로 내보내고 가져와도 템플릿으로 남습니다. farm 복원에는 쓸 수 없습니다.
+- 추가할 때 farm과 릴리스·서비스·아키텍처가 다르면 `409`입니다. 템플릿은 로컬 호스트에만 있으므로
+  control VM이 로컬 호스트에 있는 farm에, 같은 호스트로만 붙일 수 있습니다.
+- 얼릴 때는 링크와 Docker를 디스크에서 꺼 둡니다(원본은 다시 켜서 시작). 템플릿으로 부팅한 VM은
+  Docker가 뜨기 전에 Nova `compute_id`, 인스턴스와 libvirt domain, `authorized_keys`를 지우고
+  machine-id를 새로 만든 뒤 Docker를 켜고 OVS system-id를 새 hostname으로 바꿉니다. 그 뒤
+  `kolla-ansible reconfigure --limit farm-compute-N`과 `nova-manage cell_v2 discover_hosts`를 실행합니다.
+  인스턴스가 있는 compute는 템플릿으로 얼릴 수 없습니다.
+- 실패한 확장은 처음과 같은 방식(같은 템플릿 또는 클린 설치)으로만 재시도할 수 있습니다.
 
 ## 웹포탈
 
@@ -259,7 +281,7 @@ curl -N http://127.0.0.1:10010/api/v1/farms/demo/logs/stream
 | GET / POST | `/farms` | 목록 / 생성 job (`host_id` 필수) |
 | GET / DELETE | `/farms/{id}` | farm 상태 / 삭제 job |
 | POST | `/farms/{id}/deploy` | 배포 job (`{"from":"prechecks"}`로 재개) |
-| POST | `/farms/{id}/computes` | 배포된 다중 VM farm에 다음 compute VM 추가 job (`{"host_id":"dev-01"}`; 생략 시 primary 호스트) |
+| POST | `/farms/{id}/computes` | 배포된 다중 VM farm에 다음 compute VM 추가 job (`{"host_id":"dev-01"}`; 생략 시 primary 호스트, `from_snapshot`이면 compute 템플릿에서) |
 | POST | `/farms/{id}/settle` | VM 재시작 뒤 서비스 응답 확인 job |
 | GET | `/farms/{id}/endpoints` | public 서비스 URL과 admin 인증정보 |
 | PUT | `/farms/{id}/nodes/{node}/faults` | 다중 VM farm의 VM 링크에 지연·손실 설정(`{}`이면 복구), 갱신된 farm |

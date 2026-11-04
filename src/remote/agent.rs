@@ -844,9 +844,14 @@ impl Agent {
                 nodes,
                 add,
                 uplink,
+                source,
                 ..
             } => {
                 let entry = self.owned(&request, id, generation)?;
+                ensure!(
+                    source.is_none() || add.len() == 1,
+                    "a compute template boots exactly one new VM"
+                );
                 // The coordinator applies plan()'s policy; expansion must keep every
                 // existing VM's spec and only append compute VMs.
                 let canonical = layout(&PlanRequest {
@@ -951,6 +956,7 @@ impl Agent {
                         ordered.clone(),
                         add.clone(),
                         uplink.clone(),
+                        source.clone(),
                     )
                     .await?;
                 let mut registry = LockedRegistry::open(&self.dir)?;
@@ -988,7 +994,11 @@ impl Agent {
                     private_key,
                 })
             }
-            Operation::DeployCompute { index, .. } => {
+            Operation::DeployCompute {
+                index,
+                from_template,
+                ..
+            } => {
                 let entry = self.owned(&request, id, generation)?;
                 ensure!(entry.publishes(), "farm '{id}' is served from another host");
                 ensure!(
@@ -1015,6 +1025,7 @@ impl Agent {
                         *index,
                         nodes,
                         entry.plan.components.clone(),
+                        *from_template,
                         progress(emit),
                     )
                     .await?;
@@ -1095,15 +1106,30 @@ impl Agent {
             }
             Operation::Freeze {
                 snapshot_id,
+                node,
                 labels,
                 ..
             } => {
-                self.owned(&request, id, generation)?;
+                let entry = self.owned(&request, id, generation)?;
                 crate::model::validate_snapshot_id(snapshot_id)?;
+                if let Some(node) = node {
+                    ensure!(
+                        entry.plan.nodes.iter().any(|spec| {
+                            spec.role == crate::farm::Role::Compute
+                                && crate::farm::suffix(spec.role, spec.index).as_deref()
+                                    == Some(node.as_str())
+                        }),
+                        "farm '{id}' has no compute VM '{node}'"
+                    );
+                    ensure!(
+                        entry.runs(node),
+                        "VM '{node}' of farm '{id}' runs on another host"
+                    );
+                }
                 Ok(Reply::Frozen {
                     snapshot: self
                         .backend
-                        .freeze(id.into(), snapshot_id.clone(), labels.clone())
+                        .freeze(id.into(), snapshot_id.clone(), node.clone(), labels.clone())
                         .await?,
                 })
             }

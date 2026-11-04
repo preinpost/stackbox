@@ -121,6 +121,9 @@ enum Command {
         /// the farm through the coordinator's link relay.
         #[arg(long)]
         host_id: Option<String>,
+        /// Boot the new VM from this compute template snapshot instead of installing it clean
+        #[arg(long)]
+        from_snapshot: Option<String>,
     },
     /// Check that a deployed farm's services answer again after its VM started from disk
     Settle { id: String },
@@ -232,6 +235,10 @@ enum SnapshotCommand {
         id: String,
         #[arg(long)]
         note: Option<String>,
+        /// Freeze only this compute VM (compute-1, ...) of a deployed multi-node farm,
+        /// as a compute template for add-compute --from-snapshot
+        #[arg(long)]
+        node: Option<String>,
     },
     List {
         #[arg(long)]
@@ -508,8 +515,18 @@ async fn main() -> Result<()> {
         Command::Deploy { id, from } => {
             wait(&manager, manager.deploy(&id, DeployRequest { from })?).await?;
         }
-        Command::AddCompute { id, host_id } => {
-            let job = manager.add_compute(&id, AddComputeRequest { host_id })?;
+        Command::AddCompute {
+            id,
+            host_id,
+            from_snapshot,
+        } => {
+            let job = manager.add_compute(
+                &id,
+                AddComputeRequest {
+                    host_id,
+                    from_snapshot,
+                },
+            )?;
             wait(&manager, job).await?;
             print_json(&manager.get(&id)?)?;
         }
@@ -606,7 +623,12 @@ async fn main() -> Result<()> {
             }
         },
         Command::Snapshot(command) => match command {
-            SnapshotCommand::Create { farm, id, note } => {
+            SnapshotCommand::Create {
+                farm,
+                id,
+                note,
+                node,
+            } => {
                 wait(
                     &manager,
                     manager.freeze(
@@ -614,6 +636,7 @@ async fn main() -> Result<()> {
                         SnapshotRequest {
                             id: id.clone(),
                             note,
+                            node,
                         },
                     )?,
                 )
@@ -627,13 +650,18 @@ async fn main() -> Result<()> {
                 } else {
                     for s in snapshots {
                         println!(
-                            "{:<24} {:?} {:<8} from {} ({}{})",
+                            "{:<24} {:?} {:<8} from {} ({}{}{})",
                             s.id,
                             s.status,
                             s.arch,
                             s.source_farm.as_deref().unwrap_or("archive"),
                             s.plan.components.join(","),
-                            if s.deployed { ", deployed" } else { "" }
+                            if s.deployed { ", deployed" } else { "" },
+                            if s.compute_template {
+                                ", compute template"
+                            } else {
+                                ""
+                            }
                         );
                     }
                 }

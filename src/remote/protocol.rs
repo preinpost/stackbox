@@ -49,6 +49,9 @@ pub enum Operation {
         add: Vec<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         uplink: Option<crate::link::UplinkConfig>,
+        /// Compute template snapshot on this host to boot the added VM from.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source: Option<String>,
     },
     /// Return the SSH key pair the control VM uses to reach the farm's computes.
     SshKeys {
@@ -60,6 +63,9 @@ pub enum Operation {
         farm_id: String,
         generation: String,
         index: u8,
+        /// The VM was booted from a compute template, so Kolla only reconfigures it.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        from_template: bool,
     },
     /// Point this host's switch at the relay's new address for a farm that spans hosts.
     Relink {
@@ -97,11 +103,14 @@ pub enum Operation {
         #[serde(default)]
         rebind: Option<(Exposure, Exposure)>,
     },
-    /// Stop the farm's VM, capture its disks as `snapshot_id`, and start it again.
+    /// Stop the farm's VM, capture its disks as `snapshot_id`, and start it again. With
+    /// `node`, only that compute VM is captured, as a compute template.
     Freeze {
         farm_id: String,
         generation: String,
         snapshot_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        node: Option<String>,
         labels: BTreeMap<String, String>,
     },
     /// Set the faults of a multi-node farm VM's links (`node` is `control`, `compute-1`, ...);

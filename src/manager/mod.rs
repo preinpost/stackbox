@@ -1559,11 +1559,6 @@ impl FarmManager {
                     "an all-in-one farm has no control VM to add a compute to; create a multi-node farm instead",
                 ));
             }
-            if farm.snapshot_id.is_some() {
-                return Err(conflict(
-                    "a farm restored from a snapshot cannot gain a compute; create a new farm instead",
-                ));
-            }
             if plan.computes >= crate::farm::MAX_COMPUTES {
                 return Err(conflict(format!(
                     "a farm has at most {} compute VMs",
@@ -1587,6 +1582,15 @@ impl FarmManager {
                         "this farm failed before a compute was added; deploy it or delete it first",
                     )
                 })?;
+                // The VM may already exist, booted the way the failed attempt chose.
+                if previous.snapshot_id != request.from_snapshot {
+                    return Err(conflict(match &previous.snapshot_id {
+                        Some(snapshot) => format!(
+                            "retry the failed expansion from compute template '{snapshot}', as it started"
+                        ),
+                        None => "retry the failed expansion as a clean install, as it started".into(),
+                    }));
+                }
                 (
                     previous
                         .target_host
@@ -1636,6 +1640,20 @@ impl FarmManager {
                 .clone()
                 .ok_or_else(|| conflict("farm has no primary host"))?;
             let (budget, _, _, _) = self.admit_host(state, &target_host, true)?;
+            if let Some(snapshot) = &request.from_snapshot {
+                snapshots::compute_template(state, snapshot, farm)?;
+                // Snapshots are kept on the coordinator's local host only.
+                if target_host != primary
+                    || state
+                        .hosts
+                        .get(&primary)
+                        .is_none_or(|host| host.host.kind != HostKind::Local)
+                {
+                    return Err(conflict(format!(
+                        "compute template '{snapshot}' is kept on the local host, so a compute made from it can only join a farm whose control VM runs there, on that host"
+                    )));
+                }
+            }
             if target_host != primary {
                 let arch = |host: &str| {
                     state
@@ -1713,6 +1731,7 @@ impl FarmManager {
                 }
             }
             let mut job = new_job(id, JobKind::Expand);
+            job.snapshot_id = request.from_snapshot.clone();
             job.target_host = Some(target_host);
             job.target_node = Some(target_node);
             job.phase = Some(crate::kolla::Phase::Prepare);
@@ -2012,6 +2031,29 @@ impl FarmManager {
             .context("farm has no generation")?;
         let exposure = farm.exposure.clone().context("farm has no exposure")?;
         let components = farm_components(farm);
+        // A compute template is checked again: it may have changed since the job was accepted.
+        let source = match &job.snapshot_id {
+            Some(snapshot) => Some(self.read(|state| {
+                anyhow::ensure!(
+                    target_host == primary,
+                    "a compute template boots on the control VM's host"
+                );
+                snapshots::compute_template(state, snapshot, farm)?
+                    .reference
+                    .clone()
+                    .with_context(|| format!("compute template '{snapshot}' is not ready"))
+            })??),
+            None => None,
+        };
+        let from_template = source.is_some();
+        if let Some(snapshot) = &job.snapshot_id {
+            self.log(
+                &id,
+                &job.id,
+                Some(crate::kolla::Phase::Prepare),
+                format!("booting {target_node} from compute template {snapshot}\n"),
+            )?;
+        }
         let primary_backend = self.backend_for(farm)?;
         let mut shares = farm.shares.clone();
         let target_share = shares
@@ -2150,6 +2192,7 @@ impl FarmManager {
                     nodes.clone(),
                     vec![target_node.clone()],
                     None,
+                    None,
                 )
                 .await?;
             self.update(|state| {
@@ -2216,6 +2259,7 @@ impl FarmManager {
                 primary_nodes.clone(),
                 add,
                 primary_uplink.clone(),
+                source,
             )
             .await?;
         if let Some(uplink) = primary_uplink {
@@ -2250,6 +2294,7 @@ impl FarmManager {
                     share.nodes.clone(),
                     Vec::new(),
                     None,
+                    None,
                 )
                 .await?;
         }
@@ -2258,7 +2303,11 @@ impl FarmManager {
             &id,
             &job.id,
             Some(crate::kolla::Phase::Deploy),
-            format!("deploying {target_node} with Kolla, limited to that VM\n"),
+            if from_template {
+                format!("reconfiguring {target_node} with Kolla, limited to that VM\n")
+            } else {
+                format!("deploying {target_node} with Kolla, limited to that VM\n")
+            },
         )?;
         primary_backend
             .deploy_compute(
@@ -2267,6 +2316,7 @@ impl FarmManager {
                 index,
                 primary_nodes,
                 components,
+                from_template,
                 self.event_sink(job, None),
             )
             .await?;

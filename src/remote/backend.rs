@@ -112,6 +112,7 @@ impl Backend for AgentBackend {
         nodes: Vec<String>,
         add: Vec<String>,
         uplink: Option<crate::link::UplinkConfig>,
+        source: Option<String>,
     ) -> BoxFuture<'_, Result<Vec<FarmNode>>> {
         Box::pin(self.nodes(Operation::Expand {
             farm_id: id,
@@ -120,6 +121,7 @@ impl Backend for AgentBackend {
             nodes,
             add,
             uplink,
+            source,
         }))
     }
     fn ssh_keys(&self, id: String) -> BoxFuture<'_, Result<(String, String)>> {
@@ -149,6 +151,7 @@ impl Backend for AgentBackend {
         index: u8,
         _nodes: Vec<String>,
         _components: Vec<String>,
+        from_template: bool,
         sink: EventSink,
     ) -> BoxFuture<'_, Result<()>> {
         Box::pin(self.done(
@@ -156,6 +159,7 @@ impl Backend for AgentBackend {
                 farm_id: id,
                 generation: self.generation.clone(),
                 index,
+                from_template,
             },
             Some(sink),
         ))
@@ -231,6 +235,7 @@ impl Backend for AgentBackend {
         &self,
         id: String,
         snapshot_id: String,
+        node: Option<String>,
         labels: BTreeMap<String, String>,
     ) -> BoxFuture<'_, Result<FrozenSnapshot>> {
         Box::pin(async move {
@@ -240,6 +245,7 @@ impl Backend for AgentBackend {
                         farm_id: id,
                         generation: self.generation.clone(),
                         snapshot_id,
+                        node,
                         labels,
                     },
                     None,

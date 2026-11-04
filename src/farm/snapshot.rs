@@ -200,6 +200,94 @@ async fn freeze_nodes(
     }
 }
 
+/// Freeze one compute VM of a multi-node farm as a compute template: a single-VM snapshot
+/// that later expansions boot a new compute from. The farm's other VMs keep running.
+///
+/// The captured disk still carries the source's per-node identity (Nova's `compute_id`,
+/// the machine ID, OVS's system-id): a stopped VM's disk cannot be edited, and removing
+/// them from the running source would make it register again. So, like the links, Docker
+/// is disabled on disk while frozen. A compute booted from the template then starts no
+/// Kolla container until its identity is wiped (see `kolla::deploy_compute`); the source
+/// enables both again after it boots.
+pub async fn freeze_compute(
+    farm_id: &str,
+    snapshot_id: &str,
+    node: &str,
+    labels: &BTreeMap<String, String>,
+) -> Result<FrozenSnapshot> {
+    let index: u8 = node
+        .strip_prefix("compute-")
+        .and_then(|index| index.parse().ok())
+        .with_context(|| format!("{node} is not a compute VM"))?;
+    let name = node_name(farm_id, Role::Compute, Some(index));
+    // Instances would come back on every compute made from the template.
+    run_in(&name, NO_INSTANCES).await?;
+    let units = link_units();
+    let (disable, enable) = (
+        format!("systemctl disable {units} {DOCKER_UNITS}"),
+        format!("systemctl enable {units} {DOCKER_UNITS}"),
+    );
+    if let Err(error) = run_in(&name, &disable).await {
+        let _ = run_in(&name, &enable).await;
+        return Err(error.context("disable the links and Docker before freezing"));
+    }
+    let captured = match stop(&name).await {
+        Ok(()) => {
+            let mut builder = Snapshot::builder(snapshot_id)
+                .group(group(snapshot_id))
+                .from_sandbox(&name)
+                .label(snapshot_labels::NODE, node);
+            for (key, value) in labels {
+                builder = builder.label(key, value);
+            }
+            builder
+                .create()
+                .await
+                .map(|snapshot| FrozenSnapshot {
+                    reference: snapshot.reference().value().to_owned(),
+                    size_bytes: snapshot.size_bytes(),
+                    restart_error: None,
+                    nodes: Vec::new(),
+                })
+                .map_err(|error| anyhow::Error::from(error).context(format!("capture {name}")))
+        }
+        Err(error) => Err(error),
+    };
+    // Bring the source compute back whether or not the capture succeeded.
+    let restart_error = async {
+        start_with_links(&name, &units).await?;
+        run_in(
+            &name,
+            &format!("{enable} && systemctl start docker.service"),
+        )
+        .await
+    }
+    .await
+    .err()
+    .map(|e| format!("{e:#}"));
+    match (captured, restart_error) {
+        (Ok(frozen), restart_error) => Ok(FrozenSnapshot {
+            restart_error,
+            ..frozen
+        }),
+        (Err(e), None) => Err(e),
+        (Err(e), Some(restart)) => {
+            Err(e.context(format!("{name} also did not start again: {restart}")))
+        }
+    }
+}
+
+/// Docker's units, kept off in a compute template until its identity is wiped.
+const DOCKER_UNITS: &str = "docker.service docker.socket";
+
+const NO_INSTANCES: &str = r#"if docker ps --format '{{.Names}}' | grep -qx nova_libvirt; then
+  n=$(docker exec nova_libvirt virsh list --all --name | grep -c . || true)
+  if [ "$n" != 0 ]; then
+    echo "$n instance(s) run on this compute; delete them before freezing it as a template" >&2
+    exit 1
+  fi
+fi"#;
+
 async fn stop(name: &str) -> Result<()> {
     Sandbox::get(name)
         .await

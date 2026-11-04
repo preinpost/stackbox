@@ -492,6 +492,10 @@ pub struct AddComputeRequest {
     /// Host for the new compute VM; omitted for the farm's primary host. A compute on
     /// another host joins the farm through its link relay.
     pub host_id: Option<String>,
+    /// Compute template snapshot to boot the new VM from instead of installing it clean.
+    /// Kolla then only reconfigures it; the template must match the farm's OpenStack
+    /// release, components and CPU architecture.
+    pub from_snapshot: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
@@ -721,10 +725,22 @@ pub struct SnapshotRequest {
     pub id: String,
     #[serde(default)]
     pub note: Option<String>,
+    /// Freeze only this compute VM (`compute-1`, ...) of a deployed multi-node farm, as a
+    /// compute template that later expansions boot new computes from.
+    #[serde(default)]
+    pub node: Option<String>,
 }
 impl SnapshotRequest {
     pub fn validate(&self) -> Result<()> {
         validate_snapshot_id(&self.id)?;
+        if let Some(node) = &self.node {
+            let index = node
+                .strip_prefix("compute-")
+                .and_then(|index| index.parse::<u8>().ok());
+            if !index.is_some_and(|index| (1..=crate::farm::MAX_COMPUTES).contains(&index)) {
+                bail!("only a compute VM (compute-1, ...) can be frozen as a template");
+            }
+        }
         if self.note.as_ref().is_some_and(|n| n.len() > 512) {
             bail!("note must be at most 512 bytes");
         }
@@ -834,6 +850,13 @@ pub struct SnapshotRecord {
     pub reference: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub nodes: Vec<crate::farm::NodeSnapshot>,
+    /// A single compute VM frozen to boot new computes of farms from; no farm restores
+    /// from it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub compute_template: bool,
+    /// OpenStack release the guest was deployed with; unknown for older snapshots.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release: Option<String>,
     pub size_bytes: Option<u64>,
     /// Most recent export.
     pub archive: Option<SnapshotArchive>,
@@ -860,6 +883,8 @@ pub mod snapshot_labels {
     pub const COMPUTES: &str = "farm.snapshot.computes";
     /// The VM a multi-node snapshot's disk was taken from (`control`, `compute-1`, ...).
     pub const NODE: &str = "farm.snapshot.node";
+    /// `compute` on a compute template; absent on farm snapshots.
+    pub const ROLE: &str = "farm.snapshot.role";
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
