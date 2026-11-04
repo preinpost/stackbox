@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
-import { Cloud, Cpu, Snowflake } from "lucide-react";
+import { Cloud, Cpu, LoaderCircle, Snowflake } from "lucide-react";
 import {
   farmsQuery,
   hostQuery,
@@ -83,10 +83,12 @@ function TransferProgress({ snapshot }: { snapshot: Snapshot }) {
   const exporting = snapshot.status === "exporting";
   const total = transfer.total_bytes;
   const percent = total ? Math.floor((transfer.done_bytes / total) * 100) : 0;
+  // No byte count yet, or the bytes are in and the host is still registering them.
+  const waiting = total == null || (transfer.done_bytes >= total && !exporting);
   const label =
     total == null
       ? exporting
-        ? "아카이브 만드는 중"
+        ? "디스크를 아카이브로 묶는 중"
         : "S3에 연결하는 중"
       : transfer.done_bytes >= total && !exporting
         ? "내려받음 · 스냅샷 등록 중"
@@ -94,7 +96,11 @@ function TransferProgress({ snapshot }: { snapshot: Snapshot }) {
   return (
     <div className="mt-2.5 max-w-xl">
       <div className="job-meta mt-0 flex-wrap">
-        <Cloud size={13} />
+        {waiting ? (
+          <LoaderCircle size={13} className="animate-spin" />
+        ) : (
+          <Cloud size={13} />
+        )}
         <span>{label}</span>
         <span>·</span>
         <span className="font-mono">
