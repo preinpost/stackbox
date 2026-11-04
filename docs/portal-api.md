@@ -94,7 +94,7 @@ job 로그에 원본 compute 등록(nova-compute 서비스, placement, Neutron a
 릴리스가 아니면 `409`입니다.
 
 `POST /releases/farms`는 같은 body로 계획을 다시 세운 뒤 `202`와 `assemble` job을 돌려줍니다. job의
-`steps[]`는 `action`(`import`, `restore`, `expand` 또는 클린 경로의 `create`, `deploy`), `node`,
+`assembly[]`는 `action`(`import`, `restore`, `expand` 또는 클린 경로의 `create`, `deploy`), `node`,
 `snapshot_id`, `host_id`, `description`, `status`, `job_id`(그 단계를 실행한 job), `error`입니다.
 단계가 실패하면 job은 `failed`이고 이후 단계는 `interrupted`이며, farm은 그대로 남아 실패한 `expand`를
 `POST /farms/{id}/computes`로 재시도할 수 있습니다. assemble job 자체는 farm의 `active_job`이 되지
