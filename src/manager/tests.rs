@@ -46,6 +46,9 @@ pub(crate) struct Fake {
     /// The compute template each expansion that created a VM booted it from.
     expanded_from: Mutex<Vec<Option<String>>>,
     pub(crate) fail_expand: AtomicBool,
+    /// Fail the expansion that would create this many VMs (1 is the first), and every
+    /// later one; 0 never fails.
+    pub(crate) fail_expansion_from: AtomicUsize,
     pub(crate) fail_compute: AtomicBool,
     /// Farms restored from a control template that forgot their source's computes.
     forgotten: Mutex<Vec<String>>,
@@ -84,6 +87,10 @@ impl Backend for Fake {
     ) -> BoxFuture<'_, Result<Vec<FarmNode>>> {
         Box::pin(async move {
             if self.fail_expand.load(Ordering::SeqCst) {
+                bail!("intentional expand failure");
+            }
+            let from = self.fail_expansion_from.load(Ordering::SeqCst);
+            if from > 0 && !add.is_empty() && self.expanded_from.lock().unwrap().len() + 1 >= from {
                 bail!("intentional expand failure");
             }
             if let Some(source) = &source {
@@ -4953,4 +4960,606 @@ async fn a_farm_spans_hosts_with_its_computes_placed_elsewhere() {
     let delete = manager.delete("px").unwrap();
     assert_eq!(done(&manager, &delete).await.status, JobStatus::Succeeded);
     settle(&manager).await;
+}
+
+/// A deployed multi-node farm `src`, frozen into control templates `ctl-old` and `ctl` (the
+/// newer) and compute template `cpt`.
+async fn release_templates(dir: &Path) -> (FarmManager, Arc<Fake>) {
+    let backend = Arc::new(Fake::default());
+    let manager = open_with(options(dir), backend.clone()).await;
+    if !cfg!(target_os = "linux") {
+        *manager.0.guest_agent.write().unwrap() = Some(dir.join("farm-agent"));
+    }
+    let created = manager
+        .create(CreateRequest {
+            computes: 1,
+            ..request("src")
+        })
+        .unwrap();
+    assert_eq!(done(&manager, &created).await.status, JobStatus::Succeeded);
+    let deployed = manager.deploy("src", DeployRequest::default()).unwrap();
+    assert_eq!(done(&manager, &deployed).await.status, JobStatus::Succeeded);
+    for (id, node) in [
+        ("ctl-old", "control"),
+        ("ctl", "control"),
+        ("cpt", "compute-1"),
+    ] {
+        let job = manager
+            .freeze(
+                "src",
+                SnapshotRequest {
+                    id: id.into(),
+                    note: None,
+                    node: Some(node.into()),
+                },
+            )
+            .unwrap();
+        assert_eq!(done(&manager, &job).await.status, JobStatus::Succeeded);
+    }
+    manager
+        .update(|state| {
+            state.snapshots.get_mut("ctl-old").unwrap().created_at = 100;
+            state.snapshots.get_mut("ctl").unwrap().created_at = 200;
+            Ok(())
+        })
+        .unwrap();
+    (manager, backend)
+}
+fn by_release(id: &str, computes: u8) -> ReleaseCreateRequest {
+    ReleaseCreateRequest {
+        id: id.into(),
+        release: crate::kolla::OPENSTACK_RELEASE.into(),
+        host_id: Some("local".into()),
+        computes,
+        external_host: "localhost".into(),
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn a_release_plan_picks_the_newest_matching_templates_or_says_why_it_installs_clean() {
+    use crate::remote::test_server::Fixture;
+    let dir = tempfile::tempdir().unwrap();
+    let (manager, _) = release_templates(dir.path()).await;
+    let release = crate::kolla::OPENSTACK_RELEASE;
+
+    let plan = manager.preview_release(&by_release("r", 2)).await.unwrap();
+    assert_eq!(plan.release, release);
+    assert_eq!(plan.arch, current_arch());
+    assert_eq!(
+        plan.components,
+        manager.snapshot("ctl").unwrap().plan.components
+    );
+    assert_eq!(plan.control.source, NodeSource::Template);
+    assert_eq!(plan.control.snapshot_id.as_deref(), Some("ctl"));
+    assert!(
+        plan.control.reason.contains("newest of 2"),
+        "{}",
+        plan.control.reason
+    );
+    assert_eq!(plan.computes.len(), 2);
+    for (index, compute) in plan.computes.iter().enumerate() {
+        assert_eq!(compute.node, format!("compute-{}", index + 1));
+        assert_eq!(compute.host_id, "local");
+        assert_eq!(compute.source, NodeSource::Template);
+        assert_eq!(compute.snapshot_id.as_deref(), Some("cpt"));
+    }
+    // Nothing was created.
+    assert!(manager.get("r").is_err());
+    assert!(
+        manager
+            .jobs()
+            .unwrap()
+            .iter()
+            .all(|j| j.kind != JobKind::Assemble)
+    );
+
+    // A named template wins over the newest.
+    let plan = manager
+        .preview_release(&ReleaseCreateRequest {
+            control_template: Some("ctl-old".into()),
+            ..by_release("r", 1)
+        })
+        .await
+        .unwrap();
+    assert_eq!(plan.control.snapshot_id.as_deref(), Some("ctl-old"));
+    let wrong = manager
+        .preview_release(&ReleaseCreateRequest {
+            control_template: Some("cpt".into()),
+            ..by_release("r", 1)
+        })
+        .await
+        .unwrap_err();
+    assert!(wrong.is::<Conflict>(), "{wrong:#}");
+
+    // Other services: the templates do not match, and the coordinator's release installs clean.
+    let plan = manager
+        .preview_release(&ReleaseCreateRequest {
+            components: vec!["horizon".into()],
+            ..by_release("r", 2)
+        })
+        .await
+        .unwrap();
+    assert_eq!(plan.control.source, NodeSource::Clean);
+    assert!(
+        plan.control.reason.contains("run other services"),
+        "{}",
+        plan.control.reason
+    );
+    assert!(plan.components.contains(&"horizon".to_string()));
+    assert!(plan.computes.iter().all(|c| c.source == NodeSource::Clean));
+
+    // A compute on another host is installed clean; templates stay on the local host.
+    let fixture = Fixture::start().await;
+    manager.register_host(fixture.registration("edge")).unwrap();
+    let plan = manager
+        .preview_release(&ReleaseCreateRequest {
+            compute_hosts: vec!["".into(), "edge".into()],
+            ..by_release("r", 2)
+        })
+        .await
+        .unwrap();
+    assert_eq!(plan.control.source, NodeSource::Template);
+    assert_eq!(plan.computes[0].source, NodeSource::Template);
+    assert_eq!(plan.computes[1].host_id, "edge");
+    assert_eq!(plan.computes[1].source, NodeSource::Clean);
+    assert!(
+        plan.computes[1]
+            .reason
+            .contains("not copied to host 'edge'"),
+        "{}",
+        plan.computes[1].reason
+    );
+    // So is a control VM on another host, with its computes.
+    let plan = manager
+        .preview_release(&ReleaseCreateRequest {
+            host_id: Some("edge".into()),
+            ..by_release("r", 1)
+        })
+        .await
+        .unwrap();
+    assert_eq!(plan.control.source, NodeSource::Clean);
+    assert!(
+        plan.control.reason.contains("choose the local host"),
+        "{}",
+        plan.control.reason
+    );
+    assert!(
+        manager
+            .preview_release(&ReleaseCreateRequest {
+                host_id: Some("edge".into()),
+                control_template: Some("ctl".into()),
+                ..by_release("r", 1)
+            })
+            .await
+            .unwrap_err()
+            .is::<Conflict>()
+    );
+
+    // No compute template of the release: the computes are installed clean.
+    manager
+        .update(|state| {
+            state.snapshots.get_mut("cpt").unwrap().release = Some("2025.1".into());
+            Ok(())
+        })
+        .unwrap();
+    let plan = manager.preview_release(&by_release("r", 1)).await.unwrap();
+    assert_eq!(plan.control.source, NodeSource::Template);
+    assert_eq!(plan.computes[0].source, NodeSource::Clean);
+    assert!(
+        plan.computes[0].reason.contains("no compute template"),
+        "{}",
+        plan.computes[0].reason
+    );
+    // A release with no control template that this coordinator does not install is refused.
+    let error = manager
+        .preview_release(&ReleaseCreateRequest {
+            release: "2025.1".into(),
+            ..by_release("r", 1)
+        })
+        .await
+        .unwrap_err();
+    assert!(error.is::<Conflict>());
+    assert!(
+        error
+            .to_string()
+            .contains("no control template of OpenStack 2025.1"),
+        "{error:#}"
+    );
+
+    // Templates of another architecture never match.
+    manager
+        .update(|state| {
+            for snapshot in state.snapshots.values_mut() {
+                snapshot.arch = "riscv64".into();
+            }
+            Ok(())
+        })
+        .unwrap();
+    let plan = manager.preview_release(&by_release("r", 1)).await.unwrap();
+    assert_eq!(plan.control.source, NodeSource::Clean);
+    let catalog = manager.release_catalog(None, None).await.unwrap();
+    assert_eq!(catalog.releases.len(), 1);
+    assert_eq!(catalog.releases[0].local_control, 0);
+    assert!(catalog.releases[0].installable);
+    let catalog = manager
+        .release_catalog(Some("riscv64".into()), None)
+        .await
+        .unwrap();
+    let counts: Vec<_> = catalog
+        .releases
+        .iter()
+        .map(|r| {
+            (
+                r.release.as_str(),
+                r.local_control,
+                r.local_compute,
+                r.installable,
+            )
+        })
+        .collect();
+    assert_eq!(counts, [(release, 2, 0, false), ("2025.1", 0, 1, false)]);
+
+    // A farm ID in use is refused before anything else.
+    assert!(
+        manager
+            .preview_release(&by_release("src", 1))
+            .await
+            .unwrap_err()
+            .is::<Conflict>()
+    );
+}
+
+#[tokio::test]
+async fn a_release_farm_restores_its_control_then_adds_each_compute_in_order() {
+    let dir = tempfile::tempdir().unwrap();
+    let (manager, backend) = release_templates(dir.path()).await;
+    let job = manager.create_release(by_release("r", 2)).await.unwrap();
+    assert_eq!(job.kind, JobKind::Assemble);
+    let actions: Vec<_> = job.assembly.iter().map(|s| s.action.as_str()).collect();
+    assert_eq!(actions, ["restore", "expand", "expand"]);
+    let finished = done_slowly(&manager, &job).await;
+    assert_eq!(
+        finished.status,
+        JobStatus::Succeeded,
+        "{:?}",
+        finished.error
+    );
+    let kinds: Vec<_> = finished
+        .assembly
+        .iter()
+        .map(|step| {
+            assert_eq!(step.status, JobStatus::Succeeded);
+            manager.job(step.job_id.as_ref().unwrap()).unwrap()
+        })
+        .map(|job| (job.kind, job.target_node, job.snapshot_id))
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            (JobKind::Restore, None, Some("ctl".into())),
+            (
+                JobKind::Expand,
+                Some("compute-1".into()),
+                Some("cpt".into())
+            ),
+            (
+                JobKind::Expand,
+                Some("compute-2".into()),
+                Some("cpt".into())
+            ),
+        ]
+    );
+    let farm = manager.get("r").unwrap();
+    assert_eq!(farm.status, FarmStatus::Ready);
+    assert_eq!(farm.snapshot_id.as_deref(), Some("ctl"));
+    assert_eq!(farm.plan.unwrap().computes, 2);
+    assert_eq!(farm.nodes.len(), 3);
+    assert_eq!(
+        backend.reconfigured.lock().unwrap().as_slice(),
+        &[("r".into(), 1), ("r".into(), 2)]
+    );
+    let logs = manager.logs("r", 0, 1000).unwrap();
+    assert!(
+        logs.iter()
+            .any(|l| l.job_id == job.id && l.message.contains("compute-2 on local: template cpt"))
+    );
+    // The same farm cannot be started twice.
+    assert!(
+        manager
+            .create_release(by_release("r", 1))
+            .await
+            .unwrap_err()
+            .is::<Conflict>()
+    );
+
+    // Without a control template, the coordinator's release is created and deployed clean.
+    manager
+        .update(|state| {
+            state
+                .snapshots
+                .retain(|_, s| s.template != Some(TemplateRole::Control));
+            Ok(())
+        })
+        .unwrap();
+    let job = manager
+        .create_release(by_release("clean", 1))
+        .await
+        .unwrap();
+    let actions: Vec<_> = job.assembly.iter().map(|s| s.action.as_str()).collect();
+    assert_eq!(actions, ["create", "deploy"]);
+    let finished = done_slowly(&manager, &job).await;
+    assert_eq!(
+        finished.status,
+        JobStatus::Succeeded,
+        "{:?}",
+        finished.error
+    );
+    let farm = manager.get("clean").unwrap();
+    assert_eq!(farm.status, FarmStatus::Ready);
+    assert_eq!(farm.snapshot_id, None);
+    assert_eq!(farm.plan.unwrap().computes, 1);
+}
+
+async fn done_slowly(manager: &FarmManager, job: &Job) -> Job {
+    tokio::time::timeout(Duration::from_secs(30), manager.wait(&job.id))
+        .await
+        .unwrap()
+        .unwrap()
+}
+
+#[tokio::test]
+async fn a_release_farm_that_fails_midway_keeps_its_vms_and_is_retried_by_expansion() {
+    let dir = tempfile::tempdir().unwrap();
+    let (manager, backend) = release_templates(dir.path()).await;
+    backend.fail_expansion_from.store(2, Ordering::SeqCst);
+    let job = manager.create_release(by_release("r", 3)).await.unwrap();
+    let finished = done_slowly(&manager, &job).await;
+    assert_eq!(finished.status, JobStatus::Failed);
+    let error = finished.error.unwrap();
+    assert!(error.contains("add compute-2"), "{error}");
+    assert!(error.contains("from compute template 'cpt'"), "{error}");
+    let statuses: Vec<_> = finished.assembly.iter().map(|s| s.status).collect();
+    assert_eq!(
+        statuses,
+        [
+            JobStatus::Succeeded,
+            JobStatus::Succeeded,
+            JobStatus::Failed,
+            JobStatus::Interrupted
+        ]
+    );
+    assert!(finished.assembly[3].job_id.is_none());
+    // The farm has its control VM and compute-1; the failed expansion committed nothing.
+    let farm = manager.get("r").unwrap();
+    assert_eq!(farm.status, FarmStatus::Failed);
+    assert_eq!(farm.active_job, None);
+    assert_eq!(farm.plan.as_ref().unwrap().computes, 1);
+
+    // Retried the way it started, then expanded further.
+    backend.fail_expansion_from.store(0, Ordering::SeqCst);
+    let request = AddComputeRequest {
+        host_id: None,
+        from_snapshot: Some("cpt".into()),
+    };
+    let retry = manager.add_compute("r", request.clone()).unwrap();
+    assert_eq!(retry.target_node.as_deref(), Some("compute-2"));
+    assert_eq!(done(&manager, &retry).await.status, JobStatus::Succeeded);
+    let next = manager.add_compute("r", request).unwrap();
+    assert_eq!(next.target_node.as_deref(), Some("compute-3"));
+    assert_eq!(done(&manager, &next).await.status, JobStatus::Succeeded);
+    let farm = manager.get("r").unwrap();
+    assert_eq!(farm.status, FarmStatus::Ready);
+    assert_eq!(farm.plan.unwrap().computes, 3);
+
+    // A daemon stop leaves an assemble job interrupted, not its farm.
+    manager
+        .update(|state| {
+            let job = state.jobs.get_mut(&job.id).unwrap();
+            job.status = JobStatus::Running;
+            job.assembly[3].status = JobStatus::Running;
+            Ok(())
+        })
+        .unwrap();
+    settle(&manager).await;
+    drop(manager);
+    let manager = open_with(options(dir.path()), backend).await;
+    let job = manager.job(&job.id).unwrap();
+    assert_eq!(job.status, JobStatus::Interrupted);
+    assert_eq!(job.assembly[3].status, JobStatus::Interrupted);
+    assert_eq!(manager.get("r").unwrap().status, FarmStatus::Ready);
+}
+
+#[tokio::test]
+async fn a_release_farm_imports_bucket_templates_once_and_reuses_the_import() {
+    use crate::s3::{RegisterBucket, fake::FakeS3};
+    let s3 = Arc::new(FakeS3::default());
+    let endpoint = s3.start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let (manager, backend) = release_templates(dir.path()).await;
+    manager
+        .register_bucket(RegisterBucket {
+            id: "minio".into(),
+            endpoint: Some(endpoint),
+            region: None,
+            name: "farm".into(),
+            prefix: Some("snapshots".into()),
+            path_style: None,
+            ca_pem: None,
+            access_key_id: "admin".into(),
+            secret_access_key: Some("secret".into()),
+        })
+        .unwrap();
+    for id in ["ctl", "cpt"] {
+        manager
+            .export_snapshot(
+                id,
+                ExportRequest {
+                    bucket: Some("minio".into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(manager.wait_snapshot(id).await.unwrap().error, None);
+    }
+    let catalog = manager.release_catalog(None, None).await.unwrap();
+    assert_eq!(catalog.releases.len(), 1);
+    let counts = &catalog.releases[0];
+    assert_eq!(
+        (
+            counts.local_control,
+            counts.local_compute,
+            counts.bucket_control,
+            counts.bucket_compute
+        ),
+        (2, 1, 1, 1)
+    );
+    // Only the bucket keeps them now.
+    for id in ["ctl-old", "ctl", "cpt"] {
+        manager.forget_snapshot(id).await.unwrap();
+    }
+    let plan = manager.preview_release(&by_release("r", 2)).await.unwrap();
+    assert_eq!(plan.control.source, NodeSource::Bucket);
+    assert_eq!(plan.control.bucket.as_deref(), Some("minio"));
+    assert_eq!(plan.control.key.as_deref(), Some("snapshots/ctl.msb"));
+    assert_eq!(plan.control.snapshot_id.as_deref(), Some("ctl"));
+    assert!(
+        plan.computes
+            .iter()
+            .all(|c| c.source == NodeSource::Bucket && c.snapshot_id.as_deref() == Some("cpt"))
+    );
+    // An unknown bucket named in the request is an error, not a silent miss.
+    assert!(
+        manager
+            .preview_release(&ReleaseCreateRequest {
+                bucket: Some("nope".into()),
+                ..by_release("r", 1)
+            })
+            .await
+            .unwrap_err()
+            .is::<NotFound>()
+    );
+
+    let job = manager.create_release(by_release("r", 2)).await.unwrap();
+    let actions: Vec<_> = job.assembly.iter().map(|s| s.action.as_str()).collect();
+    assert_eq!(actions, ["import", "import", "restore", "expand", "expand"]);
+    let finished = done_slowly(&manager, &job).await;
+    assert_eq!(
+        finished.status,
+        JobStatus::Succeeded,
+        "{:?}",
+        finished.error
+    );
+    assert_eq!(
+        manager.snapshot("ctl").unwrap().template,
+        Some(TemplateRole::Control)
+    );
+    assert_eq!(
+        manager.snapshot("cpt").unwrap().status,
+        SnapshotStatus::Ready
+    );
+    assert_eq!(manager.get("r").unwrap().plan.unwrap().computes, 2);
+    assert_eq!(backend.reconfigured.lock().unwrap().len(), 2);
+
+    // The imports are local templates now and are used as they are.
+    let plan = manager
+        .preview_release(&by_release("again", 1))
+        .await
+        .unwrap();
+    assert_eq!(plan.control.source, NodeSource::Template);
+    assert_eq!(plan.computes[0].source, NodeSource::Template);
+
+    // An import of the same archive that is still running is waited for, not repeated.
+    manager.forget_snapshot("ctl").await.unwrap();
+    manager
+        .import_snapshot(ImportRequest {
+            bucket: Some("minio".into()),
+            key: Some("snapshots/ctl.msb".into()),
+            id: Some("running".into()),
+            ..Default::default()
+        })
+        .unwrap();
+    let plan = manager
+        .preview_release(&by_release("again", 1))
+        .await
+        .unwrap();
+    if manager.snapshot("running").unwrap().status == SnapshotStatus::Importing {
+        assert_eq!(plan.control.snapshot_id.as_deref(), Some("running"));
+    }
+    let job = manager
+        .create_release(by_release("again", 1))
+        .await
+        .unwrap();
+    let finished = done_slowly(&manager, &job).await;
+    assert_eq!(
+        finished.status,
+        JobStatus::Succeeded,
+        "{:?}",
+        finished.error
+    );
+    assert_eq!(
+        manager.get("again").unwrap().snapshot_id.as_deref(),
+        Some("running")
+    );
+    assert!(manager.snapshot("ctl").is_err());
+}
+
+#[tokio::test]
+async fn release_routes_preview_and_start_farms() {
+    let dir = tempfile::tempdir().unwrap();
+    let (manager, _) = release_templates(dir.path()).await;
+    let app = api::router(manager.clone(), None);
+    let call = |method: &str, uri: &str, body: Option<serde_json::Value>| {
+        let mut builder = Request::builder().method(method).uri(uri);
+        if body.is_some() {
+            builder = builder.header("content-type", "application/json");
+        }
+        builder
+            .body(body.map_or_else(Body::empty, |b| Body::from(b.to_string())))
+            .unwrap()
+    };
+    let response = app
+        .clone()
+        .oneshot(call("GET", "/api/v1/releases", None))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let catalog: serde_json::Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(catalog["releases"][0]["local_control"], 2);
+    let request = serde_json::json!({
+        "id": "r", "release": crate::kolla::OPENSTACK_RELEASE, "host_id": "local", "computes": 1
+    });
+    let response = app
+        .clone()
+        .oneshot(call("POST", "/api/v1/releases/plan", Some(request.clone())))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let plan: serde_json::Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(plan["control"]["source"], "template");
+    assert_eq!(plan["computes"][0]["snapshot_id"], "cpt");
+    let response = app
+        .clone()
+        .oneshot(call("POST", "/api/v1/releases/farms", Some(request)))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let job: Job =
+        serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert_eq!(job.kind, JobKind::Assemble);
+    assert_eq!(
+        done_slowly(&manager, &job).await.status,
+        JobStatus::Succeeded
+    );
+    let response = app
+        .oneshot(call(
+            "POST",
+            "/api/v1/releases/plan",
+            Some(serde_json::json!({"id": "x", "release": "1999.1", "host_id": "local"})),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
 }

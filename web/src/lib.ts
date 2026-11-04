@@ -13,6 +13,7 @@ export const jobKindLabels: Record<Job["kind"], string> = {
   snapshot: "스냅샷 얼리기",
   restore: "스냅샷에서 복원",
   settle: "서비스 응답 확인",
+  assemble: "릴리스로 만들기",
 };
 export const phases: { id: Phase; label: string; description: string }[] = [
   {

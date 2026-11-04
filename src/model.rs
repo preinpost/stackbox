@@ -590,6 +590,9 @@ pub enum JobKind {
     Restore,
     /// Check that a deployed farm's services answer again, without deploying
     Settle,
+    /// Start a farm of an OpenStack release from its templates: restore the control VM,
+    /// then add each compute, each step a job of its own
+    Assemble,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
@@ -749,6 +752,9 @@ pub struct Job {
     /// order they started; the last one is current while the job runs.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub steps: Vec<JobStep>,
+    /// The steps of an assemble job, in order, each with the job that ran it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub assembly: Vec<AssemblyStep>,
 }
 /// One numbered step of a job.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
@@ -787,6 +793,144 @@ impl Job {
 }
 fn is_zero(value: &u64) -> bool {
     *value == 0
+}
+
+/// One step of an assemble job.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct AssemblyStep {
+    /// What the step does: `import`, `create`, `deploy`, `restore` or `expand`.
+    pub action: String,
+    /// The VM it makes (`control`, `compute-1`, ...); none for an import.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node: Option<String>,
+    /// The template it imports or boots from; none for a clean install.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot_id: Option<String>,
+    /// Host the VM runs on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_id: Option<String>,
+    pub description: String,
+    pub status: JobStatus,
+    /// The farm job that ran it; none for an import, which the snapshot shows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Create a farm of an OpenStack release from saved templates: the control VM from a
+/// control template, each compute from a compute template of the same release when one
+/// can boot on its host, otherwise installed clean.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ReleaseCreateRequest {
+    pub id: String,
+    /// OpenStack release, such as `2026.2`.
+    pub release: String,
+    /// Registered host of the control VM. Required; optional only for the error message.
+    #[serde(default)]
+    pub host_id: Option<String>,
+    /// Services the farm runs; empty takes the control template's.
+    #[serde(default)]
+    pub components: Vec<String>,
+    /// Compute VMs, up to 3.
+    #[serde(default)]
+    pub computes: u8,
+    /// Host of each compute VM in order (`compute-1` first); a missing or empty entry is
+    /// the control VM's host.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub compute_hosts: Vec<String>,
+    /// Control template to use instead of the newest matching one.
+    #[serde(default)]
+    pub control_template: Option<String>,
+    /// Compute template to use instead of the newest matching one.
+    #[serde(default)]
+    pub compute_template: Option<String>,
+    /// Registered bucket to also search for templates; omitted searches every bucket.
+    #[serde(default)]
+    pub bucket: Option<String>,
+    #[serde(default = "default_host")]
+    pub external_host: String,
+    #[serde(default)]
+    pub owner: Option<String>,
+    #[serde(default)]
+    pub expires_at: Option<u64>,
+}
+impl ReleaseCreateRequest {
+    /// The VM's host: `compute_hosts` for a compute, else the control VM's.
+    pub fn host_of(&self, index: u8) -> Option<String> {
+        self.compute_hosts
+            .get(usize::from(index).wrapping_sub(1))
+            .filter(|host| !host.trim().is_empty())
+            .cloned()
+            .or_else(|| self.host_id.clone())
+    }
+}
+
+/// Where a planned VM comes from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum NodeSource {
+    /// A template snapshot this coordinator keeps.
+    Template,
+    /// A template archive in a bucket, imported first.
+    Bucket,
+    /// Installed from the golden image.
+    Clean,
+}
+
+/// How one VM of a release farm will be made, and why.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct PlannedNode {
+    /// `control`, `compute-1`, ... or `all-in-one` for a clean farm without computes.
+    pub node: String,
+    pub host_id: String,
+    pub source: NodeSource,
+    /// The local template it boots from; for a bucket template, the ID it is imported as.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bucket: Option<String>,
+    /// Object key of a bucket template's archive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    pub reason: String,
+}
+
+/// The resolved plan of a [`ReleaseCreateRequest`].
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct ReleasePlan {
+    pub farm_id: String,
+    pub release: String,
+    pub arch: String,
+    pub components: Vec<String>,
+    pub control: PlannedNode,
+    pub computes: Vec<PlannedNode>,
+    /// Buckets that could not be searched, and other things worth knowing.
+    #[serde(default)]
+    pub notes: Vec<String>,
+}
+
+/// Templates of one OpenStack release.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct ReleaseTemplates {
+    pub release: String,
+    pub local_control: usize,
+    pub local_compute: usize,
+    pub bucket_control: usize,
+    pub bucket_compute: usize,
+    /// Whether this coordinator can also install the release clean.
+    pub installable: bool,
+}
+
+/// Releases a farm can be created with on one architecture, newest first.
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
+pub struct ReleaseCatalog {
+    pub arch: String,
+    pub releases: Vec<ReleaseTemplates>,
+    /// Buckets that could not be listed, with the error.
+    #[serde(default)]
+    pub unreachable: Vec<String>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, ToSchema)]

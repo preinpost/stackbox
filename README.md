@@ -224,6 +224,31 @@ farm add-compute c13 --from-snapshot src-compute-tpl        # compute-2, 3: comp
 - compute가 없는 farm은 다시 배포(`deploy`)할 수 없고 farm 전체로도 얼릴 수 없습니다(control 템플릿만).
   compute 템플릿은 여전히 farm 복원에 쓸 수 없습니다.
 
+#### 릴리스로 만들기
+
+호스트를 등록한 뒤 OpenStack 릴리스만 고르면, coordinator가 저장된 템플릿으로 조립 계획을 세우고
+그대로 실행합니다. control VM은 그 릴리스의 control 템플릿 중 가장 최근 것(로컬 스냅샷을 먼저, 없으면
+버킷의 아카이브)에서, 각 compute는 같은 릴리스·서비스의 compute 템플릿에서 만들고, 쓸 수 있는 템플릿이
+없으면 클린 설치합니다.
+
+```bash
+farm releases                                                        # 릴리스별 control/compute 템플릿 수(로컬·버킷)
+farm create c13 --host-id local --release 2026.2 --computes 3 --dry-run  # VM마다 템플릿/클린 설치와 이유만 출력
+farm create c13 --host-id local --release 2026.2 --computes 3 \
+  --compute-host local --compute-host local --compute-host dev-01    # compute-3만 원격 호스트
+```
+
+- 계획은 `POST /api/v1/releases/plan`(dry run), 실행은 `POST /api/v1/releases/farms`입니다. 실행은
+  `assemble` job 하나로 묶이며, 단계(`assembly`)마다 기존 job이 차례로 돕니다: 버킷 템플릿 가져오기 →
+  control 템플릿 복원(`restore`) → compute마다 `expand`. 같은 아카이브를 가져오는 중인 import가 있으면
+  새로 받지 않고 기다립니다.
+- 템플릿은 지금 로컬 호스트에만 있습니다. 그래서 다른 호스트의 compute는 클린 설치되고, control VM을
+  다른 호스트에 두면 farm 전체가 클린 설치됩니다. 계획의 `reason`에 그 이유가 적힙니다.
+- control 템플릿이 없거나 쓸 수 없으면 이 coordinator가 배포하는 릴리스(현재 2026.2)만 기존 경로대로
+  클린 생성(`create`) → 배포(`deploy`)하고, 다른 릴리스는 `409`로 거절합니다.
+- 중간 단계가 실패하면 farm은 그때까지 붙은 VM을 유지합니다. 실패한 compute는 job 오류에 적힌 대로
+  `farm add-compute`(같은 템플릿 또는 클린 설치)로 재시도하고 나머지도 이어 붙이면 됩니다.
+
 ## 웹포탈
 
 Tailwind CSS·Base UI와 TanStack Router/Query/Table로 구성한 웹포탈은 `web/`에 있습니다.

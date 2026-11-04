@@ -3,6 +3,7 @@ import {
   ArrowRight,
   CopyPlus,
   Cpu,
+  Layers,
   Play,
   Plus,
   ShieldCheck,
@@ -23,6 +24,7 @@ const jobIcons = {
   snapshot: Snowflake,
   restore: CopyPlus,
   settle: ShieldCheck,
+  assemble: Layers,
 };
 export function JobsPage() {
   return <JobsMonitor />;

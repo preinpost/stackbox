@@ -16,7 +16,7 @@ import {
   ShieldCheck,
   Trash2,
 } from "lucide-react";
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import {
   api,
   catalogQuery,
@@ -57,6 +57,7 @@ import {
   Modal,
   SelectInput,
 } from "./ui";
+import { ReleaseFarmForm } from "./release-create";
 
 async function refresh(client: ReturnType<typeof useQueryClient>) {
   await Promise.all([
@@ -106,6 +107,36 @@ export function CreateFarmDialog({
 }) {
   const [open, setOpen] = useState(false);
   const [pending, setPending] = useState(false);
+  const [mode, setMode] = useState<"release" | "custom">("release");
+  const header = (
+    <div className="field">
+      <span>만드는 방법</span>
+      <div
+        className="segmented-control"
+        role="radiogroup"
+        aria-label="만드는 방법"
+      >
+        {(
+          [
+            { value: "release", label: "릴리스로 만들기" },
+            { value: "custom", label: "구성 직접 고르기" },
+          ] as const
+        ).map((item) => (
+          <button
+            key={item.value}
+            type="button"
+            role="radio"
+            aria-checked={mode === item.value}
+            className={`flex-1 ${mode === item.value ? "selected" : ""}`}
+            disabled={pending}
+            onClick={() => setMode(item.value)}
+          >
+            {item.label}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
   return (
     <Dialog.Root
       open={open}
@@ -122,13 +153,22 @@ export function CreateFarmDialog({
         <Plus size={16} />
         {label}
       </Dialog.Trigger>
-      {open && (
-        <CreateFarmForm
-          close={() => setOpen(false)}
-          onPending={setPending}
-          initialHost={hostId}
-        />
-      )}
+      {open &&
+        (mode === "release" ? (
+          <ReleaseFarmForm
+            close={() => setOpen(false)}
+            onPending={setPending}
+            initialHost={hostId}
+            header={header}
+          />
+        ) : (
+          <CreateFarmForm
+            close={() => setOpen(false)}
+            onPending={setPending}
+            initialHost={hostId}
+            header={header}
+          />
+        ))}
     </Dialog.Root>
   );
 }
@@ -136,10 +176,12 @@ export function CreateFarmForm({
   close,
   onPending,
   initialHost,
+  header,
 }: {
   close: () => void;
   onPending: (pending: boolean) => void;
   initialHost?: string;
+  header?: ReactNode;
 }) {
   const client = useQueryClient();
   const navigate = useNavigate();
@@ -241,6 +283,7 @@ export function CreateFarmForm({
         }}
       >
         <div className="modal-body space-y-6">
+          {header}
           <div>
             <span className="field-label">실행 호스트</span>
             {noHosts ? (

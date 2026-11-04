@@ -1836,6 +1836,176 @@
         }
       }
     },
+    "/api/v1/releases": {
+      "get": {
+        "tags": [],
+        "operationId": "releases",
+        "parameters": [
+          {
+            "name": "arch",
+            "in": "path",
+            "description": "CPU architecture; defaults to this coordinator's.",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "bucket",
+            "in": "path",
+            "description": "Registered bucket to count templates in; omitted counts every bucket.",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OpenStack releases with the control and compute templates kept here and in buckets, newest release first. The release this coordinator installs clean is always listed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReleaseCatalog"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/releases/farms": {
+      "post": {
+        "tags": [],
+        "operationId": "create_release",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReleaseCreateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Assemble job: the plan's imports, the control VM, then each compute, each step a job of its own listed in `assembly`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Job"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/releases/plan": {
+      "post": {
+        "tags": [],
+        "operationId": "release_plan",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReleaseCreateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Dry run: which template or clean install would make each VM, and why. Nothing is created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReleasePlan"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "No control template of the release, and this coordinator installs another release clean",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/snapshots": {
       "get": {
         "tags": [],
@@ -2238,6 +2408,61 @@
               "string",
               "null"
             ]
+          }
+        }
+      },
+      "AssemblyStep": {
+        "type": "object",
+        "description": "One step of an assemble job.",
+        "required": [
+          "action",
+          "description",
+          "status"
+        ],
+        "properties": {
+          "action": {
+            "type": "string",
+            "description": "What the step does: `import`, `create`, `deploy`, `restore` or `expand`."
+          },
+          "description": {
+            "type": "string"
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "host_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Host the VM runs on."
+          },
+          "job_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The farm job that ran it; none for an import, which the snapshot shows."
+          },
+          "node": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The VM it makes (`control`, `compute-1`, ...); none for an import."
+          },
+          "snapshot_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The template it imports or boots from; none for a clean install."
+          },
+          "status": {
+            "$ref": "#/components/schemas/JobStatus"
           }
         }
       },
@@ -3445,6 +3670,13 @@
           "created_at"
         ],
         "properties": {
+          "assembly": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AssemblyStep"
+            },
+            "description": "The steps of an assemble job, in order, each with the job that ran it."
+          },
           "created_at": {
             "type": "integer",
             "format": "int64",
@@ -3550,7 +3782,8 @@
           "delete",
           "snapshot",
           "restore",
-          "settle"
+          "settle",
+          "assemble"
         ]
       },
       "JobStatus": {
@@ -3667,6 +3900,15 @@
             "minimum": 0
           }
         }
+      },
+      "NodeSource": {
+        "type": "string",
+        "description": "Where a planned VM comes from.",
+        "enum": [
+          "template",
+          "bucket",
+          "clean"
+        ]
       },
       "NodeSpec": {
         "type": "object",
@@ -3817,6 +4059,51 @@
           }
         },
         "additionalProperties": false
+      },
+      "PlannedNode": {
+        "type": "object",
+        "description": "How one VM of a release farm will be made, and why.",
+        "required": [
+          "node",
+          "host_id",
+          "source",
+          "reason"
+        ],
+        "properties": {
+          "bucket": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "host_id": {
+            "type": "string"
+          },
+          "key": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Object key of a bucket template's archive."
+          },
+          "node": {
+            "type": "string",
+            "description": "`control`, `compute-1`, ... or `all-in-one` for a clean farm without computes."
+          },
+          "reason": {
+            "type": "string"
+          },
+          "snapshot_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The local template it boots from; for a bucket template, the ID it is imported as."
+          },
+          "source": {
+            "$ref": "#/components/schemas/NodeSource"
+          }
+        }
       },
       "RegisterAgentHost": {
         "type": "object",
@@ -4041,6 +4328,197 @@
           "proxy",
           "quick_tunnel"
         ]
+      },
+      "ReleaseCatalog": {
+        "type": "object",
+        "description": "Releases a farm can be created with on one architecture, newest first.",
+        "required": [
+          "arch",
+          "releases"
+        ],
+        "properties": {
+          "arch": {
+            "type": "string"
+          },
+          "releases": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ReleaseTemplates"
+            }
+          },
+          "unreachable": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Buckets that could not be listed, with the error."
+          }
+        }
+      },
+      "ReleaseCreateRequest": {
+        "type": "object",
+        "description": "Create a farm of an OpenStack release from saved templates: the control VM from a\ncontrol template, each compute from a compute template of the same release when one\ncan boot on its host, otherwise installed clean.",
+        "required": [
+          "id",
+          "release"
+        ],
+        "properties": {
+          "bucket": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Registered bucket to also search for templates; omitted searches every bucket."
+          },
+          "components": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Services the farm runs; empty takes the control template's."
+          },
+          "compute_hosts": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Host of each compute VM in order (`compute-1` first); a missing or empty entry is\nthe control VM's host."
+          },
+          "compute_template": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Compute template to use instead of the newest matching one."
+          },
+          "computes": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Compute VMs, up to 3.",
+            "minimum": 0
+          },
+          "control_template": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Control template to use instead of the newest matching one."
+          },
+          "expires_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
+          "external_host": {
+            "type": "string"
+          },
+          "host_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Registered host of the control VM. Required; optional only for the error message."
+          },
+          "id": {
+            "type": "string"
+          },
+          "owner": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "release": {
+            "type": "string",
+            "description": "OpenStack release, such as `2026.2`."
+          }
+        },
+        "additionalProperties": false
+      },
+      "ReleasePlan": {
+        "type": "object",
+        "description": "The resolved plan of a [`ReleaseCreateRequest`].",
+        "required": [
+          "farm_id",
+          "release",
+          "arch",
+          "components",
+          "control",
+          "computes"
+        ],
+        "properties": {
+          "arch": {
+            "type": "string"
+          },
+          "components": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "computes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PlannedNode"
+            }
+          },
+          "control": {
+            "$ref": "#/components/schemas/PlannedNode"
+          },
+          "farm_id": {
+            "type": "string"
+          },
+          "notes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Buckets that could not be searched, and other things worth knowing."
+          },
+          "release": {
+            "type": "string"
+          }
+        }
+      },
+      "ReleaseTemplates": {
+        "type": "object",
+        "description": "Templates of one OpenStack release.",
+        "required": [
+          "release",
+          "local_control",
+          "local_compute",
+          "bucket_control",
+          "bucket_compute",
+          "installable"
+        ],
+        "properties": {
+          "bucket_compute": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "bucket_control": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "installable": {
+            "type": "boolean",
+            "description": "Whether this coordinator can also install the release clean."
+          },
+          "local_compute": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "local_control": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "release": {
+            "type": "string"
+          }
+        }
       },
       "RemoteHost": {
         "type": "object",

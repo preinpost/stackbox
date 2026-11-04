@@ -2,6 +2,7 @@ mod backend;
 mod buckets;
 pub(crate) mod hosts;
 mod logs;
+mod releases;
 mod snapshots;
 mod store;
 
@@ -13,6 +14,7 @@ use crate::{
 };
 use anyhow::{Context, Result, anyhow, bail};
 pub use backend::{Backend, MicrosandboxBackend};
+pub use releases::describe as describe_release_plan;
 use std::{
     net::{IpAddr, Ipv4Addr, TcpListener},
     path::{Path, PathBuf},
@@ -307,6 +309,11 @@ impl FarmManager {
                 }
             }
             for job in state.jobs.values_mut().filter(|j| j.status.active()) {
+                // Its steps are jobs of their own, recovered on their own.
+                if job.kind == JobKind::Assemble {
+                    releases::interrupt(job);
+                    continue;
+                }
                 // A deploy runs on as its host-side job; follow it again instead of giving it up.
                 if job.kind == JobKind::Deploy && job.remote_job_id.is_some() {
                     job.status = JobStatus::Running;
@@ -1910,7 +1917,7 @@ impl FarmManager {
             JobKind::Deploy | JobKind::Expand => Some(self.0.deploy_gate.acquire().await?),
             JobKind::Snapshot => Some(self.0.snapshot_gate.acquire().await?),
             JobKind::Settle => Some(self.0.deploy_gate.acquire().await?),
-            JobKind::Delete => None,
+            JobKind::Delete | JobKind::Assemble => None,
         };
         self.update(|state| {
             let j = state.jobs.get_mut(&job.id).context("job missing")?;
@@ -2033,6 +2040,7 @@ impl FarmManager {
             }
             JobKind::Snapshot => self.freeze_job(job, farm).await?,
             JobKind::Restore => self.restore_job(job, farm).await?,
+            JobKind::Assemble => bail!("an assemble job runs its steps as jobs of their own"),
         }
         Ok(())
     }
@@ -2551,7 +2559,7 @@ impl FarmManager {
             let farm = state.farms.get_mut(&job.farm_id).context("farm missing")?;
             farm.status = match (job.kind, error.is_some()) {
                 // Freezing leaves the farm as it was; a failure is reported on the job and snapshot.
-                (JobKind::Snapshot, _) => farm.status,
+                (JobKind::Snapshot | JobKind::Assemble, _) => farm.status,
                 // A check that fails leaves the VM as it was; the user can run it again.
                 (JobKind::Settle, true) => FarmStatus::Created,
                 (JobKind::Settle, false) => FarmStatus::Ready,
@@ -2598,7 +2606,10 @@ impl FarmManager {
             if self
                 .jobs()?
                 .iter()
-                .all(|j| !j.status.active() || j.kind == JobKind::Deploy)
+                // An assemble job only waits for its steps; the next start interrupts it.
+                .all(|j| {
+                    !j.status.active() || matches!(j.kind, JobKind::Deploy | JobKind::Assemble)
+                })
                 && self.host_jobs()?.iter().all(|j| !j.status.active())
                 && self.snapshots()?.iter().all(|s| !snapshots::busy(s.status))
             {
@@ -2777,6 +2788,7 @@ fn new_job(farm: &str, kind: JobKind) -> Job {
         target_host: None,
         target_node: None,
         steps: Vec::new(),
+        assembly: Vec::new(),
     }
 }
 fn farm_components(farm: &FarmRecord) -> Vec<String> {
