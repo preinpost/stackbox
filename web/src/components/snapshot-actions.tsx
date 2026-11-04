@@ -903,15 +903,19 @@ export function ImportSnapshotDialog() {
 export function DeleteSnapshotDialog({ snapshot }: { snapshot: Snapshot }) {
   const client = useQueryClient();
   const [forget, setForget] = useState(false);
+  const [left, setLeft] = useState<string[]>([]);
   const mutation = useMutation({
     mutationFn: () => api.deleteSnapshot(snapshot.id, forget),
-    onSuccess: async () => {
+    onSuccess: async (removed) => {
       await refresh(client);
-      dialog.setOpen(false);
+      // The snapshot is gone either way; say which hosts kept their copy.
+      if (removed.copies_left?.length) setLeft(removed.copies_left);
+      else dialog.setOpen(false);
     },
   });
   const dialog = useDialog(mutation.isPending, () => {
     setForget(false);
+    setLeft([]);
     mutation.reset();
   });
   return (
@@ -948,6 +952,12 @@ export function DeleteSnapshotDialog({ snapshot }: { snapshot: Snapshot }) {
                   : "내보낸 아카이브가 없습니다. 삭제하면 되돌릴 수 없습니다."}
               </p>
               {snapshot.archive && <CopyText value={snapshot.archive.path} />}
+              {!forget && snapshot.copies?.length ? (
+                <p>
+                  {snapshot.copies.map((copy) => copy.host_id).join(", ")}에 둔
+                  사본도 지웁니다.
+                </p>
+              ) : null}
             </div>
           </div>
           <ForgetOption
@@ -957,14 +967,25 @@ export function DeleteSnapshotDialog({ snapshot }: { snapshot: Snapshot }) {
             left="스냅샷 디스크"
           />
           {mutation.error && <ErrorNotice error={mutation.error} />}
+          {left.length > 0 && (
+            <div className="warning-notice">
+              스냅샷은 삭제했지만 다음 호스트의 사본은 지우지 못했습니다. 그
+              호스트에서 직접 지우세요.
+              <ul className="mt-1.5 font-mono text-xs">
+                {left.map((line) => (
+                  <li key={line}>{line}</li>
+                ))}
+              </ul>
+            </div>
+          )}
         </div>
         <div className="modal-footer justify-end">
           <Dialog.Close render={<Button disabled={mutation.isPending} />}>
-            취소
+            {left.length ? "닫기" : "취소"}
           </Dialog.Close>
           <Button
             variant="danger"
-            disabled={mutation.isPending}
+            disabled={mutation.isPending || left.length > 0}
             onClick={() => mutation.mutate()}
           >
             {mutation.isPending ? (

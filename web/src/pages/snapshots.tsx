@@ -14,6 +14,7 @@ import {
   ImportSnapshotDialog,
   RestoreSnapshotDialog,
 } from "../components/snapshot-actions";
+import { SnapshotCopies } from "../components/snapshot-copies";
 import {
   CopyText,
   EmptyState,
@@ -196,6 +197,7 @@ function SnapshotRow({
           )}
         </div>
         <TransferProgress snapshot={snapshot} />
+        <SnapshotCopies snapshot={snapshot} />
         {snapshot.archive && (
           <div className="job-meta flex-wrap">
             <span>

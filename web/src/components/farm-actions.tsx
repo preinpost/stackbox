@@ -739,9 +739,12 @@ export function AddComputeDialog({
     snapshots.data,
     coordinator.data?.arch,
   );
-  const localHost = hosts.data?.find((host) => host.kind === "local");
-  // Templates are kept on the local host, beside a control VM that runs there.
-  const templateHost = farm.host_id === localHost?.id;
+  // A template boots on any host; one without a copy gets it when the job starts.
+  const copying =
+    hostId !== hosts.data?.find((host) => host.kind === "local")?.id &&
+    !templates
+      .find((snapshot) => snapshot.id === template)
+      ?.copies?.some((copy) => copy.host_id === hostId);
   const plan = farm.plan;
   const computes = plan?.computes ?? 0;
   const next = computes + 1;
@@ -761,7 +764,7 @@ export function AddComputeDialog({
     allowed &&
     Boolean(hostId) &&
     (!remote || Boolean(relay)) &&
-    (!fromSnapshot || (Boolean(template) && !remote && templateHost));
+    (!fromSnapshot || Boolean(template));
   const mutation = useMutation({
     mutationFn: () =>
       api.addCompute(
@@ -845,7 +848,6 @@ export function AddComputeDialog({
                     onClick={() => {
                       setMode(item.value);
                       if (item.value === "snapshot") {
-                        setHostId(farm.host_id ?? "");
                         if (!template && templates[0])
                           setTemplate(templates[0].id);
                       }
@@ -884,12 +886,6 @@ export function AddComputeDialog({
                 compute VM 하나를 템플릿으로 얼려두세요.
               </div>
             )}
-            {fromSnapshot && !templateHost && (
-              <div className="warning-notice">
-                compute 템플릿은 로컬 호스트에 있으므로, control VM이 로컬
-                호스트에서 도는 farm에만 쓸 수 있습니다.
-              </div>
-            )}
             <label className="field">
               <span>호스트</span>
               <SelectInput
@@ -900,9 +896,19 @@ export function AddComputeDialog({
                   value: host.id,
                   label: hostLabel(host),
                 }))}
-                disabled={mutation.isPending || resumable || fromSnapshot}
+                disabled={mutation.isPending || resumable}
               />
             </label>
+            {fromSnapshot && template && hostId && copying && (
+              <div className="info-notice">
+                <Cpu size={18} />
+                <div>
+                  이 호스트에는 템플릿 사본이 없어 작업이 먼저 복사합니다.
+                  버킷에 올려둔 템플릿이면 호스트가 직접 내려받고, 아니면 이
+                  coordinator가 보냅니다. 진행은 작업 로그에 나옵니다.
+                </div>
+              </div>
+            )}
             {remote && !relay && (
               <div className="warning-notice">
                 다른 호스트의 compute를 붙이려면 먼저 Hosts에서 호스트 간

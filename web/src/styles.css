@@ -3832,6 +3832,15 @@ h2 {
   font-size: 11.5px;
   color: #597260;
 }
+.snapshot-copy-remove {
+  display: inline-flex;
+  border-radius: 3px;
+  color: #8aa08f;
+}
+.snapshot-copy-remove:hover:not(:disabled) {
+  color: #b42318;
+  background: #fdecea;
+}
 .bucket-modal {
   width: 580px;
   max-height: calc(100dvh - 40px);
