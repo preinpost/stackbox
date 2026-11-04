@@ -43,6 +43,7 @@ import {
   SelectInput,
   StatusBadge,
 } from "../components/ui";
+import { currentStep, StepList } from "../components/job-steps";
 import { dateTime, jobKindLabels, phases } from "../lib";
 import {
   activityLabel,
@@ -227,6 +228,25 @@ function JobWorkspace({
                       ))}
                     </div>
                   )}
+                {a.scope === "farm" &&
+                  (() => {
+                    const step = currentStep(a.job);
+                    return (
+                      step && (
+                        <div
+                          className="jobs-phase-track"
+                          aria-label={`${step.total}단계 중 ${step.index}단계`}
+                        >
+                          {Array.from({ length: step.total }, (_, index) => (
+                            <i
+                              key={index}
+                              className={index < step.index ? "reached" : ""}
+                            />
+                          ))}
+                        </div>
+                      )
+                    );
+                  })()}
               </button>
             ))}
           </div>
@@ -620,6 +640,7 @@ function ActivityDetail({
                 <pre>{a.job.error}</pre>
               </section>
             )}
+            {a.scope === "farm" && <StepList job={a.job} now={now} />}
             {a.scope === "host" ? (
               <section className="job-detail-log">
                 <h3>작업 이벤트</h3>

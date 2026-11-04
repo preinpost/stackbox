@@ -1,5 +1,6 @@
 import { activeJob, type HostJob, type Job } from "../api/client";
-import { jobKindLabels, phases } from "../lib";
+import { currentStep, stepLabel } from "../components/job-steps";
+import { duration, jobKindLabels, phases } from "../lib";
 
 export type Activity =
   { scope: "farm"; job: Job } | { scope: "host"; job: HostJob };
@@ -31,6 +32,8 @@ export function activityStep(a: Activity) {
     return activeJob(a.job)
       ? (a.job.events.at(-1)?.message ?? "작업 시작 중")
       : "—";
+  const step = currentStep(a.job);
+  if (step) return stepLabel(step);
   return (
     phases.find((p) => p.id === a.job.phase)?.description ??
     (activeJob(a.job) ? activityLabel(a) : "—")
@@ -44,11 +47,7 @@ export function failureSummary(a: Activity) {
 export function elapsed(a: Activity, now: number) {
   if (a.job.status === "queued") return "대기 중";
   if (!activeJob(a.job) && a.job.finished_at == null) return "—";
-  const start = startedAt(a);
-  const seconds = Math.max(0, Math.floor((a.job.finished_at ?? now) - start));
-  if (seconds < 60) return `${seconds}초`;
-  if (seconds < 3600) return `${Math.floor(seconds / 60)}분 ${seconds % 60}초`;
-  return `${Math.floor(seconds / 3600)}시간 ${Math.floor((seconds % 3600) / 60)}분`;
+  return duration((a.job.finished_at ?? now) - startedAt(a));
 }
 export function historyRows(
   activities: Activity[],

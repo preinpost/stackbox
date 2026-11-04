@@ -27,6 +27,7 @@ const jobIcons = {
 export function JobsPage() {
   return <JobsMonitor />;
 }
+import { StepProgress } from "../components/job-steps";
 export function JobRow({ job }: { job: Job }) {
   const Icon = jobIcons[job.kind];
   return (
@@ -62,6 +63,7 @@ export function JobRow({ job }: { job: Job }) {
             {relativeTime(job.created_at)}
           </span>
         </div>
+        <StepProgress job={job} />
         {job.error && <p className="job-error">{job.error}</p>}
       </div>
       <Link
