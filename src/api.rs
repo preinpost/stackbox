@@ -5,7 +5,7 @@ use crate::remote::{
 use crate::{
     manager::{BadRequest, Conflict, FarmManager, NotFound},
     model::*,
-    s3::{Bucket, BucketCheck, BucketObject, RegisterBucket},
+    s3::{Bucket, BucketCheck, BucketObject, RegisterBucket, catalog::BucketIndex},
 };
 use axum::{
     Json, Router,
@@ -128,6 +128,7 @@ pub fn router(manager: FarmManager, token: Option<String>) -> Router {
         )
         .route("/api/v1/buckets/{id}/check", post(check_bucket))
         .route("/api/v1/buckets/{id}/objects", get(bucket_objects))
+        .route("/api/v1/buckets/{id}/index", post(rebuild_bucket_index))
         .route(
             "/api/v1/relay",
             get(relay_status).put(set_relay).delete(remove_relay),
@@ -799,12 +800,19 @@ async fn check_bucket(
     let message = app.manager.check_bucket(&id).await?;
     Ok(Json(BucketCheck { message }))
 }
-#[utoipa::path(get, path="/api/v1/buckets/{id}/objects", params(("id"=String, Path)), responses((status=200, description="`.msb` objects under the bucket's prefix, newest first", body=Vec<BucketObject>), (status=400, body=ErrorBody), (status=404, body=ErrorBody)))]
+#[utoipa::path(get, path="/api/v1/buckets/{id}/objects", params(("id"=String, Path)), responses((status=200, description="`.msb` objects under the bucket's prefix, newest first, with the metadata their exports wrote next to them. A missing or outdated `index.json` is written again", body=Vec<BucketObject>), (status=400, body=ErrorBody), (status=404, body=ErrorBody)))]
 async fn bucket_objects(
     State(app): State<App>,
     Path(id): Path<String>,
 ) -> Result<Json<Vec<BucketObject>>, ApiError> {
     Ok(Json(app.manager.bucket_objects(&id).await?))
+}
+#[utoipa::path(post, path="/api/v1/buckets/{id}/index", params(("id"=String, Path)), responses((status=200, description="`index.json` under the bucket's prefix, written again from the archives' metadata files", body=BucketIndex), (status=400, body=ErrorBody), (status=404, body=ErrorBody)))]
+async fn rebuild_bucket_index(
+    State(app): State<App>,
+    Path(id): Path<String>,
+) -> Result<Json<BucketIndex>, ApiError> {
+    Ok(Json(app.manager.rebuild_bucket_index(&id).await?))
 }
 
 #[derive(Deserialize, utoipa::IntoParams)]
@@ -988,7 +996,7 @@ async fn relay_shell(
 }
 
 #[derive(OpenApi)]
-#[openapi(paths(host, remote_hosts, remote_host, host_fingerprint, test_connection, register_host, register_local_host, register_agent_host, update_host_credentials, unregister_host, check_host, prepare_host, install_agent, host_jobs, host_job, catalog_handler, plan_handler, list, detail, create, deploy, add_compute, settle, delete, endpoints, set_faults, logs, log_stream, freeze, snapshots, snapshot, delete_snapshot, export_snapshot, import_snapshot, buckets, bucket, register_bucket, update_bucket, unregister_bucket, test_bucket, check_bucket, bucket_objects, relay_status, set_relay, remove_relay, update_cloudflared, jobs, job), components(schemas(ErrorBody)), modifiers(&Security))]
+#[openapi(paths(host, remote_hosts, remote_host, host_fingerprint, test_connection, register_host, register_local_host, register_agent_host, update_host_credentials, unregister_host, check_host, prepare_host, install_agent, host_jobs, host_job, catalog_handler, plan_handler, list, detail, create, deploy, add_compute, settle, delete, endpoints, set_faults, logs, log_stream, freeze, snapshots, snapshot, delete_snapshot, export_snapshot, import_snapshot, buckets, bucket, register_bucket, update_bucket, unregister_bucket, test_bucket, check_bucket, bucket_objects, rebuild_bucket_index, relay_status, set_relay, remove_relay, update_cloudflared, jobs, job), components(schemas(ErrorBody)), modifiers(&Security))]
 struct ApiDoc;
 struct Security;
 impl utoipa::Modify for Security {

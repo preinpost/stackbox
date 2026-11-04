@@ -2143,6 +2143,234 @@ async fn snapshots_freeze_restore_export_import_and_delete() {
 }
 
 #[tokio::test]
+async fn bucket_archives_carry_metadata_files_and_an_index() {
+    use crate::s3::{
+        RegisterBucket,
+        catalog::{ArchiveMetadata, BucketIndex, TemplateQuery},
+        fake::FakeS3,
+    };
+    use sha2::{Digest, Sha256};
+    let s3 = Arc::new(FakeS3::default());
+    let endpoint = s3.start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let backend = Arc::new(Fake::default());
+    let manager = open_with(options(dir.path()), backend.clone()).await;
+    manager
+        .register_bucket(RegisterBucket {
+            id: "minio".into(),
+            endpoint: Some(endpoint),
+            region: None,
+            name: "farm".into(),
+            prefix: Some("snapshots".into()),
+            path_style: None,
+            ca_pem: None,
+            access_key_id: "admin".into(),
+            secret_access_key: Some("secret".into()),
+        })
+        .unwrap();
+    done(&manager, &manager.create(request("src")).unwrap()).await;
+    let freeze = manager
+        .freeze(
+            "src",
+            SnapshotRequest {
+                id: "clean".into(),
+                note: Some("catalogued".into()),
+                node: None,
+            },
+        )
+        .unwrap();
+    done(&manager, &freeze).await;
+    let export = |key: Option<&str>| {
+        manager.export_snapshot(
+            "clean",
+            ExportRequest {
+                bucket: Some("minio".into()),
+                key: key.map(Into::into),
+                ..Default::default()
+            },
+        )
+    };
+    // The metadata file would be the catalog itself.
+    assert!(
+        export(Some("snapshots/index"))
+            .unwrap_err()
+            .is::<BadRequest>()
+    );
+    export(None).unwrap();
+    let exported = manager.wait_snapshot("clean").await.unwrap();
+    assert_eq!(exported.error, None);
+    // The metadata file goes up after the archive, and the index after both.
+    assert_eq!(
+        *s3.writes.lock().unwrap(),
+        [
+            "snapshots/clean.msb",
+            "snapshots/clean.json",
+            "snapshots/index.json"
+        ]
+    );
+    let object = |key: &str| s3.objects.lock().unwrap().get(key).cloned();
+    let archive = object("snapshots/clean.msb").unwrap();
+    let sha256 = format!("{:x}", Sha256::digest(&archive));
+    assert_eq!(exported.archive.unwrap().sha256.as_deref(), Some(&*sha256));
+    let metadata = ArchiveMetadata::parse(&object("snapshots/clean.json").unwrap()).unwrap();
+    assert_eq!(metadata.key, "snapshots/clean.msb");
+    assert_eq!(metadata.size_bytes, archive.len() as u64);
+    assert_eq!(metadata.sha256, sha256);
+    assert_eq!(metadata.snapshot_id, "clean");
+    assert_eq!(
+        metadata.release.as_deref(),
+        Some(crate::kolla::OPENSTACK_RELEASE)
+    );
+    assert_eq!(metadata.role, None);
+    assert_eq!(metadata.source_farm.as_deref(), Some("src"));
+    assert_eq!(metadata.note.as_deref(), Some("catalogued"));
+    assert_eq!(metadata.arch, current_arch());
+    let index = BucketIndex::parse(&object("snapshots/index.json").unwrap()).unwrap();
+    assert_eq!(index.entries, std::slice::from_ref(&metadata));
+
+    // Archives from before metadata files are listed without any, and templates written
+    // by another coordinator are picked up from their files and indexed.
+    let put = |key: &str, body: Vec<u8>| {
+        s3.objects.lock().unwrap().insert(key.into(), body);
+    };
+    put("snapshots/old.msb", archive.clone());
+    let template = |key: &str, role, release: &str| {
+        let mut template = metadata.clone();
+        template.key = key.into();
+        template.snapshot_id = key.into();
+        template.role = Some(role);
+        template.release = Some(release.into());
+        template.exported_at += 1;
+        put(key, archive.clone());
+        put(
+            &crate::s3::catalog::metadata_key(key),
+            serde_json::to_vec(&template).unwrap(),
+        );
+        template
+    };
+    let control = template("snapshots/ctl.msb", TemplateRole::Control, "2025.1");
+    template("snapshots/cmp.msb", TemplateRole::Compute, "2024.2");
+    let listed = manager.bucket_objects("minio").await.unwrap();
+    let about = |key: &str| {
+        listed
+            .iter()
+            .find(|o| o.key == key)
+            .unwrap()
+            .metadata
+            .clone()
+    };
+    assert_eq!(listed.len(), 4);
+    assert_eq!(about("snapshots/old.msb"), None);
+    assert_eq!(about("snapshots/ctl.msb"), Some(control.clone()));
+    let indexed = || {
+        let mut keys: Vec<_> = BucketIndex::parse(&object("snapshots/index.json").unwrap())
+            .unwrap()
+            .entries
+            .into_iter()
+            .map(|e| e.key)
+            .collect();
+        keys.sort();
+        keys
+    };
+    assert_eq!(
+        indexed(),
+        [
+            "snapshots/clean.msb",
+            "snapshots/cmp.msb",
+            "snapshots/ctl.msb"
+        ]
+    );
+    let found = |query: TemplateQuery| {
+        let manager = manager.clone();
+        async move { manager.find_templates("minio", &query).await.unwrap() }
+    };
+    assert_eq!(
+        found(TemplateQuery {
+            release: Some("2025.1".into()),
+            role: Some(TemplateRole::Control),
+            arch: None,
+            components: Some(metadata.components.clone()),
+        })
+        .await,
+        std::slice::from_ref(&control)
+    );
+    assert!(
+        found(TemplateQuery {
+            release: Some("2025.1".into()),
+            role: Some(TemplateRole::Compute),
+            ..Default::default()
+        })
+        .await
+        .is_empty()
+    );
+    // Farm snapshots are not templates.
+    assert_eq!(found(TemplateQuery::default()).await.len(), 2);
+
+    // A corrupt index is rebuilt by the next listing; a gone archive leaves it.
+    put("snapshots/index.json", b"not json".to_vec());
+    s3.objects.lock().unwrap().remove("snapshots/cmp.msb");
+    manager.bucket_objects("minio").await.unwrap();
+    assert_eq!(indexed(), ["snapshots/clean.msb", "snapshots/ctl.msb"]);
+    s3.objects.lock().unwrap().remove("snapshots/index.json");
+    let rebuilt = manager.rebuild_bucket_index("minio").await.unwrap();
+    assert_eq!(rebuilt.entries.len(), 2);
+    assert_eq!(indexed(), ["snapshots/clean.msb", "snapshots/ctl.msb"]);
+
+    let import = |key: &str, id: &str| {
+        manager
+            .import_snapshot(ImportRequest {
+                bucket: Some("minio".into()),
+                key: Some(key.into()),
+                id: Some(id.into()),
+                ..Default::default()
+            })
+            .unwrap();
+        let manager = manager.clone();
+        let id = id.to_owned();
+        async move { manager.wait_snapshot(&id).await.unwrap() }
+    };
+    let verified = import("snapshots/clean.msb", "verified").await;
+    assert_eq!(
+        verified.status,
+        SnapshotStatus::Ready,
+        "{:?}",
+        verified.error
+    );
+    let legacy = import("snapshots/old.msb", "legacy").await;
+    assert_eq!(legacy.status, SnapshotStatus::Ready, "{:?}", legacy.error);
+    // A replaced archive does not match its metadata file's SHA-256.
+    let mut tampered = archive.clone();
+    tampered.push(b' ');
+    put("snapshots/clean.msb", tampered);
+    let refused = import("snapshots/clean.msb", "tampered").await;
+    assert_eq!(refused.status, SnapshotStatus::Failed);
+    assert!(refused.error.unwrap().contains("SHA-256"));
+    assert!(
+        !backend
+            .snapshots
+            .lock()
+            .unwrap()
+            .contains_key("fake/imported/tampered")
+    );
+    // The labels inside say farm snapshot, the metadata file control template.
+    let contradicted = import("snapshots/ctl.msb", "contradicted").await;
+    assert_eq!(contradicted.status, SnapshotStatus::Failed);
+    let error = contradicted.error.unwrap();
+    assert!(
+        error.contains("does not match its metadata file"),
+        "{error}"
+    );
+    assert!(
+        !backend
+            .snapshots
+            .lock()
+            .unwrap()
+            .contains_key("fake/imported/contradicted")
+    );
+    settle(&manager).await;
+}
+
+#[tokio::test]
 async fn snapshots_move_through_registered_buckets_with_sealed_keys() {
     use crate::s3::{RegisterBucket, fake::FakeS3};
     let s3 = Arc::new(FakeS3::default());

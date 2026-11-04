@@ -68,6 +68,13 @@ pub fn validate_key(key: &str) -> Result<()> {
     Ok(())
 }
 
+/// What an upload or download moved: its size and the hex SHA-256 of its bytes.
+#[derive(Debug, PartialEq)]
+pub struct Transferred {
+    pub size: u64,
+    pub sha256: String,
+}
+
 pub struct Object {
     pub key: String,
     pub size: u64,
@@ -202,6 +209,23 @@ impl Client {
         Ok(())
     }
 
+    /// A small object read whole, or `None` when there is none.
+    pub async fn get(&self, key: &str) -> Result<Option<Bytes>> {
+        let response = self.send(Call::new(Method::GET, Some(key))).await?;
+        if response.status() == StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        Ok(Some(expect(response, "read object").await?.bytes().await?))
+    }
+    /// Write a small object in one request, replacing any there.
+    pub async fn put(&self, key: &str, body: Bytes) -> Result<()> {
+        let call = Call::new(Method::PUT, Some(key))
+            .header("content-type", "application/json".into())
+            .body(body);
+        expect(self.send(call).await?, "write object").await?;
+        Ok(())
+    }
+
     pub async fn start_upload(&self, key: &str) -> Result<String> {
         let call = Call::new(Method::POST, Some(key)).query("uploads", "");
         let body = expect(self.send(call).await?, "start multipart upload")
@@ -211,14 +235,16 @@ impl Client {
         tag(&body, "UploadId").context("multipart upload response has no UploadId")
     }
 
-    /// Upload `path` in equal parts and complete the upload. `progress` gets the bytes sent so far.
+    /// Upload `path` in equal parts and complete the upload. `progress` gets the bytes sent
+    /// so far. The parts are hashed as they are read, so the file is read once.
     pub async fn upload(
         &self,
         path: &Path,
         key: &str,
         upload_id: &str,
         mut progress: impl FnMut(u64, u64),
-    ) -> Result<u64> {
+    ) -> Result<Transferred> {
+        let mut hash = Sha256::new();
         let mut file = tokio::fs::File::open(path).await?;
         let size = file.metadata().await?.len();
         let part = part_size(size, self.min_part);
@@ -228,6 +254,7 @@ impl Client {
         for number in 1..=size.div_ceil(part).max(1) {
             let mut body = vec![0; part.min(size - sent) as usize];
             file.read_exact(&mut body).await?;
+            hash.update(&body);
             let length = body.len() as u64;
             let call = Call::new(Method::PUT, Some(key))
                 .query("partNumber", number.to_string())
@@ -260,7 +287,10 @@ impl Client {
         if body.contains("<Error>") {
             return Err(describe(status, &body, "complete multipart upload"));
         }
-        Ok(size)
+        Ok(Transferred {
+            size,
+            sha256: hex(&hash.finalize()),
+        })
     }
 
     pub async fn abort_upload(&self, key: &str, upload_id: &str) -> Result<()> {
@@ -278,8 +308,10 @@ impl Client {
         key: &str,
         path: &Path,
         mut progress: impl FnMut(u64, Option<u64>),
-    ) -> Result<u64> {
+    ) -> Result<Transferred> {
         let mut file = tokio::fs::File::create(path).await?;
+        // A resumed range continues the hash; a restart from zero starts it over.
+        let mut hash = Sha256::new();
         let mut done = 0;
         let mut total = None;
         let mut failures = 0;
@@ -300,6 +332,7 @@ impl Client {
                     file.set_len(0).await?;
                     file.rewind().await?;
                     done = 0;
+                    hash = Sha256::new();
                 }
                 total = response
                     .headers()
@@ -310,6 +343,7 @@ impl Client {
             let streamed = async {
                 while let Some(chunk) = response.chunk().await? {
                     file.write_all(&chunk).await?;
+                    hash.update(&chunk);
                     done += chunk.len() as u64;
                     progress(done, total);
                 }
@@ -335,7 +369,10 @@ impl Client {
             );
         }
         file.sync_all().await?;
-        Ok(done)
+        Ok(Transferred {
+            size: done,
+            sha256: hex(&hash.finalize()),
+        })
     }
 
     async fn send(&self, call: Call<'_>) -> Result<Response> {
@@ -775,13 +812,21 @@ mod tests {
         assert_eq!(client.head(key).await.unwrap(), None);
         let upload_id = client.start_upload(key).await.unwrap();
         let mut reports = Vec::new();
-        client
+        let uploaded = client
             .upload(&source, key, &upload_id, |done, total| {
                 reports.push((done, total))
             })
             .await
             .unwrap();
         let size = data.len() as u64;
+        let sha256 = hex(&Sha256::digest(&data));
+        assert_eq!(
+            uploaded,
+            Transferred {
+                size,
+                sha256: sha256.clone()
+            }
+        );
         assert_eq!(
             reports,
             [(0, size), (MIB, size), (2 * MIB, size), (size, size)]
@@ -798,7 +843,7 @@ mod tests {
                 .download(key, &copy, |done, total| last = (done, total))
                 .await
                 .unwrap(),
-            size
+            Transferred { size, sha256 }
         );
         assert_eq!(last, (size, Some(size)));
         assert_eq!(std::fs::read(&copy).unwrap(), data);
@@ -807,6 +852,13 @@ mod tests {
             .await
             .unwrap_err();
         assert!(format!("{error:#}").contains("NoSuchKey"));
+        client
+            .put("dir/a.json", Bytes::from_static(b"{}"))
+            .await
+            .unwrap();
+        assert_eq!(client.get("dir/a.json").await.unwrap().unwrap(), "{}");
+        assert_eq!(client.get("dir/none.json").await.unwrap(), None);
+        client.delete("dir/a.json").await.unwrap();
         client.delete(key).await.unwrap();
         assert!(fake.objects.lock().unwrap().is_empty());
     }
@@ -857,7 +909,10 @@ mod tests {
         assert_eq!(object.size, size);
         assert!(object.modified_at.is_some());
         let copy = dir.path().join("copy");
-        assert_eq!(client.download(&key, &copy, |_, _| {}).await.unwrap(), size);
+        assert_eq!(
+            client.download(&key, &copy, |_, _| {}).await.unwrap().size,
+            size
+        );
         assert!(std::fs::read(&copy).unwrap() == data);
         client.delete(&key).await.unwrap();
         assert_eq!(client.head(&key).await.unwrap(), None);

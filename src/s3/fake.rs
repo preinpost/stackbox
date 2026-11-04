@@ -17,6 +17,8 @@ pub struct FakeS3 {
     pub uploads: Mutex<BTreeMap<String, BTreeMap<u32, Vec<u8>>>>,
     /// Fail every part upload with this status.
     pub fail_parts: Mutex<Option<StatusCode>>,
+    /// Keys of whole objects written, in the order they appeared.
+    pub writes: Mutex<Vec<String>>,
 }
 
 impl FakeS3 {
@@ -119,6 +121,7 @@ impl FakeS3 {
                     [(header::ETAG, format!("\"etag-{number}\""))].into_response()
                 }
                 _ => {
+                    self.writes.lock().unwrap().push(key.into());
                     self.objects
                         .lock()
                         .unwrap()
@@ -150,6 +153,7 @@ impl FakeS3 {
                     )));
                     object.extend(part);
                 }
+                self.writes.lock().unwrap().push(key.into());
                 self.objects.lock().unwrap().insert(key.into(), object);
                 "<CompleteMultipartUploadResult/>".into_response()
             }

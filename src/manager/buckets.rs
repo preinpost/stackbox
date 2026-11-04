@@ -3,9 +3,14 @@
 use super::{FarmManager, NotFound, bad_request, conflict, snapshots::busy};
 use crate::{
     model::now,
-    s3::{Bucket, BucketObject, BucketSecret, Client, RegisterBucket, StoredBucket},
+    s3::{
+        Bucket, BucketObject, BucketSecret, Client, RegisterBucket, StoredBucket,
+        catalog::{self, ArchiveMetadata, BucketIndex, TemplateQuery},
+        client::Object,
+    },
 };
 use anyhow::{Result, anyhow};
+use std::collections::BTreeMap;
 
 /// Objects listed for an import; the rest of a large bucket is left out.
 const LIST_LIMIT: usize = 5000;
@@ -146,17 +151,27 @@ impl FarmManager {
         let (bucket, client) = self.s3_client(id)?;
         check(&client.interactive(), &bucket).await
     }
-    /// Snapshot archives under the bucket's prefix, newest first.
+    /// Snapshot archives under the bucket's prefix, newest first, with their metadata. An
+    /// index that is missing or behind the metadata files is written again.
     pub async fn bucket_objects(&self, id: &str) -> Result<Vec<BucketObject>> {
         let (bucket, client) = self.s3_client(id)?;
-        let mut objects: Vec<_> = client
-            .interactive()
-            .list(&bucket.prefix, LIST_LIMIT)
+        let client = client.interactive();
+        let listed = client.list(&bucket.prefix, LIST_LIMIT).await.map_err(bad)?;
+        let (mut found, stale) = catalog_of(&client, &bucket, &listed, true)
             .await
-            .map_err(bad)?
+            .map_err(bad)?;
+        if stale {
+            let index = BucketIndex::new(found.values().cloned().collect());
+            // Listing works with a read-only key too; the index is only a cache.
+            if let Err(error) = write_index(&client, &bucket, &index).await {
+                eprintln!("cannot update the index of bucket {id}: {error:#}");
+            }
+        }
+        let mut objects: Vec<_> = listed
             .into_iter()
             .filter(|o| o.key.ends_with(".msb"))
             .map(|o| BucketObject {
+                metadata: found.remove(&o.key),
                 key: o.key,
                 size_bytes: o.size,
                 modified_at: o.modified_at,
@@ -164,6 +179,73 @@ impl FarmManager {
             .collect();
         objects.sort_by_key(|o| std::cmp::Reverse(o.modified_at));
         Ok(objects)
+    }
+    /// Write the bucket's index again from the metadata files alone.
+    pub async fn rebuild_bucket_index(&self, id: &str) -> Result<BucketIndex> {
+        let (bucket, client) = self.s3_client(id)?;
+        let listed = client.list(&bucket.prefix, LIST_LIMIT).await.map_err(bad)?;
+        let (found, _) = catalog_of(&client, &bucket, &listed, false)
+            .await
+            .map_err(bad)?;
+        let index = BucketIndex::new(found.into_values().collect());
+        write_index(&client, &bucket, &index).await.map_err(bad)?;
+        Ok(index)
+    }
+    /// Templates in the bucket that `query` matches, newest export first. Archives without
+    /// a metadata file are left out, since only downloading them would tell.
+    pub async fn find_templates(
+        &self,
+        id: &str,
+        query: &TemplateQuery,
+    ) -> Result<Vec<ArchiveMetadata>> {
+        let mut found: Vec<_> = self
+            .bucket_objects(id)
+            .await?
+            .into_iter()
+            .filter_map(|o| o.metadata)
+            .filter(|m| query.matches(m))
+            .collect();
+        found.sort_by_key(|m| std::cmp::Reverse(m.exported_at));
+        Ok(found)
+    }
+
+    /// Write an uploaded archive's metadata file, which marks the upload complete, then
+    /// add it to the index. A failed index update is only reported: listings repair it.
+    pub(super) async fn publish_metadata(
+        &self,
+        bucket: &Bucket,
+        client: &Client,
+        metadata: ArchiveMetadata,
+    ) -> Result<()> {
+        client
+            .put(
+                &catalog::metadata_key(&metadata.key),
+                serde_json::to_vec_pretty(&metadata)?.into(),
+            )
+            .await?;
+        if !metadata.key.starts_with(&bucket.prefix) {
+            return Ok(());
+        }
+        let indexed = async {
+            let current = client
+                .get(&catalog::index_key(&bucket.prefix))
+                .await?
+                .and_then(|body| BucketIndex::parse(&body));
+            let index = match current {
+                Some(index) => index.upsert(metadata),
+                None => {
+                    let listed = client.list(&bucket.prefix, LIST_LIMIT).await?;
+                    let (found, _) = catalog_of(client, bucket, &listed, false).await?;
+                    BucketIndex::new(found.into_values().collect())
+                }
+            };
+            write_index(client, bucket, &index).await
+        }
+        .await;
+        if let Err(error) = indexed {
+            eprintln!("cannot update the index of bucket {}: {error:#}", bucket.id);
+        }
+        Ok(())
     }
 
     /// Abort multipart uploads a stopped daemon or a failed abort left behind, so they stop
@@ -214,6 +296,84 @@ fn ensure_unused(state: &super::store::State, id: &str) -> Result<()> {
         )));
     }
     Ok(())
+}
+
+/// Metadata of the archives in `listed` that have a metadata file, by archive key: from
+/// the index where its entry still matches the archive's size, otherwise read from the
+/// file. Also says whether the index was missing or behind.
+async fn catalog_of(
+    client: &Client,
+    bucket: &Bucket,
+    listed: &[Object],
+    use_index: bool,
+) -> Result<(BTreeMap<String, ArchiveMetadata>, bool)> {
+    let index_key = catalog::index_key(&bucket.prefix);
+    let keys: BTreeMap<&str, u64> = listed.iter().map(|o| (o.key.as_str(), o.size)).collect();
+    let index = match use_index && keys.contains_key(index_key.as_str()) {
+        true => client
+            .get(&index_key)
+            .await?
+            .and_then(|body| BucketIndex::parse(&body)),
+        false => None,
+    };
+    let mut stale = index.is_none();
+    let mut indexed: BTreeMap<String, ArchiveMetadata> = index
+        .map(|index| {
+            index
+                .entries
+                .into_iter()
+                .map(|entry| (entry.key.clone(), entry))
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut found = BTreeMap::new();
+    for (&key, &size) in keys.iter().filter(|(k, _)| k.ends_with(".msb")) {
+        let path = catalog::metadata_key(key);
+        if path == index_key || !keys.contains_key(path.as_str()) {
+            continue;
+        }
+        let metadata = match indexed.remove(key) {
+            Some(entry) if entry.size_bytes == size => Some(entry),
+            _ => {
+                stale = true;
+                read_metadata(client, key).await?
+            }
+        };
+        if let Some(metadata) = metadata.filter(|m| m.size_bytes == size) {
+            found.insert(key.to_owned(), metadata);
+        }
+    }
+    // Entries whose archive or metadata file is gone.
+    stale |= !indexed.is_empty();
+    Ok((found, stale))
+}
+
+/// The metadata file next to the archive at `key`, if there is a readable one.
+pub(super) async fn read_metadata(client: &Client, key: &str) -> Result<Option<ArchiveMetadata>> {
+    let path = catalog::metadata_key(key);
+    let Some(body) = client.get(&path).await? else {
+        return Ok(None);
+    };
+    match ArchiveMetadata::parse(&body) {
+        Some(mut metadata) => {
+            // A copied pair keeps the key it was written with.
+            metadata.key = key.into();
+            Ok(Some(metadata))
+        }
+        None => {
+            eprintln!("ignoring {path}: not a metadata file this version reads");
+            Ok(None)
+        }
+    }
+}
+
+async fn write_index(client: &Client, bucket: &Bucket, index: &BucketIndex) -> Result<()> {
+    client
+        .put(
+            &catalog::index_key(&bucket.prefix),
+            serde_json::to_vec_pretty(index)?.into(),
+        )
+        .await
 }
 
 fn bad(error: anyhow::Error) -> anyhow::Error {

@@ -272,6 +272,15 @@ enum SnapshotCommand {
         #[arg(long)]
         id: Option<String>,
     },
+    /// List a registered bucket's archives with what their metadata files say
+    Bucket {
+        bucket: String,
+        /// Write the bucket's index.json again from the metadata files first
+        #[arg(long)]
+        rebuild_index: bool,
+        #[arg(long)]
+        json: bool,
+    },
     Delete {
         id: String,
         /// Remove only the record, without asking the host; a disk left there stays
@@ -699,6 +708,38 @@ async fn main() -> Result<()> {
                     id,
                 })?;
                 print_json(&wait_snapshot(&manager, &record.id).await?)?;
+            }
+            SnapshotCommand::Bucket {
+                bucket,
+                rebuild_index,
+                json,
+            } => {
+                if rebuild_index {
+                    let index = manager.rebuild_bucket_index(&bucket).await?;
+                    eprintln!("indexed {} archives", index.entries.len());
+                }
+                let objects = manager.bucket_objects(&bucket).await?;
+                if json {
+                    print_json(&objects)?;
+                } else {
+                    for o in objects {
+                        let about = match &o.metadata {
+                            None => "no metadata".into(),
+                            Some(m) => format!(
+                                "{} {} {} ({})",
+                                m.release.as_deref().unwrap_or("unknown release"),
+                                match m.role {
+                                    Some(model::TemplateRole::Control) => "control template",
+                                    Some(model::TemplateRole::Compute) => "compute template",
+                                    None => "farm snapshot",
+                                },
+                                m.arch,
+                                m.components.join(",")
+                            ),
+                        };
+                        println!("{:<40} {:>14} {about}", o.key, o.size_bytes);
+                    }
+                }
             }
             SnapshotCommand::Delete { id, forget } => {
                 if forget {

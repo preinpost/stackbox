@@ -1,5 +1,6 @@
 //! S3-compatible buckets that snapshot archives are exported to and imported from.
 
+pub mod catalog;
 pub mod client;
 #[cfg(test)]
 pub(crate) mod fake;
@@ -192,6 +193,9 @@ pub struct BucketObject {
     pub key: String,
     pub size_bytes: u64,
     pub modified_at: Option<u64>,
+    /// From the archive's metadata file; `None` for archives exported before those were
+    /// written, which can still be imported.
+    pub metadata: Option<catalog::ArchiveMetadata>,
 }
 
 #[derive(Serialize, ToSchema)]

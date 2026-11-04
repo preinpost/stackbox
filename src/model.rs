@@ -853,6 +853,9 @@ pub struct SnapshotArchive {
     pub bucket: Option<String>,
     #[serde(default)]
     pub key: Option<String>,
+    /// Hex SHA-256 of an uploaded archive, as its metadata file in the bucket records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
 }
 /// An export to, or import from, a bucket in progress.
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
@@ -892,6 +895,9 @@ pub struct SnapshotRecord {
     /// of a whole farm.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub template: Option<TemplateRole>,
+    /// The VM a template was frozen from (`control`, `compute-1`, ...).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node: Option<String>,
     /// Records from before control templates marked compute templates this way; read once
     /// into `template` when the state is loaded.
     #[serde(default, rename = "compute_template", skip_serializing)]

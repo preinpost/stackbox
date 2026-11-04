@@ -360,6 +360,54 @@
         }
       }
     },
+    "/api/v1/buckets/{id}/index": {
+      "post": {
+        "tags": [],
+        "operationId": "rebuild_bucket_index",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "`index.json` under the bucket's prefix, written again from the archives' metadata files",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BucketIndex"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/buckets/{id}/objects": {
       "get": {
         "tags": [],
@@ -376,7 +424,7 @@
         ],
         "responses": {
           "200": {
-            "description": "`.msb` objects under the bucket's prefix, newest first",
+            "description": "`.msb` objects under the bucket's prefix, newest first, with the metadata their exports wrote next to them. A missing or outdated `index.json` is written again",
             "content": {
               "application/json": {
                 "schema": {
@@ -2082,6 +2130,117 @@
           }
         }
       },
+      "ArchiveMetadata": {
+        "type": "object",
+        "description": "The metadata file written next to an exported archive.",
+        "required": [
+          "schema",
+          "key",
+          "size_bytes",
+          "sha256",
+          "snapshot_id",
+          "components",
+          "arch",
+          "deployed",
+          "created_at",
+          "exported_at"
+        ],
+        "properties": {
+          "arch": {
+            "type": "string"
+          },
+          "components": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "computes": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Compute VMs of the farm the snapshot restores; 0 for all-in-one and templates.",
+            "minimum": 0
+          },
+          "created_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the snapshot was frozen.",
+            "minimum": 0
+          },
+          "deployed": {
+            "type": "boolean"
+          },
+          "exported_at": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "key": {
+            "type": "string",
+            "description": "Object key of the archive this describes."
+          },
+          "node": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The VM a template was frozen from (`control`, `compute-1`, ...)."
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "platform": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "release": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "OpenStack release the guest was deployed with; unknown for older snapshots."
+          },
+          "role": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/TemplateRole",
+                "description": "`control` or `compute` for a template; absent for a snapshot of a whole farm."
+              }
+            ]
+          },
+          "schema": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "sha256": {
+            "type": "string",
+            "description": "Hex SHA-256 of the archive; imports refuse an archive that does not match."
+          },
+          "size_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "snapshot_id": {
+            "type": "string"
+          },
+          "source_farm": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
       "AuthMethod": {
         "type": "string",
         "enum": [
@@ -2162,6 +2321,33 @@
           }
         }
       },
+      "BucketIndex": {
+        "type": "object",
+        "description": "`index.json`: every archive under the prefix with metadata, newest export first.",
+        "required": [
+          "schema",
+          "generated_at",
+          "entries"
+        ],
+        "properties": {
+          "entries": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ArchiveMetadata"
+            }
+          },
+          "generated_at": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "schema": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          }
+        }
+      },
       "BucketObject": {
         "type": "object",
         "required": [
@@ -2171,6 +2357,17 @@
         "properties": {
           "key": {
             "type": "string"
+          },
+          "metadata": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ArchiveMetadata",
+                "description": "From the archive's metadata file; `None` for archives exported before those were\nwritten, which can still be imported."
+              }
+            ]
           },
           "modified_at": {
             "type": [
@@ -3979,6 +4176,13 @@
             "type": "string",
             "description": "File path on the coordinator, or `s3://<bucket name>/<key>`."
           },
+          "sha256": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Hex SHA-256 of an uploaded archive, as its metadata file in the bucket records."
+          },
           "size_bytes": {
             "type": "integer",
             "format": "int64",
@@ -4030,6 +4234,13 @@
           },
           "id": {
             "type": "string"
+          },
+          "node": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The VM a template was frozen from (`control`, `compute-1`, ...)."
           },
           "nodes": {
             "type": "array",

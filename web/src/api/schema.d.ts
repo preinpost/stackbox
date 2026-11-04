@@ -84,6 +84,22 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/v1/buckets/{id}/index": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    post: operations["rebuild_bucket_index"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/v1/buckets/{id}/objects": {
     parameters: {
       query?: never;
@@ -632,6 +648,41 @@ export interface components {
       host: components["schemas"]["RemoteHost"];
       token: string;
     };
+    /** @description The metadata file written next to an exported archive. */
+    ArchiveMetadata: {
+      arch: string;
+      components: string[];
+      /**
+       * Format: int32
+       * @description Compute VMs of the farm the snapshot restores; 0 for all-in-one and templates.
+       */
+      computes?: number;
+      /**
+       * Format: int64
+       * @description When the snapshot was frozen.
+       */
+      created_at: number;
+      deployed: boolean;
+      /** Format: int64 */
+      exported_at: number;
+      /** @description Object key of the archive this describes. */
+      key: string;
+      /** @description The VM a template was frozen from (`control`, `compute-1`, ...). */
+      node?: string | null;
+      note?: string | null;
+      platform?: string | null;
+      /** @description OpenStack release the guest was deployed with; unknown for older snapshots. */
+      release?: string | null;
+      role?: null | components["schemas"]["TemplateRole"];
+      /** Format: int32 */
+      schema: number;
+      /** @description Hex SHA-256 of the archive; imports refuse an archive that does not match. */
+      sha256: string;
+      /** Format: int64 */
+      size_bytes: number;
+      snapshot_id: string;
+      source_farm?: string | null;
+    };
     /** @enum {string} */
     AuthMethod: "password" | "private_key";
     /** @description A registered bucket. Its secret key is stored encrypted and never returned. */
@@ -658,8 +709,17 @@ export interface components {
       /** @description What was verified: listing, writing and deleting under the prefix. */
       message: string;
     };
+    /** @description `index.json`: every archive under the prefix with metadata, newest export first. */
+    BucketIndex: {
+      entries: components["schemas"]["ArchiveMetadata"][];
+      /** Format: int64 */
+      generated_at: number;
+      /** Format: int32 */
+      schema: number;
+    };
     BucketObject: {
       key: string;
+      metadata?: null | components["schemas"]["ArchiveMetadata"];
       /** Format: int64 */
       modified_at?: number | null;
       /** Format: int64 */
@@ -1249,6 +1309,8 @@ export interface components {
       key?: string | null;
       /** @description File path on the coordinator, or `s3://<bucket name>/<key>`. */
       path: string;
+      /** @description Hex SHA-256 of an uploaded archive, as its metadata file in the bucket records. */
+      sha256?: string | null;
       /** Format: int64 */
       size_bytes: number;
     };
@@ -1262,6 +1324,8 @@ export interface components {
       deployed: boolean;
       error?: string | null;
       id: string;
+      /** @description The VM a template was frozen from (`control`, `compute-1`, ...). */
+      node?: string | null;
       nodes?: components["schemas"]["NodeSnapshot"][];
       note?: string | null;
       plan: components["schemas"]["Plan"];
@@ -1636,6 +1700,44 @@ export interface operations {
       };
     };
   };
+  rebuild_bucket_index: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description `index.json` under the bucket's prefix, written again from the archives' metadata files */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["BucketIndex"];
+        };
+      };
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorBody"];
+        };
+      };
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorBody"];
+        };
+      };
+    };
+  };
   bucket_objects: {
     parameters: {
       query?: never;
@@ -1647,7 +1749,7 @@ export interface operations {
     };
     requestBody?: never;
     responses: {
-      /** @description `.msb` objects under the bucket's prefix, newest first */
+      /** @description `.msb` objects under the bucket's prefix, newest first, with the metadata their exports wrote next to them. A missing or outdated `index.json` is written again */
       200: {
         headers: {
           [name: string]: unknown;

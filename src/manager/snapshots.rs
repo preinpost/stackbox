@@ -180,6 +180,39 @@ fn labels(snapshot: &SnapshotRecord) -> BTreeMap<String, String> {
     labels
 }
 
+/// The metadata file of `snapshot`'s archive at `key`, saying what its labels say.
+fn archive_metadata(
+    snapshot: &SnapshotRecord,
+    key: &str,
+    uploaded: &crate::s3::client::Transferred,
+    exported_at: u64,
+) -> crate::s3::catalog::ArchiveMetadata {
+    let labels = labels(snapshot);
+    crate::s3::catalog::ArchiveMetadata {
+        schema: crate::s3::catalog::SCHEMA,
+        key: key.into(),
+        size_bytes: uploaded.size,
+        sha256: uploaded.sha256.clone(),
+        snapshot_id: snapshot.id.clone(),
+        release: labels.get(label::RELEASE).cloned(),
+        role: snapshot.template,
+        node: snapshot.node.clone(),
+        components: snapshot.plan.components.clone(),
+        computes: if snapshot.template.is_some() {
+            0
+        } else {
+            snapshot.plan.computes
+        },
+        arch: labels[label::ARCH].clone(),
+        platform: labels.get(label::PLATFORM).cloned(),
+        deployed: snapshot.deployed,
+        source_farm: snapshot.source_farm.clone(),
+        note: snapshot.note.clone(),
+        created_at: snapshot.created_at,
+        exported_at,
+    }
+}
+
 enum Target {
     File(PathBuf),
     /// `key` is resolved against the bucket's prefix when the export is accepted.
@@ -206,6 +239,7 @@ struct Imported {
     source_farm: Option<String>,
     note: Option<String>,
     template: Option<TemplateRole>,
+    node: Option<String>,
     release: Option<String>,
 }
 fn parse_labels(labels: &BTreeMap<String, String>) -> Result<Imported> {
@@ -256,6 +290,7 @@ fn parse_labels(labels: &BTreeMap<String, String>) -> Result<Imported> {
         source_farm: labels.get(label::SOURCE).cloned(),
         note: labels.get(label::NOTE).cloned(),
         template,
+        node: template.and(labels.get(label::NODE).cloned()),
         release: labels.get(label::RELEASE).cloned(),
     })
 }
@@ -413,6 +448,7 @@ impl FarmManager {
                 reference: None,
                 nodes: Vec::new(),
                 template,
+                node: request.node.clone(),
                 legacy_compute_template: false,
                 release: Some(crate::kolla::OPENSTACK_RELEASE.into()),
                 size_bytes: None,
@@ -610,6 +646,12 @@ impl FarmManager {
                         bad_request(format!("bucket '{bucket}' is not registered"))
                     })?;
                     let key = key.unwrap_or_else(|| format!("{}{id}.msb", stored.bucket.prefix));
+                    let index = crate::s3::catalog::index_key(&stored.bucket.prefix);
+                    if crate::s3::catalog::metadata_key(&key) == index {
+                        return Err(bad_request(format!(
+                            "{key} would put its metadata at {index}, the bucket's catalog; choose another key"
+                        )));
+                    }
                     Target::Bucket {
                         bucket,
                         key: Some(key),
@@ -718,6 +760,7 @@ impl FarmManager {
             exported_at: now(),
             bucket: None,
             key: None,
+            sha256: None,
         })
     }
     /// Where an archive passing through the coordinator is kept until its transfer ends.
@@ -728,7 +771,8 @@ impl FarmManager {
         let _ = std::fs::remove_file(&path);
         Ok(path)
     }
-    /// Write the archive locally, upload it, then delete the local copy.
+    /// Write the archive locally, upload it, then delete the local copy. Its metadata file
+    /// goes up last, then the bucket's index is brought up to date.
     async fn run_upload(
         &self,
         id: &str,
@@ -737,6 +781,7 @@ impl FarmManager {
         key: &str,
     ) -> Result<SnapshotArchive> {
         let _permit = self.0.snapshot_gate.acquire().await?;
+        let snapshot = self.snapshot(id)?;
         let (bucket, client) = self.s3_client(bucket_id)?;
         let location = format!("s3://{}/{key}", bucket.name);
         // Like a file export, never replace what is there.
@@ -781,12 +826,21 @@ impl FarmManager {
         }
         .await;
         let _ = std::fs::remove_file(&archive);
+        let uploaded = uploaded?;
+        let exported_at = now();
+        let metadata = archive_metadata(&snapshot, key, &uploaded, exported_at);
+        self.publish_metadata(&bucket, &client, metadata)
+            .await
+            .with_context(|| {
+                format!("{location} was uploaded, but its metadata file was not written; it imports like an archive from before metadata files")
+            })?;
         Ok(SnapshotArchive {
             path: location,
-            size_bytes: uploaded?,
-            exported_at: now(),
+            size_bytes: uploaded.size,
+            exported_at,
             bucket: Some(bucket_id.into()),
             key: Some(key.into()),
+            sha256: Some(uploaded.sha256),
         })
     }
     /// Record transfer progress, at most once per 64 MiB so the state file is not rewritten per chunk.
@@ -892,6 +946,7 @@ impl FarmManager {
                 reference: None,
                 nodes: Vec::new(),
                 template: None,
+                node: None,
                 legacy_compute_template: false,
                 release: None,
                 size_bytes: None,
@@ -923,6 +978,7 @@ impl FarmManager {
                         s.source_farm = imported.source_farm;
                         s.note = imported.note;
                         s.template = imported.template;
+                        s.node = imported.node;
                         s.release = imported.release;
                         s.reference = Some(reference);
                         s.size_bytes = size_bytes;
@@ -943,7 +999,9 @@ impl FarmManager {
         let _permit = self.0.snapshot_gate.acquire().await?;
         self.import_archive(path, id).await
     }
-    /// Download the object, import it, then delete the downloaded copy.
+    /// Download the object, import it, then delete the downloaded copy. With a metadata
+    /// file next to it, the download must match its SHA-256, and the archive's labels its
+    /// release and role.
     async fn run_download(
         &self,
         id: &str,
@@ -954,15 +1012,35 @@ impl FarmManager {
         // Fail before a long download that could not be imported.
         self.local_backend()?;
         let (_, client) = self.s3_client(bucket)?;
+        let metadata = super::buckets::read_metadata(&client, key).await?;
         let archive = self.transfer_path(id, "import")?;
         let imported = async {
             let mut reported = None;
-            client
+            let downloaded = client
                 .download(key, &archive, |done, total| {
                     self.report(id, &mut reported, done, total)
                 })
                 .await?;
-            self.import_archive(&archive, id).await
+            if let Some(metadata) = &metadata
+                && metadata.sha256 != downloaded.sha256
+            {
+                return Err(anyhow!(
+                    "{key} has SHA-256 {} but its metadata file says {}; the archive is damaged or was replaced, so it is not imported",
+                    downloaded.sha256,
+                    metadata.sha256
+                ));
+            }
+            let imported = self.import_archive(&archive, id).await?;
+            if let Some(metadata) = &metadata
+                && let Err(error) =
+                    metadata.agrees(imported.0.release.as_deref(), imported.0.template)
+            {
+                if let Err(cleanup) = self.local_backend()?.remove_snapshot(imported.1).await {
+                    eprintln!("cannot remove rejected import {id}: {cleanup:#}");
+                }
+                return Err(error.context(format!("{key} does not match its metadata file")));
+            }
+            Ok(imported)
         }
         .await;
         let _ = std::fs::remove_file(&archive);
