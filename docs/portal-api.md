@@ -97,6 +97,10 @@ VM 관측 결과는 시작 시와 30초 주기로 갱신되며, 실행 중인 jo
 `error`와 `archive.path`를 표시하세요. 경로는 farmd 호스트의 절대 경로이며 상대 경로는 `400`입니다.
 `arch`는 스냅샷을 얼린 CPU 아키텍처입니다. 다른 아키텍처의 스냅샷은 복원(`POST /farms`)과
 가져오기(`POST /snapshots/import`)에서 `409`로 거절합니다.
+버킷 목록(`GET /buckets/{id}/objects`)의 각 객체 `metadata`는 내보내기가 아카이브 옆에 쓴 메타데이터
+파일(`release`, `role`, `components`, `arch`, `sha256` 등)이고, 예전 아카이브는 `null`("메타데이터 없음")입니다.
+버킷에서 가져온 아카이브는 메타데이터 파일의 SHA-256과 다르면 `failed`가 됩니다.
+`POST /buckets/{id}/index`는 prefix의 `index.json`을 메타데이터 파일에서 다시 만듭니다.
 `POST /farms/{id}/settle`은 배포를 다시 실행하지 않고 Keystone과 선택 서비스의 응답만 기다립니다.
 farm 상태가 `settling`으로 바뀌고, 성공하면 `ready`, 실패하면 `created`로 돌아갑니다.
 VM을 직접 재시작했거나 host가 재부팅된 뒤에 사용합니다.

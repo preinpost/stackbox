@@ -12,6 +12,7 @@ farm snapshot export dev-clean -o ~/farm-snapshots/
 farm snapshot import ~/farm-snapshots/dev-clean.msb --id dev-clean
 farm snapshot export dev-clean --bucket team-r2                 # 등록한 S3 버킷으로
 farm snapshot import --bucket team-r2 --key farm/dev-clean.msb  # 다른 호스트에서
+farm snapshot bucket team-r2                                     # 버킷의 아카이브와 메타데이터
 farm snapshot list
 farm snapshot delete dev-clean
 ```
@@ -150,6 +151,35 @@ Secret key는 호스트 SSH 자격 증명과 같은 `credentials.key`(XChaCha20-
 같은 키의 객체가 있으면 덮어쓰지 않습니다. 가져오기는 같은 디렉터리로 내려받아(끊기면 Range로 이어받음) 등록한 뒤 지웁니다. 진행
 상황은 스냅샷의 `transfer`(`done_bytes`/`total_bytes`)로 보입니다.
 
+### 메타데이터 파일과 index.json
+
+아카이브 안의 label을 읽으려면 GiB 단위로 내려받아야 하므로, 내보내기는 `<이름>.msb`를 다 올린
+**뒤에** 옆에 `<이름>.json`을 씁니다. 이 파일이 있으면 업로드가 끝난 것입니다.
+
+```json
+{"schema": 1, "key": "farm/ctl.msb", "size_bytes": 2147483648, "sha256": "<hex>",
+ "snapshot_id": "ctl", "release": "2025.1", "role": "control", "node": "control",
+ "components": ["keystone", "nova", "neutron"], "computes": 0, "arch": "aarch64",
+ "platform": "macos", "deployed": true, "source_farm": "dev", "note": null,
+ "created_at": 1767225600, "exported_at": 1767229200}
+```
+
+`role`은 `control`/`compute` 템플릿이면 있고 farm 스냅샷이면 `null`입니다. `sha256`은 올리면서
+계산하므로 아카이브를 다시 읽지 않습니다. 그다음 prefix의 `index.json`
+(`{"schema":1,"generated_at":…,"entries":[메타데이터…]}`, 최신 내보내기순)에 항목을 더합니다.
+index는 메타데이터 파일에서 언제든 다시 만들 수 있는 캐시입니다. 버킷 목록(`GET /buckets/{id}/objects`,
+가져오기 대화상자)은 index를 읽되, 크기가 다르거나 index에 없는 아카이브는 메타데이터 파일을 직접
+읽고, index가 없거나 깨졌거나 뒤처졌으면 다시 씁니다(읽기 전용 키면 경고만). 여러 coordinator가
+동시에 써서 항목이 빠져도 다음 목록에서 채워집니다. `POST /buckets/{id}/index`나
+`farm snapshot bucket <id> --rebuild-index`는 메타데이터 파일만으로 index를 새로 씁니다.
+메타데이터 파일이 없는 예전 아카이브는 "메타데이터 없음"으로 보이고 그대로 가져올 수 있습니다.
+`<prefix>index.msb`처럼 메타데이터 파일이 index와 겹치는 키로는 내보낼 수 없습니다.
+
+가져오기는 메타데이터 파일이 있으면 내려받은 아카이브의 SHA-256이 같아야 등록하고, 다르면
+실패합니다. 기록은 아카이브 안의 label로 만들며, label의 릴리스나 역할이 메타데이터 파일과
+다르면 등록을 지우고 실패합니다. farm은 버킷의 객체를 지우지 않으므로, 버킷에서 아카이브를 직접
+지웠다면 메타데이터 파일도 함께 지우세요(남아도 아카이브가 없으면 목록과 index에서 빠집니다).
+
 S3 호환 서버마다 다른 동작을 피하려고 다음처럼 요청합니다.
 
 - SigV4 서명, 본문은 SHA-256으로 서명합니다(`aws-chunked`·`x-amz-checksum-*` 헤더 없음).
@@ -176,7 +206,8 @@ S3 호환 서버마다 다른 동작을 피하려고 다음처럼 요청합니�
 | GET / POST | `/buckets` | S3 버킷 목록 / 등록 (secret은 응답에 없음) |
 | GET / PUT / DELETE | `/buckets/{id}` | 버킷 상세 / 수정 / 등록 해제 |
 | POST | `/buckets/test-connection`, `/buckets/{id}/check` | 저장 전 / 등록된 버킷 연결 확인 |
-| GET | `/buckets/{id}/objects` | prefix 아래의 `.msb` 객체 (최신순) |
+| GET | `/buckets/{id}/objects` | prefix 아래의 `.msb` 객체 (최신순, `metadata`는 메타데이터 파일의 내용 또는 `null`) |
+| POST | `/buckets/{id}/index` | 메타데이터 파일에서 `index.json`을 다시 써서 반환 |
 | POST | `/farms` | `{"id","snapshot_id",...}` → restore job (202) |
 | POST | `/farms/{id}/settle` | 서비스 응답 확인 job (배포 재실행 없음) |
 
