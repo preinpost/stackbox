@@ -548,6 +548,54 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/v1/releases": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get: operations["releases"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/v1/releases/farms": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    post: operations["create_release"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/v1/releases/plan": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    post: operations["release_plan"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/v1/snapshots": {
     parameters: {
       query?: never;
@@ -682,6 +730,22 @@ export interface components {
       size_bytes: number;
       snapshot_id: string;
       source_farm?: string | null;
+    };
+    /** @description One step of an assemble job. */
+    AssemblyStep: {
+      /** @description What the step does: `import`, `create`, `deploy`, `restore` or `expand`. */
+      action: string;
+      description: string;
+      error?: string | null;
+      /** @description Host the VM runs on. */
+      host_id?: string | null;
+      /** @description The farm job that ran it; none for an import, which the snapshot shows. */
+      job_id?: string | null;
+      /** @description The VM it makes (`control`, `compute-1`, ...); none for an import. */
+      node?: string | null;
+      /** @description The template it imports or boots from; none for a clean install. */
+      snapshot_id?: string | null;
+      status: components["schemas"]["JobStatus"];
     };
     /** @enum {string} */
     AuthMethod: "password" | "private_key";
@@ -1090,6 +1154,8 @@ export interface components {
       /** Format: int64 */
       started_at?: number | null;
       status: components["schemas"]["JobStatus"];
+      /** @description The steps of an assemble job, in order, each with the job that ran it. */
+      steps?: components["schemas"]["AssemblyStep"][];
       /** @description Host that receives the VM of a compute-expansion job. */
       target_host?: string | null;
       /** @description Suffix of the compute VM a compute-expansion job adds (`compute-2`, ...). */
@@ -1103,7 +1169,8 @@ export interface components {
       | "delete"
       | "snapshot"
       | "restore"
-      | "settle";
+      | "settle"
+      | "assemble";
     /** @enum {string} */
     JobStatus: "queued" | "running" | "succeeded" | "failed" | "interrupted";
     LogEntry: {
@@ -1123,6 +1190,11 @@ export interface components {
       /** Format: int64 */
       size_bytes?: number | null;
     };
+    /**
+     * @description Where a planned VM comes from.
+     * @enum {string}
+     */
+    NodeSource: "template" | "bucket" | "clean";
     NodeSpec: {
       /**
        * Format: int32
@@ -1182,6 +1254,19 @@ export interface components {
        * @default 0
        */
       computes: number;
+    };
+    /** @description How one VM of a release farm will be made, and why. */
+    PlannedNode: {
+      bucket?: string | null;
+      host_id: string;
+      /** @description Object key of a bucket template's archive. */
+      key?: string | null;
+      /** @description `control`, `compute-1`, ... or `all-in-one` for a clean farm without computes. */
+      node: string;
+      reason: string;
+      /** @description The local template it boots from; for a bucket template, the ID it is imported as. */
+      snapshot_id?: string | null;
+      source: components["schemas"]["NodeSource"];
     };
     /** @description Register a host whose agent will dial in. */
     RegisterAgentHost: {
@@ -1256,6 +1341,68 @@ export interface components {
      * @enum {string}
      */
     RelayTlsMode: "private" | "proxy" | "quick_tunnel";
+    /** @description Releases a farm can be created with on one architecture, newest first. */
+    ReleaseCatalog: {
+      arch: string;
+      releases: components["schemas"]["ReleaseTemplates"][];
+      /** @description Buckets that could not be listed, with the error. */
+      unreachable?: string[];
+    };
+    /**
+     * @description Create a farm of an OpenStack release from saved templates: the control VM from a
+     *     control template, each compute from a compute template of the same release when one
+     *     can boot on its host, otherwise installed clean.
+     */
+    ReleaseCreateRequest: {
+      /** @description Registered bucket to also search for templates; omitted searches every bucket. */
+      bucket?: string | null;
+      /** @description Services the farm runs; empty takes the control template's. */
+      components?: string[];
+      /**
+       * @description Host of each compute VM in order (`compute-1` first); a missing or empty entry is
+       *     the control VM's host.
+       */
+      compute_hosts?: string[];
+      /** @description Compute template to use instead of the newest matching one. */
+      compute_template?: string | null;
+      /**
+       * Format: int32
+       * @description Compute VMs, up to 3.
+       */
+      computes?: number;
+      /** @description Control template to use instead of the newest matching one. */
+      control_template?: string | null;
+      /** Format: int64 */
+      expires_at?: number | null;
+      external_host?: string;
+      /** @description Registered host of the control VM. Required; optional only for the error message. */
+      host_id?: string | null;
+      id: string;
+      owner?: string | null;
+      /** @description OpenStack release, such as `2026.2`. */
+      release: string;
+    };
+    /** @description The resolved plan of a [`ReleaseCreateRequest`]. */
+    ReleasePlan: {
+      arch: string;
+      components: string[];
+      computes: components["schemas"]["PlannedNode"][];
+      control: components["schemas"]["PlannedNode"];
+      farm_id: string;
+      /** @description Buckets that could not be searched, and other things worth knowing. */
+      notes?: string[];
+      release: string;
+    };
+    /** @description Templates of one OpenStack release. */
+    ReleaseTemplates: {
+      bucket_compute: number;
+      bucket_control: number;
+      /** @description Whether this coordinator can also install the release clean. */
+      installable: boolean;
+      local_compute: number;
+      local_control: number;
+      release: string;
+    };
     RemoteHost: {
       active_job?: string | null;
       /** @description SSH address; `localhost` for the local host. */
@@ -2835,6 +2982,136 @@ export interface operations {
           "application/json": components["schemas"]["RelayStatus"];
         };
       };
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorBody"];
+        };
+      };
+    };
+  };
+  releases: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        /** @description CPU architecture; defaults to this coordinator's. */
+        arch: string | null;
+        /** @description Registered bucket to count templates in; omitted counts every bucket. */
+        bucket: string | null;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description OpenStack releases with the control and compute templates kept here and in buckets, newest release first. The release this coordinator installs clean is always listed */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ReleaseCatalog"];
+        };
+      };
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorBody"];
+        };
+      };
+    };
+  };
+  create_release: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["ReleaseCreateRequest"];
+      };
+    };
+    responses: {
+      /** @description Assemble job: the plan's imports, the control VM, then each compute, each step a job of its own listed in `steps` */
+      202: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["Job"];
+        };
+      };
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorBody"];
+        };
+      };
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorBody"];
+        };
+      };
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorBody"];
+        };
+      };
+    };
+  };
+  release_plan: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["ReleaseCreateRequest"];
+      };
+    };
+    responses: {
+      /** @description Dry run: which template or clean install would make each VM, and why. Nothing is created */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ReleasePlan"];
+        };
+      };
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorBody"];
+        };
+      };
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorBody"];
+        };
+      };
+      /** @description No control template of the release, and this coordinator installs another release clean */
       409: {
         headers: {
           [name: string]: unknown;

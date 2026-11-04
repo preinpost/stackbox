@@ -4,7 +4,7 @@ use farm::remote::{HostJobKind, RegisterLocalHost};
 use farm::{
     api,
     kolla::Phase,
-    manager::{FarmManager, ManagerOptions, default_state_dir},
+    manager::{self, FarmManager, ManagerOptions, default_state_dir},
     model::{
         self, AddComputeRequest, ComputeSize, CreateRequest, DeployRequest, ExportRequest,
         ImportRequest, Job, JobStatus, PlanRequest, SnapshotRecord, SnapshotRequest,
@@ -55,6 +55,33 @@ impl ComputeArgs {
             disk_mib: self.compute_disk_mib.unwrap_or(default.disk_mib),
         })
     }
+}
+
+/// Options of `create --release`.
+#[derive(Args)]
+struct ReleaseArgs {
+    /// Start from this OpenStack release's templates: the control VM from the newest
+    /// control template, each compute from a compute template of the release when one
+    /// boots on its host, otherwise clean. Without a control template the farm is
+    /// installed clean, which only this coordinator's release can be.
+    #[arg(long, conflicts_with_all = ["snapshot", "placement"])]
+    release: Option<String>,
+    /// Host of the next compute VM with --release (compute-1 first); repeatable.
+    /// Omitted ones run on --host-id.
+    #[arg(long = "compute-host", requires = "release")]
+    compute_hosts: Vec<String>,
+    /// Control template to use with --release instead of the newest one
+    #[arg(long, requires = "release")]
+    control_template: Option<String>,
+    /// Compute template to use with --release instead of the newest one
+    #[arg(long, requires = "release")]
+    compute_template: Option<String>,
+    /// Bucket to search for templates with --release; omitted searches every bucket
+    #[arg(long, requires = "release")]
+    bucket: Option<String>,
+    /// With --release, print which template or clean install makes each VM and stop
+    #[arg(long, requires = "release")]
+    dry_run: bool,
 }
 
 #[derive(Subcommand)]
@@ -109,6 +136,19 @@ enum Command {
         /// Needs FARM_RELAY_URL on the coordinator.
         #[arg(long = "place", value_parser = parse_placement, conflicts_with = "snapshot")]
         placement: Vec<(String, String)>,
+        #[command(flatten)]
+        by_release: Box<ReleaseArgs>,
+    },
+    /// OpenStack releases with the templates farms can start from
+    Releases {
+        /// CPU architecture; defaults to this host's
+        #[arg(long)]
+        arch: Option<String>,
+        /// Count only this bucket's templates
+        #[arg(long)]
+        bucket: Option<String>,
+        #[arg(long)]
+        json: bool,
     },
     Deploy {
         id: String,
@@ -507,6 +547,57 @@ async fn main() -> Result<()> {
             expires_at,
             snapshot,
             placement,
+            by_release,
+        } if by_release.release.is_some() => {
+            let ReleaseArgs {
+                release,
+                compute_hosts,
+                control_template,
+                compute_template,
+                bucket,
+                dry_run,
+            } = *by_release;
+            let request = model::ReleaseCreateRequest {
+                id: id.clone(),
+                release: release.unwrap_or_default(),
+                host_id: Some(host_id),
+                components,
+                computes,
+                compute_hosts,
+                control_template,
+                compute_template,
+                bucket,
+                external_host,
+                owner,
+                expires_at,
+            };
+            if compute.size().is_some() {
+                bail!("a farm made by release takes its compute size from its templates");
+            }
+            let _ = (snapshot, placement);
+            let plan = manager.preview_release(&request).await?;
+            for line in manager::describe_release_plan(&plan) {
+                println!("{line}");
+            }
+            if dry_run {
+                return Ok(());
+            }
+            let job = manager.create_release(request).await?;
+            wait(&manager, job).await?;
+            print_json(&manager.get(&id)?)?;
+        }
+        Command::Create {
+            id,
+            host_id,
+            components,
+            computes,
+            compute,
+            external_host,
+            owner,
+            expires_at,
+            snapshot,
+            placement,
+            ..
         } => {
             let job = manager.create(CreateRequest {
                 id: id.clone(),
@@ -522,6 +613,26 @@ async fn main() -> Result<()> {
             })?;
             wait(&manager, job).await?;
             print_json(&manager.get(&id)?)?;
+        }
+        Command::Releases { arch, bucket, json } => {
+            let catalog = manager.release_catalog(arch, bucket).await?;
+            if json {
+                return print_json(&catalog);
+            }
+            for r in &catalog.releases {
+                println!(
+                    "{:<10} control {} here, {} in buckets · compute {} here, {} in buckets · clean install: {}",
+                    r.release,
+                    r.local_control,
+                    r.bucket_control,
+                    r.local_compute,
+                    r.bucket_compute,
+                    if r.installable { "yes" } else { "no" }
+                );
+            }
+            for error in &catalog.unreachable {
+                eprintln!("bucket not searched: {error}");
+            }
         }
         Command::Deploy { id, from } => {
             wait(&manager, manager.deploy(&id, DeployRequest { from })?).await?;

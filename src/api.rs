@@ -103,6 +103,9 @@ pub fn router(manager: FarmManager, token: Option<String>) -> Router {
         .route("/api/v1/catalog", get(catalog_handler))
         .route("/api/v1/plans", post(plan_handler))
         .route("/api/v1/farms", get(list).post(create))
+        .route("/api/v1/releases", get(releases))
+        .route("/api/v1/releases/plan", post(release_plan))
+        .route("/api/v1/releases/farms", post(create_release))
         .route("/api/v1/farms/{id}", get(detail).delete(delete))
         .route("/api/v1/farms/{id}/deploy", post(deploy))
         .route("/api/v1/farms/{id}/computes", post(add_compute))
@@ -575,6 +578,38 @@ async fn create(
     request.validate().map_err(bad)?;
     Ok(accepted(app.manager.create(request)?))
 }
+#[derive(Deserialize, utoipa::IntoParams)]
+struct ReleaseQuery {
+    /// CPU architecture; defaults to this coordinator's.
+    arch: Option<String>,
+    /// Registered bucket to count templates in; omitted counts every bucket.
+    bucket: Option<String>,
+}
+#[utoipa::path(get, path="/api/v1/releases", params(ReleaseQuery), responses((status=200, description="OpenStack releases with the control and compute templates kept here and in buckets, newest release first. The release this coordinator installs clean is always listed", body=ReleaseCatalog), (status=404, body=ErrorBody)))]
+async fn releases(
+    State(app): State<App>,
+    Query(query): Query<ReleaseQuery>,
+) -> Result<Json<ReleaseCatalog>, ApiError> {
+    Ok(Json(
+        app.manager
+            .release_catalog(query.arch, query.bucket)
+            .await?,
+    ))
+}
+#[utoipa::path(post, path="/api/v1/releases/plan", request_body=ReleaseCreateRequest, responses((status=200, description="Dry run: which template or clean install would make each VM, and why. Nothing is created", body=ReleasePlan), (status=400, body=ErrorBody), (status=404, body=ErrorBody), (status=409, description="No control template of the release, and this coordinator installs another release clean", body=ErrorBody)))]
+async fn release_plan(
+    State(app): State<App>,
+    value: Result<Json<ReleaseCreateRequest>, JsonRejection>,
+) -> Result<Json<ReleasePlan>, ApiError> {
+    Ok(Json(app.manager.preview_release(&body(value)?).await?))
+}
+#[utoipa::path(post, path="/api/v1/releases/farms", request_body=ReleaseCreateRequest, responses((status=202, description="Assemble job: the plan's imports, the control VM, then each compute, each step a job of its own listed in `steps`", body=Job), (status=400, body=ErrorBody), (status=404, body=ErrorBody), (status=409, body=ErrorBody)))]
+async fn create_release(
+    State(app): State<App>,
+    value: Result<Json<ReleaseCreateRequest>, JsonRejection>,
+) -> Result<Response, ApiError> {
+    Ok(accepted(app.manager.create_release(body(value)?).await?))
+}
 fn accepted(job: Job) -> Response {
     (
         StatusCode::ACCEPTED,
@@ -996,7 +1031,7 @@ async fn relay_shell(
 }
 
 #[derive(OpenApi)]
-#[openapi(paths(host, remote_hosts, remote_host, host_fingerprint, test_connection, register_host, register_local_host, register_agent_host, update_host_credentials, unregister_host, check_host, prepare_host, install_agent, host_jobs, host_job, catalog_handler, plan_handler, list, detail, create, deploy, add_compute, settle, delete, endpoints, set_faults, logs, log_stream, freeze, snapshots, snapshot, delete_snapshot, export_snapshot, import_snapshot, buckets, bucket, register_bucket, update_bucket, unregister_bucket, test_bucket, check_bucket, bucket_objects, rebuild_bucket_index, relay_status, set_relay, remove_relay, update_cloudflared, jobs, job), components(schemas(ErrorBody)), modifiers(&Security))]
+#[openapi(paths(host, remote_hosts, remote_host, host_fingerprint, test_connection, register_host, register_local_host, register_agent_host, update_host_credentials, unregister_host, check_host, prepare_host, install_agent, host_jobs, host_job, catalog_handler, plan_handler, list, detail, create, releases, release_plan, create_release, deploy, add_compute, settle, delete, endpoints, set_faults, logs, log_stream, freeze, snapshots, snapshot, delete_snapshot, export_snapshot, import_snapshot, buckets, bucket, register_bucket, update_bucket, unregister_bucket, test_bucket, check_bucket, bucket_objects, rebuild_bucket_index, relay_status, set_relay, remove_relay, update_cloudflared, jobs, job), components(schemas(ErrorBody)), modifiers(&Security))]
 struct ApiDoc;
 struct Security;
 impl utoipa::Modify for Security {
