@@ -1090,6 +1090,11 @@ export interface components {
       /** Format: int64 */
       started_at?: number | null;
       status: components["schemas"]["JobStatus"];
+      /**
+       * @description Numbered steps of a job whose steps are known up front, such as a freeze, in the
+       *     order they started; the last one is current while the job runs.
+       */
+      steps?: components["schemas"]["JobStep"][];
       /** @description Host that receives the VM of a compute-expansion job. */
       target_host?: string | null;
       /** @description Suffix of the compute VM a compute-expansion job adds (`compute-2`, ...). */
@@ -1106,6 +1111,23 @@ export interface components {
       | "settle";
     /** @enum {string} */
     JobStatus: "queued" | "running" | "succeeded" | "failed" | "interrupted";
+    /** @description One numbered step of a job. */
+    JobStep: {
+      /** @description The job failed during this step. */
+      failed?: boolean;
+      /** Format: int64 */
+      finished_at?: number | null;
+      /**
+       * Format: int32
+       * @description Position from 1.
+       */
+      index: number;
+      /** Format: int64 */
+      started_at: number;
+      step: string;
+      /** Format: int32 */
+      total: number;
+    };
     LogEntry: {
       /** Format: int64 */
       id: number;

@@ -237,6 +237,7 @@ impl Backend for AgentBackend {
         snapshot_id: String,
         node: Option<String>,
         labels: BTreeMap<String, String>,
+        sink: EventSink,
     ) -> BoxFuture<'_, Result<FrozenSnapshot>> {
         Box::pin(async move {
             match self
@@ -248,7 +249,7 @@ impl Backend for AgentBackend {
                         node,
                         labels,
                     },
-                    None,
+                    Some(sink),
                 )
                 .await?
             {

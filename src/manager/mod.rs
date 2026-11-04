@@ -347,6 +347,7 @@ impl FarmManager {
                     "daemon stopped during this job; inspect the VMs and retry explicitly".into(),
                 );
                 job.finished_at = Some(now());
+                job.end_step(true, now());
                 if let Some(farm) = state.farms.get_mut(&job.farm_id) {
                     farm.active_job = None;
                     farm.status = FarmStatus::Failed;
@@ -2475,6 +2476,22 @@ impl FarmManager {
                     manager.log(&job.farm_id, &job.id, None, format!("step: {step}"))?;
                     return Ok(());
                 }
+                DeployEvent::Progress(progress) => {
+                    let text = format!("{}/{} {}", progress.index, progress.total, progress.step);
+                    manager.update(|state| {
+                        let farm = state.farms.get_mut(&job.farm_id).context("farm missing")?;
+                        farm.step = Some(text.clone());
+                        farm.updated_at = now();
+                        state
+                            .jobs
+                            .get_mut(&job.id)
+                            .context("job missing")?
+                            .start_step(progress.step, progress.index, progress.total, now());
+                        save(state)
+                    })?;
+                    manager.log(&job.farm_id, &job.id, None, format!("step {text}"))?;
+                    return Ok(());
+                }
                 DeployEvent::Phase(phase) => {
                     manager.update(|state| {
                         let farm = state.farms.get_mut(&job.farm_id).context("farm missing")?;
@@ -2524,6 +2541,7 @@ impl FarmManager {
             };
             current.error = error.clone();
             current.finished_at = Some(now());
+            current.end_step(error.is_some(), now());
             // A farm restored from a deployed snapshot is ready as soon as its services answer.
             let deployed = job
                 .snapshot_id
@@ -2758,6 +2776,7 @@ fn new_job(farm: &str, kind: JobKind) -> Job {
         remote_frames: 0,
         target_host: None,
         target_node: None,
+        steps: Vec::new(),
     }
 }
 fn farm_components(farm: &FarmRecord) -> Vec<String> {

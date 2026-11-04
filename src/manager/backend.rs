@@ -121,6 +121,7 @@ pub trait Backend: Send + Sync + 'static {
         _snapshot_id: String,
         _node: Option<String>,
         _labels: BTreeMap<String, String>,
+        _sink: EventSink,
     ) -> BoxFuture<'_, Result<FrozenSnapshot>> {
         unsupported()
     }
@@ -429,12 +430,13 @@ PY"#).await;
         snapshot_id: String,
         node: Option<String>,
         labels: BTreeMap<String, String>,
+        sink: EventSink,
     ) -> BoxFuture<'_, Result<FrozenSnapshot>> {
         Box::pin(async move {
             match node.as_deref() {
-                Some("control") => farm::freeze_control(&id, &snapshot_id, &labels).await,
-                Some(node) => farm::freeze_compute(&id, &snapshot_id, node, &labels).await,
-                None => farm::freeze_farm(&id, &snapshot_id, &labels).await,
+                Some("control") => farm::freeze_control(&id, &snapshot_id, &labels, sink).await,
+                Some(node) => farm::freeze_compute(&id, &snapshot_id, node, &labels, sink).await,
+                None => farm::freeze_farm(&id, &snapshot_id, &labels, sink).await,
             }
         })
     }

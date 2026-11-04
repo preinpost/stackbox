@@ -358,6 +358,13 @@ pub enum Frame {
     Step {
         step: String,
     },
+    /// A numbered step of an operation whose steps are known up front, such as a freeze.
+    /// Coordinators older than it reject it, but they also send no freeze to a newer agent.
+    Progress {
+        step: String,
+        index: u32,
+        total: u32,
+    },
     Output {
         message: String,
     },
@@ -427,6 +434,10 @@ impl Operation {
                 | Self::DeployCompute { .. }
         )
     }
+    /// Whether the agent may report numbered steps while running this operation.
+    fn reports_steps(&self) -> bool {
+        matches!(self, Self::Freeze { .. })
+    }
     /// Whether the agent may stream command output while running this operation.
     fn reports_output(&self) -> bool {
         !matches!(
@@ -463,6 +474,9 @@ pub fn deliver(
         }
         Frame::Phase { phase } if operation.reports_progress() => DeployEvent::Phase(phase),
         Frame::Step { step } if operation.reports_progress() => DeployEvent::Step(step),
+        Frame::Progress { step, index, total } if operation.reports_steps() => {
+            DeployEvent::Progress(crate::kolla::StepProgress { step, index, total })
+        }
         Frame::Output { message } if operation.reports_output() => DeployEvent::Output(message),
         _ => anyhow::bail!("unexpected farm-agent progress event"),
     };
@@ -501,6 +515,48 @@ mod tests {
         ));
         let purged: Reply = serde_json::from_str(r#"{"result":"purged","farms":3}"#).unwrap();
         assert!(matches!(purged, Reply::Purged { farms: 3 }));
+    }
+
+    #[test]
+    fn freeze_reports_numbered_steps_and_others_do_not() {
+        use std::sync::{Arc, Mutex};
+        let frame: Frame = serde_json::from_str(
+            r#"{"type":"progress","step":"capture farm-a-control (1/2)","index":3,"total":7}"#,
+        )
+        .unwrap();
+        let freeze = Operation::Freeze {
+            farm_id: "a".into(),
+            generation: "g".into(),
+            snapshot_id: "s".into(),
+            node: None,
+            labels: BTreeMap::new(),
+        };
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let record = seen.clone();
+        let sink: crate::kolla::EventSink = Arc::new(move |event| {
+            if let crate::kolla::DeployEvent::Progress(progress) = event {
+                record.lock().unwrap().push(progress);
+            }
+            Ok(())
+        });
+        assert!(
+            deliver(frame.clone(), &freeze, Some(&sink))
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            seen.lock().unwrap()[0],
+            crate::kolla::StepProgress {
+                step: "capture farm-a-control (1/2)".into(),
+                index: 3,
+                total: 7,
+            }
+        );
+        let delete = Operation::Delete {
+            farm_id: "a".into(),
+            generation: "g".into(),
+        };
+        assert!(deliver(frame, &delete, Some(&sink)).is_err());
     }
 
     #[test]

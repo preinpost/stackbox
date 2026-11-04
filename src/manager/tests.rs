@@ -279,11 +279,22 @@ impl Backend for Fake {
         snapshot_id: String,
         node: Option<String>,
         mut labels: BTreeMap<String, String>,
+        sink: EventSink,
     ) -> BoxFuture<'_, Result<crate::farm::FrozenSnapshot>> {
         Box::pin(async move {
+            let step = |index, step: &str| {
+                sink(DeployEvent::Progress(crate::kolla::StepProgress {
+                    step: step.into(),
+                    index,
+                    total: 3,
+                }))
+            };
+            step(1, "stop the VMs")?;
+            step(2, "capture the VMs")?;
             if self.fail.load(Ordering::SeqCst) {
                 bail!("intentional freeze failure");
             }
+            step(3, "start the VMs")?;
             // A compute template is that one VM's disks.
             if let Some(node) = node {
                 assert!(
@@ -1867,7 +1878,31 @@ async fn snapshots_freeze_restore_export_import_and_delete() {
     let job = freeze("clean").unwrap();
     assert_eq!(job.kind, JobKind::Snapshot);
     assert!(freeze("other").unwrap_err().is::<Conflict>());
-    assert_eq!(done(&manager, &job).await.status, JobStatus::Succeeded);
+    let frozen = done(&manager, &job).await;
+    assert_eq!(frozen.status, JobStatus::Succeeded);
+    // The backend's steps, numbered against one more for the services check after them.
+    let steps: Vec<_> = frozen
+        .steps
+        .iter()
+        .map(|s| (s.index, s.total, s.step.as_str(), s.failed))
+        .collect();
+    assert_eq!(
+        steps,
+        [
+            (1, 4, "stop the VMs", false),
+            (2, 4, "capture the VMs", false),
+            (3, 4, "start the VMs", false),
+            (4, 4, "check that the services answer", false),
+        ]
+    );
+    assert!(frozen.steps.iter().all(|s| s.finished_at.is_some()));
+    assert!(
+        frozen
+            .steps
+            .windows(2)
+            .all(|w| w[0].finished_at.unwrap() <= w[1].started_at)
+    );
+    assert!(manager.get("src").unwrap().step.is_none());
     assert!(freeze("clean").unwrap_err().is::<Conflict>());
     let snapshot = manager.snapshot("clean").unwrap();
     assert_eq!(snapshot.status, SnapshotStatus::Ready);
@@ -1994,6 +2029,11 @@ async fn snapshots_freeze_restore_export_import_and_delete() {
     backend.fail.store(true, Ordering::SeqCst);
     let failed = done(&manager, &freeze("broken").unwrap()).await;
     assert_eq!(failed.status, JobStatus::Failed);
+    // The step it failed in is marked, and no later one started.
+    let last = failed.steps.last().unwrap();
+    assert_eq!((last.index, last.step.as_str()), (2, "capture the VMs"));
+    assert!(last.failed && last.finished_at.is_some());
+    assert!(!failed.steps[0].failed);
     assert_eq!(
         manager.snapshot("broken").unwrap().status,
         SnapshotStatus::Failed
