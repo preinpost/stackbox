@@ -62,6 +62,10 @@ bind 주소와 RabbitMQ 노드 이름(`rabbit@<hostname>`), nova-compute·Neutro
 3. VM을 다시 시작하고, 배포된 farm이면 Keystone·Glance와 선택 서비스(Neutron agent,
    nova-compute)가 다시 응답할 때까지 기다립니다.
 
+job은 링크 끄기 → compute 정지 → control 정지 → VM별 캡처(i/N) → control 시작 → compute 시작·링크 켜기
+→ 서비스 확인처럼 단계를 하나씩 기록하고, 포탈은 Farm 상세의 얼리기 배너, 작업 화면, `생성 중`인
+스냅샷 행에 현재 단계와 경과 시간을 보여줍니다. 원격 호스트에서도 farm-agent가 단계를 전달합니다.
+
 원본 farm은 이 동안 몇 분간 응답하지 않습니다. 상태는 그대로 유지되고, 실패는 job과 스냅샷에 기록됩니다.
 캡처는 성공했지만 원본이 다시 시작되지 않으면 스냅샷은 `ready`, job은 `failed`가 됩니다.
 메모리까지 저장하는 full 스냅샷은 macOS(HVF)에서 msb가 지원하지 않아 사용하지 않습니다.

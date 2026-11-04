@@ -1149,7 +1149,13 @@ impl Agent {
                 Ok(Reply::Frozen {
                     snapshot: self
                         .backend
-                        .freeze(id.into(), snapshot_id.clone(), node.clone(), labels.clone())
+                        .freeze(
+                            id.into(),
+                            snapshot_id.clone(),
+                            node.clone(),
+                            labels.clone(),
+                            progress(emit),
+                        )
                         .await?,
                 })
             }
@@ -1226,6 +1232,11 @@ fn progress(emit: Emitter) -> crate::kolla::EventSink {
         emit(match event {
             crate::kolla::DeployEvent::Phase(phase) => Frame::Phase { phase },
             crate::kolla::DeployEvent::Step(step) => Frame::Step { step },
+            crate::kolla::DeployEvent::Progress(crate::kolla::StepProgress {
+                step,
+                index,
+                total,
+            }) => Frame::Progress { step, index, total },
             crate::kolla::DeployEvent::Output(message) => Frame::Output { message },
         })
     })

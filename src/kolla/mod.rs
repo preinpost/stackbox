@@ -17,7 +17,16 @@ pub enum DeployEvent {
     Phase(Phase),
     /// A finer step inside the phase: our own markers, or an Ansible task name.
     Step(String),
+    /// A numbered step of a job whose steps are known up front, such as a freeze.
+    Progress(StepProgress),
     Output(String),
+}
+/// Step `index` (from 1) of `total`.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct StepProgress {
+    pub step: String,
+    pub index: u32,
+    pub total: u32,
 }
 pub type EventSink = Arc<dyn Fn(DeployEvent) -> Result<()> + Send + Sync>;
 

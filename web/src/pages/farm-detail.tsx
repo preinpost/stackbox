@@ -71,6 +71,7 @@ import {
 } from "../lib";
 import { shellTargets } from "../components/shell-targets";
 import { JobRow } from "./jobs";
+import { StepProgress } from "../components/job-steps";
 
 // xterm is large; load it only when a shell is opened.
 const FarmTerminal = lazy(() =>
@@ -229,6 +230,9 @@ export function FarmDetailPage({ id }: { id: string }) {
             <strong>스냅샷 {activeJob.snapshot_id}을 만드는 중입니다.</strong>{" "}
             VM을 잠시 정지했다가 다시 시작합니다. 그동안 서비스가 응답하지
             않습니다.
+            <div className="mt-2">
+              <StepProgress job={activeJob} />
+            </div>
           </div>
         </div>
       )}

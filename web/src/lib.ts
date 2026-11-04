@@ -108,6 +108,13 @@ export const nodeAddress = ({ role, index }: NodeRef) =>
     : String(role) === "control"
       ? "10.254.0.10"
       : "10.254.0.2";
+/** A span of seconds, e.g. `42초`, `3분 5초`, `1시간 2분`. */
+export function duration(span: number) {
+  const seconds = Math.max(0, Math.floor(span));
+  if (seconds < 60) return `${seconds}초`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}분 ${seconds % 60}초`;
+  return `${Math.floor(seconds / 3600)}시간 ${Math.floor((seconds % 3600) / 60)}분`;
+}
 export const dateTime = (timestamp: number) =>
   new Intl.DateTimeFormat("ko-KR", {
     month: "short",

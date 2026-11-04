@@ -3,6 +3,7 @@
 use super::{FarmManager, NotFound, bad_request, conflict, ensure_idle, store::State};
 use crate::{
     farm::Role,
+    kolla::{DeployEvent, StepProgress},
     model::{snapshot_labels as label, *},
 };
 use anyhow::{Context, Result, anyhow};
@@ -10,6 +11,7 @@ use std::{
     collections::BTreeMap,
     net::{IpAddr, Ipv4Addr},
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 pub(super) fn busy(status: SnapshotStatus) -> bool {
@@ -486,12 +488,26 @@ impl FarmManager {
             },
         )?;
         let backend = self.backend_for(&farm)?;
+        // A compute template stopped one compute only; the control plane kept answering.
+        let settle = snapshot.deployed && snapshot.template != Some(TemplateRole::Compute);
+        let sink = self.event_sink(job, None);
+        let steps = sink.clone();
         let frozen = match backend
             .freeze(
                 farm.id.clone(),
                 id.clone(),
                 job.target_node.clone(),
                 labels(&snapshot),
+                // The services check after the freeze is one more step.
+                Arc::new(move |event| {
+                    steps(match event {
+                        DeployEvent::Progress(mut progress) if settle => {
+                            progress.total += 1;
+                            DeployEvent::Progress(progress)
+                        }
+                        event => event,
+                    })
+                }),
             )
             .await
         {
@@ -522,8 +538,15 @@ impl FarmManager {
                 "snapshot {id} is ready, but the farm's VM did not start again: {error}"
             ));
         }
-        // A compute template stopped one compute only; the control plane kept answering.
-        if snapshot.deployed && snapshot.template != Some(TemplateRole::Compute) {
+        if settle {
+            let last = self.job(&job.id)?.steps.last().map(|s| s.total);
+            if let Some(total) = last {
+                sink(DeployEvent::Progress(StepProgress {
+                    step: "check that the services answer".into(),
+                    index: total,
+                    total,
+                }))?;
+            }
             backend
                 .settle(
                     farm.id.clone(),

@@ -3518,6 +3518,13 @@
           "status": {
             "$ref": "#/components/schemas/JobStatus"
           },
+          "steps": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/JobStep"
+            },
+            "description": "Numbered steps of a job whose steps are known up front, such as a freeze, in the\norder they started; the last one is current while the job runs."
+          },
           "target_host": {
             "type": [
               "string",
@@ -3555,6 +3562,49 @@
           "failed",
           "interrupted"
         ]
+      },
+      "JobStep": {
+        "type": "object",
+        "description": "One numbered step of a job.",
+        "required": [
+          "step",
+          "index",
+          "total",
+          "started_at"
+        ],
+        "properties": {
+          "failed": {
+            "type": "boolean",
+            "description": "The job failed during this step."
+          },
+          "finished_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
+          "index": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Position from 1.",
+            "minimum": 0
+          },
+          "started_at": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "step": {
+            "type": "string"
+          },
+          "total": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          }
+        }
       },
       "LogEntry": {
         "type": "object",

@@ -12,6 +12,7 @@ use super::node::{
     node_name, wait_until_booted,
 };
 use super::template::{NodeSpec, Role, suffix};
+use crate::kolla::{DeployEvent, EventSink, StepProgress};
 use crate::model::{Exposure, snapshot_labels};
 use crate::shell::run;
 
@@ -43,6 +44,32 @@ pub struct ImportedSnapshot {
     pub size_bytes: Option<u64>,
 }
 
+/// Reports a freeze's steps, numbered against the total known up front.
+struct Steps {
+    sink: EventSink,
+    index: u32,
+    total: u32,
+}
+impl Steps {
+    fn new(sink: EventSink, total: u32) -> Self {
+        Self {
+            sink,
+            index: 0,
+            total,
+        }
+    }
+    /// Start the next step. A sink that fails only loses progress, not the freeze, which
+    /// must still bring the farm back.
+    fn next(&mut self, step: impl Into<String>) {
+        self.index = (self.index + 1).min(self.total);
+        let _ = (self.sink)(DeployEvent::Progress(StepProgress {
+            step: step.into(),
+            index: self.index,
+            total: self.total,
+        }));
+    }
+}
+
 /// Each snapshot gets its own msb group, so imports never contend for a shared group head.
 fn group(snapshot_id: &str) -> String {
     format!("farm-snap-{snapshot_id}")
@@ -54,13 +81,17 @@ pub async fn freeze_farm(
     farm_id: &str,
     snapshot_id: &str,
     labels: &BTreeMap<String, String>,
+    sink: EventSink,
 ) -> Result<FrozenSnapshot> {
     let nodes = super::get_farm(farm_id).await?;
     if super::observed_layout(&nodes).is_some()
         && nodes.iter().any(|node| node.role == Some(Role::Control))
     {
-        return freeze_nodes(farm_id, snapshot_id, labels, nodes, None).await;
+        let total = freeze_steps(nodes.len(), None);
+        let mut steps = Steps::new(sink, total);
+        return freeze_nodes(farm_id, snapshot_id, labels, nodes, None, &mut steps).await;
     }
+    let mut steps = Steps::new(sink, 3);
     let name = super::all_in_one_name(farm_id).await?;
     let sandbox = connect(&name).await?;
     let identity = run(
@@ -74,6 +105,7 @@ pub async fn freeze_farm(
             "{name} was created before farms had a fixed guest identity, so its OpenStack is bound to an address a restored copy cannot keep; create and deploy a new farm, then freeze that one"
         );
     }
+    steps.next(format!("stop {name}"));
     let handle = Sandbox::get(&name)
         .await
         .with_context(|| format!("find {name}"))?;
@@ -81,6 +113,7 @@ pub async fn freeze_farm(
         .stop_with_timeout(STOP_TIMEOUT)
         .await
         .with_context(|| format!("stop {name}"))?;
+    steps.next(format!("capture {name}"));
     let captured = async {
         let mut builder = Snapshot::builder(snapshot_id)
             .group(group(snapshot_id))
@@ -98,6 +131,7 @@ pub async fn freeze_farm(
     }
     .await;
     // Bring the source farm back whether or not the capture succeeded.
+    steps.next(format!("start {name}"));
     let restart_error = start(&name).await.err().map(|e| format!("{e:#}"));
     match (captured, restart_error) {
         (Ok(frozen), restart_error) => Ok(FrozenSnapshot {
@@ -139,12 +173,22 @@ async fn run_in(name: &str, script: &str) -> Result<()> {
 ///
 /// With `only`, every VM still stops and starts in that order, but only that one is
 /// captured, as a single-VM snapshot.
+/// Steps of `freeze_nodes` for a farm of `vms` VMs: disable the links, stop the computes,
+/// stop the control VM, capture each VM (or `only` one), start the control VM, then the
+/// computes. A farm without computes skips stopping and starting them.
+fn freeze_steps(vms: usize, only: Option<&str>) -> u32 {
+    let computes = u32::from(vms > 1);
+    let captures = if only.is_some() { 1 } else { vms as u32 };
+    1 + computes + 1 + captures + 1 + computes
+}
+
 async fn freeze_nodes(
     farm_id: &str,
     snapshot_id: &str,
     labels: &BTreeMap<String, String>,
     mut nodes: Vec<super::FarmNode>,
     only: Option<&str>,
+    steps: &mut Steps,
 ) -> Result<FrozenSnapshot> {
     nodes.sort_by_key(|node| (node.role != Some(Role::Control), node.index));
     let vms: Vec<(String, String)> = nodes
@@ -160,6 +204,7 @@ async fn freeze_nodes(
         format!("systemctl disable {units}"),
         format!("systemctl enable {units}"),
     );
+    steps.next("disable the links");
     let disabled = try_join_all(vms.iter().map(|(name, _)| run_in(name, &disable))).await;
     if let Err(error) = disabled {
         join_all(vms.iter().map(|(name, _)| run_in(name, &enable))).await;
@@ -167,24 +212,38 @@ async fn freeze_nodes(
     }
     let (control, computes) = vms.split_first().context("farm has no VMs")?;
     let stopped = async {
-        try_join_all(computes.iter().map(|(name, _)| stop(name))).await?;
+        if !computes.is_empty() {
+            steps.next(match computes.len() {
+                1 => "stop the compute".to_owned(),
+                n => format!("stop the {n} computes"),
+            });
+            try_join_all(computes.iter().map(|(name, _)| stop(name))).await?;
+        }
+        steps.next(format!("stop {}", control.0));
         stop(&control.0).await
     }
     .await;
     let captured = match (stopped, only) {
-        (Ok(()), None) => capture_nodes(snapshot_id, labels, &vms).await,
+        (Ok(()), None) => capture_nodes(snapshot_id, labels, &vms, steps).await,
         (Ok(()), Some(node)) => match vms.iter().find(|(_, suffix)| suffix == node) {
-            Some((name, _)) => capture_one(snapshot_id, labels, name, node)
-                .await
-                .map(|node| vec![node]),
+            Some((name, _)) => {
+                steps.next(format!("capture {name}"));
+                capture_one(snapshot_id, labels, name, node)
+                    .await
+                    .map(|node| vec![node])
+            }
             None => Err(anyhow::anyhow!("farm '{farm_id}' has no VM '{node}'")),
         },
         (Err(error), _) => Err(error),
     };
     // Bring the source farm back whether or not the capture succeeded.
     let mut restart_errors = Vec::new();
+    steps.next(format!("start {}", control.0));
     if let Err(error) = start_with_links(&control.0, &units).await {
         restart_errors.push(format!("{error:#}"));
+    }
+    if !computes.is_empty() {
+        steps.next("start the computes and enable their links");
     }
     for result in join_all(
         computes
@@ -222,6 +281,7 @@ pub async fn freeze_control(
     farm_id: &str,
     snapshot_id: &str,
     labels: &BTreeMap<String, String>,
+    sink: EventSink,
 ) -> Result<FrozenSnapshot> {
     let nodes = super::get_farm(farm_id).await?;
     if super::observed_layout(&nodes).is_none()
@@ -229,9 +289,19 @@ pub async fn freeze_control(
     {
         bail!("farm '{farm_id}' has no control VM to freeze as a template");
     }
+    let mut steps = Steps::new(sink, 1 + freeze_steps(nodes.len(), Some("control")));
     // A copy could neither run nor delete instances whose computes it forgot.
+    steps.next("check that no instance runs");
     run_in(&node_name(farm_id, Role::Control, None), NO_SERVERS).await?;
-    freeze_nodes(farm_id, snapshot_id, labels, nodes, Some("control")).await
+    freeze_nodes(
+        farm_id,
+        snapshot_id,
+        labels,
+        nodes,
+        Some("control"),
+        &mut steps,
+    )
+    .await
 }
 
 /// Refuses a farm with instances, asking with the OpenStack CLI and admin credentials the
@@ -285,24 +355,33 @@ pub async fn freeze_compute(
     snapshot_id: &str,
     node: &str,
     labels: &BTreeMap<String, String>,
+    sink: EventSink,
 ) -> Result<FrozenSnapshot> {
     let index: u8 = node
         .strip_prefix("compute-")
         .and_then(|index| index.parse().ok())
         .with_context(|| format!("{node} is not a compute VM"))?;
     let name = node_name(farm_id, Role::Compute, Some(index));
+    let mut steps = Steps::new(sink, 5);
     // Instances would come back on every compute made from the template.
+    steps.next("check that no instance runs");
     run_in(&name, NO_INSTANCES).await?;
     let units = link_units();
     let (disable, enable) = (
         format!("systemctl disable {units} {DOCKER_UNITS}"),
         format!("systemctl enable {units} {DOCKER_UNITS}"),
     );
+    steps.next("disable the links and Docker");
     if let Err(error) = run_in(&name, &disable).await {
         let _ = run_in(&name, &enable).await;
         return Err(error.context("disable the links and Docker before freezing"));
     }
-    let captured = match stop(&name).await {
+    steps.next(format!("stop {name}"));
+    let stopped = stop(&name).await;
+    if stopped.is_ok() {
+        steps.next(format!("capture {name}"));
+    }
+    let captured = match stopped {
         Ok(()) => capture_one(snapshot_id, labels, &name, node)
             .await
             .map(|captured| FrozenSnapshot {
@@ -314,6 +393,7 @@ pub async fn freeze_compute(
         Err(error) => Err(error),
     };
     // Bring the source compute back whether or not the capture succeeded.
+    steps.next(format!("start {name} and enable its links and Docker"));
     let restart_error = async {
         start_with_links(&name, &units).await?;
         run_in(
@@ -362,9 +442,11 @@ async fn capture_nodes(
     snapshot_id: &str,
     labels: &BTreeMap<String, String>,
     vms: &[(String, String)],
+    steps: &mut Steps,
 ) -> Result<Vec<NodeSnapshot>> {
     let mut nodes = Vec::new();
-    for (name, suffix) in vms {
+    for (i, (name, suffix)) in vms.iter().enumerate() {
+        steps.next(format!("capture {name} ({}/{})", i + 1, vms.len()));
         let mut builder = Snapshot::builder(format!("{snapshot_id}-{suffix}"))
             .group(group(snapshot_id))
             .from_sandbox(name)
@@ -505,5 +587,40 @@ pub async fn remove_snapshot(reference: &str) -> Result<()> {
         // Already removed, e.g. with `msb snapshot rm`: only the coordinator's record is left.
         Err(microsandbox::MicrosandboxError::SnapshotNotFound(_)) => Ok(()),
         result => result.with_context(|| format!("remove snapshot {reference}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn freeze_steps_count_what_freeze_nodes_reports() {
+        // Links, computes, control, three captures, control, computes.
+        assert_eq!(freeze_steps(3, None), 8);
+        // A control template captures the control VM only.
+        assert_eq!(freeze_steps(3, Some("control")), 6);
+        // Without computes nothing stops or starts them.
+        assert_eq!(freeze_steps(1, None), 4);
+    }
+
+    #[test]
+    fn steps_number_up_to_the_total_and_survive_a_failing_sink() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let record = seen.clone();
+        let mut steps = Steps::new(
+            Arc::new(move |event| {
+                if let DeployEvent::Progress(p) = event {
+                    record.lock().unwrap().push((p.index, p.total));
+                }
+                anyhow::bail!("sink gone")
+            }),
+            2,
+        );
+        steps.next("a");
+        steps.next("b");
+        steps.next("c");
+        assert_eq!(*seen.lock().unwrap(), [(1, 2), (2, 2), (2, 2)]);
     }
 }

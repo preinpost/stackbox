@@ -89,6 +89,10 @@ VM 관측 결과는 시작 시와 30초 주기로 갱신되며, 실행 중인 jo
 
 `POST /farms/{id}/snapshots`에 `{"id":"dev-clean"}`를 전달하면 `snapshot` job이 VM을 정지해
 디스크를 저장하고 다시 시작합니다. farm 상태는 바뀌지 않으며 진행 중에는 `active_job`이 설정됩니다.
+job의 `steps`에는 시작한 순서대로 번호 붙은 단계가 쌓입니다(`step`, `index`/`total`, `started_at`,
+끝난 단계는 `finished_at`, 실패한 단계는 `failed: true`). 마지막 항목에 `finished_at`이 없으면 지금
+실행 중인 단계입니다. farm의 `step`에도 `2/5 capture ...` 형태로 같은 값이 들어갑니다.
+디스크 캡처는 바이트 진행률을 알려주지 않으므로 단계 단위로만 표시합니다.
 `POST /farms`에 `snapshot_id`를 지정하면 `restore` job이 스냅샷에서 VM을 만들고, 배포된 스냅샷이면
 성공 시 바로 `ready`가 됩니다. 이때 `components`와 `host_id`는 생략합니다. 두 job 모두 `snapshot_id`를 포함합니다.
 

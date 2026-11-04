@@ -4000,6 +4000,31 @@ h2 {
 .phase-step svg {
   flex-shrink: 0;
 }
+/* A job's numbered steps, such as a freeze's, with the time each took. */
+.job-steps {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 12.5px;
+}
+.job-steps li {
+  display: grid;
+  grid-template-columns: 14px auto 1fr auto;
+  align-items: center;
+  gap: 8px;
+  color: #5b7264;
+}
+.job-steps li.running {
+  color: #4c6d8c;
+}
+.job-steps li.failed {
+  color: #b4532f;
+}
+.job-step-text {
+  overflow-wrap: anywhere;
+}
 /* A choice that carries its own explanation, used by the unregister dialog. */
 .checkbox-row {
   display: flex;

@@ -2,12 +2,15 @@ import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { Cloud, Cpu, LoaderCircle, Snowflake } from "lucide-react";
 import {
+  activeJob,
   farmsQuery,
   hostQuery,
+  jobsQuery,
   snapshotsQuery,
   type Snapshot,
 } from "../api/client";
 import { BucketsPanel } from "../components/bucket-actions";
+import { StepProgress } from "../components/job-steps";
 import {
   DeleteSnapshotDialog,
   ExportSnapshotDialog,
@@ -129,6 +132,16 @@ function SnapshotRow({
   const sourceExists = farms.data?.some((f) => f.id === snapshot.source_farm);
   // An import learns its services from the archive only when it completes.
   const known = snapshot.status !== "importing" && snapshot.status !== "failed";
+  const creating = snapshot.status === "creating";
+  const jobs = useQuery({ ...jobsQuery(), enabled: creating });
+  const freezing = creating
+    ? jobs.data?.find(
+        (j) =>
+          j.kind === "snapshot" &&
+          j.snapshot_id === snapshot.id &&
+          activeJob(j),
+      )
+    : undefined;
   return (
     <div className="job-row snapshot-row">
       <span className={`job-kind-icon ${snapshot.status}`}>
@@ -159,6 +172,11 @@ function SnapshotRow({
             {snapshotHost(snapshot)}
           </span>
         </div>
+        {freezing && (
+          <div className="mt-1.5">
+            <StepProgress job={freezing} />
+          </div>
+        )}
         {snapshot.note && <p className="mt-1.5">{snapshot.note}</p>}
         {known && (
           <div className="service-tags mt-2.5">

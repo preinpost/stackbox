@@ -745,6 +745,45 @@ pub struct Job {
     /// Suffix of the compute VM a compute-expansion job adds (`compute-2`, ...).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_node: Option<String>,
+    /// Numbered steps of a job whose steps are known up front, such as a freeze, in the
+    /// order they started; the last one is current while the job runs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub steps: Vec<JobStep>,
+}
+/// One numbered step of a job.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct JobStep {
+    pub step: String,
+    /// Position from 1.
+    pub index: u32,
+    pub total: u32,
+    pub started_at: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finished_at: Option<u64>,
+    /// The job failed during this step.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub failed: bool,
+}
+impl Job {
+    /// Start a step, ending the one before it.
+    pub fn start_step(&mut self, step: String, index: u32, total: u32, at: u64) {
+        self.end_step(false, at);
+        self.steps.push(JobStep {
+            step,
+            index,
+            total,
+            started_at: at,
+            finished_at: None,
+            failed: false,
+        });
+    }
+    /// End the current step, if one is running.
+    pub fn end_step(&mut self, failed: bool, at: u64) {
+        if let Some(current) = self.steps.last_mut().filter(|s| s.finished_at.is_none()) {
+            current.finished_at = Some(at);
+            current.failed = failed;
+        }
+    }
 }
 fn is_zero(value: &u64) -> bool {
     *value == 0
