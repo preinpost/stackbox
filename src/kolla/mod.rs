@@ -271,6 +271,7 @@ pub async fn deploy_compute(
                     address: spec.address(),
                 })
                 .collect(),
+            multinode: true,
         };
         topology
             .computes
@@ -371,6 +372,106 @@ pub async fn deploy_compute(
         sandbox.detach().await;
     }
     result
+}
+
+/// Make a farm restored from a control template forget the computes of the farm it was
+/// frozen from, so its first expansion is compute-1 again. Only this copy changes; the
+/// source farm keeps its computes. Kolla's inventory lists no compute, the control VM forgets
+/// their SSH host keys, and OpenStack drops their registrations: each nova-compute service
+/// (Nova removes its compute node, placement resource provider and cell host mapping with
+/// it), any of those left behind, and their Neutron agents. Waits for the APIs first, and
+/// is safe to run again.
+pub async fn forget_computes(farm_id: &str, components: &[String], sink: EventSink) -> Result<()> {
+    let name = farm::node_name(farm_id, farm::Role::Control, None);
+    let control = farm::connect(&name).await?;
+    let result = async {
+        farm::wait_until_booted(&control).await?;
+        step(&sink, "Kolla multinode inventory에서 원본 compute 제거")?;
+        let topology = Topology {
+            name: name.clone(),
+            ip: None,
+            interface: farm::GUEST_INTERFACE.into(),
+            computes: Vec::new(),
+            multinode: true,
+        };
+        write_inventory(&control, &topology).await?;
+        step(&sink, "원본 farm의 compute 등록 정리")?;
+        stream(
+            &control,
+            &forget_computes_script(components),
+            &format!("{LOG_DIR}/forget-computes.log"),
+            &sink,
+        )
+        .await
+    }
+    .await;
+    control.detach().await;
+    result
+}
+
+/// Compute VMs are `farm-compute-<n>` to OpenStack; the control VM is never matched.
+fn forget_computes_script(components: &[String]) -> String {
+    let has = |id: &str| components.iter().any(|c| c == id);
+    let known_hosts: String = (1..=farm::MAX_COMPUTES)
+        .map(|index| {
+            format!(
+                "ssh-keygen -R {} >/dev/null 2>&1 || true
+ssh-keygen -R {} >/dev/null 2>&1 || true
+",
+                farm::hostname(farm::Role::Compute, Some(index)),
+                farm::address(farm::Role::Compute, Some(index)),
+            )
+        })
+        .collect();
+    let mut script = format!(
+        r#"set -euo pipefail
+{known_hosts}. {CONFIG_DIR}/admin-openrc.sh
+os={OSC_VENV}/bin/openstack
+ok=''
+for _ in $(seq 120); do
+  if $os token issue -f value -c expires >/dev/null 2>&1; then ok=1; break; fi
+  sleep 5
+done
+[ -n "$ok" ] || {{ echo "keystone did not answer within 10 minutes" >&2; exit 1; }}
+"#
+    );
+    if has("nova") {
+        script.push_str(&format!(
+            r#"for _ in $(seq 60); do $os compute service list -f value -c ID >/dev/null 2>&1 && break; sleep 5; done
+# Nova deletes a service's compute nodes, their resource providers and its host mapping with it.
+$os compute service list --service nova-compute -f value -c ID -c Host | while read -r id host; do
+  case "$host" in farm-compute-*) ;; *) continue ;; esac
+  echo "nova-compute $host: deleting service $id"
+  $os compute service delete "$id"
+done
+# The OpenStack CLI has no placement commands without osc-placement; its SDK has them.
+{OSC_VENV}/bin/python - <<'PY'
+import openstack
+conn = openstack.connect()
+for rp in list(conn.placement.resource_providers()):
+    if rp.name.startswith("farm-compute-"):
+        print(f"placement: deleting resource provider {{rp.name}} {{rp.id}}", flush=True)
+        conn.placement.delete_resource_provider(rp)
+PY
+docker exec nova_api nova-manage cell_v2 list_hosts | awk -F'|' 'NF >= 4 {{ gsub(/ /, "", $3); gsub(/ /, "", $4); if ($4 ~ /^farm-compute-/) print $3, $4 }}' | while read -r cell host; do
+  echo "cell host mapping $host: deleting"
+  docker exec nova_api nova-manage cell_v2 delete_host --cell_uuid "$cell" --host "$host"
+done
+"#
+        ));
+    }
+    if has("neutron") {
+        script.push_str(
+            r#"$os network agent list -f value -c ID -c Host | while read -r id host; do
+  case "$host" in farm-compute-*) ;; *) continue ;; esac
+  echo "neutron agent on $host: deleting $id"
+  $os network agent delete "$id"
+done
+"#,
+        );
+    }
+    script.push_str("echo \"the source farm's computes are forgotten\"\n");
+    script
 }
 
 /// Rewrite only Kolla's multinode inventory and Ansible concurrency, leaving passwords and
@@ -1071,21 +1172,37 @@ echo "neutron OK"
         );
     }
     if has("nova") {
-        script.push_str(
+        script.push_str(&format!(
             r#"compute_state=''
+# A farm restored from a control template has no compute VM, so no nova-compute, until one
+# is added; Kolla's multinode inventory then lists no compute host.
+if {no_computes}; then
+  $os compute service list -f value -c ID >/dev/null
+  echo "nova OK (no compute VM yet)"
+else
 # Every nova-compute, one per compute VM of a multi-node farm.
 for _ in $(seq 60); do
   compute_state=$($os compute service list --service nova-compute -f value -c State 2>/dev/null || true)
   [ -n "$compute_state" ] && ! echo "$compute_state" | grep -qvx up && break
   sleep 5
 done
-[ -n "$compute_state" ] && ! echo "$compute_state" | grep -qvx up || { echo "nova-compute is not up everywhere: ${compute_state:-missing}" >&2; exit 1; }
+[ -n "$compute_state" ] && ! echo "$compute_state" | grep -qvx up || {{ echo "nova-compute is not up everywhere: ${{compute_state:-missing}}" >&2; exit 1; }}
 echo "nova OK"
+fi
 "#,
-        );
+            no_computes = no_compute_hosts(INVENTORY),
+        ));
     }
     script.push_str("echo \"services answer\"\n");
     script
+}
+
+/// A shell test that Kolla's multinode inventory at `inventory` lists no compute host; an
+/// all-in-one inventory lists the deployer there.
+fn no_compute_hosts(inventory: &str) -> String {
+    format!(
+        r#"[ -f {inventory} ] && grep -qx '\[compute\]' {inventory} && [ "$(awk '/^\[/ {{ group = $0; next }} group == "[compute]" && NF && !/^#/ {{ n++ }} END {{ print n + 0 }}' {inventory})" = 0 ]"#
+    )
 }
 
 /// Kolla variable holding each service's public base URL (without the API version path).
@@ -1397,6 +1514,8 @@ mod tests {
             verify_script(&components, 2),
             settle_script(None, &components),
             settle_script(Some((&from, &to)), &components),
+            forget_computes_script(&components),
+            forget_computes_script(&components[..2]),
             OVS_EXTEND_START_SCRIPT.to_owned(),
             include_str!("../../guest/farm/farm-external").to_owned(),
             include_str!("../../guest/farm/farm-identity").to_owned(),
@@ -1430,6 +1549,7 @@ mod tests {
             verify_script(&components, 0),
             verify_script(&components, 2),
             settle_script(None, &components),
+            forget_computes_script(&components),
         ] {
             assert_heredocs_do_not_nest(&script);
         }
@@ -1453,6 +1573,53 @@ mod tests {
         }
         assert!(!settle_script(None, &components).contains("endpoint set"));
         assert!(!settle_script(Some((&from, &from)), &components).contains("endpoint set"));
+    }
+
+    #[test]
+    fn a_control_template_copy_forgets_only_the_computes_and_settles_without_them() {
+        let components = ["keystone", "glance", "placement", "neutron", "nova"].map(String::from);
+        let script = forget_computes_script(&components);
+        for expected in [
+            "ssh-keygen -R farm-compute-1 ",
+            "ssh-keygen -R 10.254.0.13 ",
+            "$os compute service delete \"$id\"",
+            "conn.placement.delete_resource_provider(rp)",
+            "nova-manage cell_v2 delete_host --cell_uuid \"$cell\" --host \"$host\"",
+            "$os network agent delete \"$id\"",
+        ] {
+            assert!(script.contains(expected), "{expected}");
+        }
+        // Nothing of the control VM's own matches.
+        assert!(!script.contains("farm-control"));
+        let without = forget_computes_script(&components[..2]);
+        assert!(!without.contains("compute service") && !without.contains("network agent"));
+
+        // The inventory test, run against the inventories it tells apart.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("inventory");
+        let template = "[control]\ncontrol01\n\n[network]\nnetwork01\n\n[compute]\ncompute01\n\n[monitoring]\nmonitoring01\n\n[storage]\nstorage01\n\n[deployment]\nlocalhost\n";
+        let check = |inventory: &str| {
+            std::fs::write(&path, inventory).unwrap();
+            Command::new("bash")
+                .arg("-c")
+                .arg(no_compute_hosts(&path.display().to_string()))
+                .status()
+                .unwrap()
+                .success()
+        };
+        let compute = config::Compute {
+            name: "demo-compute-1".into(),
+            hostname: "farm-compute-1".into(),
+            address: "10.254.0.11".into(),
+        };
+        assert!(check(
+            &config::multinode_inventory(template, "farm-control", &[]).unwrap()
+        ));
+        assert!(!check(
+            &config::multinode_inventory(template, "farm-control", &[compute]).unwrap()
+        ));
+        assert!(!check("[control]\nlocalhost\n\n[compute]\nlocalhost\n"));
+        assert!(settle_script(None, &components).contains("no compute VM yet"));
     }
 
     #[test]

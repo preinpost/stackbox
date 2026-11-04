@@ -669,7 +669,7 @@ async fn set_faults(
 ) -> Result<Json<FarmRecord>, ApiError> {
     Ok(Json(app.manager.impair(&id, &node, body(value)?).await?))
 }
-#[utoipa::path(post, path="/api/v1/farms/{id}/snapshots", params(("id"=String, Path)), request_body=SnapshotRequest, responses((status=202, description="Snapshot job; the farm's VM stops for the capture and starts again", body=Job), (status=400, body=ErrorBody), (status=409, body=ErrorBody)))]
+#[utoipa::path(post, path="/api/v1/farms/{id}/snapshots", params(("id"=String, Path)), request_body=SnapshotRequest, responses((status=202, description="Snapshot job; the farm's VM stops for the capture and starts again. With `node: control` every VM stops, computes first, but only the control VM is captured, as a control template", body=Job), (status=400, body=ErrorBody), (status=409, body=ErrorBody)))]
 async fn freeze(
     State(app): State<App>,
     Path(id): Path<String>,

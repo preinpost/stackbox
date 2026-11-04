@@ -35,7 +35,8 @@ pub(super) fn restorable<'a>(state: &'a State, id: &str) -> Result<&'a SnapshotR
     {
         return Err(conflict(format!("snapshot '{id}' is not ready")));
     }
-    if snapshot.compute_template {
+    // A control template is restored too, as a farm with its control VM alone.
+    if snapshot.template == Some(TemplateRole::Compute) {
         return Err(conflict(format!(
             "snapshot '{id}' is a compute template; add a compute from it to a deployed farm instead"
         )));
@@ -55,7 +56,7 @@ pub(super) fn compute_template<'a>(
         .snapshots
         .get(id)
         .ok_or_else(|| NotFound(format!("snapshot '{id}'")))?;
-    if !snapshot.compute_template {
+    if snapshot.template != Some(TemplateRole::Compute) {
         return Err(conflict(format!(
             "snapshot '{id}' is not a compute template; freeze one of a farm's compute VMs as one"
         )));
@@ -171,8 +172,8 @@ fn labels(snapshot: &SnapshotRecord) -> BTreeMap<String, String> {
     if let Some(note) = &snapshot.note {
         labels.insert(label::NOTE.into(), note.clone());
     }
-    if snapshot.compute_template {
-        labels.insert(label::ROLE.into(), Role::Compute.as_str().into());
+    if let Some(template) = snapshot.template {
+        labels.insert(label::ROLE.into(), template.as_str().into());
     } else if snapshot.plan.computes > 0 {
         labels.insert(label::COMPUTES.into(), snapshot.plan.computes.to_string());
     }
@@ -204,7 +205,7 @@ struct Imported {
     source_exposure: Exposure,
     source_farm: Option<String>,
     note: Option<String>,
-    compute_template: bool,
+    template: Option<TemplateRole>,
     release: Option<String>,
 }
 fn parse_labels(labels: &BTreeMap<String, String>) -> Result<Imported> {
@@ -223,21 +224,27 @@ fn parse_labels(labels: &BTreeMap<String, String>) -> Result<Imported> {
         .split(',')
         .map(str::to_owned)
         .collect();
-    let compute_template = match labels.get(label::ROLE).map(String::as_str) {
-        None => false,
-        Some("compute") => true,
+    let template = match labels.get(label::ROLE).map(String::as_str) {
+        None => None,
+        Some("control") => Some(TemplateRole::Control),
+        Some("compute") => Some(TemplateRole::Compute),
         Some(role) => anyhow::bail!("archive holds a {role} VM, which farm cannot use"),
+    };
+    // Snapshots are of all-in-one VMs, Nova included from before plan() split it off.
+    // A compute template's farm had at least one compute; a control template's farm starts
+    // with none. Archives do not record the computes' size.
+    let plan = match template {
+        Some(TemplateRole::Control) => control_layout(&components, None)?,
+        _ => layout(&PlanRequest {
+            components,
+            computes: u8::from(template.is_some()),
+            compute: None,
+        })?,
     };
     Ok(Imported {
         arch: arch.clone(),
         platform: labels.get(label::PLATFORM).cloned(),
-        // Snapshots are of all-in-one VMs, Nova included from before plan() split it off.
-        // A compute template's farm had at least one compute.
-        plan: layout(&PlanRequest {
-            components,
-            computes: u8::from(compute_template),
-            compute: None,
-        })?,
+        plan,
         deployed: get(label::DEPLOYED)? == "true",
         source_exposure: Exposure {
             host: get(label::EXPOSURE_HOST)?.clone(),
@@ -248,7 +255,7 @@ fn parse_labels(labels: &BTreeMap<String, String>) -> Result<Imported> {
         },
         source_farm: labels.get(label::SOURCE).cloned(),
         note: labels.get(label::NOTE).cloned(),
-        compute_template,
+        template,
         release: labels.get(label::RELEASE).cloned(),
     })
 }
@@ -333,7 +340,24 @@ impl FarmManager {
                     "farms imported from older versions cannot be frozen",
                 ));
             };
-            if let Some(node) = &request.node {
+            if request.node.as_deref() == Some("control") {
+                if !plan.multinode() {
+                    return Err(conflict(
+                        "an all-in-one farm has no control VM to freeze as a template; freeze the whole farm instead",
+                    ));
+                }
+                if farm.status != FarmStatus::Ready {
+                    return Err(conflict(
+                        "deploy the farm before freezing a control template from it",
+                    ));
+                }
+                // Its computes stop while the control VM is captured; snapshots stay here.
+                if !farm.shares.is_empty() {
+                    return Err(conflict(
+                        "this farm has computes on other hosts; only a farm on the local host alone can be frozen as a control template",
+                    ));
+                }
+            } else if let Some(node) = &request.node {
                 if plan.computes == 0
                     || !plan.nodes.iter().any(|spec| {
                         crate::farm::suffix(spec.role, spec.index).as_deref() == Some(node.as_str())
@@ -352,7 +376,12 @@ impl FarmManager {
                     )));
                 }
             }
-            let layout_matches = if plan.computes > 0 {
+            if request.node.is_none() && plan.multinode() && plan.computes == 0 {
+                return Err(conflict(
+                    "this farm has no compute VM yet; freeze its control VM as a control template instead",
+                ));
+            }
+            let layout_matches = if plan.multinode() {
                 crate::farm::observed_layout(&farm.nodes) == Some(plan.computes)
             } else {
                 farm.nodes.len() == 1 && farm.nodes[0].role == Some(Role::AllInOne)
@@ -360,19 +389,31 @@ impl FarmManager {
             if !layout_matches || farm.nodes.iter().any(|node| node.status != "running") {
                 return Err(conflict("the farm's VMs must be running to freeze it"));
             }
+            let template = request.node.as_deref().map(|node| match node {
+                "control" => TemplateRole::Control,
+                _ => TemplateRole::Compute,
+            });
             let snapshot = SnapshotRecord {
                 id: request.id.clone(),
                 status: SnapshotStatus::Creating,
                 arch: current_arch(),
                 platform: Some(current_platform()),
                 source_farm: Some(farm_id.into()),
-                plan: plan.clone(),
+                plan: match template {
+                    // What a farm restored from it runs until it gains computes.
+                    Some(TemplateRole::Control) => {
+                        control_layout(&plan.components, plan.compute)
+                            .map_err(|e| conflict(e.to_string()))?
+                    }
+                    _ => plan.clone(),
+                },
                 deployed: farm.status == FarmStatus::Ready,
                 source_exposure: exposure.clone(),
                 note: request.note.clone().filter(|n| !n.trim().is_empty()),
                 reference: None,
                 nodes: Vec::new(),
-                compute_template: request.node.is_some(),
+                template,
+                legacy_compute_template: false,
                 release: Some(crate::kolla::OPENSTACK_RELEASE.into()),
                 size_bytes: None,
                 archive: None,
@@ -402,7 +443,8 @@ impl FarmManager {
             &farm.id,
             &job.id,
             None,
-            match &job.target_node {
+            match job.target_node.as_deref() {
+                Some("control") => "stopping the computes, then the control VM, to capture the control VM as a control template\n".into(),
                 Some(node) => format!("stopping {node} to capture it as a compute template\n"),
                 None => "stopping the VM to capture its disks\n".into(),
             },
@@ -445,7 +487,7 @@ impl FarmManager {
             ));
         }
         // A compute template stopped one compute only; the control plane kept answering.
-        if snapshot.deployed && !snapshot.compute_template {
+        if snapshot.deployed && snapshot.template != Some(TemplateRole::Compute) {
             backend
                 .settle(
                     farm.id.clone(),
@@ -494,6 +536,25 @@ impl FarmManager {
             state.farms.get_mut(&farm.id).context("farm missing")?.nodes = nodes;
             Ok(())
         })?;
+        if snapshot.template == Some(TemplateRole::Control) {
+            self.log(
+                &farm.id,
+                &job.id,
+                None,
+                "control VM started; forgetting the computes of the farm it was frozen from\n"
+                    .into(),
+            )?;
+            backend
+                .forget_computes(
+                    farm.id.clone(),
+                    plan.components.clone(),
+                    self.event_sink(job, None),
+                )
+                .await
+                .context(
+                    "the control VM started, but its source farm's computes are still registered",
+                )?;
+        }
         if snapshot.deployed {
             self.log(
                 &farm.id,
@@ -830,7 +891,8 @@ impl FarmManager {
                 note: None,
                 reference: None,
                 nodes: Vec::new(),
-                compute_template: false,
+                template: None,
+                legacy_compute_template: false,
                 release: None,
                 size_bytes: None,
                 archive: None,
@@ -860,7 +922,7 @@ impl FarmManager {
                         s.source_exposure = imported.source_exposure;
                         s.source_farm = imported.source_farm;
                         s.note = imported.note;
-                        s.compute_template = imported.compute_template;
+                        s.template = imported.template;
                         s.release = imported.release;
                         s.reference = Some(reference);
                         s.size_bytes = size_bytes;

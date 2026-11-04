@@ -47,6 +47,9 @@ pub(crate) struct Fake {
     expanded_from: Mutex<Vec<Option<String>>>,
     pub(crate) fail_expand: AtomicBool,
     pub(crate) fail_compute: AtomicBool,
+    /// Farms restored from a control template that forgot their source's computes.
+    forgotten: Mutex<Vec<String>>,
+    pub(crate) fail_forget: AtomicBool,
 }
 impl Backend for Fake {
     fn relink(&self, id: String, url: String) -> BoxFuture<'_, Result<()>> {
@@ -361,6 +364,30 @@ impl Backend for Fake {
             }
             sink(DeployEvent::Output("services answer".into()))?;
             self.settled.lock().unwrap().push(rebind);
+            Ok(())
+        })
+    }
+    fn forget_computes(
+        &self,
+        id: String,
+        _: Vec<String>,
+        sink: EventSink,
+    ) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async move {
+            if self.fail_forget.load(Ordering::SeqCst) {
+                bail!("intentional forget failure");
+            }
+            // Only the restored control VM is left to clean up.
+            let farms = self.farms.lock().unwrap();
+            assert!(
+                farms[&id]
+                    .iter()
+                    .all(|vm| vm.role == Some(crate::farm::Role::Control))
+            );
+            sink(DeployEvent::Output(
+                "the source farm's computes are forgotten".into(),
+            ))?;
+            self.forgotten.lock().unwrap().push(id);
             Ok(())
         })
     }
@@ -3528,12 +3555,18 @@ async fn a_compute_template_boots_the_next_compute_and_kolla_only_reconfigures_i
         note: None,
         node: Some(node.into()),
     };
-    // Only a deployed farm's compute VM can become a template.
+    // Only a deployed farm's control or compute VM can become a template.
+    assert!(
+        manager
+            .freeze("src", template("compute-0"))
+            .unwrap_err()
+            .is::<BadRequest>()
+    );
     assert!(
         manager
             .freeze("src", template("control"))
             .unwrap_err()
-            .is::<BadRequest>()
+            .is::<Conflict>()
     );
     assert!(
         manager
@@ -3553,7 +3586,7 @@ async fn a_compute_template_boots_the_next_compute_and_kolla_only_reconfigures_i
     assert_eq!(job.target_node.as_deref(), Some("compute-1"));
     assert_eq!(done(&manager, &job).await.status, JobStatus::Succeeded);
     let snapshot = manager.snapshot("tpl").unwrap();
-    assert!(snapshot.compute_template);
+    assert_eq!(snapshot.template, Some(model::TemplateRole::Compute));
     assert!(snapshot.nodes.is_empty());
     assert_eq!(snapshot.reference.as_deref(), Some("fake/tpl"));
     assert_eq!(
@@ -3638,7 +3671,7 @@ async fn a_compute_template_boots_the_next_compute_and_kolla_only_reconfigures_i
         "{:?}",
         imported.error
     );
-    assert!(imported.compute_template);
+    assert_eq!(imported.template, Some(model::TemplateRole::Compute));
     assert_eq!(imported.release, snapshot.release);
     assert_eq!(imported.plan.components, snapshot.plan.components);
 
@@ -3769,6 +3802,340 @@ async fn a_failed_expansion_from_a_template_is_retried_the_same_way() {
         backend.reconfigured.lock().unwrap().as_slice(),
         &[("retry".into(), 2)]
     );
+}
+
+#[tokio::test]
+async fn a_control_template_starts_a_farm_without_computes_that_expands_clean_or_from_a_template() {
+    let dir = tempfile::tempdir().unwrap();
+    let backend = Arc::new(Fake::default());
+    let manager = open_with(options(dir.path()), backend.clone()).await;
+    if !cfg!(target_os = "linux") {
+        *manager.0.guest_agent.write().unwrap() = Some(dir.path().join("farm-agent"));
+    }
+    let created = manager
+        .create(CreateRequest {
+            computes: 1,
+            ..request("src")
+        })
+        .unwrap();
+    assert_eq!(done(&manager, &created).await.status, JobStatus::Succeeded);
+    let template = |id: &str, node: &str| SnapshotRequest {
+        id: id.into(),
+        note: None,
+        node: Some(node.into()),
+    };
+    let deployed = manager.deploy("src", DeployRequest::default()).unwrap();
+    assert_eq!(done(&manager, &deployed).await.status, JobStatus::Succeeded);
+    let source_plan = manager.get("src").unwrap().plan.unwrap();
+
+    let job = manager.freeze("src", template("ctl", "control")).unwrap();
+    assert_eq!(job.target_node.as_deref(), Some("control"));
+    assert_eq!(done(&manager, &job).await.status, JobStatus::Succeeded);
+    let snapshot = manager.snapshot("ctl").unwrap();
+    assert_eq!(snapshot.template, Some(model::TemplateRole::Control));
+    // One VM's disks, like an all-in-one snapshot, so it exports as one archive.
+    assert!(snapshot.nodes.is_empty());
+    assert_eq!(snapshot.reference.as_deref(), Some("fake/ctl"));
+    assert_eq!(snapshot.plan.computes, 0);
+    assert_eq!(snapshot.plan.nodes.len(), 1);
+    assert_eq!(snapshot.plan.nodes[0].role, crate::farm::Role::Control);
+    assert_eq!(
+        serde_json::to_value(snapshot.plan.nodes[0]).unwrap(),
+        serde_json::to_value(source_plan.nodes[0]).unwrap()
+    );
+    assert_eq!(snapshot.plan.components, source_plan.components);
+    let labels = backend.snapshots.lock().unwrap()["fake/ctl"].clone();
+    assert_eq!(labels[crate::model::snapshot_labels::ROLE], "control");
+    assert_eq!(labels[crate::model::snapshot_labels::NODE], "control");
+    assert_eq!(
+        labels[crate::model::snapshot_labels::RELEASE],
+        crate::kolla::OPENSTACK_RELEASE
+    );
+    assert!(!labels.contains_key(crate::model::snapshot_labels::COMPUTES));
+    // The source's control plane restarted and was checked; its OpenStack kept its compute.
+    assert!(matches!(backend.settled.lock().unwrap().as_slice(), [None]));
+    assert!(backend.forgotten.lock().unwrap().is_empty());
+    let source = manager.get("src").unwrap();
+    assert_eq!(source.status, FarmStatus::Ready);
+    assert_eq!(source.plan.unwrap().computes, 1);
+    let job = manager.freeze("src", template("cpt", "compute-1")).unwrap();
+    assert_eq!(done(&manager, &job).await.status, JobStatus::Succeeded);
+
+    // The whole-farm restore path starts a multi-node farm with the control VM alone.
+    let restored = manager
+        .create(CreateRequest {
+            snapshot_id: Some("ctl".into()),
+            ..request("copy")
+        })
+        .unwrap();
+    assert_eq!(restored.kind, JobKind::Restore);
+    let finished = done(&manager, &restored).await;
+    assert_eq!(
+        finished.status,
+        JobStatus::Succeeded,
+        "{:?}",
+        finished.error
+    );
+    let copy = manager.get("copy").unwrap();
+    assert_eq!(copy.status, FarmStatus::Ready);
+    assert_eq!(copy.snapshot_id.as_deref(), Some("ctl"));
+    let plan = copy.plan.clone().unwrap();
+    assert!(plan.multinode());
+    assert_eq!(plan.computes, 0);
+    assert_eq!(copy.nodes.len(), 1);
+    assert_eq!(copy.nodes[0].name, "copy-control");
+    assert_eq!(copy.memory_mib(), plan.memory_mib);
+    assert_eq!(backend.forgotten.lock().unwrap().as_slice(), &["copy"]);
+    let settled = backend.settled.lock().unwrap().last().cloned().unwrap();
+    assert_eq!(
+        settled.map(|(from, _)| from.port_base),
+        Some(snapshot.source_exposure.port_base)
+    );
+    let logs = manager.logs("copy", 0, 1000).unwrap();
+    assert!(
+        logs.iter()
+            .any(|entry| entry.message.contains("computes are forgotten")),
+        "{logs:?}"
+    );
+    // Kolla came with the template; a farm without a compute VM only grows.
+    assert!(
+        manager
+            .deploy("copy", DeployRequest::default())
+            .unwrap_err()
+            .to_string()
+            .contains("no compute VM yet")
+    );
+    assert!(
+        manager
+            .freeze(
+                "copy",
+                SnapshotRequest {
+                    id: "whole".into(),
+                    note: None,
+                    node: None,
+                },
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("control template")
+    );
+
+    // A check forgets them again, in case the restore stopped before it had.
+    let job = manager.settle("copy").unwrap();
+    assert_eq!(done(&manager, &job).await.status, JobStatus::Succeeded);
+    assert_eq!(backend.forgotten.lock().unwrap().len(), 2);
+
+    // compute-1 is installed clean, then compute-2 boots from the source's compute template.
+    let job = manager
+        .add_compute("copy", AddComputeRequest::default())
+        .unwrap();
+    assert_eq!(job.target_node.as_deref(), Some("compute-1"));
+    let finished = done(&manager, &job).await;
+    assert_eq!(
+        finished.status,
+        JobStatus::Succeeded,
+        "{:?}",
+        finished.error
+    );
+    let job = manager
+        .add_compute(
+            "copy",
+            AddComputeRequest {
+                host_id: None,
+                from_snapshot: Some("cpt".into()),
+            },
+        )
+        .unwrap();
+    assert_eq!(job.target_node.as_deref(), Some("compute-2"));
+    let finished = done(&manager, &job).await;
+    assert_eq!(
+        finished.status,
+        JobStatus::Succeeded,
+        "{:?}",
+        finished.error
+    );
+    let copy = manager.get("copy").unwrap();
+    let plan = copy.plan.unwrap();
+    assert_eq!(plan.computes, 2);
+    assert_eq!(copy.nodes.len(), 3);
+    assert_eq!(
+        serde_json::to_value(&plan.nodes[..2]).unwrap(),
+        serde_json::to_value(&source_plan.nodes).unwrap()
+    );
+    assert_eq!(
+        backend.computed.lock().unwrap().as_slice(),
+        &[("copy".into(), 1)]
+    );
+    assert_eq!(
+        backend.reconfigured.lock().unwrap().as_slice(),
+        &[("copy".into(), 2)]
+    );
+
+    // A control template travels as an archive and stays one.
+    let archive = dir.path().join("ctl.msb");
+    manager
+        .export_snapshot(
+            "ctl",
+            ExportRequest {
+                path: Some(archive.display().to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    manager.wait_snapshot("ctl").await.unwrap();
+    manager
+        .import_snapshot(ImportRequest {
+            path: Some(archive.display().to_string()),
+            id: Some("ctl-copy".into()),
+            ..Default::default()
+        })
+        .unwrap();
+    let imported = manager.wait_snapshot("ctl-copy").await.unwrap();
+    assert_eq!(
+        imported.status,
+        SnapshotStatus::Ready,
+        "{:?}",
+        imported.error
+    );
+    assert_eq!(imported.template, Some(model::TemplateRole::Control));
+    assert_eq!(imported.plan.computes, 0);
+    assert_eq!(
+        serde_json::to_value(&imported.plan.nodes).unwrap(),
+        serde_json::to_value(&snapshot.plan.nodes).unwrap()
+    );
+    let restored = manager
+        .create(CreateRequest {
+            snapshot_id: Some("ctl-copy".into()),
+            ..request("again")
+        })
+        .unwrap();
+    assert_eq!(done(&manager, &restored).await.status, JobStatus::Succeeded);
+    assert_eq!(manager.get("again").unwrap().nodes.len(), 1);
+}
+
+#[tokio::test]
+async fn a_control_template_needs_a_deployed_multi_node_farm_and_a_clean_copy() {
+    let dir = tempfile::tempdir().unwrap();
+    let backend = Arc::new(Fake::default());
+    let manager = open_with(options(dir.path()), backend.clone()).await;
+    if !cfg!(target_os = "linux") {
+        *manager.0.guest_agent.write().unwrap() = Some(dir.path().join("farm-agent"));
+    }
+    let control = |id: &str| SnapshotRequest {
+        id: id.into(),
+        note: None,
+        node: Some("control".into()),
+    };
+    // An all-in-one farm has no control VM.
+    let aio = manager.create(request("aio")).unwrap();
+    assert_eq!(done(&manager, &aio).await.status, JobStatus::Succeeded);
+    let deployed = manager.deploy("aio", DeployRequest::default()).unwrap();
+    assert_eq!(done(&manager, &deployed).await.status, JobStatus::Succeeded);
+    let refused = manager.freeze("aio", control("nope")).unwrap_err();
+    assert!(refused.is::<Conflict>());
+    assert!(refused.to_string().contains("all-in-one"), "{refused}");
+
+    let created = manager
+        .create(CreateRequest {
+            computes: 1,
+            ..request("src")
+        })
+        .unwrap();
+    assert_eq!(done(&manager, &created).await.status, JobStatus::Succeeded);
+    let refused = manager.freeze("src", control("nope")).unwrap_err();
+    assert!(refused.to_string().contains("deploy the farm"), "{refused}");
+    let deployed = manager.deploy("src", DeployRequest::default()).unwrap();
+    assert_eq!(done(&manager, &deployed).await.status, JobStatus::Succeeded);
+    let job = manager.freeze("src", control("ctl")).unwrap();
+    assert_eq!(done(&manager, &job).await.status, JobStatus::Succeeded);
+    // Neither a compute template nor a control template adds a compute.
+    let refused = manager
+        .add_compute(
+            "src",
+            AddComputeRequest {
+                host_id: None,
+                from_snapshot: Some("ctl".into()),
+            },
+        )
+        .unwrap_err();
+    assert!(
+        refused.to_string().contains("not a compute template"),
+        "{refused}"
+    );
+
+    // A copy that cannot forget its source's computes is not ready.
+    backend.fail_forget.store(true, Ordering::SeqCst);
+    let restored = manager
+        .create(CreateRequest {
+            snapshot_id: Some("ctl".into()),
+            ..request("copy")
+        })
+        .unwrap();
+    let failed = done(&manager, &restored).await;
+    assert_eq!(failed.status, JobStatus::Failed);
+    assert!(
+        failed
+            .error
+            .as_deref()
+            .is_some_and(|e| e.contains("still registered")),
+        "{:?}",
+        failed.error
+    );
+    assert_eq!(manager.get("copy").unwrap().status, FarmStatus::Failed);
+    assert!(
+        manager
+            .add_compute("copy", AddComputeRequest::default())
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn compute_templates_recorded_before_control_templates_load_as_compute_templates() {
+    let dir = tempfile::tempdir().unwrap();
+    let manager = open_with(options(dir.path()), Arc::new(Fake::default())).await;
+    if !cfg!(target_os = "linux") {
+        *manager.0.guest_agent.write().unwrap() = Some(dir.path().join("farm-agent"));
+    }
+    let created = manager
+        .create(CreateRequest {
+            computes: 1,
+            ..request("src")
+        })
+        .unwrap();
+    assert_eq!(done(&manager, &created).await.status, JobStatus::Succeeded);
+    let deployed = manager.deploy("src", DeployRequest::default()).unwrap();
+    assert_eq!(done(&manager, &deployed).await.status, JobStatus::Succeeded);
+    let job = manager
+        .freeze(
+            "src",
+            SnapshotRequest {
+                id: "tpl".into(),
+                note: None,
+                node: Some("compute-1".into()),
+            },
+        )
+        .unwrap();
+    assert_eq!(done(&manager, &job).await.status, JobStatus::Succeeded);
+    settle(&manager).await;
+    drop(manager);
+    let path = dir.path().join("state.json");
+    let mut state: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let record = &mut state["snapshots"]["tpl"];
+    assert_eq!(record["template"], "compute");
+    assert!(record.get("compute_template").is_none());
+    let record = record.as_object_mut().unwrap();
+    record.remove("template");
+    record.insert("compute_template".into(), true.into());
+    std::fs::write(&path, serde_json::to_vec(&state).unwrap()).unwrap();
+
+    let manager = open_with(options(dir.path()), Arc::new(Fake::default())).await;
+    let snapshot = manager.snapshot("tpl").unwrap();
+    assert_eq!(snapshot.template, Some(model::TemplateRole::Compute));
+    assert!(!snapshot.legacy_compute_template);
+    let api = serde_json::to_value(&snapshot).unwrap();
+    assert_eq!(api["template"], "compute");
+    assert!(api.get("compute_template").is_none());
 }
 
 #[tokio::test]

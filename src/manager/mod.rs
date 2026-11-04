@@ -475,7 +475,7 @@ impl FarmManager {
         let plan = farm
             .plan
             .as_ref()
-            .filter(|plan| plan.computes > 0)
+            .filter(|plan| plan.multinode())
             .ok_or_else(|| conflict("only multi-node farms have links to fault"))?;
         if !plan
             .nodes
@@ -1350,7 +1350,7 @@ impl FarmManager {
                     placed.entry(host.clone()).or_default().push(node.clone());
                 }
             }
-            let (budget, agent_sha256, bind, local) = self.admit_host(state, &host_id, plan.computes > 0)?;
+            let (budget, agent_sha256, bind, local) = self.admit_host(state, &host_id, plan.multinode())?;
             let mut hosts = vec![(host_id.clone(), budget, agent_sha256.clone())];
             let mut relay_url = None;
             if !placed.is_empty() {
@@ -1482,6 +1482,11 @@ impl FarmManager {
             if !matches!(layout, Some(Ok(_))) {
                 return Err(conflict("legacy multi-node farms cannot be deployed; keep or delete this farm and create a new farm"));
             }
+            // Its Kolla configuration came with the control template; a full deploy would
+            // verify Nova on computes it does not have.
+            if farm.plan.as_ref().is_some_and(|plan| plan.multinode() && plan.computes == 0) {
+                return Err(conflict("this farm has no compute VM yet; add one instead of deploying it again"));
+            }
             let expected = farm.plan.as_ref().map_or(1, |plan| plan.nodes.len());
             if farm.nodes.len() != expected || farm.nodes.iter().any(|n| n.status != "running") {
                 return Err(conflict(format!(
@@ -1554,7 +1559,7 @@ impl FarmManager {
                 .as_ref()
                 .ok_or_else(|| conflict("farm has no plan to expand"))?
                 .clone();
-            if plan.computes == 0 {
+            if !plan.multinode() {
                 return Err(conflict(
                     "an all-in-one farm has no control VM to add a compute to; create a multi-node farm instead",
                 ));
@@ -2002,7 +2007,26 @@ impl FarmManager {
             JobKind::Expand => self.expand_job(job, &farm).await?,
             JobKind::Settle => {
                 let components = farm_components(&farm);
-                self.backend_for(&farm)?
+                let backend = self.backend_for(&farm)?;
+                // A restore from a control template may have stopped before its copy forgot
+                // the source farm's computes; doing it again changes nothing once it has.
+                let template = farm
+                    .snapshot_id
+                    .as_ref()
+                    .and_then(|id| self.snapshot(id).ok())
+                    .and_then(|snapshot| snapshot.template);
+                if template == Some(crate::model::TemplateRole::Control)
+                    && farm.plan.as_ref().is_some_and(|plan| plan.computes == 0)
+                {
+                    backend
+                        .forget_computes(
+                            farm.id.clone(),
+                            components.clone(),
+                            self.event_sink(job, None),
+                        )
+                        .await?;
+                }
+                backend
                     .settle(farm.id, None, components, self.event_sink(job, None))
                     .await?;
             }

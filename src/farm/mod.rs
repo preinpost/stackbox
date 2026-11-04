@@ -19,8 +19,8 @@ pub use node::{
     wait_until_booted,
 };
 pub use snapshot::{
-    FrozenSnapshot, ImportedSnapshot, NodeSnapshot, export_snapshot, freeze_compute, freeze_farm,
-    import_snapshot, remove_snapshot, restore_farm,
+    FrozenSnapshot, ImportedSnapshot, NodeSnapshot, export_snapshot, freeze_compute,
+    freeze_control, freeze_farm, import_snapshot, remove_snapshot, restore_farm,
 };
 pub use template::{
     ALL_IN_ONE, COMPUTE, CONTROL, MAX_COMPUTES, NodeSpec, Role, address, hostname, suffix,
@@ -51,14 +51,14 @@ pub async fn create_farm_with(
     sources: &[String],
     share: Option<&crate::remote::protocol::Share>,
 ) -> Result<Vec<FarmNode>> {
-    let computes = layout(template)?;
+    layout(template)?;
     if !sources.is_empty() && sources.len() != template.len() {
         bail!("{} snapshots for {} VMs", sources.len(), template.len());
     }
     if !farm_handles(farm_id).await?.is_empty() {
         bail!("farm '{farm_id}' already exists");
     }
-    if computes == 0 {
+    if template[0].role == Role::AllInOne {
         let setup = NodeSetup {
             exposure,
             public_ports: public_ports(components),
@@ -237,14 +237,14 @@ fn public_ports(components: &[String]) -> Vec<(u16, u16)> {
 }
 
 /// How many compute VMs a layout new farms can have has: 0 for one all-in-one VM, or a
-/// control VM followed by computes numbered from 1. Legacy multi-VM layouts are refused.
+/// control VM followed by computes numbered from 1. A control VM alone, restored from a
+/// control template, has none yet. Legacy multi-VM layouts are refused.
 pub fn layout(template: &[NodeSpec]) -> Result<u8> {
     match template {
         [spec] if spec.role == Role::AllInOne => Ok(0),
         [control, computes @ ..]
             if control.role == Role::Control
                 && control.index.is_none()
-                && !computes.is_empty()
                 && computes.len() <= usize::from(MAX_COMPUTES)
                 && computes.iter().enumerate().all(|(i, spec)| {
                     spec.role == Role::Compute && spec.index == Some(i as u8 + 1)
@@ -358,7 +358,6 @@ fn farm_of(handle: &SandboxHandle) -> Option<String> {
 pub async fn all_in_one_name(farm_id: &str) -> Result<String> {
     let nodes = get_farm(farm_id).await?;
     let control = observed_layout(&nodes)
-        .filter(|computes| *computes > 0)
         .and_then(|_| nodes.iter().find(|node| node.role == Some(Role::Control)));
     nodes
         .iter()
@@ -444,7 +443,8 @@ mod tests {
         assert_eq!(layout(&[CONTROL, compute(1), compute(2)]).unwrap(), 2);
         assert!(layout(&[]).is_err());
         assert!(layout(&[ALL_IN_ONE, ALL_IN_ONE]).is_err());
-        assert!(layout(&[CONTROL]).is_err());
+        // A control template's farm starts without computes.
+        assert_eq!(layout(&[CONTROL]).unwrap(), 0);
         assert!(layout(&[CONTROL, compute(2)]).is_err());
         assert!(layout(&[CONTROL, COMPUTE]).is_err());
         assert!(layout(&[CONTROL, compute(1), compute(2), compute(3), compute(4)]).is_err());
@@ -476,6 +476,7 @@ mod tests {
             Some(2)
         );
         assert_eq!(observed_layout(&[node(Role::AllInOne, None)]), Some(0));
+        assert_eq!(observed_layout(&[node(Role::Control, None)]), Some(0));
         // A legacy farm with control and compute VMs is not a multi-node farm.
         assert_eq!(
             observed_layout(&[

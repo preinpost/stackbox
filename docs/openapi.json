@@ -971,7 +971,7 @@
         },
         "responses": {
           "202": {
-            "description": "Snapshot job; the farm's VM stops for the capture and starts again",
+            "description": "Snapshot job; the farm's VM stops for the capture and starts again. With `node: control` every VM stops, computes first, but only the control VM is captured, as a control template",
             "content": {
               "application/json": {
                 "schema": {
@@ -2381,7 +2381,7 @@
               "string",
               "null"
             ],
-            "description": "Start from this snapshot instead of an empty VM. Its services replace `components`."
+            "description": "Start from this snapshot instead of an empty VM. Its services replace `components`.\nA control template starts a multi-node farm with its control VM alone, ready for\ncomputes to be added; a compute template cannot start a farm."
           }
         },
         "additionalProperties": false
@@ -4013,10 +4013,6 @@
               }
             ]
           },
-          "compute_template": {
-            "type": "boolean",
-            "description": "A single compute VM frozen to boot new computes of farms from; no farm restores\nfrom it."
-          },
           "created_at": {
             "type": "integer",
             "format": "int64",
@@ -4093,6 +4089,17 @@
           "status": {
             "$ref": "#/components/schemas/SnapshotStatus"
           },
+          "template": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/TemplateRole",
+                "description": "The one VM a template holds: `control`, which new farms start from without\ncomputes, or `compute`, which expansions boot new computes from. None for a snapshot\nof a whole farm."
+              }
+            ]
+          },
           "transfer": {
             "oneOf": [
               {
@@ -4125,7 +4132,7 @@
               "string",
               "null"
             ],
-            "description": "Freeze only this compute VM (`compute-1`, ...) of a deployed multi-node farm, as a\ncompute template that later expansions boot new computes from."
+            "description": "Freeze only this VM of a deployed multi-node farm as a template: a compute VM\n(`compute-1`, ...) that later expansions boot new computes from, or `control`, which\nnew farms start from without computes."
           },
           "note": {
             "type": [
@@ -4195,6 +4202,14 @@
           }
         },
         "additionalProperties": false
+      },
+      "TemplateRole": {
+        "type": "string",
+        "description": "The VM a template snapshot was frozen from.",
+        "enum": [
+          "control",
+          "compute"
+        ]
       },
       "TunnelStatus": {
         "type": "object",

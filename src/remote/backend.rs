@@ -291,6 +291,21 @@ impl Backend for AgentBackend {
             Some(sink),
         ))
     }
+    fn forget_computes(
+        &self,
+        id: String,
+        // The agent uses the components recorded with its own reservation.
+        _: Vec<String>,
+        sink: EventSink,
+    ) -> BoxFuture<'_, Result<()>> {
+        Box::pin(self.done(
+            Operation::ForgetComputes {
+                farm_id: id,
+                generation: self.generation.clone(),
+            },
+            Some(sink),
+        ))
+    }
     fn export_snapshot(&self, reference: String, output: PathBuf) -> BoxFuture<'_, Result<()>> {
         Box::pin(self.done(
             Operation::ExportSnapshot {

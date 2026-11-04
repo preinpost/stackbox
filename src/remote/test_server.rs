@@ -395,6 +395,7 @@ impl server::Handler for Handler {
                 | Operation::VerifyVm
                 | Operation::InstallMsb
                 | Operation::Settle { .. }
+                | Operation::ForgetComputes { .. }
                 | Operation::ExportSnapshot { .. }
                 | Operation::RemoveSnapshot { .. } => Reply::Done,
                 Operation::Freeze { .. }

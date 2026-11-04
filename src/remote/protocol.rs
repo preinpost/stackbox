@@ -103,8 +103,14 @@ pub enum Operation {
         #[serde(default)]
         rebind: Option<(Exposure, Exposure)>,
     },
+    /// Drop the registrations of the source farm's computes from a farm restored from a
+    /// control template, and list no compute in its Kolla inventory.
+    ForgetComputes {
+        farm_id: String,
+        generation: String,
+    },
     /// Stop the farm's VM, capture its disks as `snapshot_id`, and start it again. With
-    /// `node`, only that compute VM is captured, as a compute template.
+    /// `node`, only that VM is captured, as a control or compute template.
     Freeze {
         farm_id: String,
         generation: String,
@@ -219,6 +225,10 @@ impl Operation {
                 generation,
                 ..
             }
+            | Self::ForgetComputes {
+                farm_id,
+                generation,
+            }
             | Self::Freeze {
                 farm_id,
                 generation,
@@ -248,6 +258,7 @@ impl Operation {
             Self::Purge => 1800,
             Self::Shell { .. } => 12 * 3600,
             Self::Settle { .. }
+            | Self::ForgetComputes { .. }
             | Self::Freeze { .. }
             | Self::Restore { .. }
             | Self::Prepare { .. }
@@ -412,6 +423,7 @@ impl Operation {
             Self::Deploy { .. }
                 | Self::Attach { .. }
                 | Self::Settle { .. }
+                | Self::ForgetComputes { .. }
                 | Self::DeployCompute { .. }
         )
     }

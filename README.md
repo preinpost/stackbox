@@ -198,6 +198,31 @@ farm add-compute grow --from-snapshot grow-compute-tpl          # 생략하면 �
   인스턴스가 있는 compute는 템플릿으로 얼릴 수 없습니다.
 - 실패한 확장은 처음과 같은 방식(같은 템플릿 또는 클린 설치)으로만 재시도할 수 있습니다.
 
+#### Control 템플릿으로 클러스터 조립
+
+배포된 다중 VM farm의 control VM을 **control 템플릿**으로 얼려두면, 그 템플릿에서 compute 없는
+farm을 만든 뒤 compute를 한 대씩(클린 설치 또는 compute 템플릿에서) 붙여 1c1c, 1c3c 같은 클러스터를
+조립할 수 있습니다.
+
+```bash
+farm snapshot create src src-control-tpl --node control    # compute를 먼저 멈추고 control만 저장
+farm create c13 --host-id local --snapshot src-control-tpl  # control VM 하나, compute 0대로 Ready
+farm add-compute c13                                        # compute-1: 클린 설치
+farm add-compute c13 --from-snapshot src-compute-tpl        # compute-2, 3: compute 템플릿에서
+```
+
+- 얼릴 때는 farm 전체를 얼릴 때처럼 링크를 끄고 compute → control 순서로 멈춘 뒤 control VM만
+  단일 VM 스냅샷으로 저장하고, control → compute 순서로 다시 켭니다. 원본 farm의 OpenStack은 바꾸지
+  않습니다. 인스턴스가 있거나, compute가 다른 호스트에 있는 farm은 `409`입니다.
+- 템플릿에는 `farm.snapshot.role=control`, 릴리스, 서비스, 아키텍처 라벨이 남고, 스냅샷의 `plan`은
+  control VM 하나(`computes: 0`)입니다. 내보내고 가져와도 control 템플릿으로 남습니다.
+- 이 템플릿으로 만든 farm(기존 `snapshot_id` 복원 경로)은 새 스위치·포트·링크로 control VM만 부팅한 뒤,
+  복사본에서만 원본 compute의 등록을 지웁니다: `openstack compute service delete`(nova-compute),
+  남은 placement resource provider, `farm-compute-*`의 Neutron agent, `nova-manage cell_v2 delete_host`.
+  Kolla inventory의 `[compute]`와 control VM의 compute SSH host key도 비우므로 첫 확장은 compute-1입니다.
+- compute가 없는 farm은 다시 배포(`deploy`)할 수 없고 farm 전체로도 얼릴 수 없습니다(control 템플릿만).
+  compute 템플릿은 여전히 farm 복원에 쓸 수 없습니다.
+
 ## 웹포탈
 
 Tailwind CSS·Base UI와 TanStack Router/Query/Table로 구성한 웹포탈은 `web/`에 있습니다.
@@ -288,7 +313,7 @@ curl -N http://127.0.0.1:10010/api/v1/farms/demo/logs/stream
 | GET | `/farms/{id}/logs?after=0&limit=1000` | 최근 로그 |
 | GET | `/farms/{id}/logs/stream` | 로그 SSE (`Last-Event-ID`로 재연결) |
 | GET (WebSocket) | `/farms/{id}/shell?rows=24&cols=80[&node=compute-1]` | VM의 root 로그인 셸 (다중 노드는 `node`로 VM 선택) |
-| POST | `/farms/{id}/snapshots` | VM을 스냅샷으로 얼리는 job |
+| POST | `/farms/{id}/snapshots` | VM을 스냅샷으로 얼리는 job (`node`: `control`이면 control 템플릿, `compute-N`이면 compute 템플릿) |
 | GET / DELETE | `/snapshots`, `/snapshots/{id}` | 스냅샷 목록·상세 / 삭제 |
 | POST | `/snapshots/{id}/export`, `/snapshots/import` | `.msb` 아카이브 내보내기 / 가져오기 (파일 또는 S3 버킷) |
 | GET / POST / PUT / DELETE | `/buckets`, `/buckets/{id}` | 스냅샷을 옮길 S3 호환 버킷 등록·관리 |

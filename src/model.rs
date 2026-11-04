@@ -80,6 +80,15 @@ pub struct Plan {
     pub disk_mib: u64,
     pub warnings: Vec<String>,
 }
+impl Plan {
+    /// Whether the farm runs a control VM, with or without computes yet, rather than one
+    /// all-in-one VM.
+    pub fn multinode(&self) -> bool {
+        self.nodes
+            .first()
+            .is_some_and(|spec| spec.role == crate::farm::Role::Control)
+    }
+}
 
 #[derive(Clone, Debug, Serialize, ToSchema)]
 pub struct Component {
@@ -308,6 +317,27 @@ pub fn plan(request: &PlanRequest) -> Result<Plan> {
     layout(&request)
 }
 
+/// A multi-node farm's control VM alone, as a control template restores it: its farm's
+/// plan without the compute VMs, which are added one at a time afterwards. The compute size
+/// is kept for them.
+pub fn control_layout(components: &[String], compute: Option<ComputeSize>) -> Result<Plan> {
+    let mut plan = layout(&PlanRequest {
+        components: components.to_vec(),
+        computes: 1,
+        compute,
+    })?;
+    plan.nodes.truncate(1);
+    plan.computes = 0;
+    plan.memory_mib = plan.nodes.iter().map(|n| u64::from(n.memory_mib)).sum();
+    plan.disk_mib = plan
+        .nodes
+        .iter()
+        .map(|n| u64::from(n.disk_mib) + 2 * u64::from(n.container_disk_mib.unwrap_or(0)))
+        .sum();
+    plan.warnings[0] = "The farm runs its control plane, network node and Kolla on one control VM; Nova instances need a compute VM added to it.".into();
+    Ok(plan)
+}
+
 /// Lays out the VMs exactly as requested, so farms and snapshots made before [`plan`] moved
 /// Nova off the all-in-one VM keep their layout.
 pub fn layout(request: &PlanRequest) -> Result<Plan> {
@@ -391,6 +421,8 @@ pub struct CreateRequest {
     #[serde(default)]
     pub expires_at: Option<u64>,
     /// Start from this snapshot instead of an empty VM. Its services replace `components`.
+    /// A control template starts a multi-node farm with its control VM alone, ready for
+    /// computes to be added; a compute template cannot start a farm.
     #[serde(default)]
     pub snapshot_id: Option<String>,
     /// Compute VMs that run on another host than `host_id`, by VM (`compute-2` → host id).
@@ -725,8 +757,9 @@ pub struct SnapshotRequest {
     pub id: String,
     #[serde(default)]
     pub note: Option<String>,
-    /// Freeze only this compute VM (`compute-1`, ...) of a deployed multi-node farm, as a
-    /// compute template that later expansions boot new computes from.
+    /// Freeze only this VM of a deployed multi-node farm as a template: a compute VM
+    /// (`compute-1`, ...) that later expansions boot new computes from, or `control`, which
+    /// new farms start from without computes.
     #[serde(default)]
     pub node: Option<String>,
 }
@@ -737,8 +770,12 @@ impl SnapshotRequest {
             let index = node
                 .strip_prefix("compute-")
                 .and_then(|index| index.parse::<u8>().ok());
-            if !index.is_some_and(|index| (1..=crate::farm::MAX_COMPUTES).contains(&index)) {
-                bail!("only a compute VM (compute-1, ...) can be frozen as a template");
+            if node != "control"
+                && !index.is_some_and(|index| (1..=crate::farm::MAX_COMPUTES).contains(&index))
+            {
+                bail!(
+                    "only the control VM or a compute VM (compute-1, ...) can be frozen as a template"
+                );
             }
         }
         if self.note.as_ref().is_some_and(|n| n.len() > 512) {
@@ -850,10 +887,15 @@ pub struct SnapshotRecord {
     pub reference: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub nodes: Vec<crate::farm::NodeSnapshot>,
-    /// A single compute VM frozen to boot new computes of farms from; no farm restores
-    /// from it.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub compute_template: bool,
+    /// The one VM a template holds: `control`, which new farms start from without
+    /// computes, or `compute`, which expansions boot new computes from. None for a snapshot
+    /// of a whole farm.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template: Option<TemplateRole>,
+    /// Records from before control templates marked compute templates this way; read once
+    /// into `template` when the state is loaded.
+    #[serde(default, rename = "compute_template", skip_serializing)]
+    pub legacy_compute_template: bool,
     /// OpenStack release the guest was deployed with; unknown for older snapshots.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub release: Option<String>,
@@ -883,8 +925,24 @@ pub mod snapshot_labels {
     pub const COMPUTES: &str = "farm.snapshot.computes";
     /// The VM a multi-node snapshot's disk was taken from (`control`, `compute-1`, ...).
     pub const NODE: &str = "farm.snapshot.node";
-    /// `compute` on a compute template; absent on farm snapshots.
+    /// `control` or `compute` on a template; absent on farm snapshots.
     pub const ROLE: &str = "farm.snapshot.role";
+}
+
+/// The VM a template snapshot was frozen from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum TemplateRole {
+    Control,
+    Compute,
+}
+impl TemplateRole {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Control => "control",
+            Self::Compute => "compute",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
@@ -1063,6 +1121,58 @@ mod tests {
             placement: Default::default(),
         };
         assert!(restore.validate().is_err());
+    }
+
+    #[test]
+    fn a_control_template_keeps_its_farms_control_vm_and_compute_size() {
+        let size = ComputeSize {
+            cpus: 4,
+            memory_mib: 8192,
+            disk_mib: 32768,
+        };
+        let farm = layout(&PlanRequest {
+            components: vec!["horizon".into()],
+            computes: 2,
+            compute: Some(size),
+        })
+        .unwrap();
+        let alone = control_layout(&farm.components, farm.compute).unwrap();
+        assert!(alone.multinode() && !layout(&PlanRequest::default()).unwrap().multinode());
+        assert_eq!(alone.computes, 0);
+        assert_eq!(alone.compute, Some(size));
+        assert_eq!(alone.components, farm.components);
+        assert_eq!(
+            serde_json::to_value(&alone.nodes).unwrap(),
+            serde_json::to_value(&farm.nodes[..1]).unwrap()
+        );
+        assert_eq!(alone.memory_mib, u64::from(farm.nodes[0].memory_mib));
+        crate::farm::layout(&alone.nodes).unwrap();
+        // Its first compute comes back as the farm's had it.
+        let next = layout(&PlanRequest {
+            components: alone.components.clone(),
+            computes: 1,
+            compute: alone.compute,
+        })
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(&next.nodes[..1]).unwrap(),
+            serde_json::to_value(&alone.nodes).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_value(next.nodes[1]).unwrap(),
+            serde_json::to_value(farm.nodes[1]).unwrap()
+        );
+
+        let freeze = |node: &str| SnapshotRequest {
+            id: "tpl".into(),
+            note: None,
+            node: Some(node.into()),
+        };
+        freeze("control").validate().unwrap();
+        freeze("compute-3").validate().unwrap();
+        for node in ["compute-0", "compute-4", "all-in-one", "controller"] {
+            assert!(freeze(node).validate().is_err(), "{node}");
+        }
     }
 
     #[test]

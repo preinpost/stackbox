@@ -83,7 +83,7 @@ impl Store {
             .open(dir.join("state.lock"))?;
         lock.try_lock_exclusive().context("farm state is locked by another process; use the running daemon's API or stop it before using the CLI")?;
         let path = dir.join("state.json");
-        let state: State = match fs::read(&path) {
+        let mut state: State = match fs::read(&path) {
             Ok(bytes) => serde_json::from_slice(&bytes)
                 .context("invalid farm state.json; refusing to overwrite it")?,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => State::default(),
@@ -94,6 +94,11 @@ impl Store {
             "unsupported state version {}",
             state.version
         );
+        for snapshot in state.snapshots.values_mut() {
+            if std::mem::take(&mut snapshot.legacy_compute_template) {
+                snapshot.template = Some(crate::model::TemplateRole::Compute);
+            }
+        }
         Ok(Self {
             dir: dir.into(),
             state,

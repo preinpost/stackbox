@@ -56,8 +56,10 @@ pub async fn freeze_farm(
     labels: &BTreeMap<String, String>,
 ) -> Result<FrozenSnapshot> {
     let nodes = super::get_farm(farm_id).await?;
-    if super::observed_layout(&nodes).is_some_and(|computes| computes > 0) {
-        return freeze_nodes(farm_id, snapshot_id, labels, nodes).await;
+    if super::observed_layout(&nodes).is_some()
+        && nodes.iter().any(|node| node.role == Some(Role::Control))
+    {
+        return freeze_nodes(farm_id, snapshot_id, labels, nodes, None).await;
     }
     let name = super::all_in_one_name(farm_id).await?;
     let sandbox = connect(&name).await?;
@@ -134,11 +136,15 @@ async fn run_in(name: &str, script: &str) -> Result<()> {
 /// A restored VM must not join its source farm's links: the switch hands a port to whoever
 /// connects to it last. So the links are disabled on disk while frozen; the source VMs
 /// enable them again after they boot, and a restored copy only once it has its own ports.
+///
+/// With `only`, every VM still stops and starts in that order, but only that one is
+/// captured, as a single-VM snapshot.
 async fn freeze_nodes(
     farm_id: &str,
     snapshot_id: &str,
     labels: &BTreeMap<String, String>,
     mut nodes: Vec<super::FarmNode>,
+    only: Option<&str>,
 ) -> Result<FrozenSnapshot> {
     nodes.sort_by_key(|node| (node.role != Some(Role::Control), node.index));
     let vms: Vec<(String, String)> = nodes
@@ -165,9 +171,15 @@ async fn freeze_nodes(
         stop(&control.0).await
     }
     .await;
-    let captured = match stopped {
-        Ok(()) => capture_nodes(snapshot_id, labels, &vms).await,
-        Err(error) => Err(error),
+    let captured = match (stopped, only) {
+        (Ok(()), None) => capture_nodes(snapshot_id, labels, &vms).await,
+        (Ok(()), Some(node)) => match vms.iter().find(|(_, suffix)| suffix == node) {
+            Some((name, _)) => capture_one(snapshot_id, labels, name, node)
+                .await
+                .map(|node| vec![node]),
+            None => Err(anyhow::anyhow!("farm '{farm_id}' has no VM '{node}'")),
+        },
+        (Err(error), _) => Err(error),
     };
     // Bring the source farm back whether or not the capture succeeded.
     let mut restart_errors = Vec::new();
@@ -191,13 +203,72 @@ async fn freeze_nodes(
             reference: nodes[0].reference.clone(),
             size_bytes: nodes.iter().map(|n| n.size_bytes).sum(),
             restart_error,
-            nodes,
+            // A single-VM snapshot is its reference alone, like an all-in-one one.
+            nodes: if only.is_some() { Vec::new() } else { nodes },
         }),
         (Err(e), None) => Err(e),
         (Err(e), Some(restart)) => {
             Err(e.context(format!("the farm also did not start again: {restart}")))
         }
     }
+}
+
+/// Freeze a multi-node farm's control VM as a control template: a single-VM snapshot new
+/// farms start from without computes. The computes stop before it and start after it, as
+/// when the whole farm is frozen, so the captured control plane saw them leave cleanly; their
+/// disks are not captured. The copy forgets them once it runs (see `kolla::forget_computes`);
+/// the source farm's OpenStack is left as it was.
+pub async fn freeze_control(
+    farm_id: &str,
+    snapshot_id: &str,
+    labels: &BTreeMap<String, String>,
+) -> Result<FrozenSnapshot> {
+    let nodes = super::get_farm(farm_id).await?;
+    if super::observed_layout(&nodes).is_none()
+        || !nodes.iter().any(|node| node.role == Some(Role::Control))
+    {
+        bail!("farm '{farm_id}' has no control VM to freeze as a template");
+    }
+    // A copy could neither run nor delete instances whose computes it forgot.
+    run_in(&node_name(farm_id, Role::Control, None), NO_SERVERS).await?;
+    freeze_nodes(farm_id, snapshot_id, labels, nodes, Some("control")).await
+}
+
+/// Refuses a farm with instances, asking with the OpenStack CLI and admin credentials the
+/// deploy installs on the control VM.
+const NO_SERVERS: &str = r#"set -euo pipefail
+if [ -x /opt/osc/bin/openstack ] && [ -r /etc/kolla/admin-openrc.sh ] && docker ps --format '{{.Names}}' | grep -qx nova_api; then
+  . /etc/kolla/admin-openrc.sh
+  ids=$(/opt/osc/bin/openstack server list --all-projects -f value -c ID)
+  n=$(echo "$ids" | grep -c . || true)
+  if [ "$n" != 0 ]; then
+    echo "$n instance(s) run in this farm; delete them before freezing its control VM as a template" >&2
+    exit 1
+  fi
+fi"#;
+
+async fn capture_one(
+    snapshot_id: &str,
+    labels: &BTreeMap<String, String>,
+    name: &str,
+    node: &str,
+) -> Result<NodeSnapshot> {
+    let mut builder = Snapshot::builder(snapshot_id)
+        .group(group(snapshot_id))
+        .from_sandbox(name)
+        .label(snapshot_labels::NODE, node);
+    for (key, value) in labels {
+        builder = builder.label(key, value);
+    }
+    let snapshot = builder
+        .create()
+        .await
+        .with_context(|| format!("capture {name}"))?;
+    Ok(NodeSnapshot {
+        node: node.into(),
+        reference: snapshot.reference().value().to_owned(),
+        size_bytes: snapshot.size_bytes(),
+    })
 }
 
 /// Freeze one compute VM of a multi-node farm as a compute template: a single-VM snapshot
@@ -232,25 +303,14 @@ pub async fn freeze_compute(
         return Err(error.context("disable the links and Docker before freezing"));
     }
     let captured = match stop(&name).await {
-        Ok(()) => {
-            let mut builder = Snapshot::builder(snapshot_id)
-                .group(group(snapshot_id))
-                .from_sandbox(&name)
-                .label(snapshot_labels::NODE, node);
-            for (key, value) in labels {
-                builder = builder.label(key, value);
-            }
-            builder
-                .create()
-                .await
-                .map(|snapshot| FrozenSnapshot {
-                    reference: snapshot.reference().value().to_owned(),
-                    size_bytes: snapshot.size_bytes(),
-                    restart_error: None,
-                    nodes: Vec::new(),
-                })
-                .map_err(|error| anyhow::Error::from(error).context(format!("capture {name}")))
-        }
+        Ok(()) => capture_one(snapshot_id, labels, &name, node)
+            .await
+            .map(|captured| FrozenSnapshot {
+                reference: captured.reference,
+                size_bytes: captured.size_bytes,
+                restart_error: None,
+                nodes: Vec::new(),
+            }),
         Err(error) => Err(error),
     };
     // Bring the source compute back whether or not the capture succeeded.

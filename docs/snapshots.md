@@ -65,6 +65,12 @@ bind 주소와 RabbitMQ 노드 이름(`rabbit@<hostname>`), nova-compute·Neutro
 캡처는 성공했지만 원본이 다시 시작되지 않으면 스냅샷은 `ready`, job은 `failed`가 됩니다.
 메모리까지 저장하는 full 스냅샷은 macOS(HVF)에서 msb가 지원하지 않아 사용하지 않습니다.
 
+`node`를 주면 VM 하나만 템플릿으로 저장합니다. `compute-N`은 compute 템플릿(그 compute만 멈춤),
+`control`은 control 템플릿입니다. control 템플릿은 farm 전체처럼 compute → control 순서로 멈추고
+control → compute 순서로 켜지만 control VM의 디스크만 저장합니다. 이 템플릿으로 복원한 farm은
+control VM 하나로 시작해 원본 compute의 OpenStack 등록을 지운 뒤 `ready`가 되고, compute를 추가해
+클러스터를 조립합니다(README의 "Control 템플릿으로 클러스터 조립").
+
 ## 불러오기
 
 `POST /farms`에 `snapshot_id`를 지정하면 `restore` job이 실행됩니다. 서비스 목록과 VM 크기는

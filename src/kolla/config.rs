@@ -22,22 +22,27 @@ pub struct Topology {
     /// Interface holding `ip`: the fixed `farm0` service address, or eth0 on older farms.
     pub interface: String,
     pub computes: Vec<Compute>,
+    /// A control VM and its computes, if any yet, rather than one all-in-one VM.
+    pub multinode: bool,
 }
 
 impl Topology {
     pub fn from_nodes(nodes: &[FarmNode]) -> Result<Self> {
-        let Some(computes) = crate::farm::observed_layout(nodes) else {
+        if crate::farm::observed_layout(nodes).is_none() {
             bail!(
                 "deployment requires one all-in-one VM, or a control VM and its compute VMs; legacy multi-VM farms cannot be deployed with this version (create a new farm)"
             );
-        };
+        }
         if let Some(node) = nodes.iter().find(|node| node.status != "running") {
             bail!("{} is {}, expected running", node.name, node.status);
         }
-        let deployer = if computes == 0 {
-            Role::AllInOne
-        } else {
+        // A control VM without computes yet, restored from a control template, still deploys
+        // as a multi-node farm.
+        let multinode = nodes.iter().any(|node| node.role == Some(Role::Control));
+        let deployer = if multinode {
             Role::Control
+        } else {
+            Role::AllInOne
         };
         let node = nodes
             .iter()
@@ -60,10 +65,11 @@ impl Topology {
             ip: None,
             interface: "eth0".into(),
             computes,
+            multinode,
         })
     }
     pub fn multinode(&self) -> bool {
-        !self.computes.is_empty()
+        self.multinode
     }
 
     pub fn set_address(&mut self, address: &str) -> Result<()> {
@@ -230,8 +236,12 @@ pub fn multinode_inventory(template: &str, control: &str, computes: &[Compute]) 
                 break;
             }
         }
-        out.push_str(body);
-        out.push_str("\n\n");
+        // A control template's copy has no compute host yet.
+        if !body.is_empty() {
+            out.push_str(body);
+            out.push('\n');
+        }
+        out.push('\n');
         filled += 1;
     }
     if filled != groups.len() {
@@ -311,7 +321,11 @@ mod tests {
         let mut stopped = compute(2);
         stopped.status = "stopped".into();
         assert!(Topology::from_nodes(&[control.clone(), compute(1), stopped]).is_err());
-        assert!(Topology::from_nodes(&[control, compute(2)]).is_err());
+        assert!(Topology::from_nodes(&[control.clone(), compute(2)]).is_err());
+        // A control template's copy has no compute yet, and is still multi-node.
+        let alone = Topology::from_nodes(std::slice::from_ref(&control)).unwrap();
+        assert_eq!(alone.name, "demo-control");
+        assert!(alone.multinode() && alone.computes.is_empty());
 
         let selected = ["keystone", "glance", "placement", "neutron", "nova"].map(String::from);
         let globals = globals("10.254.0.10", "farm0", "aarch64", false, &selected, true);
@@ -346,6 +360,8 @@ mod tests {
             assert!(!inventory.contains(&format!("\n{gone}\n")), "{gone}");
         }
         assert!(multinode_inventory("[control]\nx\n", "farm-control", &[]).is_err());
+        let alone = multinode_inventory(template, "farm-control", &[]).unwrap();
+        assert!(alone.contains("[compute]\n\n[monitoring]\nfarm-control\n"));
     }
 
     fn globals_single(selected: &[String]) -> String {

@@ -101,7 +101,8 @@ enum Command {
         /// UTC Unix seconds; metadata only
         #[arg(long)]
         expires_at: Option<u64>,
-        /// Start from a snapshot instead of an empty VM (this machine's host only; replaces --components)
+        /// Start from a snapshot instead of an empty VM (this machine's host only; replaces --components).
+        /// A control template starts a multi-node farm without computes; add them with add-compute.
         #[arg(long, conflicts_with = "components")]
         snapshot: Option<String>,
         /// Run a compute VM on another host, as `compute-2=<host id>`; repeatable.
@@ -235,8 +236,9 @@ enum SnapshotCommand {
         id: String,
         #[arg(long)]
         note: Option<String>,
-        /// Freeze only this compute VM (compute-1, ...) of a deployed multi-node farm,
-        /// as a compute template for add-compute --from-snapshot
+        /// Freeze only this VM of a deployed multi-node farm as a template: `control`, which
+        /// `create --snapshot` starts a farm without computes from, or a compute VM
+        /// (compute-1, ...) for add-compute --from-snapshot
         #[arg(long)]
         node: Option<String>,
     },
@@ -657,10 +659,10 @@ async fn main() -> Result<()> {
                             s.source_farm.as_deref().unwrap_or("archive"),
                             s.plan.components.join(","),
                             if s.deployed { ", deployed" } else { "" },
-                            if s.compute_template {
-                                ", compute template"
-                            } else {
-                                ""
+                            match s.template {
+                                Some(model::TemplateRole::Control) => ", control template",
+                                Some(model::TemplateRole::Compute) => ", compute template",
+                                None => "",
                             }
                         );
                     }

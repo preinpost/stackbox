@@ -265,12 +265,17 @@ impl Agent {
             self.limits.virtualization,
             "this host has no usable hypervisor (/dev/kvm on Linux)"
         );
-        // The coordinator applies plan()'s policy; restored snapshots keep an older layout.
-        let canonical = layout(&PlanRequest {
-            components: requested.components.clone(),
-            computes: requested.computes,
-            compute: requested.compute,
-        })?;
+        // The coordinator applies plan()'s policy; restored snapshots keep an older layout,
+        // and a control template's farm starts with its control VM alone.
+        let canonical = if requested.multinode() && requested.computes == 0 {
+            crate::model::control_layout(&requested.components, requested.compute)?
+        } else {
+            layout(&PlanRequest {
+                components: requested.components.clone(),
+                computes: requested.computes,
+                compute: requested.compute,
+            })?
+        };
         ensure!(
             serde_json::to_value(requested)? == serde_json::to_value(&canonical)?,
             "farm plan differs from the supported layout"
@@ -289,7 +294,8 @@ impl Agent {
             host_id: None,
             components: requested.components.clone(),
             computes: requested.computes,
-            compute: requested.compute,
+            // A control template's farm keeps its computes' size for later expansions.
+            compute: requested.compute.filter(|_| requested.computes > 0),
             external_host: exposure.host.clone(),
             owner: None,
             expires_at: None,
@@ -1104,6 +1110,18 @@ impl Agent {
                     .await?;
                 Ok(Reply::Done)
             }
+            Operation::ForgetComputes { .. } => {
+                let entry = self.owned(&request, id, generation)?;
+                ensure!(entry.publishes(), "farm '{id}' is served from another host");
+                ensure!(
+                    entry.plan.multinode(),
+                    "farm '{id}' has no control VM to forget computes on"
+                );
+                self.backend
+                    .forget_computes(id.into(), entry.plan.components, progress(emit))
+                    .await?;
+                Ok(Reply::Done)
+            }
             Operation::Freeze {
                 snapshot_id,
                 node,
@@ -1115,11 +1133,13 @@ impl Agent {
                 if let Some(node) = node {
                     ensure!(
                         entry.plan.nodes.iter().any(|spec| {
-                            spec.role == crate::farm::Role::Compute
-                                && crate::farm::suffix(spec.role, spec.index).as_deref()
-                                    == Some(node.as_str())
+                            matches!(
+                                spec.role,
+                                crate::farm::Role::Control | crate::farm::Role::Compute
+                            ) && crate::farm::suffix(spec.role, spec.index).as_deref()
+                                == Some(node.as_str())
                         }),
-                        "farm '{id}' has no compute VM '{node}'"
+                        "farm '{id}' has no control or compute VM '{node}'"
                     );
                     ensure!(
                         entry.runs(node),

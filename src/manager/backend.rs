@@ -114,7 +114,7 @@ pub trait Backend: Send + Sync + 'static {
         components: Vec<String>,
     ) -> BoxFuture<'_, Result<Endpoints>>;
     /// Stop the farm's VM, capture its disks under `labels`, and start it again. With
-    /// `node`, only that compute VM is captured, as a compute template.
+    /// `node`, only that VM is captured, as a control or compute template.
     fn freeze(
         &self,
         _id: String,
@@ -124,8 +124,8 @@ pub trait Backend: Send + Sync + 'static {
     ) -> BoxFuture<'_, Result<FrozenSnapshot>> {
         unsupported()
     }
-    /// Boot the farm from a snapshot: `reference` for an all-in-one VM, `nodes` for a
-    /// multi-node farm's VMs.
+    /// Boot the farm from a snapshot: `reference` for an all-in-one VM or a control
+    /// template's control VM, `nodes` for a multi-node farm's VMs.
     fn restore(
         &self,
         _id: String,
@@ -142,6 +142,16 @@ pub trait Backend: Send + Sync + 'static {
         &self,
         _id: String,
         _rebind: Option<(Exposure, Exposure)>,
+        _components: Vec<String>,
+        _sink: EventSink,
+    ) -> BoxFuture<'_, Result<()>> {
+        unsupported()
+    }
+    /// Drop the registrations of the source farm's computes from a farm restored from a
+    /// control template, and list no compute in its Kolla inventory.
+    fn forget_computes(
+        &self,
+        _id: String,
         _components: Vec<String>,
         _sink: EventSink,
     ) -> BoxFuture<'_, Result<()>> {
@@ -421,8 +431,9 @@ PY"#).await;
         labels: BTreeMap<String, String>,
     ) -> BoxFuture<'_, Result<FrozenSnapshot>> {
         Box::pin(async move {
-            match node {
-                Some(node) => farm::freeze_compute(&id, &snapshot_id, &node, &labels).await,
+            match node.as_deref() {
+                Some("control") => farm::freeze_control(&id, &snapshot_id, &labels).await,
+                Some(node) => farm::freeze_compute(&id, &snapshot_id, node, &labels).await,
                 None => farm::freeze_farm(&id, &snapshot_id, &labels).await,
             }
         })
@@ -436,7 +447,24 @@ PY"#).await;
         exposure: Exposure,
     ) -> BoxFuture<'_, Result<Vec<FarmNode>>> {
         Box::pin(async move {
-            if plan.computes > 0 {
+            if plan.multinode() && nodes.is_empty() {
+                // A control template holds the control VM alone.
+                anyhow::ensure!(
+                    plan.nodes.len() == 1,
+                    "a control template restores the control VM alone"
+                );
+                return farm::create_farm_with(
+                    &id,
+                    &plan.nodes,
+                    Some(&exposure),
+                    &plan.components,
+                    Some(&self.switch),
+                    &[reference],
+                    None,
+                )
+                .await;
+            }
+            if plan.multinode() {
                 // Each VM boots from the disks taken from the VM in its place.
                 let sources = plan
                     .nodes
@@ -478,6 +506,14 @@ PY"#).await;
             let rebind = rebind.as_ref().map(|(from, to)| (from, to));
             kolla::settle(&id, rebind, &components, sink).await
         })
+    }
+    fn forget_computes(
+        &self,
+        id: String,
+        components: Vec<String>,
+        sink: EventSink,
+    ) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async move { kolla::forget_computes(&id, &components, sink).await })
     }
     fn export_snapshot(&self, reference: String, output: PathBuf) -> BoxFuture<'_, Result<()>> {
         Box::pin(async move { farm::export_snapshot(&reference, &output).await })
