@@ -76,6 +76,30 @@ job 로그에 원본 compute 등록(nova-compute 서비스, placement, Neutron a
 대상입니다. all-in-one farm, 다른 작업이 진행 중인 farm은 `409`입니다. 대상 호스트의 메모리 예산을 넘거나 원격
 호스트인데 relay가 없어도 `409`입니다. 기존 인스턴스는 새 compute로 자동 이동하지 않습니다.
 
+### 릴리스로 만들기
+
+`GET /releases?arch=&bucket=`은 릴리스별로 로컬(`local_control`, `local_compute`)과 버킷
+(`bucket_control`, `bucket_compute`)의 템플릿 수, 그리고 클린 설치 가능 여부(`installable`)를 최신
+릴리스부터 돌려줍니다. `arch`를 생략하면 coordinator의 아키텍처이고, `bucket`을 생략하면 등록된 모든
+버킷을 셉니다(조회하지 못한 버킷은 `unreachable`).
+
+`POST /releases/plan`은 `ReleaseCreateRequest`(`id`, `release`, `host_id`, `computes`, 선택:
+`components`, `compute_hosts`, `control_template`, `compute_template`, `bucket`, `external_host`,
+`owner`, `expires_at`)로 아무것도 만들지 않고 계획(`ReleasePlan`)을 돌려줍니다. `control`과 `computes[]`의
+각 VM은 `source`(`template`, `bucket`, `clean`), `snapshot_id`(버킷 템플릿은 가져올 ID), `bucket`/`key`,
+`reason`을 가집니다. 여러 템플릿이 맞으면 로컬 것 중 가장 최근, 없으면 버킷에서 가장 최근에 내보낸 것을
+고르며, 서비스(`components`를 주면 그 집합)와 아키텍처가 다른 템플릿은 제외하고 이유에 개수를 적습니다.
+템플릿은 로컬 호스트에만 있으므로 다른 호스트의 compute는 `clean`이고, control 호스트가 원격이면 farm
+전체가 클린 설치입니다(`control_template`을 지정했으면 `409`). control 템플릿 없이 이 coordinator의
+릴리스가 아니면 `409`입니다.
+
+`POST /releases/farms`는 같은 body로 계획을 다시 세운 뒤 `202`와 `assemble` job을 돌려줍니다. job의
+`steps[]`는 `action`(`import`, `restore`, `expand` 또는 클린 경로의 `create`, `deploy`), `node`,
+`snapshot_id`, `host_id`, `description`, `status`, `job_id`(그 단계를 실행한 job), `error`입니다.
+단계가 실패하면 job은 `failed`이고 이후 단계는 `interrupted`이며, farm은 그대로 남아 실패한 `expand`를
+`POST /farms/{id}/computes`로 재시도할 수 있습니다. assemble job 자체는 farm의 `active_job`이 되지
+않고, daemon이 멈추면 `interrupted`로 남습니다(각 단계 job은 기존대로 복구).
+
 farm 상태는 `creating`, `created`, `deploying`, `settling`, `ready`, `failed`, `broken`, `deleting`, `deleted`입니다.
 배포 중에는 `phase`와 함께 `step`이 채워집니다. `step`은 그 단계 안에서 지금 실행 중인 작업이며,
 설치·검증 등 farm이 직접 실행하는 구간은 단계 이름을, Kolla-Ansible 구간은 현재 Ansible task 이름을
