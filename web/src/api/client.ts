@@ -33,6 +33,12 @@ export type Impair = Schema["Impair"];
 export type RegisterBucket = Schema["RegisterBucket"];
 export type BucketObject = Schema["BucketObject"];
 export type ArchiveMetadata = Schema["ArchiveMetadata"];
+export type ReleaseCatalog = Schema["ReleaseCatalog"];
+export type ReleaseTemplates = Schema["ReleaseTemplates"];
+export type ReleaseCreateRequest = Schema["ReleaseCreateRequest"];
+export type ReleasePlan = Schema["ReleasePlan"];
+export type PlannedNode = Schema["PlannedNode"];
+export type AssemblyStep = Schema["AssemblyStep"];
 
 export class ApiError extends Error {
   constructor(
@@ -88,6 +94,7 @@ export const keys = {
   snapshots: ["snapshots"] as const,
   buckets: ["buckets"] as const,
   bucketObjects: (id: string) => ["buckets", id, "objects"] as const,
+  releases: ["releases"] as const,
   farm: (id: string) => ["farms", id] as const,
   logs: (id: string) => ["logs", id] as const,
   endpoints: (id: string) => ["endpoints", id] as const,
@@ -154,6 +161,13 @@ export const bucketObjectsQuery = (id: string) =>
       request<BucketObject[]>(`/buckets/${encode(id)}/objects`, { signal }),
     staleTime: 0,
     retry: false,
+  });
+/** Releases with the templates kept here and in every bucket, on this host's architecture. */
+export const releasesQuery = () =>
+  queryOptions({
+    queryKey: keys.releases,
+    queryFn: ({ signal }) => request<ReleaseCatalog>("/releases", { signal }),
+    staleTime: 30_000,
   });
 export const catalogQuery = () =>
   queryOptions({
@@ -238,6 +252,19 @@ export const api = {
     request<RelayStatus>("/relay/cloudflared/update", { method: "POST" }),
   create: (body: CreateRequest) =>
     request<Job>("/farms", { method: "POST", body: JSON.stringify(body) }),
+  /** Dry run: which template or clean install makes each VM, and why. */
+  releasePlan: (body: ReleaseCreateRequest, signal?: AbortSignal) =>
+    request<ReleasePlan>("/releases/plan", {
+      method: "POST",
+      body: JSON.stringify(body),
+      signal,
+    }),
+  /** Starts an assemble job; its steps are jobs of their own. */
+  createRelease: (body: ReleaseCreateRequest) =>
+    request<Job>("/releases/farms", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
   deploy: (id: string, from: Phase) =>
     request<Job>(`/farms/${encode(id)}/deploy`, {
       method: "POST",

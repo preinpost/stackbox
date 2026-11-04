@@ -33,6 +33,7 @@ import {
   hostJobsQuery,
   jobsQuery,
   logsQuery,
+  type AssemblyStep,
 } from "../api/client";
 import {
   Button,
@@ -620,6 +621,9 @@ function ActivityDetail({
                 <pre>{a.job.error}</pre>
               </section>
             )}
+            {a.scope === "farm" && !!a.job.steps?.length && (
+              <AssemblySteps steps={a.job.steps} />
+            )}
             {a.scope === "host" ? (
               <section className="job-detail-log">
                 <h3>작업 이벤트</h3>
@@ -669,6 +673,33 @@ function ActivityDetail({
         </Dialog.Popup>
       </Dialog.Viewport>
     </Dialog.Portal>
+  );
+}
+const stepStatus: Record<AssemblyStep["status"], string> = {
+  queued: "대기",
+  running: "진행 중",
+  succeeded: "완료",
+  failed: "실패",
+  interrupted: "실행 안 됨",
+};
+/** The steps of an assemble job, each a job of its own. */
+export function AssemblySteps({ steps }: { steps: AssemblyStep[] }) {
+  return (
+    <section className="job-detail-log">
+      <h3>단계</h3>
+      <ol className="job-events" aria-label="작업 단계">
+        {steps.map((step, index) => (
+          <li key={index}>
+            <time>
+              {index + 1}. {stepStatus[step.status]}
+              {step.job_id && ` · ${step.job_id.slice(0, 8)}`}
+            </time>
+            <p>{step.description}</p>
+            {step.error && <p className="job-error">{step.error}</p>}
+          </li>
+        ))}
+      </ol>
+    </section>
   );
 }
 function FarmJobLog({

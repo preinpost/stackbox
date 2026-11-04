@@ -31,6 +31,13 @@ export function activityStep(a: Activity) {
     return activeJob(a.job)
       ? (a.job.events.at(-1)?.message ?? "작업 시작 중")
       : "—";
+  // An assemble job is as far as its running step.
+  const steps = a.job.steps ?? [];
+  const running = steps.findIndex((step) => activeJob(step));
+  if (steps.length && activeJob(a.job))
+    return running < 0
+      ? "다음 단계 준비 중"
+      : `${running + 1}/${steps.length}단계 · ${steps[running].description}`;
   return (
     phases.find((p) => p.id === a.job.phase)?.description ??
     (activeJob(a.job) ? activityLabel(a) : "—")
