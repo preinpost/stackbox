@@ -75,8 +75,13 @@ export const isAllInOneFarm = (farm: Farm) => {
 };
 export const farmNodeCount = (farm: Farm) =>
   farm.plan?.nodes.length ?? farm.nodes.length;
-/** A control VM and compute VMs joined by the host's link switch. */
-export const isMultiNodeFarm = (farm: Farm) => (farm.plan?.computes ?? 0) > 0;
+/** A control VM and compute VMs joined by the host's link switch. A farm made from a
+ * control template has its control VM alone until a compute is added. */
+export const isMultiNodeFarm = (farm: Farm) =>
+  String(farm.plan?.nodes[0]?.role) === "control";
+/** A multi-node farm made from a control template that has no compute VM yet. */
+export const awaitsCompute = (farm: Farm) =>
+  isMultiNodeFarm(farm) && (farm.plan?.computes ?? 0) === 0;
 /** All-in-one and multi-node farms deploy; legacy multi-VM layouts do not. */
 export const isDeployableFarm = (farm: Farm) =>
   isAllInOneFarm(farm) || isMultiNodeFarm(farm);

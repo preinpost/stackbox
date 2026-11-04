@@ -40,8 +40,10 @@ import {
   remoteAgentNeedsUpdate,
   componentLabel,
   farmComponents,
+  awaitsCompute,
   farmNodesRunning,
   isDeployableFarm,
+  isMultiNodeFarm,
   memory,
   phases,
   resolveComponents,
@@ -73,7 +75,7 @@ export const computeTemplatesFor = (
 ) =>
   snapshots.filter(
     (s) =>
-      s.compute_template &&
+      s.template === "compute" &&
       ["ready", "exporting"].includes(s.status) &&
       (!arch || s.arch === arch) &&
       s.plan.components.join(",") === (farm.plan?.components ?? []).join(","),
@@ -600,9 +602,11 @@ export function DeployFarmDialog({
     },
   });
   const validNodes = isDeployableFarm(farm) && farmNodesRunning(farm);
+  // Kolla came with the control template; such a farm only gains computes.
   const allowed =
     ["created", "failed", "ready"].includes(farm.status) &&
     validNodes &&
+    !awaitsCompute(farm) &&
     !farm.active_job;
   const resumable =
     (lastJob?.status === "failed" || lastJob?.status === "interrupted") &&
@@ -626,7 +630,9 @@ export function DeployFarmDialog({
         title={
           !isDeployableFarm(farm)
             ? "기존 다중 VM Farm은 재배포할 수 없습니다. Farm을 새로 만드세요."
-            : undefined
+            : awaitsCompute(farm)
+              ? "control 템플릿으로 만든 farm에는 아직 compute VM이 없습니다. Compute를 추가하세요."
+              : undefined
         }
       >
         <Play size={14} />
@@ -748,7 +754,7 @@ export function AddComputeDialog({
     isDeployableFarm(farm) &&
     (farm.status === "ready" || (farm.status === "failed" && resumable)) &&
     !farm.active_job &&
-    computes > 0 &&
+    isMultiNodeFarm(farm) &&
     computes < 3;
   const fromSnapshot = mode === "snapshot";
   const canSubmit =
@@ -788,7 +794,7 @@ export function AddComputeDialog({
         title={
           computes >= 3
             ? "한 farm에는 compute VM을 3대까지 둘 수 있습니다."
-            : computes === 0
+            : !isMultiNodeFarm(farm)
               ? "all-in-one farm에는 compute를 추가할 수 없습니다. control과 compute로 이루어진 farm을 새로 만드세요."
               : "배포가 끝난 farm에 다음 compute VM을 추가합니다."
         }

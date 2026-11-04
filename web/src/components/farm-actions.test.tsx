@@ -10,7 +10,11 @@ import {
   DeleteFarmDialog,
   DeployFarmDialog,
 } from "./farm-actions";
-import { DeleteSnapshotDialog, FreezeFarmDialog } from "./snapshot-actions";
+import {
+  DeleteSnapshotDialog,
+  FreezeFarmDialog,
+  RestoreSnapshotDialog,
+} from "./snapshot-actions";
 
 const { navigate } = vi.hoisted(() => ({
   navigate: vi.fn().mockResolvedValue(undefined),
@@ -660,14 +664,21 @@ test("adds a compute from a compatible compute template", async () => {
       id: "other-services",
       status: "ready",
       arch: "aarch64",
-      compute_template: true,
+      template: "compute",
       plan: { ...plan, components: ["keystone", "glance", "horizon"] },
+    },
+    {
+      id: "control-tpl",
+      status: "ready",
+      arch: "aarch64",
+      template: "control",
+      plan,
     },
     {
       id: "tpl",
       status: "ready",
       arch: "aarch64",
-      compute_template: true,
+      template: "compute",
       release: "2026.2",
       plan,
     },
@@ -719,6 +730,170 @@ test("freezes one compute VM of a deployed farm as a compute template", async ()
     expect(posted.body).toEqual({
       id: "grow-compute-1-tpl",
       node: "compute-1",
+    }),
+  );
+  cleanup();
+});
+
+/** A farm made from a control template: its control VM alone, before any compute. */
+function controlOnlyFarm(): Farm {
+  const farm = grownFarm();
+  return {
+    ...farm,
+    snapshot_id: "control-tpl",
+    plan: { ...farm.plan!, computes: 0, nodes: farm.plan!.nodes.slice(0, 1) },
+    nodes: farm.nodes.slice(0, 1),
+  };
+}
+
+test("freezes the control VM of a deployed farm as a control template", async () => {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+  });
+  const user = userEvent.setup();
+  const posted = stubFarmApi("/farms/grow/snapshots");
+  render(
+    <QueryClientProvider client={client}>
+      <FreezeFarmDialog farm={grownFarm()} />
+    </QueryClientProvider>,
+  );
+  const trigger = screen.getByRole("button", { name: "얼리기" });
+  await waitFor(() =>
+    expect((trigger as HTMLButtonElement).disabled).toBe(false),
+  );
+  await user.click(trigger);
+  await user.click(await screen.findByRole("combobox", { name: "얼릴 대상" }));
+  const options = await screen.findAllByRole("option");
+  expect(options.map((option) => option.textContent)).toEqual([
+    "farm 전체",
+    "control (control 템플릿)",
+    "compute-1 (compute 템플릿)",
+  ]);
+  await user.click(
+    screen.getByRole("option", { name: "control (control 템플릿)" }),
+  );
+  expect(
+    screen.getByText(/control VM 하나를 control 템플릿으로 저장합니다/),
+  ).toBeTruthy();
+  await user.click(screen.getByRole("button", { name: "얼리기 시작" }));
+  await waitFor(() =>
+    expect(posted.body).toEqual({ id: "grow-control-tpl", node: "control" }),
+  );
+  cleanup();
+});
+
+test("a farm without computes is frozen as a control template only", async () => {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+  });
+  const user = userEvent.setup();
+  const posted = stubFarmApi("/farms/grow/snapshots");
+  render(
+    <QueryClientProvider client={client}>
+      <FreezeFarmDialog farm={controlOnlyFarm()} />
+    </QueryClientProvider>,
+  );
+  const trigger = screen.getByRole("button", { name: "얼리기" });
+  await waitFor(() =>
+    expect((trigger as HTMLButtonElement).disabled).toBe(false),
+  );
+  await user.click(trigger);
+  await user.click(await screen.findByRole("combobox", { name: "얼릴 대상" }));
+  const options = await screen.findAllByRole("option");
+  expect(options.map((option) => option.textContent)).toEqual([
+    "control (control 템플릿)",
+  ]);
+  await user.keyboard("{Escape}");
+  await user.click(screen.getByRole("button", { name: "얼리기 시작" }));
+  await waitFor(() =>
+    expect(posted.body).toEqual({ id: "grow-control-tpl", node: "control" }),
+  );
+  cleanup();
+});
+
+test("a farm made from a control template gains computes instead of a redeploy", async () => {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+  });
+  const user = userEvent.setup();
+  const plan = { ...singleVmPlan(), computes: 1 };
+  const posted = stubFarmApi("/computes", [
+    {
+      id: "tpl",
+      status: "ready",
+      arch: "aarch64",
+      template: "compute",
+      release: "2026.2",
+      plan,
+    },
+  ]);
+  const farm = controlOnlyFarm();
+  render(
+    <QueryClientProvider client={client}>
+      <DeployFarmDialog farm={farm} />
+      <AddComputeDialog farm={farm} />
+    </QueryClientProvider>,
+  );
+  const deploy = screen.getByRole("button", { name: "다시 배포" });
+  expect((deploy as HTMLButtonElement).disabled).toBe(true);
+  expect(deploy.getAttribute("title")).toContain("Compute를 추가하세요");
+  const add = screen.getByRole("button", { name: "Compute 추가" });
+  expect((add as HTMLButtonElement).disabled).toBe(false);
+  await user.click(add);
+  expect(await screen.findByText("Compute 1 추가")).toBeTruthy();
+  await user.click(await screen.findByRole("radio", { name: "스냅샷에서" }));
+  const select = await screen.findByRole("combobox", {
+    name: "compute 템플릿 스냅샷",
+  });
+  await waitFor(() => expect(select.textContent).toContain("tpl"));
+  await user.click(screen.getByRole("button", { name: "추가" }));
+  await waitFor(() =>
+    expect(posted.body).toEqual({ host_id: "local", from_snapshot: "tpl" }),
+  );
+  cleanup();
+});
+
+test("starts a farm from a control template through the restore dialog", async () => {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+  });
+  const user = userEvent.setup();
+  const posted = stubFarmApi("/farms");
+  const plan = controlOnlyFarm().plan!;
+  render(
+    <QueryClientProvider client={client}>
+      <RestoreSnapshotDialog
+        snapshot={
+          {
+            id: "control-tpl",
+            status: "ready",
+            arch: "aarch64",
+            template: "control",
+            deployed: true,
+            plan,
+          } as Snapshot
+        }
+      />
+    </QueryClientProvider>,
+  );
+  await user.click(screen.getByRole("button", { name: "Farm 만들기" }));
+  expect(
+    await screen.findByText("Control 템플릿에서 farm 만들기"),
+  ).toBeTruthy();
+  expect(screen.getByText(/control VM만, compute 0대/)).toBeTruthy();
+  await user.type(screen.getByPlaceholderText("dev-openstack"), "cluster");
+  // The dialog's submit button carries the trigger's name.
+  const submit = screen.getAllByRole("button", { name: "Farm 만들기" }).at(-1)!;
+  await waitFor(() =>
+    expect((submit as HTMLButtonElement).disabled).toBe(false),
+  );
+  await user.click(submit);
+  await waitFor(() =>
+    expect(posted.body).toEqual({
+      id: "cluster",
+      host_id: "local",
+      snapshot_id: "control-tpl",
+      external_host: "localhost",
     }),
   );
   cleanup();

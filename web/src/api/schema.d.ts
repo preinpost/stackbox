@@ -739,7 +739,11 @@ export interface components {
       placement?: {
         [key: string]: string;
       };
-      /** @description Start from this snapshot instead of an empty VM. Its services replace `components`. */
+      /**
+       * @description Start from this snapshot instead of an empty VM. Its services replace `components`.
+       *     A control template starts a multi-node farm with its control VM alone, ready for
+       *     computes to be added; a compute template cannot start a farm.
+       */
       snapshot_id?: string | null;
     };
     /** @description Write-only input. Never include this type in a host/job response or derive Debug. */
@@ -1252,11 +1256,6 @@ export interface components {
       /** @description CPU architecture of the frozen guest; its disks cannot boot on another one. */
       arch?: string;
       archive?: null | components["schemas"]["SnapshotArchive"];
-      /**
-       * @description A single compute VM frozen to boot new computes of farms from; no farm restores
-       *     from it.
-       */
-      compute_template?: boolean;
       /** Format: int64 */
       created_at: number;
       /** @description Whether OpenStack was deployed when frozen. Restored farms then start `ready`. */
@@ -1282,6 +1281,7 @@ export interface components {
       /** @description Farm the snapshot was frozen from; `None` when imported from an archive. */
       source_farm?: string | null;
       status: components["schemas"]["SnapshotStatus"];
+      template?: null | components["schemas"]["TemplateRole"];
       transfer?: null | components["schemas"]["SnapshotTransfer"];
       /** Format: int64 */
       updated_at: number;
@@ -1290,8 +1290,9 @@ export interface components {
       /** @description Snapshot ID: 1-48 lowercase letters, digits or hyphens. */
       id: string;
       /**
-       * @description Freeze only this compute VM (`compute-1`, ...) of a deployed multi-node farm, as a
-       *     compute template that later expansions boot new computes from.
+       * @description Freeze only this VM of a deployed multi-node farm as a template: a compute VM
+       *     (`compute-1`, ...) that later expansions boot new computes from, or `control`, which
+       *     new farms start from without computes.
        */
       node?: string | null;
       note?: string | null;
@@ -1319,6 +1320,11 @@ export interface components {
       /** Format: int32 */
       port?: number;
     };
+    /**
+     * @description The VM a template snapshot was frozen from.
+     * @enum {string}
+     */
+    TemplateRole: "control" | "compute";
     TunnelStatus: {
       /**
        * Format: int64
@@ -2064,7 +2070,7 @@ export interface operations {
       };
     };
     responses: {
-      /** @description Snapshot job; the farm's VM stops for the capture and starts again */
+      /** @description Snapshot job; the farm's VM stops for the capture and starts again. With `node: control` every VM stops, computes first, but only the control VM is captured, as a control template */
       202: {
         headers: {
           [name: string]: unknown;

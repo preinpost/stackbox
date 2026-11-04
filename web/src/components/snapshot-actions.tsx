@@ -35,8 +35,10 @@ import {
   dateTime,
   hostNotice,
   hostReady,
+  awaitsCompute,
   farmNodesRunning,
   isDeployableFarm,
+  isMultiNodeFarm,
   memory,
   snapshotHost,
 } from "../lib";
@@ -75,18 +77,24 @@ function useDialog(pending: boolean, onOpen?: () => void) {
   };
 }
 
-/** Compute VMs of a deployed multi-node farm that can be frozen as compute templates:
- * those on the farm's own host, which keeps its snapshots. */
+/** VMs of a deployed multi-node farm that can be frozen as templates: the control VM,
+ * while every VM runs on the farm's own host, which keeps its snapshots, and the computes
+ * there. */
 export const templateNodes = (farm: Farm) =>
-  farm.status === "ready" && (farm.plan?.computes ?? 0) > 0
-    ? (farm.plan?.nodes ?? [])
-        .filter((spec) => spec.role === "compute" && spec.index)
-        .map((spec) => `compute-${spec.index}`)
-        .filter(
-          (suffix) =>
-            !farm.shares?.some((share) => share.nodes.includes(suffix)),
-        )
+  farm.status === "ready" && isMultiNodeFarm(farm)
+    ? [
+        ...(farm.shares?.length ? [] : ["control"]),
+        ...(farm.plan?.nodes ?? [])
+          .filter((spec) => spec.role === "compute" && spec.index)
+          .map((spec) => `compute-${spec.index}`)
+          .filter(
+            (suffix) =>
+              !farm.shares?.some((share) => share.nodes.includes(suffix)),
+          ),
+      ]
     : [];
+const templateLabel = (node: string) =>
+  node === "control" ? "control (control 템플릿)" : `${node} (compute 템플릿)`;
 
 /** Snapshots live with this machine's host, so only its farms can be frozen. */
 export const canFreeze = (farm: Farm, localHostId?: string) =>
@@ -105,12 +113,15 @@ export function FreezeFarmDialog({ farm }: { farm: Farm }) {
     (h) => h.kind === "local",
   );
   const snapshots = useQuery(snapshotsQuery());
-  const [node, setNode] = useState("");
+  // A farm without computes yet is frozen as a control template only.
+  const whole = !awaitsCompute(farm);
+  const initialNode = whole ? "" : "control";
+  const [node, setNode] = useState(initialNode);
   const suggest = (node: string) =>
     node
       ? `${farm.id.slice(0, 36)}-${node}-tpl`
       : `${farm.id.slice(0, 42)}-${farm.status === "ready" ? "clean" : "base"}`;
-  const suggested = suggest("");
+  const suggested = suggest(initialNode);
   const [id, setId] = useState(suggested);
   const [note, setNote] = useState("");
   const templates = templateNodes(farm);
@@ -127,7 +138,7 @@ export function FreezeFarmDialog({ farm }: { farm: Farm }) {
     },
   });
   const dialog = useDialog(mutation.isPending, () => {
-    setNode("");
+    setNode(initialNode);
     setId(suggested);
     setNote("");
     mutation.reset();
@@ -165,11 +176,13 @@ export function FreezeFarmDialog({ farm }: { farm: Farm }) {
                   {node ? `${farm.id}-${node}` : farm.id}
                 </strong>
                 <p>
-                  {node
-                    ? "이 compute VM 하나를 compute 템플릿으로 저장합니다. 같은 서비스와 릴리스의 farm에 compute를 빠르게 추가할 때 씁니다."
-                    : farm.status === "ready"
-                      ? "배포된 OpenStack을 그대로 저장합니다. 복원한 farm은 바로 Ready가 됩니다."
-                      : "OpenStack 배포 전 상태입니다. 복원한 farm은 VM 준비됨 상태로 시작합니다."}
+                  {node === "control"
+                    ? "control VM 하나를 control 템플릿으로 저장합니다. 이 템플릿으로 compute 없는 farm을 만든 뒤 compute를 추가해 클러스터를 조립합니다."
+                    : node
+                      ? "이 compute VM 하나를 compute 템플릿으로 저장합니다. 같은 서비스와 릴리스의 farm에 compute를 빠르게 추가할 때 씁니다."
+                      : farm.status === "ready"
+                        ? "배포된 OpenStack을 그대로 저장합니다. 복원한 farm은 바로 Ready가 됩니다."
+                        : "OpenStack 배포 전 상태입니다. 복원한 farm은 VM 준비됨 상태로 시작합니다."}
                 </p>
               </div>
             </div>
@@ -184,10 +197,10 @@ export function FreezeFarmDialog({ farm }: { farm: Farm }) {
                     setId(suggest(value));
                   }}
                   items={[
-                    { value: "", label: "farm 전체" },
+                    ...(whole ? [{ value: "", label: "farm 전체" }] : []),
                     ...templates.map((suffix) => ({
                       value: suffix,
-                      label: `${suffix} (compute 템플릿)`,
+                      label: templateLabel(suffix),
                     })),
                   ]}
                   disabled={mutation.isPending}
@@ -226,7 +239,15 @@ export function FreezeFarmDialog({ farm }: { farm: Farm }) {
                 disabled={mutation.isPending}
               />
             </label>
-            {node ? (
+            {node === "control" ? (
+              <div className="warning-notice">
+                farm 전체처럼 compute를 먼저 멈추고 control을 먼저 켜지만,
+                control VM만 저장합니다. 원본 farm의 OpenStack은 바꾸지
+                않습니다. 인스턴스가 있는 farm은 얼릴 수 없습니다. 이 템플릿으로
+                만든 farm은 원본의 compute 등록(nova-compute, placement, Neutron
+                agent)을 지우고 compute 없이 시작합니다.
+              </div>
+            ) : node ? (
               <div className="warning-notice">
                 {node}만 잠시 정지했다가 다시 시작합니다. 인스턴스가 있는
                 compute는 템플릿으로 얼릴 수 없습니다. 노드 identity(Nova
@@ -318,6 +339,7 @@ export function RestoreSnapshotDialog({
   const overBudget = remaining !== null && snapshot.plan.memory_mib > remaining;
   const ready =
     ["ready", "exporting"].includes(snapshot.status) && !foreignArch;
+  const control = snapshot.template === "control";
   return (
     <Dialog.Root open={dialog.open} onOpenChange={dialog.onOpenChange}>
       <Dialog.Trigger render={<Button variant="primary" disabled={!ready} />}>
@@ -325,8 +347,14 @@ export function RestoreSnapshotDialog({
         Farm 만들기
       </Dialog.Trigger>
       <Modal
-        title="스냅샷에서 farm 만들기"
-        description="얼려둔 VM을 복사해 새 farm으로 시작합니다. OpenStack을 다시 설치하지 않습니다."
+        title={
+          control ? "Control 템플릿에서 farm 만들기" : "스냅샷에서 farm 만들기"
+        }
+        description={
+          control
+            ? "얼려둔 control VM만 복사해 compute 없는 farm으로 시작합니다. 원본의 compute 등록은 지워지고, Compute 추가로 compute-1부터 clean 설치하거나 compute 템플릿에서 붙입니다."
+            : "얼려둔 VM을 복사해 새 farm으로 시작합니다. OpenStack을 다시 설치하지 않습니다."
+        }
         closeDisabled={mutation.isPending}
       >
         <form
@@ -343,7 +371,11 @@ export function RestoreSnapshotDialog({
                 <p>
                   {snapshot.plan.components.map(componentLabel).join(" · ")} ·{" "}
                   {memory(snapshot.plan.memory_mib)}
-                  {snapshot.deployed ? " · 배포 완료" : " · 배포 전"}
+                  {control
+                    ? " · control VM만, compute 0대"
+                    : snapshot.deployed
+                      ? " · 배포 완료"
+                      : " · 배포 전"}
                 </p>
                 <p>
                   {snapshotHost(snapshot)}에서 얼린 게스트 · 이 호스트의

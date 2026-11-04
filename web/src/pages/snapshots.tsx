@@ -134,8 +134,8 @@ function SnapshotRow({
           <StatusBadge status={snapshot.status} />
           {known && (
             <span className="muted text-xs">
-              {snapshot.compute_template
-                ? `Compute 템플릿${snapshot.release ? ` · OpenStack ${snapshot.release}` : ""}`
+              {snapshot.template
+                ? `${snapshot.template === "control" ? "Control" : "Compute"} 템플릿${snapshot.release ? ` · OpenStack ${snapshot.release}` : ""}`
                 : snapshot.deployed
                   ? "OpenStack 배포 완료"
                   : "배포 전 VM"}
@@ -205,7 +205,7 @@ function SnapshotRow({
         {snapshot.error && <p className="job-error">{snapshot.error}</p>}
       </div>
       <div className="flex shrink-0 flex-wrap items-center gap-2">
-        {!snapshot.compute_template && (
+        {snapshot.template !== "compute" && (
           <RestoreSnapshotDialog
             snapshot={snapshot}
             foreignArch={foreignArch}
