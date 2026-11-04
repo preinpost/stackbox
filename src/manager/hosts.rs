@@ -286,6 +286,10 @@ impl FarmManager {
             // This removes only coordinator records and encrypted credentials, never remote VMs/files.
             state.hosts.remove(id);
             state.host_jobs.retain(|_, job| job.host_id != id);
+            // Snapshot copies there stay on the host, unrecorded, like its files.
+            for snapshot in state.snapshots.values_mut() {
+                snapshot.copies.retain(|copy| copy.host_id != id);
+            }
             Ok(())
         })
     }
@@ -720,7 +724,7 @@ impl FarmManager {
                         None,
                     )
                     .await;
-                if !matches!(result, Ok(crate::remote::protocol::Reply::Hello { version: crate::remote::protocol::VERSION, ref arch, supports_single_vm: true, ref build_id }) if arch == &agent.artifact.arch && build_id == crate::BUILD_ID)
+                if !matches!(result, Ok(crate::remote::protocol::Reply::Hello { version: crate::remote::protocol::VERSION, ref arch, supports_single_vm: true, ref build_id, .. }) if arch == &agent.artifact.arch && build_id == crate::BUILD_ID)
                 {
                     self.update(|state| {
                         state

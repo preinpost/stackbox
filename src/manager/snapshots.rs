@@ -454,6 +454,7 @@ impl FarmManager {
                 size_bytes: None,
                 archive: None,
                 transfer: None,
+                copies: Vec::new(),
                 error: None,
                 created_at: now(),
                 updated_at: now(),
@@ -546,10 +547,11 @@ impl FarmManager {
             .context("restored farm has no snapshot")?;
         let snapshot = self.snapshot(&id)?;
         ensure_compatible(&snapshot)?;
-        let reference = snapshot
-            .reference
-            .clone()
-            .ok_or_else(|| conflict(format!("snapshot '{id}' is not ready")))?;
+        // On a host other than the local one, from a copy there.
+        let host_id = farm.host_id.clone().context("restored farm has no host")?;
+        let reference = self
+            .ensure_snapshot_on_host(&id, &host_id, Some(self.event_sink(job, None)))
+            .await?;
         let plan = farm.plan.clone().context("farm has no plan")?;
         let exposure = farm.exposure.clone().context("farm has no exposure")?;
         self.log(
@@ -952,6 +954,7 @@ impl FarmManager {
                 size_bytes: None,
                 archive: None,
                 transfer,
+                copies: Vec::new(),
                 error: None,
                 created_at: now(),
                 updated_at: now(),
@@ -962,14 +965,16 @@ impl FarmManager {
         let manager = self.clone();
         tokio::spawn(async move {
             let result = match source {
-                Source::File(path) => manager.run_import(&path, &id).await,
+                Source::File(path) => manager.run_import(&path, &id).await.map(|r| (r, None)),
                 Source::Bucket { bucket, key } => manager.run_download(&id, &bucket, &key).await,
             };
             let saved = manager.update_snapshot(&id, |s| {
                 s.transfer = None;
                 match result {
-                    Ok((imported, reference, size_bytes)) => {
+                    Ok(((imported, reference, size_bytes), archive)) => {
                         s.status = SnapshotStatus::Ready;
+                        // Other hosts can download a template from where it came from.
+                        s.archive = archive;
                         s.arch = imported.arch;
                         s.platform = imported.platform;
                         s.plan = imported.plan;
@@ -1007,7 +1012,7 @@ impl FarmManager {
         id: &str,
         bucket: &str,
         key: &str,
-    ) -> Result<(Imported, String, Option<u64>)> {
+    ) -> Result<((Imported, String, Option<u64>), Option<SnapshotArchive>)> {
         let _permit = self.0.snapshot_gate.acquire().await?;
         // Fail before a long download that could not be imported.
         self.local_backend()?;
@@ -1040,7 +1045,16 @@ impl FarmManager {
                 }
                 return Err(error.context(format!("{key} does not match its metadata file")));
             }
-            Ok(imported)
+            let bucket_record = self.bucket(bucket)?;
+            let archive = metadata.as_ref().map(|metadata| SnapshotArchive {
+                path: format!("s3://{}/{key}", bucket_record.name),
+                size_bytes: downloaded.size,
+                exported_at: metadata.exported_at,
+                bucket: Some(bucket.into()),
+                key: Some(key.into()),
+                sha256: Some(downloaded.sha256.clone()),
+            });
+            Ok((imported, archive))
         }
         .await;
         let _ = std::fs::remove_file(&archive);
@@ -1067,16 +1081,18 @@ impl FarmManager {
         }
     }
 
-    pub async fn delete_snapshot(&self, id: &str) -> Result<()> {
+    /// Removes the snapshot, then its copies on other hosts as far as those answer.
+    /// Returns the copies that could not be removed, by host.
+    pub async fn delete_snapshot(&self, id: &str) -> Result<Vec<String>> {
         self.remove_snapshot(id, false).await
     }
     /// Removes the snapshot's record without asking the host that keeps its disk, for a host
-    /// that is gone. The disk, if any is left, stays on that host.
+    /// that is gone. The disk, if any is left, stays on that host, and so do its copies.
     pub async fn forget_snapshot(&self, id: &str) -> Result<()> {
-        self.remove_snapshot(id, true).await
+        self.remove_snapshot(id, true).await.map(|_| ())
     }
-    async fn remove_snapshot(&self, id: &str, forget: bool) -> Result<()> {
-        let (references, previous) = self.update(|state| {
+    async fn remove_snapshot(&self, id: &str, forget: bool) -> Result<Vec<String>> {
+        let (references, previous, copies) = self.update(|state| {
             self.ensure_accepting()?;
             if state
                 .jobs
@@ -1109,7 +1125,7 @@ impl FarmManager {
                     .map(|n| n.reference.clone())
                     .collect()
             };
-            Ok((references, previous))
+            Ok((references, previous, snapshot.copies.clone()))
         })?;
         let removed = async {
             if forget {
@@ -1130,9 +1146,17 @@ impl FarmManager {
             })?;
             return Err(error);
         }
+        let left = if forget {
+            Vec::new()
+        } else {
+            self.remove_snapshot_copies(&copies).await
+        };
+        for copy in &left {
+            eprintln!("snapshot {id} was deleted, but its copy on {copy}");
+        }
         self.update(|state| {
             state.snapshots.remove(id);
-            Ok(())
+            Ok(left)
         })
     }
 }

@@ -20,7 +20,7 @@ pub use node::{
 };
 pub use snapshot::{
     FrozenSnapshot, ImportedSnapshot, NodeSnapshot, export_snapshot, freeze_compute,
-    freeze_control, freeze_farm, import_snapshot, remove_snapshot, restore_farm,
+    freeze_control, freeze_farm, import_snapshot, remove_snapshot, restore_farm, snapshot_labels,
 };
 pub use template::{
     ALL_IN_ONE, COMPUTE, CONTROL, MAX_COMPUTES, NodeSpec, Role, address, hostname, suffix,
@@ -67,7 +67,12 @@ pub async fn create_farm_with(
         };
         return Ok(vec![create_node(farm_id, template[0], &setup).await?]);
     }
-    if share.is_some() && !sources.is_empty() {
+    // A share of one compute may boot from a compute template; nothing else that spans
+    // hosts starts from snapshots.
+    if let Some(share) = share
+        && !sources.is_empty()
+        && !(share.nodes.len() == 1 && share.nodes[0].starts_with("compute-"))
+    {
         bail!("a farm that spans hosts cannot start from snapshots");
     }
     let switch = switch.context("multi-node farms need the host's link switch")?;

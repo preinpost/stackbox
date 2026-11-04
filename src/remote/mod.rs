@@ -1,6 +1,7 @@
 pub mod agent;
 pub mod artifact;
 pub mod backend;
+mod cache;
 pub mod dial;
 pub mod host;
 pub mod hub;

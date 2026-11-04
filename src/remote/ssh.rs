@@ -152,6 +152,7 @@ impl Session {
                 arch,
                 supports_single_vm,
                 build_id,
+                ..
             } if version == artifact.info.protocol
                 && arch == artifact.info.arch
                 && supports_single_vm

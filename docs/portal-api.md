@@ -61,7 +61,9 @@ body에 `from_snapshot`(compute 템플릿 스냅샷 ID)을 넣으면 새 VM을 �
 `{"id":"...","node":"compute-1"}`로 만듭니다(배포된 farm, farm의 primary 호스트에 있는 compute만).
 스냅샷의 `template`이 `"compute"`이고 `release`가 OpenStack 릴리스입니다(이전 버전의
 `compute_template: true` 기록은 읽을 때 `template: "compute"`로 바뀝니다). 템플릿이 아니거나 farm과
-릴리스·서비스·아키텍처가 다르거나, 대상이 로컬 호스트의 control VM 호스트가 아니면 `409`입니다. 실패한
+릴리스·서비스·아키텍처가 다르면 `409`입니다. `host_id`가 로컬 호스트가 아니면 job이 먼저 그 호스트에
+템플릿 복사본을 두고(진행은 job 로그), 스냅샷의 `copies`에 기록합니다. 그 호스트의 farm-agent가 복사를
+모르면 job이 `409`와 같은 메시지로 실패합니다([스냅샷 문서](snapshots.md#다른-호스트로-복사)). 실패한
 확장은 처음과 같은 `from_snapshot`으로만 재시도할 수 있습니다.
 
 `{"id":"...","node":"control"}`은 control VM만 **control 템플릿**(`template: "control"`)으로 얼립니다.

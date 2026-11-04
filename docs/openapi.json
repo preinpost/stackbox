@@ -1998,6 +1998,62 @@
         }
       }
     },
+    "/api/v1/snapshots/{id}/copies/{host_id}": {
+      "delete": {
+        "tags": [],
+        "operationId": "delete_snapshot_copy",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "host_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The copy on that host was removed; the snapshot itself stays",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SnapshotRecord"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/snapshots/{id}/export": {
       "post": {
         "tags": [],
@@ -2505,6 +2561,14 @@
           }
         },
         "additionalProperties": false
+      },
+      "CopySource": {
+        "type": "string",
+        "enum": [
+          "bucket",
+          "stream",
+          "found"
+        ]
       },
       "CreateRequest": {
         "type": "object",
@@ -4128,6 +4192,13 @@
           "id"
         ],
         "properties": {
+          "copies_left": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Copies on other hosts that could not be removed, as `<host>: <error>`; they stay\non those hosts until removed there."
+          },
           "id": {
             "type": "string"
           }
@@ -4190,6 +4261,42 @@
           }
         }
       },
+      "SnapshotCopy": {
+        "type": "object",
+        "description": "A snapshot copied to another host, where its agent keeps it as an msb snapshot.",
+        "required": [
+          "host_id",
+          "reference",
+          "via",
+          "copied_at"
+        ],
+        "properties": {
+          "copied_at": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "host_id": {
+            "type": "string"
+          },
+          "reference": {
+            "type": "string",
+            "description": "msb snapshot reference on that host."
+          },
+          "size_bytes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
+          "via": {
+            "$ref": "#/components/schemas/CopySource",
+            "description": "How the archive got there."
+          }
+        }
+      },
       "SnapshotRecord": {
         "type": "object",
         "required": [
@@ -4216,6 +4323,13 @@
                 "description": "Most recent export."
               }
             ]
+          },
+          "copies": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SnapshotCopy"
+            },
+            "description": "Copies kept on other hosts, which farms and computes there boot from."
           },
           "created_at": {
             "type": "integer",

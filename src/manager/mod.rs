@@ -4,6 +4,7 @@ pub(crate) mod hosts;
 mod logs;
 mod snapshots;
 mod store;
+mod transfers;
 
 use crate::{
     farm::Role,
@@ -118,6 +119,8 @@ struct Inner {
     published: std::sync::RwLock<
         std::collections::BTreeMap<String, Arc<crate::remote::artifact::Published>>,
     >,
+    /// One snapshot copy to a host at a time, by snapshot and host.
+    copy_locks: Mutex<std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 #[derive(Debug)]
 pub struct NotFound(pub String);
@@ -289,6 +292,7 @@ impl FarmManager {
             guest_agent: Default::default(),
             artifacts,
             published: Default::default(),
+            copy_locks: Default::default(),
         }));
         let mut resumed = Vec::new();
         manager.update(|state| {
@@ -1338,10 +1342,11 @@ impl FarmManager {
             let host_id = request.host_id.clone().ok_or_else(|| {
                 bad_request("choose a host for the farm; register the local host or a server under Hosts first")
             })?;
-            if request.snapshot_id.is_some()
+            // A host other than the local one gets a copy when the restore starts.
+            if let Some(snapshot_id) = &request.snapshot_id
                 && state.hosts.get(&host_id).is_some_and(|h| h.host.kind != HostKind::Local)
             {
-                return Err(conflict("snapshots restore on the local host only"));
+                transfers::copyable(snapshots::restorable(state, snapshot_id)?)?;
             }
             // Computes placed on the control VM's host need no share of their own.
             let mut placed: std::collections::BTreeMap<String, Vec<String>> = Default::default();
@@ -1646,18 +1651,8 @@ impl FarmManager {
                 .ok_or_else(|| conflict("farm has no primary host"))?;
             let (budget, _, _, _) = self.admit_host(state, &target_host, true)?;
             if let Some(snapshot) = &request.from_snapshot {
-                snapshots::compute_template(state, snapshot, farm)?;
-                // Snapshots are kept on the coordinator's local host only.
-                if target_host != primary
-                    || state
-                        .hosts
-                        .get(&primary)
-                        .is_none_or(|host| host.host.kind != HostKind::Local)
-                {
-                    return Err(conflict(format!(
-                        "compute template '{snapshot}' is kept on the local host, so a compute made from it can only join a farm whose control VM runs there, on that host"
-                    )));
-                }
+                // A host other than the local one gets a copy when the expansion starts.
+                transfers::copyable(snapshots::compute_template(state, snapshot, farm)?)?;
             }
             if target_host != primary {
                 let arch = |host: &str| {
@@ -2057,16 +2052,18 @@ impl FarmManager {
         let components = farm_components(farm);
         // A compute template is checked again: it may have changed since the job was accepted.
         let source = match &job.snapshot_id {
-            Some(snapshot) => Some(self.read(|state| {
-                anyhow::ensure!(
-                    target_host == primary,
-                    "a compute template boots on the control VM's host"
-                );
-                snapshots::compute_template(state, snapshot, farm)?
-                    .reference
-                    .clone()
-                    .with_context(|| format!("compute template '{snapshot}' is not ready"))
-            })??),
+            Some(snapshot) => {
+                self.read(|state| snapshots::compute_template(state, snapshot, farm).map(|_| ()))??;
+                // The template boots on the new compute's host, which may need a copy first.
+                Some(
+                    self.ensure_snapshot_on_host(
+                        snapshot,
+                        &target_host,
+                        Some(self.event_sink(job, None)),
+                    )
+                    .await?,
+                )
+            }
             None => None,
         };
         let from_template = source.is_some();
@@ -2140,9 +2137,24 @@ impl FarmManager {
                 Some(crate::kolla::Phase::Prepare),
                 format!("creating {target_node} on host {target_host}\n"),
             )?;
-            let nodes = backend
-                .create_share(id.clone(), plan.clone(), exposure.clone(), share)
-                .await?;
+            let nodes = match &source {
+                Some(source) => {
+                    backend
+                        .create_share_from(
+                            id.clone(),
+                            plan.clone(),
+                            exposure.clone(),
+                            share,
+                            source.clone(),
+                        )
+                        .await?
+                }
+                None => {
+                    backend
+                        .create_share(id.clone(), plan.clone(), exposure.clone(), share)
+                        .await?
+                }
+            };
             self.log(
                 &id,
                 &job.id,
@@ -2216,7 +2228,7 @@ impl FarmManager {
                     nodes.clone(),
                     vec![target_node.clone()],
                     None,
-                    None,
+                    source.clone(),
                 )
                 .await?;
             self.update(|state| {
@@ -2283,7 +2295,8 @@ impl FarmManager {
                 primary_nodes.clone(),
                 add,
                 primary_uplink.clone(),
-                source,
+                // Only a compute added on the control VM's host boots there.
+                source.filter(|_| target_host == primary),
             )
             .await?;
         if let Some(uplink) = primary_uplink {

@@ -108,7 +108,10 @@ impl Hub {
             .insert(session, frames_tx);
         connection
             .outgoing
-            .send(Envelope::Open { session, request })
+            .send(Envelope::Open {
+                session,
+                request: Box::new(request),
+            })
             .map_err(|_| anyhow!("the agent of host '{host}' disconnected"))?;
         Ok(Session {
             id: session,

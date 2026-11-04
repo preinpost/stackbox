@@ -120,6 +120,10 @@ pub fn router(manager: FarmManager, token: Option<String>) -> Router {
             get(snapshot).delete(delete_snapshot),
         )
         .route("/api/v1/snapshots/{id}/export", post(export_snapshot))
+        .route(
+            "/api/v1/snapshots/{id}/copies/{host_id}",
+            axum::routing::delete(delete_snapshot_copy),
+        )
         .route("/api/v1/buckets", get(buckets).post(register_bucket))
         .route("/api/v1/buckets/test-connection", post(test_bucket))
         .route(
@@ -692,6 +696,10 @@ async fn snapshot(
 #[derive(Serialize, ToSchema)]
 struct RemovedSnapshot {
     id: String,
+    /// Copies on other hosts that could not be removed, as `<host>: <error>`; they stay
+    /// on those hosts until removed there.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    copies_left: Vec<String>,
 }
 #[utoipa::path(delete, path="/api/v1/snapshots/{id}", params(("id"=String, Path), ForgetQuery), responses((status=200, body=RemovedSnapshot), (status=404, body=ErrorBody), (status=409, body=ErrorBody)))]
 async fn delete_snapshot(
@@ -699,12 +707,20 @@ async fn delete_snapshot(
     Path(id): Path<String>,
     Query(query): Query<ForgetQuery>,
 ) -> Result<Json<RemovedSnapshot>, ApiError> {
-    if query.forget {
+    let copies_left = if query.forget {
         app.manager.forget_snapshot(&id).await?;
+        Vec::new()
     } else {
-        app.manager.delete_snapshot(&id).await?;
-    }
-    Ok(Json(RemovedSnapshot { id }))
+        app.manager.delete_snapshot(&id).await?
+    };
+    Ok(Json(RemovedSnapshot { id, copies_left }))
+}
+#[utoipa::path(delete, path="/api/v1/snapshots/{id}/copies/{host_id}", params(("id"=String, Path), ("host_id"=String, Path)), responses((status=200, description="The copy on that host was removed; the snapshot itself stays", body=SnapshotRecord), (status=404, body=ErrorBody), (status=409, body=ErrorBody)))]
+async fn delete_snapshot_copy(
+    State(app): State<App>,
+    Path((id, host_id)): Path<(String, String)>,
+) -> Result<Json<SnapshotRecord>, ApiError> {
+    Ok(Json(app.manager.remove_snapshot_copy(&id, &host_id).await?))
 }
 fn accepted_snapshot(snapshot: SnapshotRecord) -> Response {
     (
@@ -996,7 +1012,7 @@ async fn relay_shell(
 }
 
 #[derive(OpenApi)]
-#[openapi(paths(host, remote_hosts, remote_host, host_fingerprint, test_connection, register_host, register_local_host, register_agent_host, update_host_credentials, unregister_host, check_host, prepare_host, install_agent, host_jobs, host_job, catalog_handler, plan_handler, list, detail, create, deploy, add_compute, settle, delete, endpoints, set_faults, logs, log_stream, freeze, snapshots, snapshot, delete_snapshot, export_snapshot, import_snapshot, buckets, bucket, register_bucket, update_bucket, unregister_bucket, test_bucket, check_bucket, bucket_objects, rebuild_bucket_index, relay_status, set_relay, remove_relay, update_cloudflared, jobs, job), components(schemas(ErrorBody)), modifiers(&Security))]
+#[openapi(paths(host, remote_hosts, remote_host, host_fingerprint, test_connection, register_host, register_local_host, register_agent_host, update_host_credentials, unregister_host, check_host, prepare_host, install_agent, host_jobs, host_job, catalog_handler, plan_handler, list, detail, create, deploy, add_compute, settle, delete, endpoints, set_faults, logs, log_stream, freeze, snapshots, snapshot, delete_snapshot, delete_snapshot_copy, export_snapshot, import_snapshot, buckets, bucket, register_bucket, update_bucket, unregister_bucket, test_bucket, check_bucket, bucket_objects, rebuild_bucket_index, relay_status, set_relay, remove_relay, update_cloudflared, jobs, job), components(schemas(ErrorBody)), modifiers(&Security))]
 struct ApiDoc;
 struct Security;
 impl utoipa::Modify for Security {

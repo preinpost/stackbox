@@ -500,6 +500,15 @@ pub async fn import_snapshot(archive: &Path, snapshot_id: &str) -> Result<Import
     })
 }
 
+/// The labels of the snapshot at `reference`, or `None` when msb no longer has it.
+pub async fn snapshot_labels(reference: &str) -> Result<Option<BTreeMap<String, String>>> {
+    match Snapshot::open_ref(SnapshotReference::auto(reference)).await {
+        Ok(snapshot) => Ok(Some(snapshot.labels().clone())),
+        Err(microsandbox::MicrosandboxError::SnapshotNotFound(_)) => Ok(None),
+        Err(error) => Err(error).with_context(|| format!("look up snapshot {reference}")),
+    }
+}
+
 pub async fn remove_snapshot(reference: &str) -> Result<()> {
     match Snapshot::remove_ref(SnapshotReference::auto(reference), false).await {
         // Already removed, e.g. with `msb snapshot rm`: only the coordinator's record is left.

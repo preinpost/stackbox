@@ -28,6 +28,9 @@ pub enum Operation {
         /// For a farm that spans hosts: the part this host runs.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         share: Option<Box<Share>>,
+        /// Compute template snapshot on this host to boot the share's one compute from.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source: Option<String>,
     },
     /// Ready this host's compute VMs of a farm that spans hosts for Kolla, which the
     /// control VM's host deploys afterwards.
@@ -151,6 +154,37 @@ pub enum Operation {
     RemoveSnapshot {
         reference: String,
     },
+    /// Whether this host keeps the coordinator's snapshot `snapshot_id`, which an earlier
+    /// `ImportArchive` cached here; the agent checks that msb still has it.
+    FindSnapshot {
+        snapshot_id: String,
+    },
+    /// Download a snapshot archive from a presigned bucket URL into the staging file of
+    /// transfer `transfer_id`, which must end up `size_bytes` long with SHA-256 `sha256`.
+    /// The URL grants reading that one object until it expires; it is never stored.
+    FetchArchive {
+        transfer_id: String,
+        url: String,
+        /// PEM certificates of a bucket behind a private CA.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ca_pem: Option<String>,
+        sha256: String,
+        size_bytes: u64,
+    },
+    /// Receive a snapshot archive from the coordinator into transfer `transfer_id`'s staging
+    /// file. Like a shell, stdin stays open after the request: the archive follows as
+    /// `TerminalFrame::Input` lines until EOF, then the agent checks its size and SHA-256.
+    ReceiveArchive {
+        transfer_id: String,
+        sha256: String,
+        size_bytes: u64,
+    },
+    /// Load transfer `transfer_id`'s verified staging file as the snapshot `snapshot_id`,
+    /// remember it for `FindSnapshot`, and delete the file.
+    ImportArchive {
+        transfer_id: String,
+        snapshot_id: String,
+    },
     /// Interactive shell in the farm's VM. After the request line, the coordinator keeps
     /// stdin open and writes one `TerminalFrame` per line until the session ends.
     Shell {
@@ -268,7 +302,11 @@ impl Operation {
             Self::SshKeys { .. } => 300,
             // Each moves a whole VM disk.
             Self::ExportSnapshot { .. } | Self::ImportSnapshot { .. } => 7200,
-            Self::RemoveSnapshot { .. } => 300,
+            Self::RemoveSnapshot { .. } | Self::FindSnapshot { .. } => 300,
+            // A whole template disk crosses the network, then is loaded.
+            Self::FetchArchive { .. }
+            | Self::ReceiveArchive { .. }
+            | Self::ImportArchive { .. } => 7200,
             Self::VerifyVm => 300,
             // Downloads the release bundle; the script itself stops after 600 s.
             Self::InstallMsb => 660,
@@ -385,6 +423,10 @@ pub enum Reply {
         /// Revision the installed agent was built from; empty for agents older than this field.
         #[serde(default)]
         build_id: String,
+        /// Takes `FindSnapshot`, `FetchArchive`, `ReceiveArchive` and `ImportArchive`, so
+        /// templates can be copied to this host.
+        #[serde(default)]
+        supports_template_transfer: bool,
     },
     Inventory {
         farms: BTreeMap<String, Vec<FarmNode>>,
@@ -404,6 +446,11 @@ pub enum Reply {
     Imported {
         snapshot: ImportedSnapshot,
     },
+    /// The answer to `FindSnapshot`: the msb reference of the cached copy, if any.
+    Found {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reference: Option<String>,
+    },
     SshKeys {
         public_key: String,
         private_key: String,
@@ -416,6 +463,10 @@ pub enum Reply {
 }
 
 impl Operation {
+    /// Whether the coordinator keeps writing `TerminalFrame` lines after the request.
+    pub fn streams_input(&self) -> bool {
+        matches!(self, Self::Shell { .. } | Self::ReceiveArchive { .. })
+    }
     /// Whether the agent reports phases and steps while running this operation.
     fn reports_progress(&self) -> bool {
         matches!(

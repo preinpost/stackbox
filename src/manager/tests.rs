@@ -1,3 +1,5 @@
+mod transfers;
+
 use super::*;
 use crate::{
     api,
@@ -71,6 +73,20 @@ impl Backend for Fake {
             });
             self.shares.lock().unwrap().push(share);
             self.create(id, plan, exposure).await
+        })
+    }
+    fn create_share_from(
+        &self,
+        id: String,
+        plan: Plan,
+        exposure: Exposure,
+        share: crate::remote::protocol::Share,
+        source: String,
+    ) -> BoxFuture<'_, Result<Vec<FarmNode>>> {
+        Box::pin(async move {
+            assert!(self.snapshots.lock().unwrap().contains_key(&source));
+            self.expanded_from.lock().unwrap().push(Some(source));
+            self.create_share(id, plan, exposure, share).await
         })
     }
     fn expand(
@@ -432,6 +448,12 @@ impl Backend for Fake {
                 .context("no such snapshot")?;
             Ok(())
         })
+    }
+    fn snapshot_labels(
+        &self,
+        reference: String,
+    ) -> BoxFuture<'_, Result<Option<BTreeMap<String, String>>>> {
+        Box::pin(async move { Ok(self.snapshots.lock().unwrap().get(&reference).cloned()) })
     }
     /// Echoes input and reports resizes until the client closes its side.
     fn terminal(
@@ -1123,6 +1145,7 @@ impl crate::remote::link::AgentLink for MsbLink {
                     arch: std::env::consts::ARCH.into(),
                     supports_single_vm: true,
                     build_id: crate::BUILD_ID.into(),
+                    supports_template_transfer: true,
                 },
                 Operation::Inspect => {
                     let msb_version = self.msb.lock().unwrap().clone();

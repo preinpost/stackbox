@@ -190,8 +190,10 @@ farm add-compute grow --from-snapshot grow-compute-tpl          # 생략하면 �
 
 - 템플릿에는 `farm.snapshot.role=compute`, OpenStack 릴리스, 서비스 목록, 아키텍처가 라벨로 남고,
   archive로 내보내고 가져와도 템플릿으로 남습니다. farm 복원에는 쓸 수 없습니다.
-- 추가할 때 farm과 릴리스·서비스·아키텍처가 다르면 `409`입니다. 템플릿은 로컬 호스트에만 있으므로
-  control VM이 로컬 호스트에 있는 farm에, 같은 호스트로만 붙일 수 있습니다.
+- 추가할 때 farm과 릴리스·서비스·아키텍처가 다르면 `409`입니다. 템플릿은 로컬 호스트에서 얼리지만,
+  `--host-id`로 다른 호스트에 붙이면 job이 먼저 그 호스트에 복사본을 둡니다(버킷에 있으면 호스트가
+  직접 내려받고, 아니면 coordinator가 agent 연결로 보냄). 다음부터는 그 복사본을 씁니다.
+  [docs/snapshots.md](docs/snapshots.md#다른-호스트로-복사) 참고.
 - 얼릴 때는 링크와 Docker를 디스크에서 꺼 둡니다(원본은 다시 켜서 시작). 템플릿으로 부팅한 VM은
   Docker가 뜨기 전에 Nova `compute_id`, 인스턴스와 libvirt domain, `authorized_keys`를 지우고
   machine-id를 새로 만든 뒤 Docker를 켜고 OVS system-id를 새 hostname으로 바꿉니다. 그 뒤
@@ -223,6 +225,8 @@ farm add-compute c13 --from-snapshot src-compute-tpl        # compute-2, 3: comp
   Kolla inventory의 `[compute]`와 control VM의 compute SSH host key도 비우므로 첫 확장은 compute-1입니다.
 - compute가 없는 farm은 다시 배포(`deploy`)할 수 없고 farm 전체로도 얼릴 수 없습니다(control 템플릿만).
   compute 템플릿은 여전히 farm 복원에 쓸 수 없습니다.
+- `farm create --host-id <원격 호스트> --snapshot <control 템플릿>`도 됩니다. compute 템플릿과 같이
+  그 호스트에 복사본을 먼저 둡니다.
 
 ## 웹포탈
 
@@ -315,7 +319,8 @@ curl -N http://127.0.0.1:10010/api/v1/farms/demo/logs/stream
 | GET | `/farms/{id}/logs/stream` | 로그 SSE (`Last-Event-ID`로 재연결) |
 | GET (WebSocket) | `/farms/{id}/shell?rows=24&cols=80[&node=compute-1]` | VM의 root 로그인 셸 (다중 노드는 `node`로 VM 선택) |
 | POST | `/farms/{id}/snapshots` | VM을 스냅샷으로 얼리는 job (`node`: `control`이면 control 템플릿, `compute-N`이면 compute 템플릿) |
-| GET / DELETE | `/snapshots`, `/snapshots/{id}` | 스냅샷 목록·상세 / 삭제 |
+| GET / DELETE | `/snapshots`, `/snapshots/{id}` | 스냅샷 목록·상세 / 삭제 (다른 호스트의 복사본 포함) |
+| DELETE | `/snapshots/{id}/copies/{host_id}` | 다른 호스트에 둔 스냅샷 복사본만 삭제 |
 | POST | `/snapshots/{id}/export`, `/snapshots/import` | `.msb` 아카이브 내보내기 / 가져오기 (파일 또는 S3 버킷) |
 | GET / POST / PUT / DELETE | `/buckets`, `/buckets/{id}` | 스냅샷을 옮길 S3 호환 버킷 등록·관리 |
 | GET / POST | `/buckets/{id}/objects`, `/buckets/{id}/index` | 버킷의 아카이브와 메타데이터 / `index.json` 다시 만들기 |
