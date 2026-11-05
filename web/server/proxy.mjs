@@ -47,7 +47,7 @@ export function proxyApi(req, res, env = process.env) {
   // Only expose the portal's known API surface, including canonical farm IDs.
   // Encoded/alternate spellings cannot bypass the credential response filter.
   if (
-    !/^\/api\/v1\/(?:host|local-host|agent-hosts|hosts(?:\/[a-z0-9-]+(?:\/(?:check|prepare|agent))?)?|host-jobs(?:\/[a-f0-9-]+)?|catalog|plans|openapi\.json|jobs(?:\/[a-f0-9-]+)?|farms(?:\/[a-z0-9-]+(?:\/(?:deploy|computes|settle|endpoints|snapshots|logs(?:\/stream)?))?)?|snapshots(?:\/[a-z0-9-]+(?:\/(?:export|copies\/[a-z0-9-]+))?)?|buckets(?:\/[a-z0-9-]+(?:\/(?:check|objects))?)?|relay(?:\/cloudflared\/update)?)$/.test(
+    !/^\/api\/v1\/(?:host|local-host|agent-hosts|hosts(?:\/[a-z0-9-]+(?:\/(?:check|prepare|agent))?)?|host-jobs(?:\/[a-f0-9-]+)?|catalog|plans|releases(?:\/(?:plan|farms))?|openapi\.json|jobs(?:\/[a-f0-9-]+)?|farms(?:\/[a-z0-9-]+(?:\/(?:deploy|computes|settle|endpoints|snapshots|logs(?:\/stream)?))?)?|snapshots(?:\/[a-z0-9-]+(?:\/(?:export|copies\/[a-z0-9-]+))?)?|buckets(?:\/[a-z0-9-]+(?:\/(?:check|objects))?)?|relay(?:\/cloudflared\/update)?)$/.test(
       url.pathname,
     )
   ) {

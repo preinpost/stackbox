@@ -244,6 +244,32 @@ test("forwards bucket routes and keeps others closed", async (t) => {
   }
   assert.equal(seen.length, allowed.length);
 });
+test("forwards release routes and keeps others closed", async (t) => {
+  const seen = [];
+  const address = await setup(t, (req, res) => {
+    seen.push(`${req.method} ${req.url}`);
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end("{}");
+  });
+  const allowed = [
+    ["GET", "/api/v1/releases"],
+    ["POST", "/api/v1/releases/plan"],
+    ["POST", "/api/v1/releases/farms"],
+  ];
+  for (const [method, path] of allowed) {
+    const response = await fetch(address + path, { method });
+    assert.equal(response.status, 200, `${method} ${path}`);
+  }
+  assert.equal(seen.length, allowed.length);
+  for (const path of [
+    "/api/v1/releases/Demo",
+    "/api/v1/releases/plan/x",
+    "/api/v1/releases/farms/x",
+  ]) {
+    assert.equal((await fetch(address + path)).status, 404, path);
+  }
+  assert.equal(seen.length, allowed.length);
+});
 test("forwards the relay settings and cloudflared update only", async (t) => {
   const seen = [];
   const address = await setup(t, (req, res) => {
