@@ -330,8 +330,9 @@ impl Backend for AgentBackend {
         id: String,
         from: Phase,
         _: Option<Exposure>,
-        // The agent deploys the components recorded with its own reservation.
+        // The agent deploys the components and release recorded with its own reservation.
         _: Vec<String>,
+        _: String,
         sink: EventSink,
     ) -> BoxFuture<'_, Result<()>> {
         Box::pin(self.deploy_job(id, from, uuid::Uuid::new_v4().to_string(), sink))

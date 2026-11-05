@@ -2846,6 +2846,17 @@
           "id": {
             "type": "string"
           },
+          "layout": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/FarmLayout",
+                "description": "VMs of a farm without computes (see [`PlanRequest::layout`])."
+              }
+            ]
+          },
           "owner": {
             "type": [
               "string",
@@ -2861,6 +2872,13 @@
             "propertyNames": {
               "type": "string"
             }
+          },
+          "release": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "OpenStack release to install (see [`PlanRequest::release`])."
           },
           "snapshot_id": {
             "type": [
@@ -3091,6 +3109,14 @@
             "minimum": 0
           }
         }
+      },
+      "FarmLayout": {
+        "type": "string",
+        "description": "How a farm without compute VMs lays its service out, so that \"one VM\" and \"a control\nVM that gains computes later\" are never the same choice.",
+        "enum": [
+          "all-in-one",
+          "control"
+        ]
       },
       "FarmNode": {
         "type": "object",
@@ -4084,6 +4110,13 @@
               "$ref": "#/components/schemas/NodeSpec"
             }
           },
+          "release": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "OpenStack release the VMs install. Absent on plans recorded before it was kept, which\nread as [`crate::kolla::OPENSTACK_RELEASE`]."
+          },
           "warnings": {
             "type": "array",
             "items": {
@@ -4120,6 +4153,26 @@
             "description": "Compute VMs beside a control VM, up to 3; 0 runs everything in one all-in-one VM.\nA multi-node farm always runs Nova and Neutron.",
             "default": 0,
             "minimum": 0
+          },
+          "layout": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/FarmLayout",
+                "description": "VMs of a farm without computes; omitted keeps the all-in-one default."
+              }
+            ],
+            "default": null
+          },
+          "release": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "OpenStack release to install; omitted installs this coordinator's own release.",
+            "default": null
           }
         },
         "additionalProperties": false
@@ -4441,6 +4494,17 @@
             },
             "description": "Services the farm runs; empty takes the control template's."
           },
+          "compute": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ComputeSize",
+                "description": "Size of the compute VMs this farm installs clean, and of the ones added to it later.\nA compute that boots from a compute template keeps the template's size."
+              }
+            ]
+          },
           "compute_hosts": {
             "type": "array",
             "items": {
@@ -4488,6 +4552,17 @@
           },
           "id": {
             "type": "string"
+          },
+          "layout": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/FarmLayout",
+                "description": "VMs of a farm without computes: `all-in-one` for one VM that runs everything, or\n`control` for a control VM alone, ready for computes from compute templates to join\nit later. Omitted keeps the previous behaviour (a control template starts its farm\nwith the control VM alone, a clean install runs all-in-one)."
+              }
+            ]
           },
           "owner": {
             "type": [

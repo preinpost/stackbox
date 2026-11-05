@@ -908,6 +908,9 @@ impl FarmManager {
             components: plan.components.clone(),
             computes: plan.computes + 1,
             compute: plan.compute,
+            // The computes join the farm's own release.
+            release: plan.release.clone(),
+            layout: None,
         })?;
         if serde_json::to_value(&expanded.nodes[..plan.nodes.len()])?
             != serde_json::to_value(&plan.nodes)?
@@ -1495,9 +1498,15 @@ impl FarmManager {
             if !matches!(layout, Some(Ok(_))) {
                 return Err(conflict("legacy multi-node farms cannot be deployed; keep or delete this farm and create a new farm"));
             }
-            // Its Kolla configuration came with the control template; a full deploy would
-            // verify Nova on computes it does not have.
-            if farm.plan.as_ref().is_some_and(|plan| plan.multinode() && plan.computes == 0) {
+            // A farm restored from a control template has its Kolla configuration already;
+            // a full deploy would verify Nova on computes it does not have. A farm created
+            // clean as a control VM alone still has to install OpenStack on it.
+            if farm.snapshot_id.is_some()
+                && farm
+                    .plan
+                    .as_ref()
+                    .is_some_and(|plan| plan.multinode() && plan.computes == 0)
+            {
                 return Err(conflict("this farm has no compute VM yet; add one instead of deploying it again"));
             }
             let expected = farm.plan.as_ref().map_or(1, |plan| plan.nodes.len());

@@ -187,6 +187,7 @@ impl Backend for Fake {
         from: Phase,
         exposure: Option<Exposure>,
         components: Vec<String>,
+        release: String,
         remote: Vec<u8>,
         key: String,
         sink: EventSink,
@@ -194,7 +195,8 @@ impl Backend for Fake {
         Box::pin(async move {
             assert!(key.starts_with("-----BEGIN OPENSSH PRIVATE KEY-----"));
             self.spanning.lock().unwrap().push(remote);
-            self.deploy(id, from, exposure, components, sink).await
+            self.deploy(id, from, exposure, components, release, sink)
+                .await
         })
     }
     fn impair(
@@ -246,6 +248,7 @@ impl Backend for Fake {
         from: Phase,
         _: Option<Exposure>,
         _: Vec<String>,
+        _: String,
         sink: EventSink,
     ) -> BoxFuture<'_, Result<()>> {
         Box::pin(async move {
@@ -554,6 +557,8 @@ fn request(id: &str) -> CreateRequest {
         components: vec![],
         computes: 0,
         compute: None,
+        layout: None,
+        release: None,
         external_host: "localhost".into(),
         owner: Some("test".into()),
         expires_at: None,
@@ -5315,6 +5320,106 @@ async fn done_slowly(manager: &FarmManager, job: &Job) -> Job {
         .await
         .unwrap()
         .unwrap()
+}
+
+#[tokio::test]
+async fn a_release_farm_can_start_as_its_control_vm_alone_and_gain_a_compute_later() {
+    let dir = tempfile::tempdir().unwrap();
+    let (manager, backend) = release_templates(dir.path()).await;
+    // The control installs clean, as it would on a host without a control template.
+    manager
+        .update(|state| {
+            state
+                .snapshots
+                .retain(|_, s| s.template != Some(TemplateRole::Control));
+            Ok(())
+        })
+        .unwrap();
+    let control_only = || ReleaseCreateRequest {
+        layout: Some(FarmLayout::Control),
+        ..by_release("ctl", 0)
+    };
+    let plan = manager.preview_release(&control_only()).await.unwrap();
+    assert_eq!(plan.control.node, "control");
+    assert!(plan.computes.is_empty());
+    assert!(plan.control.reason.contains("installed clean"));
+
+    // An all-in-one farm of the same release stays one VM.
+    let all_in_one = manager
+        .preview_release(&ReleaseCreateRequest {
+            layout: Some(FarmLayout::AllInOne),
+            ..by_release("aio", 0)
+        })
+        .await
+        .unwrap();
+    assert_eq!(all_in_one.control.node, "all-in-one");
+    assert!(all_in_one.computes.is_empty());
+
+    let job = manager.create_release(control_only()).await.unwrap();
+    let actions: Vec<_> = job.assembly.iter().map(|s| s.action.as_str()).collect();
+    assert_eq!(actions, ["create", "deploy"]);
+    let finished = done_slowly(&manager, &job).await;
+    assert_eq!(
+        finished.status,
+        JobStatus::Succeeded,
+        "{:?}",
+        finished.error
+    );
+    let farm = manager.get("ctl").unwrap();
+    assert_eq!(farm.status, FarmStatus::Ready);
+    let plan = farm.plan.unwrap();
+    assert_eq!(plan.computes, 0);
+    assert_eq!(plan.nodes.len(), 1);
+    assert_eq!(plan.nodes[0].role, crate::farm::Role::Control);
+
+    // The release's compute template still joins the farm it was kept for.
+    let job = manager
+        .add_compute(
+            "ctl",
+            AddComputeRequest {
+                host_id: None,
+                from_snapshot: Some("cpt".into()),
+            },
+        )
+        .unwrap();
+    let finished = done_slowly(&manager, &job).await;
+    assert_eq!(
+        finished.status,
+        JobStatus::Succeeded,
+        "{:?}",
+        finished.error
+    );
+    let farm = manager.get("ctl").unwrap();
+    assert_eq!(farm.nodes.len(), 2);
+    assert_eq!(farm.plan.unwrap().computes, 1);
+    assert_eq!(farm.status, FarmStatus::Ready);
+    assert_eq!(
+        backend.reconfigured.lock().unwrap().as_slice(),
+        &[("ctl".into(), 1)]
+    );
+}
+
+#[tokio::test]
+async fn a_release_layout_is_checked_against_its_computes_and_templates() {
+    let dir = tempfile::tempdir().unwrap();
+    let (manager, _) = release_templates(dir.path()).await;
+    let request = |layout, computes, control_template: Option<&str>| ReleaseCreateRequest {
+        layout: Some(layout),
+        control_template: control_template.map(Into::into),
+        ..by_release("r", computes)
+    };
+    // A layout never rides along with computes.
+    let error = manager
+        .preview_release(&request(FarmLayout::Control, 1, None))
+        .await
+        .unwrap_err();
+    assert!(error.is::<BadRequest>(), "{error:#}");
+    // An all-in-one farm starts from scratch, so a control template is not its own.
+    let error = manager
+        .preview_release(&request(FarmLayout::AllInOne, 0, Some("ctl")))
+        .await
+        .unwrap_err();
+    assert!(error.is::<BadRequest>(), "{error:#}");
 }
 
 #[tokio::test]

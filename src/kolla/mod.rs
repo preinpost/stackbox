@@ -1,4 +1,5 @@
 mod config;
+pub mod releases;
 
 use std::fmt;
 
@@ -113,7 +114,15 @@ impl fmt::Display for Phase {
 }
 
 pub async fn deploy(farm_id: &str, from: Phase, components: &[String]) -> Result<()> {
-    deploy_with(farm_id, from, None, components, Arc::new(|_| Ok(()))).await
+    deploy_with(
+        farm_id,
+        from,
+        None,
+        components,
+        OPENSTACK_RELEASE,
+        Arc::new(|_| Ok(())),
+    )
+    .await
 }
 
 /// `components` is the farm plan's resolved service list.
@@ -122,9 +131,20 @@ pub async fn deploy_with(
     from: Phase,
     exposure: Option<Exposure>,
     components: &[String],
+    release: &str,
     sink: EventSink,
 ) -> Result<()> {
-    deploy_on(farm_id, from, exposure, components, &[], None, sink).await
+    deploy_on(
+        farm_id,
+        from,
+        exposure,
+        components,
+        release,
+        &[],
+        None,
+        sink,
+    )
+    .await
 }
 
 /// Deploy a farm that spans hosts from its control VM's host. The compute VMs numbered in
@@ -135,6 +155,7 @@ pub async fn deploy_spanning(
     from: Phase,
     exposure: Option<Exposure>,
     components: &[String],
+    release: &str,
     remote: &[u8],
     ssh_private_key: &str,
     sink: EventSink,
@@ -144,6 +165,7 @@ pub async fn deploy_spanning(
         from,
         exposure,
         components,
+        release,
         remote,
         Some(ssh_private_key),
         sink,
@@ -156,6 +178,7 @@ async fn deploy_on(
     from: Phase,
     exposure: Option<Exposure>,
     components: &[String],
+    release: &str,
     remote: &[u8],
     ssh_private_key: Option<&str>,
     sink: EventSink,
@@ -210,6 +233,7 @@ async fn deploy_on(
             &topology,
             exposure.as_ref(),
             components,
+            release,
             &sink,
         )
         .await
@@ -634,6 +658,7 @@ async fn deploy_phases(
     topology: &Topology,
     exposure: Option<&Exposure>,
     components: &[String],
+    release: &str,
     sink: &EventSink,
 ) -> Result<()> {
     for phase in Phase::ALL.into_iter().filter(|p| *p >= from) {
@@ -642,9 +667,12 @@ async fn deploy_phases(
         let log = format!("{LOG_DIR}/{phase}.log");
         match phase {
             Phase::Prepare => prepare(deployer, computes, components, sink).await,
-            Phase::Install => stream(deployer, &install_script(), &log, sink).await,
+            Phase::Install => stream(deployer, &install_script(release), &log, sink).await,
             Phase::Configure => {
-                configure(deployer, computes, topology, exposure, components, sink).await
+                configure(
+                    deployer, computes, topology, exposure, components, release, sink,
+                )
+                .await
             }
             Phase::Bootstrap => {
                 step(
@@ -784,7 +812,7 @@ systemctl daemon-reload"#,
     Ok(())
 }
 
-fn install_script() -> String {
+fn install_script(release: &str) -> String {
     format!(
         r#"set -euo pipefail
 export PATH={VENV}/bin:$PATH
@@ -793,12 +821,15 @@ if ! command -v gcc >/dev/null; then
   step "빌드 도구 설치 (gcc, python3-devel, libffi, openssl)"
   dnf install -y -q gcc python3-devel libffi-devel openssl-devel
 fi
-if [ ! -x {VENV}/bin/kolla-ansible ]; then
+# One venv per release: the branches differ, so a different release reinstalls it.
+if [ ! -x {VENV}/bin/kolla-ansible ] || [ "$(cat {VENV}/.farm-release 2>/dev/null || true)" != "{release}" ]; then
   step "kolla-ansible 가상환경 생성 ({VENV})"
+  rm -rf {VENV}
   python3 -m venv {VENV}
   {VENV}/bin/pip install -q -U pip
-  step "kolla-ansible 설치 (stable/{OPENSTACK_RELEASE})"
-  {VENV}/bin/pip install -q "git+https://opendev.org/openstack/kolla-ansible@stable/{OPENSTACK_RELEASE}"
+  step "kolla-ansible 설치 (stable/{release})"
+  {VENV}/bin/pip install -q "git+https://opendev.org/openstack/kolla-ansible@stable/{release}"
+  printf '%s' "{release}" > {VENV}/.farm-release
 fi
 step "kolla-ansible install-deps (컨테이너 런타임 의존성)"
 kolla-ansible install-deps
@@ -828,6 +859,16 @@ if patched not in text:
     if text.count(marker) != 1:
         raise RuntimeError("unexpected Kolla OVS other_config task; review the userspace TSO patch")
     path.write_text(text.replace(marker, patched, 1))
+# A control VM alone has no compute host yet; the farm's globals say so, and the first
+# compute joins later without redeploying the control plane.
+path = Path("{VENV}/share/kolla-ansible/ansible/roles/nova-cell/tasks/precheck.yml")
+text = path.read_text()
+marker = "  when:\n    - groups[nova_cell_compute_group] | length < 1\n    - not nova_compute_ironic.enabled | bool\n"
+patched = marker + "    - not (farm_no_computes | default(false))\n"
+if patched not in text:
+    if text.count(marker) != 1:
+        raise RuntimeError("unexpected Kolla nova-cell precheck; review the no-compute patch")
+    path.write_text(text.replace(marker, patched, 1))
 # The same kernel has no openvswitch module; farms run OVS with the userspace (netdev) datapath.
 path = Path("{VENV}/share/kolla-ansible/ansible/roles/openvswitch/tasks/config-host.yml")
 text = path.read_text()
@@ -849,12 +890,14 @@ if patched not in text:
         raise RuntimeError("unexpected Kolla nova-cell when clause; review the br_netfilter patch")
     path.write_text(text.replace(marker, patched, 1))
 PY
-if [ ! -x {OSC_VENV}/bin/openstack ]; then
+if [ ! -x {OSC_VENV}/bin/openstack ] || [ "$(cat {OSC_VENV}/.farm-release 2>/dev/null || true)" != "{release}" ]; then
   step "OpenStack CLI 가상환경 생성 ({OSC_VENV})"
+  rm -rf {OSC_VENV}
   python3 -m venv {OSC_VENV}
   {OSC_VENV}/bin/pip install -q -U pip
   step "python-openstackclient 설치"
-  {OSC_VENV}/bin/pip install -q -c https://releases.openstack.org/constraints/upper/{OPENSTACK_RELEASE} python-openstackclient
+  {OSC_VENV}/bin/pip install -q -c https://releases.openstack.org/constraints/upper/{release} python-openstackclient
+  printf '%s' "{release}" > {OSC_VENV}/.farm-release
 fi
 step "kolla-ansible 버전 확인"
 kolla-ansible --version"#
@@ -867,6 +910,7 @@ async fn configure(
     topology: &Topology,
     exposure: Option<&Exposure>,
     components: &[String],
+    release: &str,
     sink: &EventSink,
 ) -> Result<()> {
     step(sink, "passwords.yml 생성 (kolla-genpwd)")?;
@@ -880,8 +924,11 @@ async fn configure(
     )
     .await?;
 
-    let multinode = !computes.is_empty();
-    if multinode {
+    // A control VM alone is already a multi-node farm: its computes join later, so its
+    // network layout must be written the multi-node way from the first deploy. Deciding by
+    // the computes present here would leave physnet1 here and physnet2 in post-deploy.
+    let multinode = topology.multinode();
+    if !computes.is_empty() {
         step(sink, "control VM에서 compute VM으로 SSH 키 배포")?;
         distribute_ssh_key(deployer, computes).await?;
     }
@@ -932,6 +979,7 @@ async fn configure(
         kvm,
         components,
         multinode,
+        release,
     );
     // Public catalog URLs retain host-side offset ports; service listeners and
     // all internal API/database calls use the VM's eth0 address and native ports.
@@ -948,6 +996,11 @@ async fn configure(
                 ));
             }
         }
+    }
+    // Kolla's nova-cell precheck refuses an inventory without a compute host; a control
+    // VM alone is exactly that until its first compute joins.
+    if multinode && computes.is_empty() {
+        globals.push_str("farm_no_computes: true\n");
     }
     fs.write(&format!("{CONFIG_DIR}/globals.yml"), globals)
         .await?;
@@ -1516,7 +1569,7 @@ mod tests {
         };
         let (from, to) = (exposure(15000), exposure(15010));
         let scripts = [
-            install_script(),
+            install_script(OPENSTACK_RELEASE),
             post_deploy_script(&components, false),
             post_deploy_script(&components, true),
             verify_script(&components, 0),
@@ -1552,7 +1605,7 @@ mod tests {
         // A heredoc opener inside another heredoc's body only fails inside the guest,
         // where nothing points at the generated script.
         for script in [
-            install_script(),
+            install_script(OPENSTACK_RELEASE),
             post_deploy_script(&components, false),
             post_deploy_script(&components, true),
             verify_script(&components, 0),
@@ -1563,6 +1616,20 @@ mod tests {
             assert_heredocs_do_not_nest(&script);
         }
 
+        // A control VM alone deploys as a multi-node farm: its external network is physnet2
+        // on br-ex, and the computes that join later keep the same layout.
+        let control_only = Topology::from_nodes(&[farm::FarmNode {
+            name: "dev-control".into(),
+            role: Some(farm::Role::Control),
+            index: None,
+            status: "running".into(),
+            memory_mib: 6656,
+            ip: Some("10.254.0.10".into()),
+        }])
+        .unwrap();
+        assert!(control_only.multinode());
+        assert!(post_deploy_script(&components, control_only.multinode()).contains("physnet2"));
+
         let verify = verify_script(&components, 0);
         assert!(
             !verify.contains("ssh "),
@@ -1572,7 +1639,7 @@ mod tests {
         assert!(verify.contains("nova-compute is not up"));
         assert!(verify.contains("cirros-0.6.3-aarch64-disk.img"));
         for script in [
-            install_script(),
+            install_script(OPENSTACK_RELEASE),
             verify_script(&components, 0),
             verify_script(&components, 2),
             post_deploy_script(&components, false),

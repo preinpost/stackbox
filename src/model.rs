@@ -28,6 +28,23 @@ pub struct PlanRequest {
     /// Size of every compute VM; omitted for the default. Only for farms with compute VMs.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub compute: Option<ComputeSize>,
+    /// OpenStack release to install; omitted installs this coordinator's own release.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub release: Option<String>,
+    /// VMs of a farm without computes; omitted keeps the all-in-one default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub layout: Option<FarmLayout>,
+}
+
+/// How a farm without compute VMs lays its service out, so that "one VM" and "a control
+/// VM that gains computes later" are never the same choice.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum FarmLayout {
+    /// Every selected service in one VM; it cannot gain compute VMs.
+    AllInOne,
+    /// A control VM alone, ready for computes to be added one at a time.
+    Control,
 }
 
 /// A compute VM's size. Omitted fields keep the default compute VM's value.
@@ -68,6 +85,10 @@ impl ComputeSize {
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
 pub struct Plan {
     pub components: Vec<String>,
+    /// OpenStack release the VMs install. Absent on plans recorded before it was kept, which
+    /// read as [`crate::kolla::OPENSTACK_RELEASE`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release: Option<String>,
     /// Compute VMs beside the control VM; 0 for an all-in-one farm.
     #[serde(default)]
     pub computes: u8,
@@ -307,7 +328,10 @@ const NOVA_COMPUTE_MIB: u32 = 1024;
 /// Neutron's userspace firewall drops instance TCP (see the OVS patch in kolla).
 pub fn plan(request: &PlanRequest) -> Result<Plan> {
     let mut request = request.clone();
+    // An explicit layout owns the VM count: an all-in-one farm stays one VM even with Nova,
+    // and a control VM stays alone until computes are added.
     if request.computes == 0
+        && request.layout.is_none()
         && resolve_components(&request.components)?
             .iter()
             .any(|c| c.id == "nova")
@@ -320,22 +344,18 @@ pub fn plan(request: &PlanRequest) -> Result<Plan> {
 /// A multi-node farm's control VM alone, as a control template restores it: its farm's
 /// plan without the compute VMs, which are added one at a time afterwards. The compute size
 /// is kept for them.
-pub fn control_layout(components: &[String], compute: Option<ComputeSize>) -> Result<Plan> {
-    let mut plan = layout(&PlanRequest {
+pub fn control_layout(
+    components: &[String],
+    compute: Option<ComputeSize>,
+    release: Option<&str>,
+) -> Result<Plan> {
+    layout(&PlanRequest {
         components: components.to_vec(),
-        computes: 1,
+        computes: 0,
         compute,
-    })?;
-    plan.nodes.truncate(1);
-    plan.computes = 0;
-    plan.memory_mib = plan.nodes.iter().map(|n| u64::from(n.memory_mib)).sum();
-    plan.disk_mib = plan
-        .nodes
-        .iter()
-        .map(|n| u64::from(n.disk_mib) + 2 * u64::from(n.container_disk_mib.unwrap_or(0)))
-        .sum();
-    plan.warnings[0] = "The farm runs its control plane, network node and Kolla on one control VM; Nova instances need a compute VM added to it.".into();
-    Ok(plan)
+        release: release.map(str::to_owned),
+        layout: Some(FarmLayout::Control),
+    })
 }
 
 /// Lays out the VMs exactly as requested, so farms and snapshots made before [`plan`] moved
@@ -344,8 +364,23 @@ pub fn layout(request: &PlanRequest) -> Result<Plan> {
     if request.computes > MAX_COMPUTES {
         bail!("a farm has at most {MAX_COMPUTES} compute VMs");
     }
+    if request.layout.is_some() && request.computes > 0 {
+        bail!(
+            "a farm layout chooses the VMs when it has no compute VMs; leave layout out to run computes beside a control VM"
+        );
+    }
+    let control_only = request.layout == Some(FarmLayout::Control);
+    if request.layout == Some(FarmLayout::AllInOne)
+        && resolve_components(&request.components)?
+            .iter()
+            .any(|c| c.id == "nova")
+    {
+        bail!(
+            "Nova needs a compute VM, so an all-in-one farm cannot run it; create a control VM that gains computes instead"
+        );
+    }
     let mut requested = request.components.clone();
-    if request.computes > 0 && !requested.iter().any(|c| c == "nova") {
+    if (request.computes > 0 || control_only) && !requested.iter().any(|c| c == "nova") {
         // Compute VMs exist to run instances; Nova brings Neutron and Placement along.
         requested.push("nova".into());
     }
@@ -353,17 +388,13 @@ pub fn layout(request: &PlanRequest) -> Result<Plan> {
     let computes = request.computes;
     // The default size is stored as none, so a farm planned before sizes keeps its plan.
     let compute = match request.compute {
-        Some(_) if computes == 0 => bail!("compute size needs compute VMs"),
+        Some(_) if computes == 0 && !control_only => bail!("compute size needs compute VMs"),
         Some(size) => Some(size.validate()?).filter(|size| *size != ComputeSize::default()),
         None => None,
     };
     let size = compute.unwrap_or_default();
     let footprint = components.iter().map(|c| c.footprint_mib).sum::<u32>();
-    let nodes = if computes == 0 {
-        let mut node = ALL_IN_ONE;
-        node.memory_mib += footprint;
-        vec![node]
-    } else {
+    let nodes = if computes > 0 {
         let mut control = CONTROL;
         control.memory_mib += footprint - NOVA_COMPUTE_MIB;
         std::iter::once(control)
@@ -375,6 +406,15 @@ pub fn layout(request: &PlanRequest) -> Result<Plan> {
                 ..COMPUTE
             }))
             .collect()
+    } else if control_only {
+        // Nova's control plane stays on the control VM; nova-compute waits for a compute.
+        let mut control = CONTROL;
+        control.memory_mib += footprint - NOVA_COMPUTE_MIB;
+        vec![control]
+    } else {
+        let mut node = ALL_IN_ONE;
+        node.memory_mib += footprint;
+        vec![node]
     };
     let mut warnings = catalog().constraints;
     if computes > 0 {
@@ -382,9 +422,12 @@ pub fn layout(request: &PlanRequest) -> Result<Plan> {
             "The farm runs its control plane, network node and Kolla on one control VM and Nova instances on {} compute VM(s), joined by the host's link switch.",
             computes
         );
+    } else if control_only {
+        warnings[0] = "The farm runs its control plane, network node and Kolla on one control VM; Nova instances need a compute VM added to it.".into();
     }
     Ok(Plan {
         components: components.iter().map(|c| c.id.to_owned()).collect(),
+        release: request.release.clone(),
         computes,
         compute,
         memory_mib: nodes.iter().map(|n| u64::from(n.memory_mib)).sum(),
@@ -413,6 +456,12 @@ pub struct CreateRequest {
     /// Size of every compute VM (see [`PlanRequest::compute`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compute: Option<ComputeSize>,
+    /// OpenStack release to install (see [`PlanRequest::release`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release: Option<String>,
+    /// VMs of a farm without computes (see [`PlanRequest::layout`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layout: Option<FarmLayout>,
     #[serde(default = "default_host")]
     pub external_host: String,
     #[serde(default)]
@@ -471,9 +520,13 @@ impl CreateRequest {
             if !self.placement.is_empty() {
                 bail!("a farm restored from a snapshot runs on one host; omit placement");
             }
-            if !self.components.is_empty() || self.computes > 0 || self.compute.is_some() {
+            if !self.components.is_empty()
+                || self.computes > 0
+                || self.compute.is_some()
+                || self.layout.is_some()
+            {
                 bail!(
-                    "a farm restored from a snapshot runs the snapshot's services and layout; omit components, computes and compute"
+                    "a farm restored from a snapshot runs the snapshot's services and layout; omit components, computes, compute and layout"
                 );
             }
         }
@@ -493,6 +546,8 @@ impl CreateRequest {
             components: self.components.clone(),
             computes: self.computes,
             compute: self.compute,
+            release: self.release.clone(),
+            layout: self.layout,
         })
     }
 }
@@ -836,10 +891,20 @@ pub struct ReleaseCreateRequest {
     /// Compute VMs, up to 3.
     #[serde(default)]
     pub computes: u8,
+    /// VMs of a farm without computes: `all-in-one` for one VM that runs everything, or
+    /// `control` for a control VM alone, ready for computes from compute templates to join
+    /// it later. Omitted keeps the previous behaviour (a control template starts its farm
+    /// with the control VM alone, a clean install runs all-in-one).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub layout: Option<FarmLayout>,
     /// Host of each compute VM in order (`compute-1` first); a missing or empty entry is
     /// the control VM's host.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub compute_hosts: Vec<String>,
+    /// Size of the compute VMs this farm installs clean, and of the ones added to it later.
+    /// A compute that boots from a compute template keeps the template's size.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compute: Option<ComputeSize>,
     /// Control template to use instead of the newest matching one.
     #[serde(default)]
     pub control_template: Option<String>,
@@ -1213,6 +1278,8 @@ mod tests {
             components: vec![],
             computes: 0,
             compute: None,
+            layout: None,
+            release: None,
             external_host: default_host(),
             owner: None,
             expires_at: None,
@@ -1226,6 +1293,8 @@ mod tests {
                     components: vec![unsupported.into()],
                     computes: 0,
                     compute: None,
+                    layout: None,
+                    release: None,
                 })
                 .is_err()
             );
@@ -1243,6 +1312,8 @@ mod tests {
             components: components.iter().map(|c| (*c).into()).collect(),
             computes: 0,
             compute: None,
+            layout: None,
+            release: None,
         };
         let both = plan(&request(&["placement", "horizon", "keystone"])).unwrap();
         assert_eq!(
@@ -1292,6 +1363,8 @@ mod tests {
             components: components.iter().map(|c| (*c).into()).collect(),
             computes,
             compute: None,
+            layout: None,
+            release: None,
         };
         // Compute VMs bring Nova, and Nova its dependencies.
         let two = plan(&request(&[], 2)).unwrap();
@@ -1328,6 +1401,8 @@ mod tests {
             components: vec![],
             computes: 1,
             compute: None,
+            layout: None,
+            release: None,
             external_host: default_host(),
             owner: None,
             expires_at: None,
@@ -1348,9 +1423,11 @@ mod tests {
             components: vec!["horizon".into()],
             computes: 2,
             compute: Some(size),
+            layout: None,
+            release: None,
         })
         .unwrap();
-        let alone = control_layout(&farm.components, farm.compute).unwrap();
+        let alone = control_layout(&farm.components, farm.compute, None).unwrap();
         assert!(alone.multinode() && !layout(&PlanRequest::default()).unwrap().multinode());
         assert_eq!(alone.computes, 0);
         assert_eq!(alone.compute, Some(size));
@@ -1366,6 +1443,8 @@ mod tests {
             components: alone.components.clone(),
             computes: 1,
             compute: alone.compute,
+            layout: None,
+            release: None,
         })
         .unwrap();
         assert_eq!(
@@ -1390,12 +1469,89 @@ mod tests {
     }
 
     #[test]
+    fn a_control_layout_is_not_an_all_in_one_farm() {
+        let alone = |form: FarmLayout| {
+            crate::model::layout(&PlanRequest {
+                components: vec![],
+                computes: 0,
+                compute: None,
+                layout: Some(form),
+                release: None,
+            })
+            .unwrap()
+        };
+        // All-in-one is one VM that runs everything and cannot gain computes.
+        let one = alone(FarmLayout::AllInOne);
+        assert_eq!(one.nodes.len(), 1);
+        assert_eq!(one.nodes[0].role, Role::AllInOne);
+        assert!(!one.multinode());
+        // A control VM alone is a multi-node farm that waits for its computes.
+        let control = alone(FarmLayout::Control);
+        assert_eq!(control.nodes.len(), 1);
+        assert_eq!(control.nodes[0].role, Role::Control);
+        assert_eq!(control.computes, 0);
+        assert!(control.multinode());
+        // Nova's control plane is installed now; nova-compute arrives with a compute VM.
+        assert!(control.components.contains(&"nova".to_string()));
+        assert!(control.memory_mib > one.memory_mib);
+        let with_compute = layout(&PlanRequest {
+            components: vec![],
+            computes: 1,
+            compute: None,
+            layout: None,
+            release: None,
+        })
+        .unwrap();
+        assert_eq!(
+            control.memory_mib,
+            u64::from(with_compute.nodes[0].memory_mib)
+        );
+        // Its first compute joins without changing the control VM.
+        let next = layout(&PlanRequest {
+            components: control.components.clone(),
+            computes: 1,
+            compute: None,
+            layout: None,
+            release: None,
+        })
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(&next.nodes[..1]).unwrap(),
+            serde_json::to_value(&control.nodes).unwrap()
+        );
+        // A layout never rides along with computes.
+        assert!(
+            layout(&PlanRequest {
+                components: vec![],
+                computes: 1,
+                compute: None,
+                layout: Some(FarmLayout::Control),
+                release: None,
+            })
+            .is_err()
+        );
+        // Nova cannot run on one all-in-one VM.
+        assert!(
+            layout(&PlanRequest {
+                components: vec!["nova".into()],
+                computes: 0,
+                compute: None,
+                layout: Some(FarmLayout::AllInOne),
+                release: None,
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
     fn compute_vms_take_the_requested_size() {
         let sized = |computes, compute| {
             plan(&PlanRequest {
                 components: vec![],
                 computes,
                 compute,
+                layout: None,
+                release: None,
             })
         };
         let size = ComputeSize {
@@ -1443,6 +1599,8 @@ mod tests {
                 components: vec![],
                 computes: 0,
                 compute: Some(size),
+                layout: None,
+                release: None,
             })
             .is_err()
         );

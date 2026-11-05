@@ -437,6 +437,8 @@ async fn main() -> Result<()> {
                 components: components.clone(),
                 computes: *computes,
                 compute: compute.size(),
+                release: None,
+                layout: None,
             })?;
             if *json {
                 return print_json(&p);
@@ -571,9 +573,11 @@ async fn main() -> Result<()> {
                 components,
                 computes,
                 compute_hosts,
+                compute: compute.size(),
                 control_template,
                 compute_template,
                 bucket,
+                layout: None,
                 external_host,
                 owner,
                 expires_at,
@@ -612,6 +616,8 @@ async fn main() -> Result<()> {
                 components,
                 computes,
                 compute: compute.size(),
+                release: None,
+                layout: None,
                 external_host,
                 owner,
                 expires_at,

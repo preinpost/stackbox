@@ -268,12 +268,18 @@ impl Agent {
         // The coordinator applies plan()'s policy; restored snapshots keep an older layout,
         // and a control template's farm starts with its control VM alone.
         let canonical = if requested.multinode() && requested.computes == 0 {
-            crate::model::control_layout(&requested.components, requested.compute)?
+            crate::model::control_layout(
+                &requested.components,
+                requested.compute,
+                requested.release.as_deref(),
+            )?
         } else {
             layout(&PlanRequest {
                 components: requested.components.clone(),
                 computes: requested.computes,
                 compute: requested.compute,
+                layout: None,
+                release: requested.release.clone(),
             })?
         };
         ensure!(
@@ -296,6 +302,8 @@ impl Agent {
             computes: requested.computes,
             // A control template's farm keeps its computes' size for later expansions.
             compute: requested.compute.filter(|_| requested.computes > 0),
+            layout: None,
+            release: None,
             external_host: exposure.host.clone(),
             owner: None,
             expires_at: None,
@@ -637,12 +645,19 @@ impl Agent {
                 })
                 .filter_map(|spec| spec.index)
                 .collect();
+            // A plan recorded before releases were kept installs this build's release.
+            let release = entry
+                .plan
+                .release
+                .clone()
+                .unwrap_or_else(|| crate::kolla::OPENSTACK_RELEASE.to_owned());
             self.backend
                 .deploy_spanning(
                     id.into(),
                     *from,
                     Some(entry.exposure.clone()),
                     entry.plan.components.clone(),
+                    release,
                     remote,
                     share
                         .ssh_private_key
@@ -659,6 +674,11 @@ impl Agent {
                 *from,
                 Some(entry.exposure),
                 entry.plan.components.clone(),
+                entry
+                    .plan
+                    .release
+                    .clone()
+                    .unwrap_or_else(|| crate::kolla::OPENSTACK_RELEASE.to_owned()),
                 progress(emit),
             )
             .await?;
@@ -942,6 +962,8 @@ impl Agent {
                     components: requested.components.clone(),
                     computes: requested.computes,
                     compute: requested.compute,
+                    layout: None,
+                    release: requested.release.clone(),
                 })?;
                 ensure!(
                     serde_json::to_value(requested)? == serde_json::to_value(&canonical)?,
@@ -1747,6 +1769,7 @@ mod tests {
             from: crate::kolla::Phase,
             _: Option<Exposure>,
             _: Vec<String>,
+            _: String,
             sink: crate::kolla::EventSink,
         ) -> futures::future::BoxFuture<'_, Result<()>> {
             use crate::kolla::DeployEvent;

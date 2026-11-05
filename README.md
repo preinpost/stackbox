@@ -80,6 +80,13 @@ farm settle demo                         # VM 재시작 뒤 배포 없이 서비
 생성 요청의 `computes`(CLI `--computes`, 포털의 **VM 구성**)가 1~3이면 control VM 1대와 compute VM N대를 만듭니다.
 Nova와 그 의존성(Placement, Neutron)이 자동으로 들어갑니다.
 
+`computes`가 0이면 `layout`이 VM 구성을 정합니다. `all-in-one`은 VM 1대에 모든 서비스를 설치하고 compute를
+추가할 수 없으며, `control`은 control VM만 만들어 OpenStack을 설치한 뒤 compute를 하나씩 붙입니다.
+포털의 **VM 구성**이 `All-in-one · VM 1대`와 `Control만 · compute는 나중에`를 이 값으로 갈라 보내고,
+control로 만든 farm에는 상세 화면의 compute 추가(compute 템플릿 포함)로 compute가 들어옵니다.
+`layout`을 생략하면 이전과 같이 `computes`가 0일 때 all-in-one입니다(릴리스 경로에서 control 템플릿이 있으면
+그 control VM 하나로 시작).
+
 - **VM**: `<farm>-control`(4 vCPU, 서비스에 따라 6.5 GiB 안팎)은 API·DB·MQ·네트워크 노드(L3·DHCP)와 Kolla를,
   `<farm>-compute-<n>`(기본 2 vCPU, 3 GiB)은 nova-compute·libvirt·OVS agent를 맡습니다. 공개 포트는 control VM만 엽니다.
 - **compute 사양**: 생성 요청의 `compute`(`{"cpus":4,"memory_mib":8192,"disk_mib":65536}`, 빠진 값은 기본값),
@@ -223,17 +230,22 @@ farm add-compute c13 --from-snapshot src-compute-tpl        # compute-2, 3: comp
   복사본에서만 원본 compute의 등록을 지웁니다: `openstack compute service delete`(nova-compute),
   남은 placement resource provider, `farm-compute-*`의 Neutron agent, `nova-manage cell_v2 delete_host`.
   Kolla inventory의 `[compute]`와 control VM의 compute SSH host key도 비우므로 첫 확장은 compute-1입니다.
-- compute가 없는 farm은 다시 배포(`deploy`)할 수 없고 farm 전체로도 얼릴 수 없습니다(control 템플릿만).
+- 스냅샷(control 템플릿)에서 복원한 farm은 다시 배포(`deploy`)할 수 없고 farm 전체로도 얼릴 수 없습니다(control 템플릿만).
+  클린 설치로 만든 control-only farm(`layout: control`)은 첫 배포가 필요하고, 배포한 뒤 compute를 붙입니다.
   compute 템플릿은 여전히 farm 복원에 쓸 수 없습니다.
 - `farm create --host-id <원격 호스트> --snapshot <control 템플릿>`도 됩니다. compute 템플릿과 같이
   그 호스트에 복사본을 먼저 둡니다.
 
 #### 릴리스로 만들기
 
-호스트를 등록한 뒤 OpenStack 릴리스만 고르면, coordinator가 저장된 템플릿으로 조립 계획을 세우고
-그대로 실행합니다. control VM은 그 릴리스의 control 템플릿 중 가장 최근 것(로컬 스냅샷을 먼저, 없으면
-버킷의 아카이브)에서, 각 compute는 같은 릴리스·서비스의 compute 템플릿에서 만들고, 쓸 수 있는 템플릿이
-없으면 클린 설치합니다.
+포털의 **Farm 만들기**는 폼 하나입니다. 구성(서비스·VM 구성·compute 사양)을 직접 고르고 같은 폼에서
+OpenStack 릴리스를 고르면, coordinator가 그 릴리스의 저장된 템플릿으로 조립 계획을 세우고 그대로
+실행합니다. 릴리스 목록은 `kolla-ansible` 공개 저장소의 `stable/<release>`·`unmaintained/<release>`
+브랜치에서 읽어 오고(10분 캐시), 저장소에 닿지 않는 호스트는 `FARM_OPENSTACK_RELEASES=2026.2,2025.2`처럼
+목록을 고정할 수 있습니다. 템플릿이 없는 릴리스는 그 브랜치로 클린 설치하므로, 이 binary가 배포하는
+릴리스가 아니어도 farm을 만들 수 있습니다. control VM은 그 릴리스의 control 템플릿 중 가장 최근 것(로컬 스냅샷을 먼저, 없으면 버킷의
+아카이브)에서, 각 compute는 같은 릴리스·서비스의 compute 템플릿에서 만들고, 쓸 수 있는 템플릿이 없으면
+클린 설치합니다.
 
 ```bash
 farm releases                                                        # 릴리스별 control/compute 템플릿 수(로컬·버킷)

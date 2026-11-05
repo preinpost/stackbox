@@ -24,13 +24,14 @@ pub trait Backend: Send + Sync + 'static {
         plan: Plan,
         exposure: Exposure,
     ) -> BoxFuture<'_, Result<Vec<FarmNode>>>;
-    /// `components` is the farm plan's resolved service list.
+    /// `components` and `release` are the farm plan's resolved services and OpenStack release.
     fn deploy(
         &self,
         id: String,
         from: Phase,
         exposure: Option<Exposure>,
         components: Vec<String>,
+        release: String,
         sink: EventSink,
     ) -> BoxFuture<'_, Result<()>>;
     fn delete(&self, id: String) -> BoxFuture<'_, Result<()>>;
@@ -113,6 +114,7 @@ pub trait Backend: Send + Sync + 'static {
         _from: Phase,
         _exposure: Option<Exposure>,
         _components: Vec<String>,
+        _release: String,
         _remote: Vec<u8>,
         _ssh_private_key: String,
         _sink: EventSink,
@@ -373,6 +375,7 @@ impl Backend for MicrosandboxBackend {
         from: Phase,
         exposure: Option<Exposure>,
         components: Vec<String>,
+        release: String,
         remote: Vec<u8>,
         ssh_private_key: String,
         sink: EventSink,
@@ -383,6 +386,7 @@ impl Backend for MicrosandboxBackend {
                 from,
                 exposure,
                 &components,
+                &release,
                 &remote,
                 &ssh_private_key,
                 sink,
@@ -396,9 +400,12 @@ impl Backend for MicrosandboxBackend {
         from: Phase,
         exposure: Option<Exposure>,
         components: Vec<String>,
+        release: String,
         sink: EventSink,
     ) -> BoxFuture<'_, Result<()>> {
-        Box::pin(async move { kolla::deploy_with(&id, from, exposure, &components, sink).await })
+        Box::pin(async move {
+            kolla::deploy_with(&id, from, exposure, &components, &release, sink).await
+        })
     }
     fn delete(&self, id: String) -> BoxFuture<'_, Result<()>> {
         Box::pin(async move {

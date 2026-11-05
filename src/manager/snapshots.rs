@@ -269,12 +269,15 @@ fn parse_labels(labels: &BTreeMap<String, String>) -> Result<Imported> {
     // Snapshots are of all-in-one VMs, Nova included from before plan() split it off.
     // A compute template's farm had at least one compute; a control template's farm starts
     // with none. Archives do not record the computes' size.
+    let release = labels.get(label::RELEASE).cloned();
     let plan = match template {
-        Some(TemplateRole::Control) => control_layout(&components, None)?,
+        Some(TemplateRole::Control) => control_layout(&components, None, release.as_deref())?,
         _ => layout(&PlanRequest {
             components,
             computes: u8::from(template.is_some()),
             compute: None,
+            layout: None,
+            release,
         })?,
     };
     Ok(Imported {
@@ -438,10 +441,12 @@ impl FarmManager {
                 source_farm: Some(farm_id.into()),
                 plan: match template {
                     // What a farm restored from it runs until it gains computes.
-                    Some(TemplateRole::Control) => {
-                        control_layout(&plan.components, plan.compute)
-                            .map_err(|e| conflict(e.to_string()))?
-                    }
+                    Some(TemplateRole::Control) => control_layout(
+                        &plan.components,
+                        plan.compute,
+                        plan.release.as_deref(),
+                    )
+                    .map_err(|e| conflict(e.to_string()))?,
                     _ => plan.clone(),
                 },
                 deployed: farm.status == FarmStatus::Ready,
@@ -452,7 +457,12 @@ impl FarmManager {
                 template,
                 node: request.node.clone(),
                 legacy_compute_template: false,
-                release: Some(crate::kolla::OPENSTACK_RELEASE.into()),
+                // The farm's own release; a farm recorded before releases were kept reads as
+                // the one this build installs.
+                release: plan
+                    .release
+                    .clone()
+                    .or_else(|| Some(crate::kolla::OPENSTACK_RELEASE.into())),
                 size_bytes: None,
                 archive: None,
                 transfer: None,

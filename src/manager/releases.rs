@@ -123,14 +123,14 @@ impl FarmManager {
         bucket: Option<String>,
     ) -> Result<ReleaseCatalog> {
         let arch = arch.unwrap_or_else(current_arch);
+        let published = crate::kolla::releases::published().await;
         let mut counts: BTreeMap<String, ReleaseTemplates> = BTreeMap::new();
         let mut add = |release: &str, role: Option<TemplateRole>, local: bool| {
             let counted = counts
                 .entry(release.into())
                 .or_insert_with(|| ReleaseTemplates {
                     release: release.into(),
-                    installable: release == crate::kolla::OPENSTACK_RELEASE
-                        && arch == current_arch(),
+                    installable: arch == current_arch() && published.contains(&release.into()),
                     ..Default::default()
                 });
             match (role, local) {
@@ -159,9 +159,10 @@ impl FarmManager {
                 add(release, Some(role), false);
             }
         }
-        // The release this coordinator installs clean is always offered on its architecture.
-        if arch == current_arch() {
-            add(crate::kolla::OPENSTACK_RELEASE, None, true);
+        // Every release this coordinator can install is offered, even before its first
+        // template exists: it is installed clean from its own kolla-ansible branch.
+        for release in &published {
+            add(release, None, true);
         }
         Ok(ReleaseCatalog {
             arch,
@@ -337,6 +338,8 @@ impl FarmManager {
                     components: request.components.clone(),
                     computes: 1,
                     compute: None,
+                    layout: None,
+                    release: None,
                 })
                 .map_err(|e| bad_request(e.to_string()))?
                 .components,
@@ -353,15 +356,45 @@ impl FarmManager {
             .into_iter()
             .map(|error| format!("bucket not searched: {error}"))
             .collect();
-        self.read(|state| self.resolve(state, request, requested.as_deref(), &buckets, &mut notes))?
-            .map(|mut plan| {
-                plan.notes.extend(notes);
-                plan
-            })
+        let installable = crate::kolla::releases::published()
+            .await
+            .iter()
+            .any(|known| known == request.release.trim());
+        self.read(|state| {
+            self.resolve(
+                state,
+                request,
+                requested.as_deref(),
+                &buckets,
+                installable,
+                &mut notes,
+            )
+        })?
+        .map(|mut plan| {
+            plan.notes.extend(notes);
+            plan
+        })
     }
 
     fn check_release_request(&self, request: &ReleaseCreateRequest) -> Result<()> {
         let bad = |e: anyhow::Error| bad_request(e.to_string());
+        if request.layout.is_some() && request.computes > 0 {
+            return Err(bad_request(
+                "a layout chooses the VMs when there are no compute VMs; omit it to run computes beside a control VM",
+            ));
+        }
+        if request.layout == Some(FarmLayout::AllInOne) {
+            if request.control_template.is_some() {
+                return Err(bad_request(
+                    "an all-in-one farm is installed clean; omit control_template or choose the control layout",
+                ));
+            }
+            if request.compute_template.is_some() {
+                return Err(bad_request(
+                    "an all-in-one farm has no compute VMs; omit compute_template",
+                ));
+            }
+        }
         validate_id(&request.id).map_err(bad)?;
         if request.id.ends_with(crate::farm::LEGACY_ALL_IN_ONE_SUFFIX) {
             return Err(bad_request(format!(
@@ -425,10 +458,21 @@ impl FarmManager {
         request: &ReleaseCreateRequest,
         requested: Option<&[String]>,
         buckets: &[(String, ArchiveMetadata)],
+        // Whether this coordinator can install the release clean when no template fits.
+        installable: bool,
         notes: &mut Vec<String>,
     ) -> Result<ReleasePlan> {
         let release = request.release.trim();
         let id = &request.id;
+        // An all-in-one farm runs every service in one VM, so no template of a control or
+        // compute VM applies to it.
+        if request.layout == Some(FarmLayout::AllInOne) {
+            return self.clean_plan(
+                request,
+                "an all-in-one farm runs every selected service in one VM".into(),
+                notes,
+            );
+        }
         if state
             .farms
             .get(id)
@@ -442,7 +486,6 @@ impl FarmManager {
                 return Err(NotFound(format!("host '{host}'")).into());
             }
         }
-        let installable = release == crate::kolla::OPENSTACK_RELEASE;
         let mut taken = BTreeSet::new();
         let bucket_pick = |bucket: &String, metadata: &ArchiveMetadata, taken: &mut _| {
             Ok::<_, anyhow::Error>(Pick::Bucket {
@@ -509,8 +552,8 @@ impl FarmManager {
             }
             Err(why) => {
                 return Err(conflict(format!(
-                    "{why}; this coordinator installs only OpenStack {} clean",
-                    crate::kolla::OPENSTACK_RELEASE
+                    "{why}; this coordinator cannot install OpenStack {} clean, and only published kolla-ansible releases can be",
+                    request.release.trim()
                 )));
             }
         };
@@ -559,7 +602,7 @@ impl FarmManager {
                 (None, None) => (None, String::new()),
             },
         };
-        let computes = (1..=request.computes)
+        let computes: Vec<PlannedNode> = (1..=request.computes)
             .map(|index| {
                 let node = format!("compute-{index}");
                 let host = request.host_of(index).unwrap_or_else(|| control_host.clone());
@@ -583,6 +626,12 @@ impl FarmManager {
                 }
             })
             .collect();
+        if request.compute.is_some() && computes.iter().any(|node| node.source != NodeSource::Clean)
+        {
+            notes.push(
+                "a compute VM booted from a template keeps the template's size; the requested size applies to clean installs and the computes added later".into(),
+            );
+        }
         Ok(ReleasePlan {
             farm_id: id.clone(),
             release: release.into(),
@@ -605,6 +654,7 @@ impl FarmManager {
         let farm = CreateRequest {
             components: request.components.clone(),
             computes: request.computes,
+            compute: request.compute,
             ..self.clean_request(request)
         };
         let planned = farm.validate().map_err(|e| bad_request(e.to_string()))?;
@@ -628,7 +678,7 @@ impl FarmManager {
                 control_host.clone(),
                 format!(
                     "{why}; the farm is installed clean with OpenStack {}",
-                    crate::kolla::OPENSTACK_RELEASE
+                    request.release.trim()
                 ),
             ),
             computes: (1..=planned.computes)
@@ -660,7 +710,9 @@ impl FarmManager {
             host_id: host,
             components: Vec::new(),
             computes: 0,
-            compute: None,
+            compute: request.compute,
+            layout: request.layout,
+            release: Some(request.release.trim().into()),
             external_host: request.external_host.clone(),
             owner: request.owner.clone(),
             expires_at: request.expires_at,
@@ -798,11 +850,15 @@ impl FarmManager {
                     .context("restore has no snapshot")?;
                 let host = step.host_id.clone().context("restore has no host")?;
                 self.ensure_template_on_host(&snapshot, &host).await?;
-                // Its computes are added one at a time afterwards.
+                // Its computes are added one at a time afterwards, and the template keeps
+                // the services, layout and compute size it was frozen with.
+                let mut restore = self.clean_request(request);
+                restore.compute = None;
+                restore.layout = None;
                 self.create(CreateRequest {
                     snapshot_id: Some(snapshot),
                     placement: Default::default(),
-                    ..self.clean_request(request)
+                    ..restore
                 })?
             }
             "create" => self.create(CreateRequest {

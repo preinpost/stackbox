@@ -100,12 +100,13 @@ pub fn globals(
     kvm: bool,
     components: &[String],
     multinode: bool,
+    release: &str,
 ) -> String {
     let tag_suffix = if arch == "aarch64" { "-aarch64" } else { "" };
     format!(
         r#"---
 kolla_base_distro: "rocky"
-openstack_release: "{OPENSTACK_RELEASE}"
+openstack_release: "{release}"
 openstack_tag_suffix: "{tag_suffix}"
 kolla_internal_vip_address: "{vip}"
 network_interface: "{interface}"
@@ -328,7 +329,15 @@ mod tests {
         assert!(alone.multinode() && alone.computes.is_empty());
 
         let selected = ["keystone", "glance", "placement", "neutron", "nova"].map(String::from);
-        let globals = globals("10.254.0.10", "farm0", "aarch64", false, &selected, true);
+        let globals = globals(
+            "10.254.0.10",
+            "farm0",
+            "aarch64",
+            false,
+            &selected,
+            true,
+            OPENSTACK_RELEASE,
+        );
         assert!(globals.contains("tunnel_interface: \"farm0\"\n"));
         assert!(globals.contains("neutron_tenant_network_types: \"vlan\"\n"));
         assert!(globals.contains("enable_neutron_provider_networks: true\n"));
@@ -365,7 +374,15 @@ mod tests {
     }
 
     fn globals_single(selected: &[String]) -> String {
-        globals("10.254.0.2", "farm0", "aarch64", false, selected, false)
+        globals(
+            "10.254.0.2",
+            "farm0",
+            "aarch64",
+            false,
+            selected,
+            false,
+            OPENSTACK_RELEASE,
+        )
     }
 
     fn topology_computes() -> Vec<Compute> {
@@ -379,7 +396,15 @@ mod tests {
     #[test]
     fn direct_services_use_eth0_and_bounded_shared_resources() {
         let base = ["keystone", "glance"].map(String::from);
-        let globals = globals("192.168.127.2", "eth0", "aarch64", false, &base, false);
+        let globals = globals(
+            "192.168.127.2",
+            "eth0",
+            "aarch64",
+            false,
+            &base,
+            false,
+            OPENSTACK_RELEASE,
+        );
         assert!(globals.contains("openstack_tag_suffix: \"-aarch64\""));
         assert!(globals.contains("network_interface: \"eth0\""));
         assert!(globals.contains("database_address: \"192.168.127.2\""));
@@ -394,7 +419,15 @@ mod tests {
     #[test]
     fn fixed_identity_binds_every_service_to_the_dummy_interface() {
         let base = ["keystone", "glance"].map(String::from);
-        let globals = globals("10.254.0.2", "farm0", "aarch64", false, &base, false);
+        let globals = globals(
+            "10.254.0.2",
+            "farm0",
+            "aarch64",
+            false,
+            &base,
+            false,
+            OPENSTACK_RELEASE,
+        );
         for key in [
             "network_interface",
             "api_interface",
@@ -409,7 +442,15 @@ mod tests {
     #[test]
     fn enables_only_selected_optional_services_and_keeps_netdev_workarounds() {
         let selected = ["keystone", "glance", "horizon", "neutron"].map(String::from);
-        let globals = globals("192.168.127.2", "eth0", "x86_64", false, &selected, false);
+        let globals = globals(
+            "192.168.127.2",
+            "eth0",
+            "x86_64",
+            false,
+            &selected,
+            false,
+            OPENSTACK_RELEASE,
+        );
         for id in ["horizon", "neutron"] {
             assert!(globals.contains(&format!("enable_{id}: true\n")));
         }
@@ -425,13 +466,29 @@ mod tests {
     #[test]
     fn nova_uses_kvm_when_available_and_falls_back_to_qemu_tcg() {
         let selected = ["keystone", "glance", "nova"].map(String::from);
-        let kvm_globals = globals("192.168.127.2", "eth0", "aarch64", true, &selected, false);
+        let kvm_globals = globals(
+            "192.168.127.2",
+            "eth0",
+            "aarch64",
+            true,
+            &selected,
+            false,
+            OPENSTACK_RELEASE,
+        );
         assert!(kvm_globals.contains("enable_nova: true\n"));
         assert!(kvm_globals.contains("nova_compute_virt_type: \"kvm\"\n"));
         assert!(kvm_globals.contains("nova_libvirt_cpu_mode: \"host-passthrough\"\n"));
         assert!(kvm_globals.contains("nova_console: \"none\"\n"));
 
-        let tcg_globals = globals("192.168.127.2", "eth0", "aarch64", false, &selected, false);
+        let tcg_globals = globals(
+            "192.168.127.2",
+            "eth0",
+            "aarch64",
+            false,
+            &selected,
+            false,
+            OPENSTACK_RELEASE,
+        );
         assert!(tcg_globals.contains("enable_nova: true\n"));
         assert!(tcg_globals.contains("nova_compute_virt_type: \"qemu\"\n"));
         assert!(tcg_globals.contains("nova_libvirt_cpu_mode: \"none\"\n"));
