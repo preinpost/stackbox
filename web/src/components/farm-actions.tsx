@@ -1,22 +1,30 @@
 import { Dialog } from "@base-ui/react/dialog";
 import { Input } from "@base-ui/react/input";
 import { Checkbox } from "@base-ui/react/checkbox";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  keepPreviousData,
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
 import { Link, useNavigate } from "@tanstack/react-router";
 import {
   ArrowRight,
   Boxes,
   Check,
+  CopyPlus,
   Cpu,
+  Download,
   HardDrive,
   LoaderCircle,
   Play,
   Plus,
   RefreshCw,
   ShieldCheck,
+  Sparkles,
   Trash2,
 } from "lucide-react";
-import { useState, type ReactNode } from "react";
+import { useEffect, useState } from "react";
 import {
   api,
   catalogQuery,
@@ -24,11 +32,14 @@ import {
   hostQuery,
   hostsQuery,
   keys,
+  releasesQuery,
   snapshotsQuery,
   type ComputeSize,
   type Farm,
+  type FarmLayout,
   type Job,
   type Phase,
+  type ReleaseCreateRequest,
   type RemoteHost,
   type Snapshot,
 } from "../api/client";
@@ -57,7 +68,7 @@ import {
   Modal,
   SelectInput,
 } from "./ui";
-import { ReleaseFarmForm } from "./release-create";
+import { releaseLabel, sourceLabel } from "./release-create";
 
 async function refresh(client: ReturnType<typeof useQueryClient>) {
   await Promise.all([
@@ -87,7 +98,9 @@ function publicHostName(hostId: string, hosts: RemoteHost[] = []) {
   return chosen && /^[a-z0-9.-]+$/i.test(chosen.address) ? chosen.address : "";
 }
 /** Compute VM sizes the create form offers. Few disk sizes keep few golden images per host. */
-export const computeSizes: { name: string; size: ComputeSize }[] = [
+export const farmId = /^[a-z0-9]([a-z0-9-]{0,46}[a-z0-9])?$/;
+
+const computeSizes: { name: string; size: ComputeSize }[] = [
   { name: "기본", size: { cpus: 2, memory_mib: 3072, disk_mib: 32768 } },
   { name: "중간", size: { cpus: 4, memory_mib: 6144, disk_mib: 65536 } },
   { name: "큰", size: { cpus: 4, memory_mib: 10240, disk_mib: 65536 } },
@@ -107,36 +120,6 @@ export function CreateFarmDialog({
 }) {
   const [open, setOpen] = useState(false);
   const [pending, setPending] = useState(false);
-  const [mode, setMode] = useState<"release" | "custom">("release");
-  const header = (
-    <div className="field">
-      <span>만드는 방법</span>
-      <div
-        className="segmented-control"
-        role="radiogroup"
-        aria-label="만드는 방법"
-      >
-        {(
-          [
-            { value: "release", label: "릴리스로 만들기" },
-            { value: "custom", label: "구성 직접 고르기" },
-          ] as const
-        ).map((item) => (
-          <button
-            key={item.value}
-            type="button"
-            role="radio"
-            aria-checked={mode === item.value}
-            className={`flex-1 ${mode === item.value ? "selected" : ""}`}
-            disabled={pending}
-            onClick={() => setMode(item.value)}
-          >
-            {item.label}
-          </button>
-        ))}
-      </div>
-    </div>
-  );
   return (
     <Dialog.Root
       open={open}
@@ -153,22 +136,13 @@ export function CreateFarmDialog({
         <Plus size={16} />
         {label}
       </Dialog.Trigger>
-      {open &&
-        (mode === "release" ? (
-          <ReleaseFarmForm
-            close={() => setOpen(false)}
-            onPending={setPending}
-            initialHost={hostId}
-            header={header}
-          />
-        ) : (
-          <CreateFarmForm
-            close={() => setOpen(false)}
-            onPending={setPending}
-            initialHost={hostId}
-            header={header}
-          />
-        ))}
+      {open && (
+        <CreateFarmForm
+          close={() => setOpen(false)}
+          onPending={setPending}
+          initialHost={hostId}
+        />
+      )}
     </Dialog.Root>
   );
 }
@@ -176,37 +150,60 @@ export function CreateFarmForm({
   close,
   onPending,
   initialHost,
-  header,
 }: {
   close: () => void;
   onPending: (pending: boolean) => void;
   initialHost?: string;
-  header?: ReactNode;
 }) {
   const client = useQueryClient();
   const navigate = useNavigate();
   const catalog = useQuery(catalogQuery());
   const coordinator = useQuery(hostQuery());
   const hosts = useQuery(hostsQuery());
+  const releases = useQuery(releasesQuery());
   const buildId = coordinator.data?.build_id;
   const [name, setName] = useState("");
   const [owner, setOwner] = useState("");
+  // One release for every VM: templates of it boot a VM when they match the services.
+  const offered = releases.data?.releases ?? [];
+  const [pickedRelease, setPickedRelease] = useState<string>();
+  const release =
+    pickedRelease ??
+    [...offered].sort(
+      (a, b) =>
+        b.local_control +
+        b.bucket_control -
+        (a.local_control + a.bucket_control),
+    )[0]?.release;
   const [selected, setSelected] = useState<string[]>([]);
-  // Compute VMs beside a control VM; 0 is one all-in-one VM. Compute VMs bring Nova.
-  const [computes, setComputes] = useState(0);
+  // One VM that runs everything, a control VM that computes join later, or computes now.
+  // Compute VMs bring Nova, and so does a control VM alone.
+  const [setup, setSetup] = useState("all-in-one");
+  const layout: FarmLayout | undefined =
+    setup === "all-in-one"
+      ? "all-in-one"
+      : setup === "control"
+        ? "control"
+        : undefined;
+  const computes = layout ? 0 : Number(setup);
   const [sizeIndex, setSizeIndex] = useState(0);
   // Compute VMs placed on another host than the control VM's (`compute-2` → host id).
   const [placed, setPlaced] = useState<Record<string, string>>({});
   const compute = computes > 0 ? computeSizes[sizeIndex].size : undefined;
   const requested =
-    computes > 0 && !selected.includes("nova")
+    (computes > 0 || layout === "control") && !selected.includes("nova")
       ? [...selected, "nova"]
       : selected;
   // Until the user picks one, default to the given host, else the first ready one.
   const [picked, setPicked] = useState(initialHost);
+  // Templates live on the local host, so it is the default for the control VM.
   const hostId =
     picked ??
-    (hosts.data?.find((h) => hostReady(h, buildId)) ?? hosts.data?.[0])?.id;
+    (
+      hosts.data?.find((h) => h.kind === "local" && hostReady(h, buildId)) ??
+      hosts.data?.find((h) => hostReady(h, buildId)) ??
+      hosts.data?.[0]
+    )?.id;
   const [editedHostName, setHostName] = useState<string>();
   const hostName = editedHostName ?? publicHostName(hostId ?? "", hosts.data);
   const target = hosts.data?.find((h) => h.id === hostId);
@@ -228,19 +225,59 @@ export function CreateFarmForm({
     requested,
   );
   const plan = useQuery({
-    queryKey: ["plan", components, computes, compute],
-    queryFn: ({ signal }) => api.plan(components, computes, signal, compute),
+    queryKey: ["plan", components, computes, compute, layout],
+    queryFn: ({ signal }) =>
+      api.plan(components, computes, signal, compute, layout),
     enabled: catalog.isSuccess,
     staleTime: Infinity,
   });
+  // One release for the whole farm. The preview follows the ID once typing settles, so a
+  // pause sends one request and the last plan stays on screen while the next one loads.
+  const [planId, setPlanId] = useState("");
+  useEffect(() => {
+    const timer = setTimeout(() => setPlanId(name), 300);
+    return () => clearTimeout(timer);
+  }, [name]);
+  const releaseFields: Omit<ReleaseCreateRequest, "id"> | undefined =
+    release && hostId
+      ? {
+          release,
+          host_id: hostId,
+          components,
+          computes,
+          compute_hosts: Array.from(
+            { length: computes },
+            (_, i) => placement[`compute-${i + 1}`] ?? "",
+          ),
+          ...(compute ? { compute } : {}),
+          ...(layout ? { layout } : {}),
+          external_host: hostName,
+        }
+      : undefined;
+  const previewBody: ReleaseCreateRequest | undefined =
+    releaseFields && farmId.test(planId)
+      ? { ...releaseFields, id: planId }
+      : undefined;
+  const releasePlan = useQuery({
+    queryKey: ["release-plan", previewBody],
+    queryFn: ({ signal }) => api.releasePlan(previewBody!, signal),
+    enabled: !!previewBody,
+    retry: false,
+    staleTime: 10_000,
+    placeholderData: keepPreviousData,
+  });
   const mutation = useMutation({
-    mutationFn: api.create,
+    mutationFn: api.createRelease,
     onMutate: () => onPending(true),
     onSettled: () => onPending(false),
-    onSuccess: async (job) => {
-      await refresh(client);
+    onSuccess: async () => {
+      await Promise.all([
+        refresh(client),
+        client.invalidateQueries({ queryKey: keys.snapshots }),
+      ]);
       close();
-      await navigate({ to: "/farms/$farmId", params: { farmId: job.farm_id } });
+      // The farm appears once its first step starts; the job shows every step.
+      await navigate({ to: "/jobs" });
     },
   });
   const duplicate = farms.data?.some((f) => f.id === name);
@@ -269,21 +306,16 @@ export function CreateFarmForm({
       <form
         onSubmit={(event) => {
           event.preventDefault();
-          if (!plan.data || duplicate || overBudget || hostUnavailable) return;
+          if (!releaseFields || !plan.data || duplicate || overBudget) return;
+          if (hostUnavailable) return;
           mutation.mutate({
+            ...releaseFields,
             id: name,
-            components,
-            computes,
-            ...(compute ? { compute } : {}),
-            ...(Object.keys(placement).length ? { placement } : {}),
-            external_host: hostName,
-            host_id: hostId,
             ...(owner.trim() ? { owner: owner.trim() } : {}),
           });
         }}
       >
         <div className="modal-body space-y-6">
-          {header}
           <div>
             <span className="field-label">실행 호스트</span>
             {noHosts ? (
@@ -330,7 +362,6 @@ export function CreateFarmForm({
                 Farm ID <span className="text-emerald-600">*</span>
               </span>
               <Input
-                autoFocus
                 value={name}
                 onValueChange={setName}
                 className="input font-mono"
@@ -341,12 +372,11 @@ export function CreateFarmForm({
                 pattern={"[a-z0-9]([a-z0-9\\-]{0,46}[a-z0-9])?"}
                 disabled={mutation.isPending}
               />
-              <small>소문자, 숫자, 하이픈 · 최대 48자</small>
-              {duplicate && (
-                <small className="text-red-600">
-                  이미 사용 중인 Farm ID입니다.
-                </small>
-              )}
+              <small className={duplicate ? "text-red-600" : undefined}>
+                {duplicate
+                  ? "이미 사용 중인 Farm ID입니다."
+                  : "소문자, 숫자, 하이픈 · 최대 48자"}
+              </small>
             </label>
             <label className="field">
               <span>
@@ -366,22 +396,25 @@ export function CreateFarmForm({
           <div>
             <span className="field-label">VM 구성</span>
             <SelectInput
-              value={String(computes)}
-              onChange={(value) => setComputes(Number(value))}
+              value={setup}
+              onChange={setSetup}
               disabled={mutation.isPending}
               label="VM 구성"
               items={[
-                { value: "0", label: "VM 1대 · all-in-one" },
+                { value: "all-in-one", label: "All-in-one · VM 1대" },
+                { value: "control", label: "Control만 · compute는 나중에" },
                 ...[1, 2, 3].map((n) => ({
                   value: String(n),
-                  label: `Control 1 + Compute ${n} · VM ${n + 1}대`,
+                  label: `Control + Compute ${n}대`,
                 })),
               ]}
             />
             <p className="field-hint mt-2">
-              {computes > 0
-                ? "control VM이 API·DB·MQ·네트워크 노드와 Kolla를 맡고, compute VM에서 Nova 인스턴스가 실행됩니다. VM끼리는 호스트의 링크 스위치로 연결되며, 상세 화면에서 compute VM을 고립시켜 evacuate를 시험할 수 있습니다."
-                : "모든 서비스를 VM 한 대에 설치합니다. Nova를 고르면 compute VM이 1대 붙습니다."}
+              {layout === "all-in-one"
+                ? "모든 서비스를 VM 한 대에 설치합니다. 이 farm에는 compute VM을 추가할 수 없습니다."
+                : layout === "control"
+                  ? "control VM에 OpenStack을 설치하고 Nova는 compute가 붙을 때까지 기다립니다. compute 스냅샷은 farm 상세 화면에서 추가합니다."
+                  : "control VM이 API·DB·MQ·네트워크 노드와 Kolla를 맡고, compute VM에서 Nova 인스턴스가 실행됩니다. VM끼리는 호스트의 링크 스위치로 연결되며, 상세 화면에서 compute VM을 고립시켜 evacuate를 시험할 수 있습니다."}
             </p>
           </div>
           {computes > 0 && (
@@ -451,6 +484,37 @@ export function CreateFarmForm({
             </div>
           )}
           <div>
+            <span className="field-label">OpenStack 릴리스</span>
+            {releases.isPending ? (
+              <Loading compact label="릴리스를 불러오는 중" />
+            ) : releases.error ? (
+              <ErrorNotice
+                error={releases.error}
+                retry={() => void releases.refetch()}
+              />
+            ) : (
+              <>
+                <SelectInput
+                  value={release ?? ""}
+                  onChange={setPickedRelease}
+                  disabled={mutation.isPending}
+                  label="OpenStack 릴리스"
+                  items={offered.map((r) => ({
+                    value: r.release,
+                    label: releaseLabel(r),
+                  }))}
+                />
+                <p className="field-hint mt-2">
+                  고른 릴리스의 템플릿이 구성과 맞으면 그 템플릿으로 VM을
+                  만들고, 없으면 그 릴리스의 kolla-ansible 브랜치로 클린
+                  설치합니다.
+                  {!!releases.data?.unreachable?.length &&
+                    ` 조회하지 못한 버킷: ${releases.data.unreachable.join(", ")}`}
+                </p>
+              </>
+            )}
+          </div>
+          <div>
             <span className="field-label">OpenStack 서비스</span>
             <div className="component-options">
               {catalog.data?.components.map((c) => {
@@ -486,9 +550,13 @@ export function CreateFarmForm({
                             ? [...current, c.id]
                             : current.filter((id) => id !== c.id),
                         );
-                        // Nova instances run on a compute VM; the plan adds one anyway.
-                        if (checked && c.id === "nova" && computes === 0) {
-                          setComputes(1);
+                        // Nova instances need a compute VM, and all-in-one has none.
+                        if (
+                          checked &&
+                          c.id === "nova" &&
+                          setup === "all-in-one"
+                        ) {
+                          setSetup("1");
                         }
                       }}
                       className="checkbox"
@@ -539,9 +607,48 @@ export function CreateFarmForm({
               OpenStack public URL에 사용할 VM 호스트의 DNS 이름 또는 IPv4 주소
             </small>
           </label>
-          {plan.data && (
-            <div className="plan-summary">
-              <span className="eyebrow">ENVIRONMENT PLAN</span>
+          <section className="plan-summary" aria-label="생성 계획">
+            <span className="eyebrow">ENVIRONMENT PLAN</span>
+            {!previewBody ? (
+              <p>Farm ID를 입력하면 VM마다 어떻게 만들지 미리 보여 줍니다.</p>
+            ) : releasePlan.isPending ? (
+              <Loading compact label="계획을 확인하는 중" />
+            ) : releasePlan.error ? (
+              <p className="text-red-600">{releasePlan.error.message}</p>
+            ) : releasePlan.data ? (
+              <>
+                <ul className="space-y-2">
+                  {[releasePlan.data.control, ...releasePlan.data.computes].map(
+                    (node) => (
+                      <li key={node.node}>
+                        {node.source === "clean" ? (
+                          <Sparkles size={15} />
+                        ) : node.source === "bucket" ? (
+                          <Download size={15} />
+                        ) : (
+                          <CopyPlus size={15} />
+                        )}{" "}
+                        <strong>{node.node}</strong>
+                        <span className="muted"> · {node.host_id}</span>:{" "}
+                        <span>{sourceLabel(node)}</span>
+                        <br />
+                        <small className="muted">{node.reason}</small>
+                      </li>
+                    ),
+                  )}
+                </ul>
+                <p>
+                  OpenStack {releasePlan.data.release} ·{" "}
+                  {releasePlan.data.components.join(", ")}
+                </p>
+                {releasePlan.data.notes?.map((note) => (
+                  <p key={note} className="muted">
+                    {note}
+                  </p>
+                ))}
+              </>
+            ) : null}
+            {plan.data && (
               <div>
                 <span>
                   <Boxes size={17} />
@@ -556,16 +663,10 @@ export function CreateFarmForm({
                   <strong>{memory(plan.data.disk_mib)}</strong> 디스크
                 </span>
               </div>
-              <p>
-                {plan.data.computes
-                  ? `Control ${memory(plan.data.nodes[0].memory_mib)} + Compute ${memory(plan.data.nodes[1].memory_mib)} × ${plan.data.computes}. `
-                  : "선택한 모든 서비스를 이 VM에 설치합니다. "}
-                생성 후 상세 화면에서 배포를 시작하세요.
-              </p>
-            </div>
-          )}
-          {(catalog.isPending || plan.isPending) && (
-            <Loading label="리소스 계획 계산 중" />
+            )}
+          </section>
+          {(catalog.isPending || plan.isPending) && !plan.data && (
+            <Loading compact label="리소스 계획 계산 중" />
           )}
           {(catalog.error || plan.error || targetError) && (
             <ErrorNotice
@@ -595,7 +696,9 @@ export function CreateFarmForm({
             <ShieldCheck size={14} />
             {computes > 0
               ? `Farm 전용 VM ${computes + 1}대와 내부망`
-              : "Farm마다 독립된 VM 한 대"}
+              : layout === "control"
+                ? "Control VM 1대, compute는 나중에"
+                : "Farm마다 독립된 VM 한 대"}
           </span>
           <div className="flex gap-2">
             <Dialog.Close render={<Button disabled={mutation.isPending} />}>
@@ -607,6 +710,8 @@ export function CreateFarmForm({
               disabled={
                 mutation.isPending ||
                 !plan.data ||
+                !releasePlan.data ||
+                releasePlan.isFetching ||
                 !capacity ||
                 Boolean(targetError) ||
                 duplicate ||

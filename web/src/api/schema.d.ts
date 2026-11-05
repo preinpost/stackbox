@@ -873,6 +873,7 @@ export interface components {
        */
       host_id?: string | null;
       id: string;
+      layout?: null | components["schemas"]["FarmLayout"];
       owner?: string | null;
       /**
        * @description Compute VMs that run on another host than `host_id`, by VM (`compute-2` → host id).
@@ -881,6 +882,8 @@ export interface components {
       placement?: {
         [key: string]: string;
       };
+      /** @description OpenStack release to install (see [`PlanRequest::release`]). */
+      release?: string | null;
       /**
        * @description Start from this snapshot instead of an empty VM. Its services replace `components`.
        *     A control template starts a multi-node farm with its control VM alone, ready for
@@ -954,6 +957,12 @@ export interface components {
       /** Format: int32 */
       port_base: number;
     };
+    /**
+     * @description How a farm without compute VMs lays its service out, so that "one VM" and "a control
+     *     VM that gains computes later" are never the same choice.
+     * @enum {string}
+     */
+    FarmLayout: "all-in-one" | "control";
     FarmNode: {
       /**
        * Format: int32
@@ -1280,6 +1289,11 @@ export interface components {
       /** Format: int64 */
       memory_mib: number;
       nodes: components["schemas"]["NodeSpec"][];
+      /**
+       * @description OpenStack release the VMs install. Absent on plans recorded before it was kept, which
+       *     read as [`crate::kolla::OPENSTACK_RELEASE`].
+       */
+      release?: string | null;
       warnings: string[];
     };
     PlanRequest: {
@@ -1294,6 +1308,13 @@ export interface components {
        * @default 0
        */
       computes: number;
+      /** @default null */
+      layout: null | components["schemas"]["FarmLayout"];
+      /**
+       * @description OpenStack release to install; omitted installs this coordinator's own release.
+       * @default null
+       */
+      release: string | null;
     };
     /** @description How one VM of a release farm will be made, and why. */
     PlannedNode: {
@@ -1398,6 +1419,7 @@ export interface components {
       bucket?: string | null;
       /** @description Services the farm runs; empty takes the control template's. */
       components?: string[];
+      compute?: null | components["schemas"]["ComputeSize"];
       /**
        * @description Host of each compute VM in order (`compute-1` first); a missing or empty entry is
        *     the control VM's host.
@@ -1418,6 +1440,7 @@ export interface components {
       /** @description Registered host of the control VM. Required; optional only for the error message. */
       host_id?: string | null;
       id: string;
+      layout?: null | components["schemas"]["FarmLayout"];
       owner?: string | null;
       /** @description OpenStack release, such as `2026.2`. */
       release: string;

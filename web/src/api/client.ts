@@ -9,6 +9,7 @@ export type RelaySettings = Schema["RelaySettings"];
 export type Catalog = Schema["Catalog"];
 export type Plan = Schema["Plan"];
 export type ComputeSize = Schema["ComputeSize"];
+export type FarmLayout = Schema["FarmLayout"];
 export type Phase = Schema["Phase"];
 export type Job = Schema["Job"];
 export type LogEntry = Schema["LogEntry"];
@@ -290,10 +291,11 @@ export const api = {
     computes = 0,
     signal?: AbortSignal,
     compute?: ComputeSize,
+    layout?: FarmLayout,
   ) =>
     request<Plan>("/plans", {
       method: "POST",
-      body: JSON.stringify({ components, computes, compute }),
+      body: JSON.stringify({ components, computes, compute, layout }),
       signal,
     }),
   /** No delay and no loss heals the VM. */

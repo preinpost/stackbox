@@ -28,6 +28,39 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+const releaseCatalog = {
+  arch: "aarch64",
+  releases: [
+    {
+      release: "2026.2",
+      local_control: 0,
+      local_compute: 0,
+      bucket_control: 0,
+      bucket_compute: 0,
+      installable: true,
+    },
+  ],
+  unreachable: [],
+};
+const releasePreview = (body: {
+  id: string;
+  host_id?: string;
+  components?: string[];
+}) => ({
+  farm_id: body.id,
+  release: "2026.2",
+  arch: "aarch64",
+  components: body.components ?? [],
+  control: {
+    node: "control",
+    host_id: body.host_id ?? "local",
+    source: "clean",
+    reason: "installed clean",
+  },
+  computes: [],
+  notes: [],
+});
+
 test("defaults to a ready host and sends its ID and public hostname", async () => {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
@@ -66,7 +99,7 @@ test("defaults to a ready host and sends its ID and public hostname", async () =
             capacity: { memory_budget_mib: 8000, memory_reserved_mib: 0 },
           },
         ]);
-      if (options?.method === "POST") {
+      if (options?.method === "POST" && !path.includes("/releases/plan")) {
         submitted = JSON.parse(String(options.body));
         return Response.json({
           id: "job",
@@ -74,6 +107,9 @@ test("defaults to a ready host and sends its ID and public hostname", async () =
           status: "queued",
         });
       }
+      if (path.endsWith("/releases")) return Response.json(releaseCatalog);
+      if (path.endsWith("/releases/plan"))
+        return Response.json(releasePreview(JSON.parse(String(options?.body))));
       return Response.json([]);
     }),
   );
@@ -94,7 +130,7 @@ test("defaults to a ready host and sends its ID and public hostname", async () =
       await screen.findByRole("option", { name: "local · 로컬 · 준비 필요" })
     ).getAttribute("aria-disabled"),
   ).toBe("true");
-  await user.keyboard("{Escape}");
+  await user.click(screen.getByRole("combobox", { name: "실행 호스트" }));
   await waitFor(() =>
     expect(
       (screen.getByRole("button", { name: "Farm 만들기" }) as HTMLButtonElement)
@@ -170,10 +206,13 @@ test("opens on the host it was launched from and refuses hosts that are not read
           memory_reserved_mib: 0,
         });
       if (path.endsWith("/hosts")) return Response.json(hosts);
-      if (options?.method === "POST") {
+      if (options?.method === "POST" && !path.includes("/releases/plan")) {
         submitted = JSON.parse(String(options.body));
         return Response.json({ id: "job", farm_id: "on-target" });
       }
+      if (path.endsWith("/releases")) return Response.json(releaseCatalog);
+      if (path.endsWith("/releases/plan"))
+        return Response.json(releasePreview(JSON.parse(String(options?.body))));
       return Response.json([]);
     }),
   );
@@ -209,7 +248,7 @@ test("opens on the host it was launched from and refuses hosts that are not read
       })
     ).getAttribute("aria-disabled"),
   ).toBe("true");
-  await user.keyboard("{Escape}");
+  await user.click(screen.getByRole("combobox", { name: "실행 호스트" }));
   await user.type(screen.getByPlaceholderText("dev-openstack"), "on-target");
   const submit = screen.getByRole("button", { name: "Farm 만들기" });
   await waitFor(() =>
@@ -286,10 +325,13 @@ test("adds optional services with their dependencies and keeps unavailable ones 
             capacity: { memory_budget_mib: 16000, memory_reserved_mib: 0 },
           },
         ]);
-      if (options?.method === "POST") {
+      if (options?.method === "POST" && !path.includes("/releases/plan")) {
         submitted = JSON.parse(String(options.body));
         return Response.json({ id: "job", farm_id: "dash" });
       }
+      if (path.endsWith("/releases")) return Response.json(releaseCatalog);
+      if (path.endsWith("/releases/plan"))
+        return Response.json(releasePreview(JSON.parse(String(options?.body))));
       return Response.json([]);
     }),
   );
@@ -330,17 +372,99 @@ test("adds optional services with their dependencies and keeps unavailable ones 
   client.clear();
 });
 
+test("creates a control VM alone so computes can join it later", async () => {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+  });
+  const planned: { components: string[]; computes: number; layout?: string }[] =
+    [];
+  let submitted: { computes?: number; layout?: string; components?: string[] } =
+    {};
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (path: string, options?: RequestInit) => {
+      if (path.endsWith("/catalog"))
+        return Response.json({
+          constraints: [],
+          components: [
+            { id: "keystone", required: true, depends_on: [] },
+            { id: "glance", required: true, depends_on: ["keystone"] },
+            { id: "nova", depends_on: ["keystone"] },
+          ],
+        });
+      if (path.endsWith("/plans")) {
+        planned.push(JSON.parse(String(options?.body)));
+        return Response.json(singleVmPlan());
+      }
+      if (path.endsWith("/host")) return Response.json({ build_id: "b" });
+      if (path.endsWith("/hosts"))
+        return Response.json([
+          {
+            id: "local",
+            kind: "local",
+            address: "localhost",
+            status: "ready",
+            capacity: { memory_budget_mib: 16000, memory_reserved_mib: 0 },
+          },
+        ]);
+      if (options?.method === "POST" && !path.includes("/releases/plan")) {
+        submitted = JSON.parse(String(options.body));
+        return Response.json({ id: "job", farm_id: "ctl" });
+      }
+      if (path.endsWith("/releases")) return Response.json(releaseCatalog);
+      if (path.endsWith("/releases/plan"))
+        return Response.json(releasePreview(JSON.parse(String(options?.body))));
+      return Response.json([]);
+    }),
+  );
+  render(
+    <QueryClientProvider client={client}>
+      <Dialog.Root open>
+        <CreateFarmForm close={vi.fn()} onPending={vi.fn()} />
+      </Dialog.Root>
+    </QueryClientProvider>,
+  );
+  const user = userEvent.setup();
+  await user.click(await screen.findByRole("combobox", { name: "VM 구성" }));
+  await user.click(
+    await screen.findByRole("option", { name: "Control만 · compute는 나중에" }),
+  );
+  // Nova's control plane is installed now, its compute later.
+  await waitFor(() =>
+    expect(planned.at(-1)).toMatchObject({ computes: 0, layout: "control" }),
+  );
+  expect(planned.at(-1)?.components).toContain("nova");
+
+  await user.type(screen.getByPlaceholderText("dev-openstack"), "ctl");
+  const submit = screen.getByRole("button", { name: "Farm 만들기" });
+  await waitFor(() =>
+    expect((submit as HTMLButtonElement).disabled).toBe(false),
+  );
+  await user.click(submit);
+  await waitFor(() =>
+    expect(submitted).toMatchObject({
+      id: "ctl",
+      computes: 0,
+      layout: "control",
+    }),
+  );
+  client.clear();
+});
+
 test("asks to register a host when there is none", async () => {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
   vi.stubGlobal(
     "fetch",
-    vi.fn(async (path: string) => {
+    vi.fn(async (path: string, options?: RequestInit) => {
       if (path.endsWith("/catalog"))
         return Response.json({ components: [{ id: "keystone" }] });
       if (path.endsWith("/plans")) return Response.json(singleVmPlan());
       if (path.endsWith("/host")) return Response.json({ build_id: "x" });
+      if (path.endsWith("/releases")) return Response.json(releaseCatalog);
+      if (path.endsWith("/releases/plan"))
+        return Response.json(releasePreview(JSON.parse(String(options?.body))));
       return Response.json([]);
     }),
   );
@@ -534,6 +658,9 @@ test("adds the next compute to the farm's primary host by default", async () => 
           status: "queued",
         });
       }
+      if (path.endsWith("/releases")) return Response.json(releaseCatalog);
+      if (path.endsWith("/releases/plan"))
+        return Response.json(releasePreview(JSON.parse(String(options?.body))));
       return Response.json([]);
     }),
   );
@@ -646,6 +773,9 @@ function stubFarmApi(post: string, snapshots: unknown[] = []) {
         posted.body = JSON.parse(String(options.body));
         return Response.json({ id: "job", farm_id: "grow", status: "queued" });
       }
+      if (path.endsWith("/releases")) return Response.json(releaseCatalog);
+      if (path.endsWith("/releases/plan"))
+        return Response.json(releasePreview(JSON.parse(String(options?.body))));
       return Response.json([]);
     }),
   );
@@ -911,6 +1041,9 @@ test("deletes only the records when asked, without the host", async () => {
         deletes.push(path);
         return Response.json({ id: "x" }, { status: 202 });
       }
+      if (path.endsWith("/releases")) return Response.json(releaseCatalog);
+      if (path.endsWith("/releases/plan"))
+        return Response.json(releasePreview(JSON.parse(String(options?.body))));
       return Response.json([]);
     }),
   );
@@ -987,10 +1120,13 @@ test("places compute VMs on other hosts when the coordinator has a relay", async
             capacity: { memory_budget_mib: 8000, memory_reserved_mib: 0 },
           })),
         );
-      if (options?.method === "POST") {
+      if (options?.method === "POST" && !path.includes("/releases/plan")) {
         submitted = JSON.parse(String(options.body));
         return Response.json({ id: "job", farm_id: "span", status: "queued" });
       }
+      if (path.endsWith("/releases")) return Response.json(releaseCatalog);
+      if (path.endsWith("/releases/plan"))
+        return Response.json(releasePreview(JSON.parse(String(options?.body))));
       return Response.json([]);
     }),
   );
@@ -1006,7 +1142,7 @@ test("places compute VMs on other hosts when the coordinator has a relay", async
   await user.click(screen.getByRole("combobox", { name: "VM 구성" }));
   await user.click(
     await screen.findByRole("option", {
-      name: "Control 1 + Compute 1 · VM 2대",
+      name: "Control + Compute 1대",
     }),
   );
   await user.click(
@@ -1034,7 +1170,7 @@ test("places compute VMs on other hosts when the coordinator has a relay", async
       id: "span",
       host_id: "edge",
       computes: 1,
-      placement: { "compute-1": "local" },
+      compute_hosts: ["local"],
     }),
   );
   client.clear();

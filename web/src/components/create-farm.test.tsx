@@ -6,7 +6,8 @@ import { afterEach, expect, test, vi } from "vitest";
 import type { Job, ReleasePlan } from "../api/client";
 import { activityStep } from "../pages/jobs-model";
 import { AssemblySteps } from "../pages/jobs-monitor";
-import { ReleaseFarmForm, releaseLabel } from "./release-create";
+import { CreateFarmForm } from "./farm-actions";
+import { releaseLabel } from "./release-create";
 
 const { navigate } = vi.hoisted(() => ({
   navigate: vi.fn().mockResolvedValue(undefined),
@@ -31,6 +32,29 @@ const hosts = [
   { id: "edge", kind: "ssh", address: "10.0.0.21", ...ready },
   { id: "local", kind: "local", address: "localhost", ...ready },
 ];
+const catalog = {
+  constraints: [],
+  components: [
+    { id: "keystone", required: true, depends_on: [] },
+    { id: "glance", required: true, depends_on: ["keystone"] },
+  ],
+};
+const resourcePlan = {
+  memory_mib: 3072,
+  disk_mib: 86016,
+  components: ["keystone", "glance"],
+  warnings: [],
+  nodes: [
+    {
+      role: "all-in-one",
+      cpus: 2,
+      disk_mib: 20480,
+      container_disk_mib: 32768,
+      memory_mib: 3072,
+    },
+  ],
+};
+
 const plan = (computes: string[]): ReleasePlan => ({
   farm_id: "r",
   release: "2026.2",
@@ -117,7 +141,13 @@ test("previews each VM's source for the chosen release and starts the plan", asy
           status: "queued",
         });
       }
-      if (path.endsWith("/host")) return Response.json({ build_id: "b" });
+      if (path.endsWith("/catalog")) return Response.json(catalog);
+      if (path.endsWith("/plans")) return Response.json(resourcePlan);
+      if (path.endsWith("/host"))
+        return Response.json({
+          build_id: "b",
+          relay_url: "https://relay.test",
+        });
       if (path.endsWith("/hosts")) return Response.json(hosts);
       return Response.json([]);
     }),
@@ -126,7 +156,7 @@ test("previews each VM's source for the chosen release and starts the plan", asy
   render(
     <QueryClientProvider client={client}>
       <Dialog.Root open>
-        <ReleaseFarmForm close={close} onPending={vi.fn()} />
+        <CreateFarmForm close={close} onPending={vi.fn()} />
       </Dialog.Root>
     </QueryClientProvider>,
   );
@@ -137,23 +167,26 @@ test("previews each VM's source for the chosen release and starts the plan", asy
   });
   await waitFor(() => expect(release.textContent).toContain("2026.2"));
   expect(
-    screen.getByRole("combobox", { name: "control 호스트" }).textContent,
+    screen.getByRole("combobox", { name: "실행 호스트" }).textContent,
   ).toContain("local");
   expect(screen.getByText(/Farm ID를 입력하면/)).toBeTruthy();
   await user.type(screen.getByPlaceholderText("dev-openstack"), "r");
   await screen.findByText("템플릿 ctl");
-  expect(
-    screen.getByText(/버킷 minio의 snapshots\/cpt.msb → cpt로 가져와 사용/),
-  ).toBeTruthy();
 
   // A second compute on another host is installed clean, and the preview says why.
-  await user.click(screen.getByRole("combobox", { name: "Compute VM 수" }));
-  await user.click(await screen.findByRole("option", { name: "Compute 2대" }));
+  await user.click(screen.getByRole("combobox", { name: "VM 구성" }));
+  await user.click(
+    await screen.findByRole("option", { name: "Control + Compute 2대" }),
+  );
   await user.click(screen.getByRole("combobox", { name: "compute-2 호스트" }));
   await user.click(
     await screen.findByRole("option", { name: "compute-2 · edge · 원격" }),
   );
   await screen.findByText("클린 설치");
+  // The compute on the local host comes from a compute template in a bucket.
+  expect(
+    screen.getByText(/버킷 minio의 snapshots\/cpt.msb → cpt로 가져와 사용/),
+  ).toBeTruthy();
   expect(screen.getByText(/not copied to host 'edge'/)).toBeTruthy();
   expect(previews.at(-1)).toMatchObject({
     id: "r",
@@ -163,7 +196,7 @@ test("previews each VM's source for the chosen release and starts the plan", asy
     compute_hosts: ["", "edge"],
   });
 
-  const start = screen.getByRole("button", { name: "이 계획으로 만들기" });
+  const start = screen.getByRole("button", { name: "Farm 만들기" });
   await waitFor(() =>
     expect((start as HTMLButtonElement).disabled).toBe(false),
   );
@@ -178,6 +211,99 @@ test("previews each VM's source for the chosen release and starts the plan", asy
   );
   await waitFor(() => expect(navigate).toHaveBeenCalledWith({ to: "/jobs" }));
   expect(close).toHaveBeenCalled();
+  client.clear();
+});
+
+const renderForm = (client: QueryClient) =>
+  render(
+    <QueryClientProvider client={client}>
+      <Dialog.Root open>
+        <CreateFarmForm close={vi.fn()} onPending={vi.fn()} />
+      </Dialog.Root>
+    </QueryClientProvider>,
+  );
+
+test("an all-in-one VM and a control VM alone are separate choices", async () => {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+  });
+  const previews: Record<string, unknown>[] = [];
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (path: string, options?: RequestInit) => {
+      if (path.endsWith("/releases"))
+        return Response.json({
+          arch: "aarch64",
+          releases: [
+            {
+              release: "2026.2",
+              local_control: 2,
+              local_compute: 1,
+              bucket_control: 0,
+              bucket_compute: 0,
+              installable: true,
+            },
+          ],
+          unreachable: [],
+        });
+      if (path.endsWith("/releases/plan")) {
+        const body = JSON.parse(String(options?.body));
+        previews.push(body);
+        return Response.json({
+          farm_id: body.id,
+          release: "2026.2",
+          arch: "aarch64",
+          components: ["keystone", "glance"],
+          control: {
+            node: body.layout === "control" ? "control" : "all-in-one",
+            host_id: "local",
+            source: "clean",
+            reason: "installed clean with OpenStack 2026.2",
+          },
+          computes: [],
+          notes: [],
+        });
+      }
+      if (path.endsWith("/catalog")) return Response.json(catalog);
+      if (path.endsWith("/plans")) return Response.json(resourcePlan);
+      if (path.endsWith("/host")) return Response.json({ build_id: "b" });
+      if (path.endsWith("/hosts")) return Response.json(hosts);
+      return Response.json([]);
+    }),
+  );
+  renderForm(client);
+  const user = userEvent.setup();
+  await user.type(screen.getByPlaceholderText("dev-openstack"), "ctl");
+  // One VM that runs everything is the default, and says so.
+  await waitFor(() =>
+    expect(previews.at(-1)).toMatchObject({
+      computes: 0,
+      layout: "all-in-one",
+    }),
+  );
+  await screen.findByText("all-in-one", { selector: ".plan-summary strong" });
+
+  // Both layouts are offered beside the computes.
+  await user.click(screen.getByRole("combobox", { name: "VM 구성" }));
+  const options = (await screen.findAllByRole("option")).map((option) =>
+    option.textContent?.trim(),
+  );
+  expect(options).toEqual([
+    "All-in-one · VM 1대",
+    "Control만 · compute는 나중에",
+    "Control + Compute 1대",
+    "Control + Compute 2대",
+    "Control + Compute 3대",
+  ]);
+  await user.click(
+    screen.getByRole("option", { name: "Control만 · compute는 나중에" }),
+  );
+
+  // A control VM alone leaves room for computes from templates to join later.
+  await waitFor(() =>
+    expect(previews.at(-1)).toMatchObject({ computes: 0, layout: "control" }),
+  );
+  await screen.findByText("control", { selector: ".plan-summary strong" });
   client.clear();
 });
 
@@ -211,7 +337,13 @@ test("a release this coordinator cannot install without templates is refused in 
           },
           { status: 409 },
         );
-      if (path.endsWith("/host")) return Response.json({ build_id: "b" });
+      if (path.endsWith("/catalog")) return Response.json(catalog);
+      if (path.endsWith("/plans")) return Response.json(resourcePlan);
+      if (path.endsWith("/host"))
+        return Response.json({
+          build_id: "b",
+          relay_url: "https://relay.test",
+        });
       if (path.endsWith("/hosts")) return Response.json(hosts);
       return Response.json([]);
     }),
@@ -219,7 +351,7 @@ test("a release this coordinator cannot install without templates is refused in 
   render(
     <QueryClientProvider client={client}>
       <Dialog.Root open>
-        <ReleaseFarmForm close={vi.fn()} onPending={vi.fn()} />
+        <CreateFarmForm close={vi.fn()} onPending={vi.fn()} />
       </Dialog.Root>
     </QueryClientProvider>,
   );
@@ -230,7 +362,7 @@ test("a release this coordinator cannot install without templates is refused in 
   expect(
     (
       screen.getByRole("button", {
-        name: "이 계획으로 만들기",
+        name: "Farm 만들기",
       }) as HTMLButtonElement
     ).disabled,
   ).toBe(true);
@@ -247,7 +379,17 @@ test("labels releases by their templates and shows an assemble job's steps", () 
       bucket_compute: 0,
       installable: true,
     }),
-  ).toBe("OpenStack 2026.2 · control 템플릿 0 · compute 템플릿 0 · 클린 설치");
+  ).toBe("OpenStack 2026.2 · 클린 설치");
+  expect(
+    releaseLabel({
+      release: "2026.2",
+      local_control: 2,
+      local_compute: 1,
+      bucket_control: 0,
+      bucket_compute: 1,
+      installable: true,
+    }),
+  ).toBe("OpenStack 2026.2 · 템플릿 control 2 · compute 2 · 버킷 1");
   const job = {
     id: "job",
     farm_id: "r",

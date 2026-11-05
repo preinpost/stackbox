@@ -85,10 +85,20 @@ export function ErrorNotice({
     </div>
   );
 }
-export function Loading({ label = "불러오는 중" }: { label?: string }) {
+/** `compact` keeps the loader to one line, for panels whose height must not change. */
+export function Loading({
+  label = "불러오는 중",
+  compact,
+}: {
+  label?: string;
+  compact?: boolean;
+}) {
   return (
-    <div role="status" className="loading">
-      <LoaderCircle size={20} className="animate-spin" />
+    <div
+      role="status"
+      className={compact ? "loading loading-compact" : "loading"}
+    >
+      <LoaderCircle size={compact ? 15 : 20} className="animate-spin" />
       {label}
     </div>
   );
@@ -128,11 +138,17 @@ export function Modal({
   className?: string;
   closeDisabled?: boolean;
 }) {
+  // Focus the dialog itself: leaving it to the first button rings the close icon on open.
+  const popup = useRef<HTMLDivElement>(null);
   return (
     <Dialog.Portal>
       <Dialog.Backdrop className="modal-backdrop" />
       <Dialog.Viewport className="modal-viewport">
-        <Dialog.Popup className={`modal ${className}`}>
+        <Dialog.Popup
+          ref={popup}
+          initialFocus={popup}
+          className={`modal ${className}`}
+        >
           <div className="modal-heading">
             <div>
               <Dialog.Title className="modal-title">{title}</Dialog.Title>
@@ -176,7 +192,11 @@ export function SelectInput<T extends string>({
       items={items}
       disabled={disabled}
     >
-      <Select.Trigger className="select-trigger" aria-label={label}>
+      <Select.Trigger
+        className="select-trigger"
+        aria-label={label}
+        title={items.find((item) => item.value === value)?.label ?? label}
+      >
         <Select.Value />
         <Select.Icon>
           <ChevronDown size={15} />

@@ -54,6 +54,10 @@ input:focus-visible,
   outline: 2px solid #168761;
   outline-offset: 3px;
 }
+/* The dialog takes focus when it opens; a ring around the whole card reads as a glitch. */
+.modal:focus-visible {
+  outline: none;
+}
 ::selection {
   background: #d6ecdf;
 }
@@ -695,6 +699,16 @@ h2 {
   font-size: 14px;
   min-width: 100px;
 }
+/* One line whatever the label: a wrapping label makes neighbouring selects differ in height. */
+.select-trigger > span:first-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.select-trigger > span:last-child {
+  flex: 0 0 auto;
+}
 .select-trigger[data-disabled] {
   opacity: 0.45;
 }
@@ -1155,6 +1169,12 @@ h2 {
   color: #5d7161;
   font-size: 15px;
 }
+/* One line, no reserved block, for use inside a panel that keeps its own height. */
+.loading-compact {
+  justify-content: flex-start;
+  min-height: 0;
+  font-size: 13px;
+}
 .modal-backdrop {
   position: fixed;
   inset: 0;
@@ -1163,20 +1183,30 @@ h2 {
   z-index: 60;
   transition: opacity 0.15s;
 }
+/* Anchored to the top: a dialog whose content grows while the user types stays put. */
+/* Anchored to the top: a dialog whose content grows while the user types stays put. */
 .modal-viewport {
+  --modal-gutter-top: clamp(24px, 9vh, 88px);
+  --modal-gutter-bottom: 25px;
   position: fixed;
   inset: 0;
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: center;
-  padding: 25px;
+  padding: var(--modal-gutter-top) 25px var(--modal-gutter-bottom);
   overflow-y: auto;
   z-index: 61;
 }
 .modal {
+  display: flex;
+  flex-direction: column;
   width: 520px;
   max-width: 100%;
-  margin: auto;
+  /* Never taller than the viewport: the body scrolls, the actions stay in view. */
+  max-height: calc(
+    100vh - var(--modal-gutter-top, 25px) - var(--modal-gutter-bottom, 25px)
+  );
+  margin: 0 auto;
   background: #fff;
   border: 1px solid #d5e0d7;
   border-radius: 13px;
@@ -1184,11 +1214,31 @@ h2 {
   outline: 0;
 }
 .create-modal {
-  width: 640px;
+  width: 660px;
+}
+/* The create form is long, so a hairline keeps its blocks apart without extra chrome. */
+.create-modal .modal-body > div + div,
+.create-modal .modal-body > div + label,
+.create-modal .modal-body > label + div,
+.create-modal .modal-body > label + label {
+  border-top: 1px solid #eef2ee;
+  padding-top: 20px;
+}
+.create-modal .field-label {
+  margin-bottom: 10px;
+  color: #3f5a48;
+  font-size: 13px;
+  font-weight: 600;
+}
+.create-modal .field-hint {
+  color: #6b7a6e;
+  font-size: 12.5px;
+  line-height: 1.65;
 }
 .modal-heading {
   display: flex;
   justify-content: space-between;
+  flex: 0 0 auto;
   gap: 18px;
   padding: 24px 26px 21px;
   border-bottom: 1px solid #e9eeea;
@@ -1203,9 +1253,20 @@ h2 {
   font-size: 14px;
 }
 .modal-body {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
   padding: 24px 26px;
 }
+/* The forms inside a dialog lay the scrolling body out above the staying footer. */
+.modal > form {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+}
 .modal-footer {
+  flex: 0 0 auto;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -1387,7 +1448,12 @@ h2 {
 .checkbox[data-disabled][data-checked] {
   background: #a9bdac;
 }
+/* The summary keeps its height while a plan loads, so the dialog does not jump. */
 .plan-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 13px;
+  min-height: 132px;
   padding: 17px;
   border-radius: 9px;
   border: 1px solid #e0eae0;
@@ -1397,7 +1463,6 @@ h2 {
   display: flex;
   flex-wrap: wrap;
   gap: 25px;
-  margin-top: 13px;
 }
 .plan-summary > div span {
   display: flex;
@@ -1414,7 +1479,6 @@ h2 {
 .plan-summary p {
   font-size: 13px;
   color: #5c6f5a;
-  margin-top: 14px;
 }
 .action-context {
   display: flex;
@@ -1591,9 +1655,13 @@ h2 {
   padding: 11px 14px;
 }
 .topology-edge {
+  position: relative;
   flex: 0 1 150px;
   min-width: 96px;
   display: grid;
+  /* Equal label rows keep the line on the column's exact center, where the VM tree's
+     connector meets it: unequal rows put the line a couple of pixels low. */
+  grid-template-rows: 1fr 2px 1fr;
   justify-items: center;
   gap: 6px;
   color: #7a8c7d;
@@ -1622,6 +1690,10 @@ h2 {
   border-left: 7px solid #c3d6c7;
   border-top: 5px solid transparent;
   border-bottom: 5px solid transparent;
+}
+/* A VM tree already ends each branch in an arrowhead at its box, so the link keeps none. */
+.topology-edge:has(+ .topology-tree) .edge-line::after {
+  display: none;
 }
 .edge-active .edge-line {
   background-image: repeating-linear-gradient(
@@ -1705,6 +1777,13 @@ h2 {
 }
 .topology-leaf {
   position: relative;
+}
+/* The fan-out that feeds a live link carries the link's color. */
+.edge-active + .topology-tree::before {
+  border-top-color: #68a879;
+}
+.edge-active + .topology-tree .topology-leaf::before {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='10'%3E%3Cpath d='M0 5H14' stroke='%2368a879' stroke-width='1.5'/%3E%3Cpath d='M13 1.5 19 5 13 8.5z' fill='%2368a879'/%3E%3C/svg%3E");
 }
 .topology-leaf::before {
   content: "";
@@ -2779,7 +2858,9 @@ h2 {
     min-height: 330px;
   }
   .modal-viewport {
-    padding: 12px;
+    --modal-gutter-top: 16px;
+    --modal-gutter-bottom: 12px;
+    padding: var(--modal-gutter-top) 12px var(--modal-gutter-bottom);
   }
   .modal-heading {
     padding: 20px;
