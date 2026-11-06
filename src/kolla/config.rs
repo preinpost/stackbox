@@ -100,13 +100,67 @@ pub fn globals(
     kvm: bool,
     components: &[String],
     multinode: bool,
-    release: &str,
+    release: &crate::kolla::releases::ReleaseInfo,
 ) -> String {
-    let tag_suffix = if arch == "aarch64" { "-aarch64" } else { "" };
+    // The legacy series' images are amd64 only, so they carry no architecture suffix.
+    let tag_suffix = if arch == "aarch64" && !release.eol {
+        "-aarch64"
+    } else {
+        ""
+    };
+    // Kolla's images are tagged with the series name on the legacy releases and with the
+    // year.release name from 2023.1 on.
+    let image_tag = &release.series;
+    let distro = &release.base_distro;
+    let enabled = ["placement", "horizon", "neutron", "nova"]
+        .iter()
+        .map(|id| format!("enable_{id}: {}\n", components.iter().any(|c| c == id)))
+        .collect::<String>();
+    let links = if multinode {
+        // Tenant networks are VLANs on each VM's `farm1` link (physnet1, br-tenant): VXLAN in
+        // the userspace datapath would need the tunnel address on an OVS bridge. The bridges
+        // are inventory host variables, which globals.yml (extra vars) would override.
+        "tunnel_interface: \"farm0\"\nneutron_tenant_network_types: \"vlan\"\nenable_neutron_provider_networks: true\n"
+    } else {
+        ""
+    };
+    let external = if components.iter().any(|c| c == "neutron") && !multinode {
+        "neutron_external_interface: \"farm-ext\"\n"
+    } else {
+        ""
+    };
+    let neutron = if components.iter().any(|c| c == "neutron") {
+        // The guest kernel has no openvswitch datapath, so OVS forwards in userspace.
+        // `farm-ext` is a veth the network node routes and masquerades for the external network.
+        // The Neutron patch lives in the release's own Python: `python3.9` for the legacy
+        // series, `python3.12` for the current ones.
+        format!(
+            concat!(
+                "neutron_plugin_agent: \"openvswitch\"\n",
+                "ovs_datapath: \"netdev\"\n",
+                "openvswitch_vswitchd_extra_volumes: \"{{{{ default_extra_volumes + ['/etc/farm/ovs-extend-start:/usr/local/bin/kolla_openvswitch_extend_start:ro'] }}}}\"\n",
+                // The kernel lacks xt_connmark; see neutron_sitecustomize.py.
+                "neutron_l3_agent_extra_volumes: \"{{{{ neutron_extra_volumes + ['/etc/farm/neutron-sitecustomize.py:/var/lib/kolla/venv/lib64/python{python}/site-packages/sitecustomize.py:ro'] }}}}\"\n",
+            ),
+            python = release.python
+        )
+    } else {
+        String::new()
+    };
+    let nova = if components.iter().any(|c| c == "nova") {
+        if kvm {
+            "nova_compute_virt_type: \"kvm\"\nnova_libvirt_cpu_mode: \"host-passthrough\"\nnova_console: \"none\"\n"
+        } else {
+            // Without /dev/kvm in the guest, fall back to qemu TCG without host-passthrough.
+            "nova_compute_virt_type: \"qemu\"\nnova_libvirt_cpu_mode: \"none\"\nnova_console: \"none\"\n"
+        }
+    } else {
+        ""
+    };
     format!(
         r#"---
-kolla_base_distro: "rocky"
-openstack_release: "{release}"
+kolla_base_distro: "{distro}"
+openstack_release: "{image_tag}"
 openstack_tag_suffix: "{tag_suffix}"
 kolla_internal_vip_address: "{vip}"
 network_interface: "{interface}"
@@ -139,51 +193,7 @@ enable_rabbitmq: true
 enable_keystone: true
 enable_glance: true
 glance_backend_file: true
-{}{}{}{}{}"#,
-        ["placement", "horizon", "neutron", "nova"]
-            .iter()
-            .map(|id| format!("enable_{id}: {}\n", components.iter().any(|c| c == id)))
-            .collect::<String>(),
-        if multinode {
-            // Tenant networks are VLANs on each VM's `farm1` link (physnet1, br-tenant): VXLAN in
-            // the userspace datapath would need the tunnel address on an OVS bridge. The bridges
-            // are inventory host variables, which globals.yml (extra vars) would override.
-            concat!(
-                "tunnel_interface: \"farm0\"\n",
-                "neutron_tenant_network_types: \"vlan\"\n",
-                "enable_neutron_provider_networks: true\n",
-            )
-        } else {
-            ""
-        },
-        if components.iter().any(|c| c == "neutron") && !multinode {
-            "neutron_external_interface: \"farm-ext\"\n"
-        } else {
-            ""
-        },
-        if components.iter().any(|c| c == "neutron") {
-            // The guest kernel has no openvswitch datapath, so OVS forwards in userspace.
-            // `farm-ext` is a veth the network node routes and masquerades for the external network.
-            concat!(
-                "neutron_plugin_agent: \"openvswitch\"\n",
-                "ovs_datapath: \"netdev\"\n",
-                "openvswitch_vswitchd_extra_volumes: \"{{ default_extra_volumes + ['/etc/farm/ovs-extend-start:/usr/local/bin/kolla_openvswitch_extend_start:ro'] }}\"\n",
-                // The kernel lacks xt_connmark; see neutron_sitecustomize.py.
-                "neutron_l3_agent_extra_volumes: \"{{ neutron_extra_volumes + ['/etc/farm/neutron-sitecustomize.py:/var/lib/kolla/venv/lib64/python3.12/site-packages/sitecustomize.py:ro'] }}\"\n",
-            )
-        } else {
-            ""
-        },
-        if components.iter().any(|c| c == "nova") {
-            if kvm {
-                "nova_compute_virt_type: \"kvm\"\nnova_libvirt_cpu_mode: \"host-passthrough\"\nnova_console: \"none\"\n"
-            } else {
-                // Without /dev/kvm in the guest, fall back to qemu TCG without host-passthrough.
-                "nova_compute_virt_type: \"qemu\"\nnova_libvirt_cpu_mode: \"none\"\nnova_console: \"none\"\n"
-            }
-        } else {
-            ""
-        }
+{enabled}{links}{external}{neutron}{nova}"#
     )
 }
 
@@ -336,7 +346,7 @@ mod tests {
             false,
             &selected,
             true,
-            OPENSTACK_RELEASE,
+            &crate::kolla::releases::info(OPENSTACK_RELEASE),
         );
         assert!(globals.contains("tunnel_interface: \"farm0\"\n"));
         assert!(globals.contains("neutron_tenant_network_types: \"vlan\"\n"));
@@ -381,7 +391,7 @@ mod tests {
             false,
             selected,
             false,
-            OPENSTACK_RELEASE,
+            &crate::kolla::releases::info(OPENSTACK_RELEASE),
         )
     }
 
@@ -403,7 +413,7 @@ mod tests {
             false,
             &base,
             false,
-            OPENSTACK_RELEASE,
+            &crate::kolla::releases::info(OPENSTACK_RELEASE),
         );
         assert!(globals.contains("openstack_tag_suffix: \"-aarch64\""));
         assert!(globals.contains("network_interface: \"eth0\""));
@@ -426,7 +436,7 @@ mod tests {
             false,
             &base,
             false,
-            OPENSTACK_RELEASE,
+            &crate::kolla::releases::info(OPENSTACK_RELEASE),
         );
         for key in [
             "network_interface",
@@ -449,7 +459,7 @@ mod tests {
             false,
             &selected,
             false,
-            OPENSTACK_RELEASE,
+            &crate::kolla::releases::info(OPENSTACK_RELEASE),
         );
         for id in ["horizon", "neutron"] {
             assert!(globals.contains(&format!("enable_{id}: true\n")));
@@ -473,7 +483,7 @@ mod tests {
             true,
             &selected,
             false,
-            OPENSTACK_RELEASE,
+            &crate::kolla::releases::info(OPENSTACK_RELEASE),
         );
         assert!(kvm_globals.contains("enable_nova: true\n"));
         assert!(kvm_globals.contains("nova_compute_virt_type: \"kvm\"\n"));
@@ -487,7 +497,7 @@ mod tests {
             false,
             &selected,
             false,
-            OPENSTACK_RELEASE,
+            &crate::kolla::releases::info(OPENSTACK_RELEASE),
         );
         assert!(tcg_globals.contains("enable_nova: true\n"));
         assert!(tcg_globals.contains("nova_compute_virt_type: \"qemu\"\n"));

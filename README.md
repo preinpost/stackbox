@@ -242,7 +242,22 @@ farm add-compute c13 --from-snapshot src-compute-tpl        # compute-2, 3: comp
 OpenStack 릴리스를 고르면, coordinator가 그 릴리스의 저장된 템플릿으로 조립 계획을 세우고 그대로
 실행합니다. 릴리스 목록은 `kolla-ansible` 공개 저장소의 `stable/<release>`·`unmaintained/<release>`
 브랜치에서 읽어 오고(10분 캐시), 저장소에 닿지 않는 호스트는 `FARM_OPENSTACK_RELEASES=2026.2,2025.2`처럼
-목록을 고정할 수 있습니다. 템플릿이 없는 릴리스는 그 브랜치로 클린 설치하므로, 이 binary가 배포하는
+목록을 고정할 수 있습니다.
+
+**EOL 릴리스도 고를 수 있습니다.** kolla-ansible은 시리즈가 EOL이 되면 브랜치를 지우므로,
+2022.2(zed)부터 2020.1(ussuri)까지는 마지막 태그(예: victoria `11.4.0`)로 설치합니다. 대상은
+`2022.2`, `2022.1`, `2021.2`, `2021.1`, `2020.2`, `2020.1`이고, 포털의 릴리스 목록에 **EOL**로
+표시됩니다. 세 가지 제약이 있습니다.
+
+- 그 시리즈의 Kolla 이미지는 **amd64 전용**입니다. aarch64 호스트(Apple Silicon 포함)에서는
+  설치할 수 없고, 릴리스 목록에서도 `installable: false`로 나옵니다. x86_64 Linux 호스트에서만 됩니다.
+- 그 시대 Ansible은 게스트의 Python 3.12에서 돌지 않습니다(ussuri 3.8, victoria~xena 3.9,
+  yoga·zed 3.10). 게스트에 해당 `python3.x`가 없으면 설치 단계가 그 이유를 밝히고 멈춥니다.
+  골든 이미지나 호스트에서 `/opt/python3.9`처럼 준비해 두세요.
+- 설치 중 적용하는 커널 호환 패치(OVS netdev, br_netfilter 등)는 최신 Kolla의 task 파일을
+  전제로 합니다. 구버전 Kolla에서 그 파일이 다르면 패치 단계가 명시적으로 실패합니다.
+
+`FARM_OPENSTACK_RELEASES=2026.2,2021.1`처럼 직접 넣으면 EOL 시리즈도 핀할 수 있습니다. 템플릿이 없는 릴리스는 그 브랜치로 클린 설치하므로, 이 binary가 배포하는
 릴리스가 아니어도 farm을 만들 수 있습니다. control VM은 그 릴리스의 control 템플릿 중 가장 최근 것(로컬 스냅샷을 먼저, 없으면 버킷의
 아카이브)에서, 각 compute는 같은 릴리스·서비스의 compute 템플릿에서 만들고, 쓸 수 있는 템플릿이 없으면
 클린 설치합니다.

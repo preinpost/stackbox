@@ -1010,6 +1010,10 @@ pub struct ReleaseTemplates {
     pub bucket_compute: usize,
     /// Whether this coordinator can also install the release clean.
     pub installable: bool,
+    /// End of life: kolla-ansible keeps no branch, so the release installs from its last tag
+    /// and only where its older images run.
+    #[serde(default)]
+    pub eol: bool,
 }
 
 /// Releases a farm can be created with on one architecture, newest first.

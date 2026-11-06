@@ -1461,6 +1461,11 @@ export interface components {
     ReleaseTemplates: {
       bucket_compute: number;
       bucket_control: number;
+      /**
+       * @description End of life: kolla-ansible keeps no branch, so the release installs from its last tag
+       *     and only where its older images run.
+       */
+      eol?: boolean;
       /** @description Whether this coordinator can also install the release clean. */
       installable: boolean;
       local_compute: number;

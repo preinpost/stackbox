@@ -4643,6 +4643,10 @@
             "type": "integer",
             "minimum": 0
           },
+          "eol": {
+            "type": "boolean",
+            "description": "End of life: kolla-ansible keeps no branch, so the release installs from its last tag\nand only where its older images run."
+          },
           "installable": {
             "type": "boolean",
             "description": "Whether this coordinator can also install the release clean."

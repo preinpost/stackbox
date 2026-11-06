@@ -5277,9 +5277,21 @@ async fn a_release_plan_picks_the_newest_matching_templates_or_says_why_it_insta
     let plan = manager.preview_release(&by_release("r", 1)).await.unwrap();
     assert_eq!(plan.control.source, NodeSource::Clean);
     let catalog = manager.release_catalog(None, None).await.unwrap();
-    assert_eq!(catalog.releases.len(), 1);
-    assert_eq!(catalog.releases[0].local_control, 0);
-    assert!(catalog.releases[0].installable);
+    // The end-of-life series are offered beside the maintained ones, marked as such.
+    let own = catalog
+        .releases
+        .iter()
+        .find(|r| r.release == release)
+        .unwrap();
+    assert_eq!(own.local_control, 0);
+    assert!(own.installable);
+    assert!(!own.eol);
+    assert!(
+        catalog
+            .releases
+            .iter()
+            .any(|r| r.release == "2021.1" && r.eol)
+    );
     let catalog = manager
         .release_catalog(Some("riscv64".into()), None)
         .await
@@ -5296,7 +5308,21 @@ async fn a_release_plan_picks_the_newest_matching_templates_or_says_why_it_insta
             )
         })
         .collect();
-    assert_eq!(counts, [(release, 2, 0, false), ("2025.1", 0, 1, false)]);
+    // The two releases that keep templates, then the end-of-life series this coordinator
+    // could still install elsewhere.
+    assert_eq!(
+        &counts[..2],
+        [(release, 2, 0, false), ("2025.1", 0, 1, false)]
+    );
+    // The end-of-life series carry no templates here and are marked as closed.
+    assert!(counts[2..].iter().all(|entry| entry.1 == 0 && entry.2 == 0));
+    assert!(
+        catalog
+            .releases
+            .iter()
+            .find(|r| r.release == "2021.1")
+            .is_some_and(|r| r.eol)
+    );
 
     // A farm ID in use is refused before anything else.
     assert!(
@@ -5651,8 +5677,12 @@ async fn a_release_farm_imports_bucket_templates_once_and_reuses_the_import() {
         assert_eq!(manager.wait_snapshot(id).await.unwrap().error, None);
     }
     let catalog = manager.release_catalog(None, None).await.unwrap();
-    assert_eq!(catalog.releases.len(), 1);
-    let counts = &catalog.releases[0];
+    let release = crate::kolla::OPENSTACK_RELEASE;
+    let counts = catalog
+        .releases
+        .iter()
+        .find(|r| r.release == release)
+        .unwrap();
     assert_eq!(
         (
             counts.local_control,

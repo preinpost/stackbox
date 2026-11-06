@@ -11,6 +11,9 @@ export function releaseLabel(r: ReleaseTemplates) {
       : []),
     ...(buckets ? [`버킷 ${buckets}`] : []),
     ...(control === 0 && r.installable ? ["클린 설치"] : []),
+    // End of life: installed from its last kolla-ansible tag, and only where its older
+    // images run (amd64), so an aarch64 coordinator offers it without the clean install.
+    ...(r.eol ? ["EOL"] : []),
   ];
   return `OpenStack ${r.release}${parts.length ? ` · ${parts.join(" · ")}` : ""}`;
 }

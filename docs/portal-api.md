@@ -88,7 +88,12 @@ job 로그에 원본 compute 등록(nova-compute 서비스, placement, Neutron a
 
 `GET /releases?arch=&bucket=`은 릴리스별로 로컬(`local_control`, `local_compute`)과 버킷
 (`bucket_control`, `bucket_compute`)의 템플릿 수, 그리고 클린 설치 가능 여부(`installable`)를 최신
-릴리스부터 돌려줍니다. `arch`를 생략하면 coordinator의 아키텍처이고, `bucket`을 생략하면 등록된 모든
+릴리스부터 돌려줍니다.
+
+EOL 시리즈(`2022.2`~`2020.1`)도 목록에 포함되고 `eol: true`로 표시됩니다. 이들은 kolla-ansible
+마지막 태그로 설치하며(`2021.1` → `12.8.0`), 이미지가 amd64 전용이라 aarch64에서는
+`installable: false`입니다. 계획(`POST /releases/plan`)의 `notes`에도 릴리스·태그·필요한 Python이
+적힙니다. `arch`를 생략하면 coordinator의 아키텍처이고, `bucket`을 생략하면 등록된 모든
 버킷을 셉니다(조회하지 못한 버킷은 `unreachable`).
 
 `POST /releases/plan`은 `ReleaseCreateRequest`(`id`, `release`, `host_id`, `computes`(1~3), 선택:

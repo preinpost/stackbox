@@ -130,7 +130,10 @@ impl FarmManager {
                 .entry(release.into())
                 .or_insert_with(|| ReleaseTemplates {
                     release: release.into(),
-                    installable: arch == current_arch() && published.contains(&release.into()),
+                    installable: arch == current_arch()
+                        && published.contains(&release.into())
+                        && crate::kolla::releases::available_on(release, &arch),
+                    eol: crate::kolla::releases::legacy(release).is_some(),
                     ..Default::default()
                 });
             match (role, local) {
@@ -356,10 +359,20 @@ impl FarmManager {
             .into_iter()
             .map(|error| format!("bucket not searched: {error}"))
             .collect();
+        let info = crate::kolla::releases::info(request.release.trim());
         let installable = crate::kolla::releases::published()
             .await
             .iter()
-            .any(|known| known == request.release.trim());
+            .any(|known| known == request.release.trim())
+            && crate::kolla::releases::available_on(&info.release, &current_arch());
+        if info.eol {
+            // Said up front: the series is closed, so an install may need an older Python in
+            // the guest and cannot run on aarch64 at all.
+            notes.push(format!(
+                "OpenStack {} ({}) is end of life: installed from kolla-ansible {} on Python {}; its images are amd64 only",
+                info.release, info.series, info.reference, info.python
+            ));
+        }
         self.read(|state| {
             self.resolve(
                 state,
@@ -551,10 +564,17 @@ impl FarmManager {
                 return self.clean_plan(request, why, notes);
             }
             Err(why) => {
-                return Err(conflict(format!(
-                    "{why}; this coordinator cannot install OpenStack {} clean, and only published kolla-ansible releases can be",
-                    request.release.trim()
-                )));
+                let release = request.release.trim();
+                // An end-of-life series only runs where its older images do.
+                let hint = match crate::kolla::releases::legacy(release) {
+                    Some(_) if current_arch() == "aarch64" => format!(
+                        "OpenStack {release} is end of life and its images are amd64 only; create it on an x86_64 host"
+                    ),
+                    _ => format!(
+                        "this coordinator cannot install OpenStack {release} clean, and only published kolla-ansible releases can be"
+                    ),
+                };
+                return Err(conflict(format!("{why}; {hint}")));
             }
         };
         let components = control.components().to_vec();

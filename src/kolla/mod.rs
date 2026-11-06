@@ -10,6 +10,8 @@ use crate::farm;
 use crate::model::Exposure;
 use crate::shell::{run, stream};
 pub use config::OPENSTACK_RELEASE;
+/// Python the golden image ships, which the releases that still have a branch run on.
+pub const GUEST_PYTHON: &str = "3.12";
 use config::{Compute, Topology};
 use std::{collections::BTreeMap, sync::Arc};
 
@@ -697,7 +699,10 @@ async fn deploy_phases(
         let log = format!("{LOG_DIR}/{phase}.log");
         match phase {
             Phase::Prepare => prepare(deployer, computes, components, sink).await,
-            Phase::Install => stream(deployer, &install_script(release), &log, sink).await,
+            Phase::Install => {
+                let info = releases::info(release);
+                stream(deployer, &install_script(&info), &log, sink).await
+            }
             Phase::Configure => {
                 configure(
                     deployer, computes, topology, exposure, components, release, sink,
@@ -848,7 +853,17 @@ systemctl daemon-reload"#,
     Ok(())
 }
 
-fn install_script(release: &str) -> String {
+/// The Python a release installs with: the guest's `python3` for current releases, the named
+/// minor for the legacy series, which Ansible of that era runs on.
+fn python_command(release: &releases::ReleaseInfo) -> String {
+    if release.eol {
+        format!("python{}", release.python)
+    } else {
+        "python3".to_owned()
+    }
+}
+
+fn install_script(release: &releases::ReleaseInfo) -> String {
     format!(
         r#"set -euo pipefail
 export PATH={VENV}/bin:$PATH
@@ -858,14 +873,27 @@ if ! command -v gcc >/dev/null; then
   dnf install -y -q gcc python3-devel libffi-devel openssl-devel
 fi
 # One venv per release: the branches differ, so a different release reinstalls it.
-if [ ! -x {VENV}/bin/kolla-ansible ] || [ "$(cat {VENV}/.farm-release 2>/dev/null || true)" != "{release}" ]; then
-  step "kolla-ansible 가상환경 생성 ({VENV})"
+# The legacy series run on their own Python; the guest ships {guest_python}.
+python={python}
+if ! command -v "$python" >/dev/null; then
+  for candidate in /opt/python{python}/bin/python{python} /usr/local/bin/python{python}; do
+    if [ -x "$candidate" ]; then python=$candidate; break; fi
+  done
+fi
+if ! command -v "$python" >/dev/null; then
+  echo "this release needs Python {python}, which this VM does not have" >&2
+  echo "install it in the golden image (dnf install python{python}, or a build under /opt/python{python}) and start the farm again" >&2
+  exit 1
+fi
+stamp="{name} {reference} $python"
+if [ ! -x {VENV}/bin/kolla-ansible ] || [ "$(cat {VENV}/.farm-release 2>/dev/null || true)" != "$stamp" ]; then
+  step "kolla-ansible 가상환경 생성 ({VENV}, $python)"
   rm -rf {VENV}
-  python3 -m venv {VENV}
+  "$python" -m venv {VENV}
   {VENV}/bin/pip install -q -U pip
-  step "kolla-ansible 설치 (stable/{release})"
-  {VENV}/bin/pip install -q "git+https://opendev.org/openstack/kolla-ansible@stable/{release}"
-  printf '%s' "{release}" > {VENV}/.farm-release
+  step "kolla-ansible 설치 ({reference})"
+  {VENV}/bin/pip install -q "git+https://opendev.org/openstack/kolla-ansible@{reference}"
+  printf '%s' "$stamp" > {VENV}/.farm-release
 fi
 step "kolla-ansible install-deps (컨테이너 런타임 의존성)"
 kolla-ansible install-deps
@@ -926,17 +954,22 @@ if patched not in text:
         raise RuntimeError("unexpected Kolla nova-cell when clause; review the br_netfilter patch")
     path.write_text(text.replace(marker, patched, 1))
 PY
-if [ ! -x {OSC_VENV}/bin/openstack ] || [ "$(cat {OSC_VENV}/.farm-release 2>/dev/null || true)" != "{release}" ]; then
+if [ ! -x {OSC_VENV}/bin/openstack ] || [ "$(cat {OSC_VENV}/.farm-release 2>/dev/null || true)" != "$stamp" ]; then
   step "OpenStack CLI 가상환경 생성 ({OSC_VENV})"
   rm -rf {OSC_VENV}
-  python3 -m venv {OSC_VENV}
+  "$python" -m venv {OSC_VENV}
   {OSC_VENV}/bin/pip install -q -U pip
   step "python-openstackclient 설치"
-  {OSC_VENV}/bin/pip install -q -c https://releases.openstack.org/constraints/upper/{release} python-openstackclient
-  printf '%s' "{release}" > {OSC_VENV}/.farm-release
+  {OSC_VENV}/bin/pip install -q -c https://releases.openstack.org/constraints/upper/{series} python-openstackclient
+  printf '%s' "$stamp" > {OSC_VENV}/.farm-release
 fi
 step "kolla-ansible 버전 확인"
-kolla-ansible --version"#
+kolla-ansible --version"#,
+        name = release.release,
+        python = python_command(release),
+        guest_python = GUEST_PYTHON,
+        reference = release.reference,
+        series = release.series,
     )
 }
 
@@ -1015,7 +1048,7 @@ async fn configure(
         kvm,
         components,
         multinode,
-        release,
+        &releases::info(release),
     );
     // Public catalog URLs retain host-side offset ports; service listeners and
     // all internal API/database calls use the VM's eth0 address and native ports.
@@ -1623,7 +1656,7 @@ mod tests {
         };
         let (from, to) = (exposure(15000), exposure(15010));
         let scripts = [
-            install_script(OPENSTACK_RELEASE),
+            install_script(&releases::info(OPENSTACK_RELEASE)),
             post_deploy_script(&components, false),
             post_deploy_script(&components, true),
             verify_script(&components, 1),
@@ -1640,6 +1673,8 @@ mod tests {
             identity_command(),
             // A compute booted from a template recreates the containers it inherited.
             wipe_template_script("farm-compute-2"),
+            // An end-of-life series installs from its last tag on its own Python.
+            install_script(&releases::info("2021.1")),
         ];
         for script in scripts {
             let mut child = Command::new("bash")
@@ -1664,7 +1699,7 @@ mod tests {
         // A heredoc opener inside another heredoc's body only fails inside the guest,
         // where nothing points at the generated script.
         for script in [
-            install_script(OPENSTACK_RELEASE),
+            install_script(&releases::info(OPENSTACK_RELEASE)),
             post_deploy_script(&components, false),
             post_deploy_script(&components, true),
             verify_script(&components, 1),
@@ -1674,6 +1709,12 @@ mod tests {
         ] {
             assert_heredocs_do_not_nest(&script);
         }
+
+        // The legacy install asks for its tag, its Python and its series' constraints.
+        let legacy = install_script(&releases::info("2021.1"));
+        assert!(legacy.contains("kolla-ansible@12.8.0"), "{legacy}");
+        assert!(legacy.contains("python=python3.9"));
+        assert!(legacy.contains("constraints/upper/wallaby"));
 
         // A restarted OVS container can leave the control's agent dead; the expansion revives it.
         assert!(RESTART_OVS_AGENT.contains("docker restart neutron_openvswitch_agent"));
@@ -1717,7 +1758,7 @@ mod tests {
         assert!(verify.contains("nova-compute is not up"));
         assert!(verify.contains("cirros-0.6.3-aarch64-disk.img"));
         for script in [
-            install_script(OPENSTACK_RELEASE),
+            install_script(&releases::info(OPENSTACK_RELEASE)),
             verify_script(&components, 1),
             verify_script(&components, 2),
             post_deploy_script(&components, false),
