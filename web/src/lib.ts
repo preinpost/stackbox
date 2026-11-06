@@ -98,6 +98,29 @@ export const farmState = (farm: Farm, job?: Job) =>
  * Its services cannot answer during a snapshot, so only labels use this, not requests. */
 export const farmDeployed = (farm: Farm) =>
   ["ready", "snapshotting"].includes(farm.status);
+/** `2 / 2 running` for a farm's VMs. A compute being added is already observed on its host
+ * before the plan keeps it, so the count says which one that is. */
+export const runningVms = (farm: Farm, job?: Job) => {
+  const running = farm.nodes.filter((node) => node.status === "running").length;
+  const adding = pendingCompute(farm, job) ? " · 1대 추가 중" : "";
+  return `${running} / ${farmNodeCount(farm)} running${adding}`;
+};
+/** Memory of a compute VM made without a chosen size, as the API plans it. */
+const DEFAULT_COMPUTE_MIB = 3072;
+/** The compute VM an expansion job is adding. Its plan is committed only once Kolla accepts
+ * it, so until then the farm still shows the computes it had; this names the one on its way. */
+export const pendingCompute = (farm: Farm, job?: Job) => {
+  if (job?.kind !== "expand" || !job.target_node) return undefined;
+  const index = Number(job.target_node.slice("compute-".length));
+  if (!Number.isInteger(index) || index < 1) return undefined;
+  if ((farm.plan?.computes ?? 0) >= index) return undefined;
+  return {
+    role: "compute" as const,
+    index,
+    host: job.target_host ?? farm.host_id ?? "",
+    memory_mib: farm.plan?.compute?.memory_mib ?? DEFAULT_COMPUTE_MIB,
+  };
+};
 /** A control VM and compute VMs joined by the host's link switch. A farm made from a
  * control template has its control VM alone until a compute is added. */
 export const isMultiNodeFarm = (farm: Farm) =>

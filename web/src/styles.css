@@ -1931,6 +1931,29 @@ h2 {
 .topology-tree .topology-node {
   min-width: 260px;
 }
+/* A VM that is on its way: Kolla has it in the inventory but the farm cannot list it yet. */
+.topology-node.pending {
+  border-style: dashed;
+  border-color: #cbdccf;
+  background: #fbfdfb;
+  color: #6a7c6d;
+}
+.topology-node.pending strong {
+  color: #6a7c6d;
+}
+.node-pending {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 10px;
+  padding-top: 9px;
+  border-top: 1px dashed #e2ebe3;
+  color: #4c6d8c;
+  font-size: 12.5px;
+}
+.node-pending span {
+  color: #6a7c6d;
+}
 .node-running {
   border-color: #d8e6d8;
 }

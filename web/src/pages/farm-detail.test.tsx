@@ -1,7 +1,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, expect, test, vi } from "vitest";
-import type { Farm } from "../api/client";
+import type { Farm, Job } from "../api/client";
 import { userEvent } from "@testing-library/user-event";
 import type { Datastore } from "../api/client";
 import {
@@ -47,6 +47,75 @@ test("shows selected services inside one VM without overlay or separate role nod
   expect(screen.getByText("Horizon")).toBeTruthy();
   expect(screen.queryByText("Deployer")).toBeNull();
   expect(container.textContent).not.toContain("vx0");
+});
+
+test("draws the compute an expansion is adding with its own pending card", () => {
+  const multi: Farm = {
+    id: "local-01",
+    status: "deploying",
+    host_id: "local",
+    created_at: 0,
+    updated_at: 0,
+    active_job: "job",
+    plan: {
+      components: ["keystone", "glance", "nova"],
+      computes: 1,
+      memory_mib: 10240,
+      disk_mib: 172032,
+      warnings: [],
+      nodes: [
+        { role: "control", cpus: 4, memory_mib: 7168, disk_mib: 20480 },
+        {
+          role: "compute",
+          index: 1,
+          cpus: 2,
+          memory_mib: 3072,
+          disk_mib: 32768,
+        },
+      ],
+    },
+    nodes: [
+      {
+        name: "local-01-control",
+        role: "control",
+        memory_mib: 7168,
+        status: "running",
+      },
+      {
+        name: "local-01-compute-1",
+        role: "compute",
+        index: 1,
+        memory_mib: 3072,
+        status: "running",
+      },
+    ],
+  };
+  const job = {
+    id: "job",
+    kind: "expand",
+    target_node: "compute-2",
+    target_host: "edge",
+  } as Job;
+  // Link faults are set through the API, which needs a client.
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+  });
+  const { container } = render(
+    <QueryClientProvider client={client}>
+      <NodeTopology farm={multi} job={job} />
+    </QueryClientProvider>,
+  );
+  // The committed plan still has two VMs; the third is drawn as on its way.
+  expect(container.querySelectorAll(".topology-node")).toHaveLength(3);
+  const pending = container.querySelector(".topology-node.pending");
+  expect(pending?.textContent).toContain("farm-compute-2");
+  expect(pending?.textContent).toContain("10.254.0.12");
+  expect(pending?.textContent).toContain("생성 중");
+  expect(pending?.textContent).toContain("edge");
+  // A VM that does not exist yet has no link to fault.
+  expect(pending?.querySelector(".node-faults")).toBeNull();
+  expect(container.textContent).toContain("VM 3대 · 1대 생성 중");
+  client.clear();
 });
 
 test("retains observed legacy and unclassified nodes instead of inventing a new layout", () => {

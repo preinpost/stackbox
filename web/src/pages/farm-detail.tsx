@@ -36,6 +36,7 @@ import {
   type Datastore,
   type Farm,
   type Impair,
+  type Job,
 } from "../api/client";
 import {
   AddComputeDialog,
@@ -59,8 +60,8 @@ import {
   farmComponents,
   farmDeployed,
   farmMemory,
-  farmNodeCount,
   farmState,
+  runningVms,
   isAllInOneFarm,
   isDeployableFarm,
   isMultiNodeFarm,
@@ -68,6 +69,7 @@ import {
   nodeAddress,
   nodeHostname,
   nodeSuffix,
+  pendingCompute,
   phases,
   publicServices,
 } from "../lib";
@@ -310,10 +312,7 @@ export function FarmDetailPage({ id }: { id: string }) {
           <Server size={17} />
           <span>
             가상 머신
-            <strong>
-              {farm.nodes.filter((n) => n.status === "running").length} /{" "}
-              {farmNodeCount(farm)} running
-            </strong>
+            <strong>{runningVms(farm, activeJob)}</strong>
           </span>
         </div>
         <div>
@@ -355,7 +354,7 @@ export function FarmDetailPage({ id }: { id: string }) {
           </Tabs.Tab>
         </Tabs.List>
         <Tabs.Panel value="overview" className="tab-panel">
-          <NodeTopology farm={farm} />
+          <NodeTopology farm={farm} job={activeJob} />
           <div className="detail-bottom-grid">
             <DeploymentPhases farm={farm} />
             <Endpoints farm={farm} />
@@ -484,9 +483,11 @@ function NodeFaults({ farm, node }: { farm: Farm; node: string }) {
   );
 }
 /** A control VM and its computes on the farm's management and tenant links. */
-function MultiNodeTopology({ farm }: { farm: Farm }) {
+function MultiNodeTopology({ farm, job }: { farm: Farm; job?: Job }) {
   const components = farmComponents(farm);
   const specs = farm.plan?.nodes ?? [];
+  // A compute being added joins the drawing before Kolla lets the farm keep it.
+  const pending = pendingCompute(farm, job);
   const exposure = farm.status !== "deleted" ? farm.exposure : null;
   return (
     <section className="panel topology">
@@ -496,7 +497,8 @@ function MultiNodeTopology({ farm }: { farm: Farm }) {
           VM topology
         </h2>
         <span className="topology-network">
-          mgmt 10.254.0.0/24 · tenant VLAN · VM {specs.length}대
+          {`mgmt 10.254.0.0/24 · tenant VLAN · VM ${specs.length + (pending ? 1 : 0)}대`}
+          {pending && " · 1대 생성 중"}
           <span className="status-dot" />
         </span>
       </div>
@@ -558,6 +560,35 @@ function MultiNodeTopology({ farm }: { farm: Farm }) {
               </div>
             );
           })}
+          {pending && (
+            <div className="topology-leaf" key={nodeSuffix(pending)}>
+              <div className="topology-node pending">
+                <div className="node-top">
+                  <Server size={15} strokeWidth={1.6} />
+                  <strong className="font-mono">{nodeHostname(pending)}</strong>
+                  <span className="node-memory">
+                    {memory(pending.memory_mib)}
+                  </span>
+                  <span
+                    className="node-status running"
+                    title="생성 중"
+                    aria-hidden
+                  />
+                </div>
+                <p>nova-compute · libvirt · OVS agent</p>
+                <div className="node-meta">
+                  <code>{nodeAddress(pending)}</code>
+                  <span className="font-mono">
+                    {farm.id}-{nodeSuffix(pending)}
+                  </span>
+                </div>
+                <div className="node-pending">
+                  <LoaderCircle size={13} className="animate-spin" />
+                  생성 중{pending.host && <span>· {pending.host}</span>}
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       </div>
       <div className="topology-footer">
@@ -568,8 +599,8 @@ function MultiNodeTopology({ farm }: { farm: Farm }) {
     </section>
   );
 }
-export function NodeTopology({ farm }: { farm: Farm }) {
-  if (isMultiNodeFarm(farm)) return <MultiNodeTopology farm={farm} />;
+export function NodeTopology({ farm, job }: { farm: Farm; job?: Job }) {
+  if (isMultiNodeFarm(farm)) return <MultiNodeTopology farm={farm} job={job} />;
   const single = isAllInOneFarm(farm);
   const components = farmComponents(farm);
   const sources = farm.plan

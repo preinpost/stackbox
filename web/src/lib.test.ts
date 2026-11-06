@@ -4,6 +4,8 @@ import {
   archiveSummary,
   farmDeployed,
   farmState,
+  pendingCompute,
+  runningVms,
   snapshotHost,
 } from "./lib";
 
@@ -25,6 +27,59 @@ test("shows a farm as snapshotting while its snapshot job keeps it ready", () =>
   expect(farmDeployed({ ...farm, status: "created" })).toBe(false);
 });
 
+test("names the compute an expansion is adding before the plan keeps it", () => {
+  const farm = {
+    id: "f",
+    status: "deploying",
+    host_id: "local",
+    plan: { computes: 1, compute: { memory_mib: 6144 } },
+  } as Farm;
+  const expand = (target_node?: string, target_host?: string) =>
+    ({ id: "j", kind: "expand", target_node, target_host }) as Job;
+  expect(pendingCompute(farm, expand("compute-2", "edge"))).toEqual({
+    role: "compute",
+    index: 2,
+    host: "edge",
+    memory_mib: 6144,
+  });
+  // A compute the plan already holds is drawn from the plan, and other jobs add nothing.
+  expect(pendingCompute(farm, expand("compute-1", "local"))).toBeUndefined();
+  expect(
+    pendingCompute(farm, { id: "j", kind: "deploy" } as Job),
+  ).toBeUndefined();
+  expect(pendingCompute(farm, expand(undefined))).toBeUndefined();
+  // Without a chosen size the API plans the default compute VM.
+  expect(
+    pendingCompute(
+      { ...farm, plan: { computes: 1 } } as Farm,
+      expand("compute-3"),
+    ),
+  ).toMatchObject({ index: 3, host: "local", memory_mib: 3072 });
+});
+
+test("counts a farm's running VMs, naming the compute an expansion is adding", () => {
+  const farm = {
+    id: "f",
+    status: "deploying",
+    plan: {
+      computes: 1,
+      nodes: [{ role: "control" }, { role: "compute", index: 1 }],
+    },
+    nodes: [
+      { role: "control", status: "running" },
+      { role: "compute", index: 1, status: "running" },
+      { role: "compute", index: 2, status: "running" },
+    ],
+  } as Farm;
+  expect(runningVms(farm)).toBe("3 / 2 running");
+  expect(
+    runningVms(farm, {
+      id: "j",
+      kind: "expand",
+      target_node: "compute-2",
+    } as Job),
+  ).toBe("3 / 2 running · 1대 추가 중");
+});
 
 test("labels a snapshot with the platform that froze it", () => {
   expect(snapshotHost({ arch: "aarch64", platform: "macos" })).toBe(
