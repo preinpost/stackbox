@@ -17,6 +17,7 @@ import {
   Download,
   HardDrive,
   LoaderCircle,
+  Lock,
   Play,
   Plus,
   RefreshCw,
@@ -79,20 +80,27 @@ async function refresh(client: ReturnType<typeof useQueryClient>) {
     client.invalidateQueries({ queryKey: keys.hosts }),
   ]);
 }
-/** Compute templates a new compute of `farm` can boot from; the API also checks the
- * OpenStack release. */
+/** Compute templates a new compute of `farm` can boot from: a compute VM of the farm's
+ * OpenStack release with the same services. A template of another release is never an
+ * option — its containers could not join the farm's control plane — and the API checks the
+ * same rule again when the job starts. */
 export const computeTemplatesFor = (
   farm: Farm,
   snapshots: Snapshot[] = [],
   arch?: string | null,
-) =>
-  snapshots.filter(
+) => {
+  const release = farm.plan?.release;
+  const components = (farm.plan?.components ?? []).join(",");
+  return snapshots.filter(
     (s) =>
       s.template === "compute" &&
       ["ready", "exporting"].includes(s.status) &&
       (!arch || s.arch === arch) &&
-      s.plan.components.join(",") === (farm.plan?.components ?? []).join(","),
+      s.plan.components.join(",") === components &&
+      // A farm recorded before releases were kept takes whatever the coordinator installs.
+      (!release || s.release === release),
   );
+};
 function publicHostName(hostId: string, hosts: RemoteHost[] = []) {
   const chosen = hosts.find((h) => h.id === hostId);
   if (chosen?.kind === "local") return "localhost";
@@ -959,6 +967,8 @@ export function AddComputeDialog({
       !chosen.copies?.some((copy) => copy.host_id === hostId)
     : false;
   const plan = farm.plan;
+  // Every compute joins the farm's own release; it cannot change with the VM being added.
+  const release = plan?.release ?? null;
   const computes = plan?.computes ?? 0;
   const next = computes + 1;
   const ready = (hosts.data ?? []).filter((host) =>
@@ -1038,13 +1048,28 @@ export function AddComputeDialog({
               <Cpu size={20} />
               <div>
                 <strong className="font-mono">
-                  {farm.id}-{lastJob?.target_node ?? `compute-${next}`}
+                  {farm.id}-
+                  {resumable && lastJob?.target_node
+                    ? lastJob.target_node
+                    : `compute-${next}`}
                 </strong>
                 <p>
                   기존 compute와 같은 크기 · {plan?.compute?.cpus ?? 2} vCPU ·{" "}
                   {memory(plan?.compute?.memory_mib ?? 3072)}
                 </p>
               </div>
+            </div>
+            <div className="field">
+              <span>OpenStack 릴리스</span>
+              <span className="fixed-release">
+                <Lock size={13} />
+                OpenStack {release ?? "기록 없음"}
+              </span>
+              <small>
+                farm의 릴리스는 바뀌지 않습니다. compute는 같은 릴리스로만
+                붙으며, 클린 설치도 이 릴리스로 설치합니다. 다른 릴리스의
+                compute 템플릿은 목록에 없고 보내도 거부됩니다.
+              </small>
             </div>
             <div className="field">
               <span>설치 방식</span>
@@ -1092,15 +1117,17 @@ export function AddComputeDialog({
                   disabled={mutation.isPending || resumable}
                 />
                 <small>
-                  이 farm과 같은 서비스로 얼린 compute 템플릿만 보입니다.
-                  OpenStack 릴리스가 다르면 추가가 거부됩니다.
+                  이 farm과 같은 릴리스·서비스로 얼린 compute 템플릿만 보입니다.
+                  다른 릴리스의 템플릿은 추가할 수 없습니다.
                 </small>
               </label>
             )}
             {fromSnapshot && !templates.length && !resumedTemplate && (
               <div className="warning-notice">
-                쓸 수 있는 compute 템플릿이 없습니다. 배포된 farm의 얼리기에서
-                compute VM 하나를 템플릿으로 얼려두세요.
+                쓸 수 있는 compute 템플릿이 없습니다. 이 farm과 같은 릴리스
+                {release ? `(OpenStack ${release})` : ""}·서비스로 얼린 compute
+                템플릿만 붙일 수 있습니다. 배포된 farm의 얼리기에서 compute VM
+                하나를 템플릿으로 얼려두세요.
               </div>
             )}
             <label className="field">

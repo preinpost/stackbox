@@ -1575,6 +1575,21 @@ h2 {
   font-size: 13px;
   color: #5c6f5a;
 }
+/* A value the farm fixes for good, such as the OpenStack release it runs. */
+.fixed-release {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  width: fit-content;
+  padding: 5px 10px;
+  border: 1px solid #e1e9e2;
+  border-radius: 7px;
+  background: #f7faf7;
+  color: #4c6553;
+  font-size: 13px;
+  font-weight: 550;
+}
+
 .action-context {
   display: flex;
   gap: 12px;

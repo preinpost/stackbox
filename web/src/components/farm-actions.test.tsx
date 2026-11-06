@@ -504,6 +504,7 @@ function singleVmPlan(memory_mib = 3072): Plan {
     memory_mib,
     disk_mib: 86016,
     components: ["keystone", "glance"],
+    release: "2026.2",
     warnings: [],
     nodes: [
       {
@@ -802,6 +803,9 @@ test("adds the next compute to the farm's primary host by default", async () => 
     </QueryClientProvider>,
   );
   await user.click(screen.getByRole("button", { name: "Compute 추가" }));
+  // The farm's release is fixed and shown with the VM being added, not the last one added.
+  expect(screen.getByText("OpenStack 2026.2")).toBeTruthy();
+  expect(screen.getByText("grow-compute-2")).toBeTruthy();
   await user.click(await screen.findByRole("button", { name: "추가" }));
   await waitFor(() => expect(submitted).toEqual({ host_id: "local" }));
   cleanup();
@@ -908,6 +912,15 @@ test("adds a compute from a compatible compute template", async () => {
       status: "ready",
       arch: "aarch64",
       template: "control",
+      plan,
+    },
+    // Another release cannot join this farm, even with the same services.
+    {
+      id: "old-release",
+      status: "ready",
+      arch: "aarch64",
+      template: "compute",
+      release: "2025.2",
       plan,
     },
     {
@@ -1091,6 +1104,15 @@ test("a farm made from a control template gains computes instead of a redeploy",
   const user = userEvent.setup();
   const plan = { ...singleVmPlan(), computes: 1 };
   const posted = stubFarmApi("/computes", [
+    // Another release cannot join this farm, even with the same services.
+    {
+      id: "old-release",
+      status: "ready",
+      arch: "aarch64",
+      template: "compute",
+      release: "2025.2",
+      plan,
+    },
     {
       id: "tpl",
       status: "ready",
