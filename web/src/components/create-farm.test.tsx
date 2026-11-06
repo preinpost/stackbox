@@ -6,7 +6,7 @@ import { afterEach, expect, test, vi } from "vitest";
 import type { Job, ReleasePlan } from "../api/client";
 import { activityStep } from "../pages/jobs-model";
 import { AssemblySteps } from "../pages/jobs-monitor";
-import { CreateFarmForm } from "./farm-actions";
+import { CreateFarmForm, bucketIssues } from "./farm-actions";
 import { releaseLabel } from "./release-create";
 
 const { navigate } = vi.hoisted(() => ({
@@ -356,7 +356,17 @@ test("a release this coordinator cannot install without templates is refused in 
     </QueryClientProvider>,
   );
   const user = userEvent.setup();
-  await screen.findByText(/조회하지 못한 버킷: minio: connection refused/);
+  // The failure stays one short line, and the coordinator's own error waits in the log.
+  await screen.findByText(/버킷 1개를 조회하지 못했습니다/);
+  expect(
+    screen.getByText("minio", { selector: ".bucket-notice-list code" }),
+  ).toBeTruthy();
+  expect(
+    screen.getByText("연결이 거부되었습니다", {
+      selector: ".bucket-notice-list span",
+    }),
+  ).toBeTruthy();
+  expect(screen.getByText("원문 로그 1건")).toBeTruthy();
   await user.type(screen.getByPlaceholderText("dev-openstack"), "old");
   await screen.findByText(/installs only OpenStack 2026.2 clean/);
   expect(
@@ -367,6 +377,32 @@ test("a release this coordinator cannot install without templates is refused in 
     ).disabled,
   ).toBe(true);
   client.clear();
+});
+
+test("turns a bucket's transport error into one line and keeps the log", () => {
+  const [dns] = bucketIssues([
+    "INNO: GET /abc: error sending request for url (https://s3.example.com/abc?list-type=2&max-keys=1000): client error (Connect): dns error: failed to lookup address information: nodename nor servname provided, or not known",
+  ]);
+  expect(dns.bucket).toBe("INNO");
+  expect(dns.reason).toBe("주소를 찾지 못했습니다 (DNS 조회 실패)");
+  expect(dns.detail).toMatch(/^GET \/abc/);
+  // The plan route repeats a failure as a note, and a bare reason has no bucket to name.
+  expect(
+    bucketIssues(["bucket not searched: minio: connection refused"]),
+  ).toEqual([
+    {
+      bucket: "minio",
+      reason: "연결이 거부되었습니다",
+      detail: "connection refused",
+    },
+  ]);
+  // A transport error that starts the string is not a bucket name, so it gets none.
+  expect(
+    bucketIssues(["dial tcp 10.0.0.5:9000: i/o timeout"])[0],
+  ).toMatchObject({
+    bucket: "",
+    reason: "시간 안에 응답하지 않았습니다",
+  });
 });
 
 test("labels releases by their templates and shows an assemble job's steps", () => {

@@ -23,6 +23,7 @@ import {
   ShieldCheck,
   Sparkles,
   Trash2,
+  TriangleAlert,
 } from "lucide-react";
 import { useEffect, useState } from "react";
 import {
@@ -100,6 +101,84 @@ function publicHostName(hostId: string, hosts: RemoteHost[] = []) {
 }
 /** Compute VM sizes the create form offers. Few disk sizes keep few golden images per host. */
 export const farmId = /^[a-z0-9]([a-z0-9-]{0,46}[a-z0-9])?$/;
+
+/** One bucket the release search could not reach, shown as one short line.
+ * `detail` keeps the coordinator's own error for the log it folds away. */
+export type BucketIssue = {
+  bucket: string;
+  reason: string;
+  detail: string;
+};
+
+/** The plan route reports the same failures as notes with this prefix. */
+const bucketNote = "bucket not searched: ";
+
+/** What a reader can act on, from the transport error a bucket search leaves behind. */
+const bucketReasons: [RegExp, string][] = [
+  [
+    /failed to lookup address|dns error|nodename nor servname|name or service not known/i,
+    "주소를 찾지 못했습니다 (DNS 조회 실패)",
+  ],
+  [/connection refused/i, "연결이 거부되었습니다"],
+  [/timed? ?out|timeout/i, "시간 안에 응답하지 않았습니다"],
+  [/certificate|tls|ssl/i, "보안 연결을 맺지 못했습니다"],
+  [
+    /403|access ?denied|invalidaccesskeyid|signaturedoesnotmatch/i,
+    "접근이 거부되었습니다",
+  ],
+  [/404|no ?such ?bucket/i, "버킷이 없습니다"],
+];
+
+const bucketReason = (detail: string) =>
+  bucketReasons.find(([pattern]) => pattern.test(detail))?.[1] ??
+  detail.split(": ")[0];
+
+/** Unreachable buckets as written by the API (`bucket: error`) or a plan note, split
+ * into the bucket, one short reason, and the error itself. */
+export function bucketIssues(errors: string[] = []): BucketIssue[] {
+  return errors.map((error) => {
+    const text = error.startsWith(bucketNote)
+      ? error.slice(bucketNote.length)
+      : error;
+    const cut = text.indexOf(": ");
+    // The name is the first colon-delimited part when it is a bare label, not the error's prose.
+    const name = cut > 0 ? text.slice(0, cut) : "";
+    const bucket = name && !name.includes(" ") ? name : "";
+    const detail = bucket ? text.slice(cut + 2) : text;
+    return { bucket, reason: bucketReason(detail), detail };
+  });
+}
+
+/** Buckets a release search could not reach, above the log that explains each one. */
+function BucketNotice({ errors }: { errors: string[] }) {
+  const issues = bucketIssues(errors);
+  if (!issues.length) return null;
+  return (
+    <div className="bucket-notice">
+      <div className="bucket-notice-head">
+        <TriangleAlert size={15} className="shrink-0" />
+        <span>
+          버킷 {issues.length}개를 조회하지 못했습니다. 그 버킷의 템플릿은
+          후보에서 빠지고, 찾은 템플릿이나 클린 설치로 계획합니다.
+        </span>
+      </div>
+      <ul className="bucket-notice-list">
+        {issues.map((issue) => (
+          <li key={`${issue.bucket} ${issue.detail}`}>
+            <code>{issue.bucket || "이름 없음"}</code>
+            <span title={issue.detail}>{issue.reason}</span>
+          </li>
+        ))}
+      </ul>
+      <details className="bucket-notice-log">
+        <summary>원문 로그 {issues.length}건</summary>
+        {issues.map((issue) => (
+          <pre key={issue.detail}>{issue.detail}</pre>
+        ))}
+      </details>
+    </div>
+  );
+}
 
 const computeSizes: { name: string; size: ComputeSize }[] = [
   { name: "기본", size: { cpus: 2, memory_mib: 3072, disk_mib: 32768 } },
@@ -267,6 +346,15 @@ export function CreateFarmForm({
     staleTime: 10_000,
     placeholderData: keepPreviousData,
   });
+  // The catalog and the plan both name a bucket they could not search, once each.
+  const bucketErrors = Array.from(
+    new Set([
+      ...(releases.data?.unreachable ?? []),
+      ...(releasePlan.data?.notes ?? [])
+        .filter((note) => note.startsWith(bucketNote))
+        .map((note) => note.slice(bucketNote.length)),
+    ]),
+  );
   const mutation = useMutation({
     mutationFn: api.createRelease,
     onMutate: () => onPending(true),
@@ -509,11 +597,10 @@ export function CreateFarmForm({
                   고른 릴리스의 템플릿이 구성과 맞으면 그 템플릿으로 VM을
                   만들고, 없으면 그 릴리스의 kolla-ansible 브랜치로 클린
                   설치합니다.
-                  {!!releases.data?.unreachable?.length &&
-                    ` 조회하지 못한 버킷: ${releases.data.unreachable.join(", ")}`}
                 </p>
               </>
             )}
+            <BucketNotice errors={bucketErrors} />
           </div>
           <div>
             <span className="field-label">OpenStack 서비스</span>
@@ -642,11 +729,13 @@ export function CreateFarmForm({
                   OpenStack {releasePlan.data.release} ·{" "}
                   {releasePlan.data.components.join(", ")}
                 </p>
-                {releasePlan.data.notes?.map((note) => (
-                  <p key={note} className="muted">
-                    {note}
-                  </p>
-                ))}
+                {releasePlan.data.notes
+                  ?.filter((note) => !note.startsWith(bucketNote))
+                  .map((note) => (
+                    <p key={note} className="muted">
+                      {note}
+                    </p>
+                  ))}
               </>
             ) : null}
             {plan.data && (
