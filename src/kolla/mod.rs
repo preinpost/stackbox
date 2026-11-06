@@ -687,7 +687,7 @@ async fn deploy_phases(
             }
             Phase::Deploy => {
                 step(sink, "kolla-ansible deploy")?;
-                stream(deployer, &kolla_ansible("deploy"), &log, sink).await
+                stream(deployer, &deploy_script(), &log, sink).await
             }
             Phase::PostDeploy => {
                 step(sink, "kolla-ansible post-deploy (admin-openrc.sh 생성)")?;
@@ -696,7 +696,13 @@ async fn deploy_phases(
             }
             Phase::Verify => {
                 step(sink, "배포 검증 시작")?;
-                let script = verify_script(components, topology.computes.len());
+                // An all-in-one VM runs nova-compute itself.
+                let hosts = if topology.multinode() {
+                    topology.computes.len()
+                } else {
+                    1
+                };
+                let script = verify_script(components, hosts);
                 stream(deployer, &script, &log, sink).await
             }
         }
@@ -1314,12 +1320,24 @@ echo "external network public ready on {EXTERNAL_NETWORK}""#
     script
 }
 
+/// Kolla's Libvirt version check delegates to the first compute host, and ansible-core
+/// templates `delegate_to` before the block's `when`, so with no compute VM yet it fails
+/// on an empty group. `add-compute` deploys the compute VM later, which runs the check.
+fn deploy_script() -> String {
+    let deploy = kolla_ansible("deploy");
+    format!(
+        "if {no_computes}; then {deploy} --skip-tags nova-libvirt-version-check; else {deploy}; fi",
+        no_computes = no_compute_hosts(INVENTORY),
+    )
+}
+
 fn kolla_ansible(command: &str) -> String {
     // kolla-ansible shells out to ansible-playbook and ansible-galaxy from PATH.
     format!("PATH={VENV}/bin:$PATH kolla-ansible {command} -i {INVENTORY}")
 }
 
-/// `computes`: a multi-node farm's compute VMs, whose nova-compute services must all be up.
+/// `computes`: the nova-compute services that must be up; none for a control VM whose
+/// computes join later, which only checks that the Nova API answers.
 fn verify_script(components: &[String], computes: usize) -> String {
     let has = |id: &str| components.iter().any(|c| c == id);
     let mut script = format!(
@@ -1397,7 +1415,13 @@ echo "horizon OK: ${home#200 }"
         script.push_str(&neutron_verify_script());
     }
     if has("nova") {
-        script.push_str(&nova_verify_script(computes.max(1)));
+        if computes == 0 {
+            script.push_str(
+                "step \"Nova API 확인 (compute VM 없음)\"\n$os compute service list -f value -c ID >/dev/null\necho \"nova OK (no compute VM yet)\"\n",
+            );
+        } else {
+            script.push_str(&nova_verify_script(computes));
+        }
     }
     script
 }
@@ -1572,8 +1596,9 @@ mod tests {
             install_script(OPENSTACK_RELEASE),
             post_deploy_script(&components, false),
             post_deploy_script(&components, true),
-            verify_script(&components, 0),
+            verify_script(&components, 1),
             verify_script(&components, 2),
+            verify_script(&components, 0),
             settle_script(None, &components),
             settle_script(Some((&from, &to)), &components),
             forget_computes_script(&components),
@@ -1608,7 +1633,7 @@ mod tests {
             install_script(OPENSTACK_RELEASE),
             post_deploy_script(&components, false),
             post_deploy_script(&components, true),
-            verify_script(&components, 0),
+            verify_script(&components, 1),
             verify_script(&components, 2),
             settle_script(None, &components),
             forget_computes_script(&components),
@@ -1629,8 +1654,10 @@ mod tests {
         .unwrap();
         assert!(control_only.multinode());
         assert!(post_deploy_script(&components, control_only.multinode()).contains("physnet2"));
+        let alone = verify_script(&components, 0);
+        assert!(alone.contains("no compute VM yet") && !alone.contains("nova-compute is not up"));
 
-        let verify = verify_script(&components, 0);
+        let verify = verify_script(&components, 1);
         assert!(
             !verify.contains("ssh "),
             "all-in-one verification must not require distributed SSH keys"
@@ -1640,7 +1667,7 @@ mod tests {
         assert!(verify.contains("cirros-0.6.3-aarch64-disk.img"));
         for script in [
             install_script(OPENSTACK_RELEASE),
-            verify_script(&components, 0),
+            verify_script(&components, 1),
             verify_script(&components, 2),
             post_deploy_script(&components, false),
             post_deploy_script(&components, true),
