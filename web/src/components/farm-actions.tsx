@@ -37,7 +37,6 @@ import {
   snapshotsQuery,
   type ComputeSize,
   type Farm,
-  type FarmLayout,
   type Job,
   type Phase,
   type ReleaseCreateRequest,
@@ -256,24 +255,18 @@ export function CreateFarmForm({
         (a.local_control + a.bucket_control),
     )[0]?.release;
   const [selected, setSelected] = useState<string[]>([]);
-  // One VM that runs everything, a control VM that computes join later, or computes now.
-  // Compute VMs bring Nova, and so does a control VM alone.
-  const [setup, setSetup] = useState("all-in-one");
-  const layout: FarmLayout | undefined =
-    setup === "all-in-one"
-      ? "all-in-one"
-      : setup === "control"
-        ? "control"
-        : undefined;
-  const computes = layout ? 0 : Number(setup);
+  // A new farm always runs a control VM and the compute VMs it is made with; one compute
+  // by default so a compute template can join it later.
+  const [setup, setSetup] = useState("1");
+  const computes = Number(setup);
   const [sizeIndex, setSizeIndex] = useState(0);
   // Compute VMs placed on another host than the control VM's (`compute-2` → host id).
   const [placed, setPlaced] = useState<Record<string, string>>({});
-  const compute = computes > 0 ? computeSizes[sizeIndex].size : undefined;
-  const requested =
-    (computes > 0 || layout === "control") && !selected.includes("nova")
-      ? [...selected, "nova"]
-      : selected;
+  const compute = computeSizes[sizeIndex].size;
+  // A compute VM runs Nova instances, so Nova always comes with it.
+  const requested = selected.includes("nova")
+    ? selected
+    : [...selected, "nova"];
   // Until the user picks one, default to the given host, else the first ready one.
   const [picked, setPicked] = useState(initialHost);
   // Templates live on the local host, so it is the default for the control VM.
@@ -305,9 +298,8 @@ export function CreateFarmForm({
     requested,
   );
   const plan = useQuery({
-    queryKey: ["plan", components, computes, compute, layout],
-    queryFn: ({ signal }) =>
-      api.plan(components, computes, signal, compute, layout),
+    queryKey: ["plan", components, computes, compute],
+    queryFn: ({ signal }) => api.plan(components, computes, signal, compute),
     enabled: catalog.isSuccess,
     staleTime: Infinity,
   });
@@ -330,7 +322,6 @@ export function CreateFarmForm({
             (_, i) => placement[`compute-${i + 1}`] ?? "",
           ),
           ...(compute ? { compute } : {}),
-          ...(layout ? { layout } : {}),
           external_host: hostName,
         }
       : undefined;
@@ -489,44 +480,38 @@ export function CreateFarmForm({
               onChange={setSetup}
               disabled={mutation.isPending}
               label="VM 구성"
-              items={[
-                { value: "all-in-one", label: "All-in-one · VM 1대" },
-                { value: "control", label: "Control만 · compute는 나중에" },
-                ...[1, 2, 3].map((n) => ({
-                  value: String(n),
-                  label: `Control + Compute ${n}대`,
-                })),
-              ]}
+              items={[1, 2, 3].map((n) => ({
+                value: String(n),
+                label: `Control + Compute ${n}대`,
+              }))}
             />
             <p className="field-hint mt-2">
-              {layout === "all-in-one"
-                ? "모든 서비스를 VM 한 대에 설치합니다. 이 farm에는 compute VM을 추가할 수 없습니다."
-                : layout === "control"
-                  ? "control VM에 OpenStack을 설치하고 Nova는 compute가 붙을 때까지 기다립니다. compute 스냅샷은 farm 상세 화면에서 추가합니다."
-                  : "control VM이 API·DB·MQ·네트워크 노드와 Kolla를 맡고, compute VM에서 Nova 인스턴스가 실행됩니다. VM끼리는 호스트의 링크 스위치로 연결되며, 상세 화면에서 compute VM을 고립시켜 evacuate를 시험할 수 있습니다."}
+              control VM이 API·DB·MQ·네트워크 노드와 Kolla를 맡고, compute
+              VM에서 Nova 인스턴스가 실행됩니다. VM끼리는 호스트의 링크 스위치로
+              연결되며, 상세 화면에서 compute VM을 고립시켜 evacuate를 시험할 수
+              있습니다. compute는 스냅샷(compute 템플릿)으로 붙일 수 있고,
+              템플릿이 없으면 클린 설치합니다.
             </p>
           </div>
-          {computes > 0 && (
-            <div>
-              <span className="field-label">Compute VM 사양</span>
-              <SelectInput
-                value={String(sizeIndex)}
-                onChange={(value) => setSizeIndex(Number(value))}
-                disabled={mutation.isPending}
-                label="Compute VM 사양"
-                items={computeSizes.map(({ name, size }, index) => ({
-                  value: String(index),
-                  label: `${name} · ${size.cpus} vCPU · 메모리 ${memory(size.memory_mib)} · 디스크 ${memory(size.disk_mib)}`,
-                }))}
-              />
-              <p className="field-hint mt-2">
-                compute VM마다 같은 사양입니다. nova-compute·libvirt·OVS가 약
-                0.8 GiB를 쓰고 나머지가 인스턴스 몫입니다. 인스턴스 디스크는
-                디스크 크기 안에 만들어지며, 처음 쓰는 디스크 크기는 호스트에서
-                golden image를 한 번 더 만듭니다(약 35초).
-              </p>
-            </div>
-          )}
+          <div>
+            <span className="field-label">Compute VM 사양</span>
+            <SelectInput
+              value={String(sizeIndex)}
+              onChange={(value) => setSizeIndex(Number(value))}
+              disabled={mutation.isPending}
+              label="Compute VM 사양"
+              items={computeSizes.map(({ name, size }, index) => ({
+                value: String(index),
+                label: `${name} · ${size.cpus} vCPU · 메모리 ${memory(size.memory_mib)} · 디스크 ${memory(size.disk_mib)}`,
+              }))}
+            />
+            <p className="field-hint mt-2">
+              compute VM마다 같은 사양입니다. nova-compute·libvirt·OVS가 약 0.8
+              GiB를 쓰고 나머지가 인스턴스 몫입니다. 인스턴스 디스크는 디스크
+              크기 안에 만들어지며, 처음 쓰는 디스크 크기는 호스트에서 golden
+              image를 한 번 더 만듭니다(약 35초).
+            </p>
+          </div>
           {canSpan && (
             <div>
               <span className="field-label">VM 배치</span>
@@ -618,7 +603,7 @@ export function CreateFarmForm({
                       ]).includes(c.id),
                   )
                   .map((other) => componentLabel(other.id));
-                const forCompute = computes > 0 && c.id === "nova";
+                const forCompute = c.id === "nova";
                 const locked =
                   c.required ||
                   !c.available ||
@@ -632,21 +617,13 @@ export function CreateFarmForm({
                     <Checkbox.Root
                       checked={included}
                       disabled={locked || mutation.isPending}
-                      onCheckedChange={(checked) => {
+                      onCheckedChange={(checked) =>
                         setSelected((current) =>
                           checked
                             ? [...current, c.id]
                             : current.filter((id) => id !== c.id),
-                        );
-                        // Nova instances need a compute VM, and all-in-one has none.
-                        if (
-                          checked &&
-                          c.id === "nova" &&
-                          setup === "all-in-one"
-                        ) {
-                          setSetup("1");
-                        }
-                      }}
+                        )
+                      }
                       className="checkbox"
                     >
                       <Checkbox.Indicator>
@@ -675,9 +652,8 @@ export function CreateFarmForm({
               })}
             </div>
             <p className="field-hint mt-2">
-              {computes > 0
-                ? "의존성은 자동으로 포함됩니다. Nova를 뺀 서비스와 DB·메시지 큐는 control VM의 컨테이너로 실행됩니다."
-                : "의존성은 자동으로 포함됩니다. 선택한 서비스와 DB·메시지 큐는 같은 VM의 컨테이너로 실행되며, 추가 서비스의 메모리도 이 VM에 합산됩니다."}
+              의존성은 자동으로 포함됩니다. Nova를 뺀 서비스와 DB·메시지 큐는
+              control VM의 컨테이너로 실행됩니다.
             </p>
           </div>
           <label className="field">
@@ -784,11 +760,7 @@ export function CreateFarmForm({
         <div className="modal-footer">
           <span className="flex items-center gap-1.5 text-xs text-stone-500">
             <ShieldCheck size={14} />
-            {computes > 0
-              ? `Farm 전용 VM ${computes + 1}대와 내부망`
-              : layout === "control"
-                ? "Control VM 1대, compute는 나중에"
-                : "Farm마다 독립된 VM 한 대"}
+            {`Farm 전용 VM ${computes + 1}대와 내부망`}
           </span>
           <div className="flex gap-2">
             <Dialog.Close render={<Button disabled={mutation.isPending} />}>
@@ -903,7 +875,6 @@ export function DeployFarmDialog({
               <div>
                 <strong className="font-mono">{farm.id}</strong>
                 <p>
-                  VM 한 대에{" "}
                   {farmComponents(farm).map(componentLabel).join(" · ")} 배포
                 </p>
               </div>

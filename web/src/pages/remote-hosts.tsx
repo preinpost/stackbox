@@ -195,7 +195,8 @@ export function RemoteHostsPage() {
           <span>
             Farm은 등록하고 준비를 마친 호스트에서만 실행됩니다. 로컬 호스트는
             등록 후 바로 점검하고, 원격 서버는 SSH 점검과 환경 준비, Farm 실행기
-            설치를 거칩니다. Farm마다 VM 한 대를 선택한 호스트에서 실행합니다.
+            설치를 거칩니다. Farm마다 control VM과 compute VM을 선택한
+            호스트에서 실행합니다.
           </span>
         </p>
       </div>

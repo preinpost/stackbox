@@ -288,14 +288,13 @@ export const api = {
     }),
   plan: (
     components: string[],
-    computes = 0,
+    computes = 1,
     signal?: AbortSignal,
     compute?: ComputeSize,
-    layout?: FarmLayout,
   ) =>
     request<Plan>("/plans", {
       method: "POST",
-      body: JSON.stringify({ components, computes, compute, layout }),
+      body: JSON.stringify({ components, computes, compute }),
       signal,
     }),
   /** No delay and no loss heals the VM. */

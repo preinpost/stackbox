@@ -958,8 +958,8 @@ export interface components {
       port_base: number;
     };
     /**
-     * @description How a farm without compute VMs lays its service out, so that "one VM" and "a control
-     *     VM that gains computes later" are never the same choice.
+     * @description The layout of a farm without computes, kept readable for farms and snapshots made
+     *     before every new farm ran a control VM with computes.
      * @enum {string}
      */
     FarmLayout: "all-in-one" | "control";
@@ -1303,8 +1303,8 @@ export interface components {
       compute: null | components["schemas"]["ComputeSize"];
       /**
        * Format: int32
-       * @description Compute VMs beside a control VM, up to 3; 0 runs everything in one all-in-one VM.
-       *     A multi-node farm always runs Nova and Neutron.
+       * @description Compute VMs beside a control VM, 1-3. A farm always runs Nova and Neutron; a
+       *     request with none is refused, as are the legacy layouts below.
        * @default 0
        */
       computes: number;

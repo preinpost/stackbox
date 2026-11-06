@@ -284,7 +284,7 @@ export function FarmsPage() {
           <EmptyState
             icon={<FarmIllustration />}
             title="첫 번째 farm을 만들어보세요"
-            description="VM 한 대로 시작하는 독립된 OpenStack 환경. 프로필과 설치할 서비스를 선택하세요."
+            description="control VM과 compute VM으로 이루어진 독립된 OpenStack 환경. 프로필과 설치할 서비스를 선택하세요."
             action={<CreateFarmDialog prominent />}
           />
         ) : farms.data && table.getRowModel().rows.length === 0 ? (

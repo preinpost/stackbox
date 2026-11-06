@@ -1,6 +1,10 @@
 # Farm당 VM 1대
 
-새 Farm은 farm id와 같은 이름의 VM `<id>` 하나에 Ansible 실행기와 선택한 모든 OpenStack 서비스를
+> 이 문서는 단일 VM 전환 당시의 기록입니다. 지금 새 Farm은 control VM 1대와 compute VM 1~3대로
+> 만들며([README의 다중 VM farm](../README.md#다중-vm-farm)), all-in-one farm은 예전 기록과 스냅샷으로만
+> 남아 있습니다.
+
+당시 새 Farm은 farm id와 같은 이름의 VM `<id>` 하나에 Ansible 실행기와 선택한 모든 OpenStack 서비스를
 설치한다. 별도 deployer·LB·infra·control·compute VM과 Farm 관리 VXLAN은 만들지 않는다.
 배포 inventory는 Kolla가 제공하는 all-in-one이며 Ansible 연결은 local이다.
 

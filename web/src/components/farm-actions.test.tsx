@@ -295,9 +295,8 @@ test("adds optional services with their dependencies and keeps unavailable ones 
             component("placement", ["keystone"]),
             component("horizon", ["keystone"]),
             component("neutron", ["keystone"]),
-            component("nova", ["keystone", "glance", "placement", "neutron"], {
-              available: false,
-            }),
+            component("nova", ["keystone", "glance", "placement", "neutron"]),
+            component("cinder", [], { available: false }),
           ],
         });
       if (path.endsWith("/plans")) {
@@ -348,13 +347,23 @@ test("adds optional services with their dependencies and keeps unavailable ones 
       .closest("label")!
       .querySelector("[role=checkbox]")!;
   expect((await box("Keystone")).getAttribute("aria-disabled")).toBe("true");
+  // Every new farm runs a compute, so Nova and its network node come along locked.
   expect((await box("Nova")).getAttribute("aria-disabled")).toBe("true");
-  expect((await box("Nova")).getAttribute("aria-checked")).toBe("false");
-  expect((await box("Neutron")).getAttribute("aria-disabled")).toBe(null);
+  expect((await box("Nova")).getAttribute("aria-checked")).toBe("true");
+  expect((await box("Neutron")).getAttribute("aria-disabled")).toBe("true");
+  expect((await box("cinder")).getAttribute("aria-disabled")).toBe("true");
+  expect((await box("cinder")).getAttribute("aria-checked")).toBe("false");
   await user.click(await box("Horizon"));
   expect((await box("Horizon")).getAttribute("aria-checked")).toBe("true");
   await waitFor(() =>
-    expect(planned.at(-1)).toEqual(["keystone", "glance", "horizon"]),
+    expect(planned.at(-1)).toEqual([
+      "keystone",
+      "glance",
+      "placement",
+      "horizon",
+      "neutron",
+      "nova",
+    ]),
   );
   expect(screen.getByText("3.5 GiB")).toBeTruthy();
   expect(
@@ -367,12 +376,19 @@ test("adds optional services with their dependencies and keeps unavailable ones 
   );
   await user.click(submit);
   await waitFor(() =>
-    expect(submitted?.components).toEqual(["keystone", "glance", "horizon"]),
+    expect(submitted?.components).toEqual([
+      "keystone",
+      "glance",
+      "placement",
+      "horizon",
+      "neutron",
+      "nova",
+    ]),
   );
   client.clear();
 });
 
-test("creates a control VM alone so computes can join it later", async () => {
+test("a new farm carries one compute by default so a template can join it", async () => {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
@@ -425,14 +441,9 @@ test("creates a control VM alone so computes can join it later", async () => {
     </QueryClientProvider>,
   );
   const user = userEvent.setup();
-  await user.click(await screen.findByRole("combobox", { name: "VM 구성" }));
-  await user.click(
-    await screen.findByRole("option", { name: "Control만 · compute는 나중에" }),
-  );
-  // Nova's control plane is installed now, its compute later.
-  await waitFor(() =>
-    expect(planned.at(-1)).toMatchObject({ computes: 0, layout: "control" }),
-  );
+  // The form opens on a control VM with one compute, and Nova comes with it.
+  await waitFor(() => expect(planned.at(-1)).toMatchObject({ computes: 1 }));
+  expect(planned.at(-1)).not.toHaveProperty("layout");
   expect(planned.at(-1)?.components).toContain("nova");
 
   await user.type(screen.getByPlaceholderText("dev-openstack"), "ctl");
@@ -442,12 +453,9 @@ test("creates a control VM alone so computes can join it later", async () => {
   );
   await user.click(submit);
   await waitFor(() =>
-    expect(submitted).toMatchObject({
-      id: "ctl",
-      computes: 0,
-      layout: "control",
-    }),
+    expect(submitted).toMatchObject({ id: "ctl", computes: 1 }),
   );
+  expect(submitted).not.toHaveProperty("layout");
   client.clear();
 });
 

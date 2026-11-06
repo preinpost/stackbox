@@ -1,9 +1,9 @@
 # farm
 
 Farm마다 microsandbox VM을 만들고 Kolla로 OpenStack을 설치하는 Rust CLI와 REST API 데몬입니다.
-기본은 VM **1대**(all-in-one)로, 선택한 모든 서비스와 Ansible 실행기가 같은 VM에서 동작합니다.
-**control 1 + compute 1~3** 구성도 고를 수 있습니다. 이때 VM들은 호스트의 링크 스위치로 이어지고,
-compute VM을 고립시켜 evacuate 같은 장애 대응을 시험할 수 있습니다([다중 VM farm](#다중-vm-farm)).
+새 farm은 **control 1 + compute 1~3**으로 만들어지며 기본은 compute 1대입니다. VM들은 호스트의 링크
+스위치로 이어지고, compute VM을 고립시켜 evacuate 같은 장애 대응을 시험할 수 있습니다
+([다중 VM farm](#다중-vm-farm)).
 웹포탈 backend는 `farm serve`의 API를 호출해 farm 생성·배포·삭제 작업과 로그를 추적할 수 있습니다.
 
 항상 **Keystone + Glance**를 배포하고, 선택 서비스로 **Placement**, **Horizon**, **Neutron**,
@@ -32,8 +32,8 @@ CLI는 작업이 끝날 때까지 기다립니다.
 ```bash
 farm host local                 # 로컬 호스트로 등록하고 준비 (시험 VM 부팅)
 farm host list
-farm create demo --host-id local                      # 1 VM / 3 GiB (Keystone·Glance)
-farm create web --host-id local --components horizon  # 선택 서비스만큼 메모리 증가
+farm create demo --host-id local                      # control 1 + compute 1 (Nova 포함)
+farm create web --host-id local --components horizon  # 선택 서비스만큼 control VM 메모리 증가
 farm deploy demo
 farm deploy demo --from prechecks
 farm status demo --json
@@ -77,15 +77,14 @@ farm settle demo                         # VM 재시작 뒤 배포 없이 서비
 
 ## 다중 VM farm
 
-생성 요청의 `computes`(CLI `--computes`, 포털의 **VM 구성**)가 1~3이면 control VM 1대와 compute VM N대를 만듭니다.
-Nova와 그 의존성(Placement, Neutron)이 자동으로 들어갑니다.
+모든 새 farm은 control VM 1대와 compute VM 1~3대입니다. 생성 요청의 `computes`(CLI `--computes`, 포털의
+**VM 구성**)가 그 수를 정하며 기본은 1이고, Nova와 그 의존성(Placement, Neutron)이 compute와 함께 들어갑니다.
+포털의 **VM 구성**은 `Control + Compute 1대`·`2대`·`3대`만 제공합니다.
 
-`computes`가 0이면 `layout`이 VM 구성을 정합니다. `all-in-one`은 VM 1대에 모든 서비스를 설치하고 compute를
-추가할 수 없으며, `control`은 control VM만 만들어 OpenStack을 설치한 뒤 compute를 하나씩 붙입니다.
-포털의 **VM 구성**이 `All-in-one · VM 1대`와 `Control만 · compute는 나중에`를 이 값으로 갈라 보내고,
-control로 만든 farm에는 상세 화면의 compute 추가(compute 템플릿 포함)로 compute가 들어옵니다.
-`layout`을 생략하면 이전과 같이 `computes`가 0일 때 all-in-one입니다(릴리스 경로에서 control 템플릿이 있으면
-그 control VM 하나로 시작).
+`layout`(`all-in-one`·`control`)과 `computes: 0`으로는 새 farm을 만들지 않습니다. 예전에 만든 farm과
+스냅샷은 그 layout을 그대로 읽고 배포·compute 추가·삭제·복원할 수 있지만, `POST /plans`·
+`POST /farms`(`snapshot_id` 없이)·`POST /releases/plan`·`POST /releases/farms`는 이 값들을 `400`으로
+거절합니다. 스냅샷 복원(`snapshot_id`)만 얼린 layout을 그대로 따릅니다.
 
 - **VM**: `<farm>-control`(4 vCPU, 서비스에 따라 6.5 GiB 안팎)은 API·DB·MQ·네트워크 노드(L3·DHCP)와 Kolla를,
   `<farm>-compute-<n>`(기본 2 vCPU, 3 GiB)은 nova-compute·libvirt·OVS agent를 맡습니다. 공개 포트는 control VM만 엽니다.
@@ -231,7 +230,8 @@ farm add-compute c13 --from-snapshot src-compute-tpl        # compute-2, 3: comp
   남은 placement resource provider, `farm-compute-*`의 Neutron agent, `nova-manage cell_v2 delete_host`.
   Kolla inventory의 `[compute]`와 control VM의 compute SSH host key도 비우므로 첫 확장은 compute-1입니다.
 - 스냅샷(control 템플릿)에서 복원한 farm은 다시 배포(`deploy`)할 수 없고 farm 전체로도 얼릴 수 없습니다(control 템플릿만).
-  클린 설치로 만든 control-only farm(`layout: control`)은 첫 배포가 필요하고, 배포한 뒤 compute를 붙입니다.
+  예전에 클린 설치로 만든 control-only farm(`layout: control`)은 첫 배포가 필요하고, 배포한 뒤 compute를 붙입니다.
+  새 farm은 이 layout으로 만들 수 없으므로, compute 없이 시작하는 farm은 이 템플릿 복원 경로뿐입니다.
   compute 템플릿은 여전히 farm 복원에 쓸 수 없습니다.
 - `farm create --host-id <원격 호스트> --snapshot <control 템플릿>`도 됩니다. compute 템플릿과 같이
   그 호스트에 복사본을 먼저 둡니다.
@@ -535,12 +535,12 @@ namespace에서 DHCP 포트를 ping한 뒤 지웁니다. `scripts/verify-opensta
 저장하지 않습니다. 실패 시 배포 로그를 확인한 뒤 `deploy e2e --from <phase>`로 재개할 수 있습니다.
 
 Kolla의 기본 Ansible 출력에는 서비스 비밀값이 포함될 수 있어 Farm은 작업명과
-호스트별 결과만 전달하는 callback을 사용합니다. 실패 상세는 all-in-one VM의
+호스트별 결과만 전달하는 callback을 사용합니다. 실패 상세는 control VM의
 `/var/log/farm/ansible-failures.jsonl`에 root 전용 권한(`0600`)으로 남기며,
 Ansible의 `no_log` 작업은 이 파일에서도 내용을 숨깁니다.
 
-단일 VM 전환의 구조와 호환성은 [docs/single-vm.md](docs/single-vm.md), 이전 다중 VM 실배포 기록은
-[docs/local-validation.md](docs/local-validation.md)에 있습니다.
+이전 단일 VM 전환의 구조와 호환성은 [docs/single-vm.md](docs/single-vm.md), 그 이전 다중 VM 실배포
+기록은 [docs/local-validation.md](docs/local-validation.md)에 있습니다.
 
 ## 릴리스
 

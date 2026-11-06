@@ -561,7 +561,9 @@ async fn catalog_handler() -> Json<Catalog> {
 async fn plan_handler(
     value: Result<Json<PlanRequest>, JsonRejection>,
 ) -> Result<Json<Plan>, ApiError> {
-    Ok(Json(plan(&body(value)?).map_err(bad)?))
+    let request = body(value)?;
+    require_multi_node(request.computes, request.layout).map_err(bad)?;
+    Ok(Json(plan(&request).map_err(bad)?))
 }
 #[utoipa::path(get, path="/api/v1/farms", responses((status=200, body=Vec<FarmRecord>)))]
 async fn list(State(app): State<App>) -> Result<Json<Vec<FarmRecord>>, ApiError> {
@@ -580,6 +582,10 @@ async fn create(
     value: Result<Json<CreateRequest>, JsonRejection>,
 ) -> Result<Response, ApiError> {
     let request = body(value)?;
+    // A snapshot restore keeps the layout it was frozen with, including the legacy ones.
+    if request.snapshot_id.is_none() {
+        require_multi_node(request.computes, request.layout).map_err(bad)?;
+    }
     request.validate().map_err(bad)?;
     Ok(accepted(app.manager.create(request)?))
 }
@@ -606,14 +612,18 @@ async fn release_plan(
     State(app): State<App>,
     value: Result<Json<ReleaseCreateRequest>, JsonRejection>,
 ) -> Result<Json<ReleasePlan>, ApiError> {
-    Ok(Json(app.manager.preview_release(&body(value)?).await?))
+    let request = body(value)?;
+    require_multi_node(request.computes, request.layout).map_err(bad)?;
+    Ok(Json(app.manager.preview_release(&request).await?))
 }
 #[utoipa::path(post, path="/api/v1/releases/farms", request_body=ReleaseCreateRequest, responses((status=202, description="Assemble job: the plan's imports, the control VM, then each compute, each step a job of its own listed in `assembly`", body=Job), (status=400, body=ErrorBody), (status=404, body=ErrorBody), (status=409, body=ErrorBody)))]
 async fn create_release(
     State(app): State<App>,
     value: Result<Json<ReleaseCreateRequest>, JsonRejection>,
 ) -> Result<Response, ApiError> {
-    Ok(accepted(app.manager.create_release(body(value)?).await?))
+    let request = body(value)?;
+    require_multi_node(request.computes, request.layout).map_err(bad)?;
+    Ok(accepted(app.manager.create_release(request).await?))
 }
 fn accepted(job: Job) -> Response {
     (

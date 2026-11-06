@@ -223,7 +223,7 @@ const renderForm = (client: QueryClient) =>
     </QueryClientProvider>,
   );
 
-test("an all-in-one VM and a control VM alone are separate choices", async () => {
+test("a new farm is a control VM with one compute by default", async () => {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
@@ -255,12 +255,17 @@ test("an all-in-one VM and a control VM alone are separate choices", async () =>
           arch: "aarch64",
           components: ["keystone", "glance"],
           control: {
-            node: body.layout === "control" ? "control" : "all-in-one",
+            node: "control",
             host_id: "local",
             source: "clean",
             reason: "installed clean with OpenStack 2026.2",
           },
-          computes: [],
+          computes: Array.from({ length: body.computes }, (_, i) => ({
+            node: `compute-${i + 1}`,
+            host_id: body.compute_hosts[i] || "local",
+            source: "clean",
+            reason: "installed clean with OpenStack 2026.2",
+          })),
           notes: [],
         });
       }
@@ -274,36 +279,25 @@ test("an all-in-one VM and a control VM alone are separate choices", async () =>
   renderForm(client);
   const user = userEvent.setup();
   await user.type(screen.getByPlaceholderText("dev-openstack"), "ctl");
-  // One VM that runs everything is the default, and says so.
-  await waitFor(() =>
-    expect(previews.at(-1)).toMatchObject({
-      computes: 0,
-      layout: "all-in-one",
-    }),
-  );
-  await screen.findByText("all-in-one", { selector: ".plan-summary strong" });
+  // One compute VM joins the control VM by default, and no legacy layout rides along.
+  await waitFor(() => expect(previews.at(-1)).toMatchObject({ computes: 1 }));
+  expect(previews.at(-1)).not.toHaveProperty("layout");
+  await screen.findByText("control", { selector: ".plan-summary strong" });
 
-  // Both layouts are offered beside the computes.
+  // All-in-one and control-only are gone; only the computes are chosen.
   await user.click(screen.getByRole("combobox", { name: "VM 구성" }));
   const options = (await screen.findAllByRole("option")).map((option) =>
     option.textContent?.trim(),
   );
   expect(options).toEqual([
-    "All-in-one · VM 1대",
-    "Control만 · compute는 나중에",
     "Control + Compute 1대",
     "Control + Compute 2대",
     "Control + Compute 3대",
   ]);
   await user.click(
-    screen.getByRole("option", { name: "Control만 · compute는 나중에" }),
+    screen.getByRole("option", { name: "Control + Compute 2대" }),
   );
-
-  // A control VM alone leaves room for computes from templates to join later.
-  await waitFor(() =>
-    expect(previews.at(-1)).toMatchObject({ computes: 0, layout: "control" }),
-  );
-  await screen.findByText("control", { selector: ".plan-summary strong" });
+  await waitFor(() => expect(previews.at(-1)).toMatchObject({ computes: 2 }));
   client.clear();
 });
 

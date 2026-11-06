@@ -17,12 +17,14 @@ API prefix는 `/api/v1`입니다. token이 설정된 경우 모든 경로에
 ## 생성과 배포
 
 1. `GET /hosts`, `GET /catalog`로 실행할 호스트의 준비 상태와 지원 범위를 확인합니다.
-2. `POST /plans`에 `{"components":["horizon"]}`처럼 추가할 서비스를 전달합니다.
+2. `POST /plans`에 `{"components":["horizon"],"computes":1}`처럼 추가할 서비스를 전달합니다.
    필수 컴포넌트(Keystone·Glance)와 선택 서비스의 `depends_on`은 자동으로 포함되며, 응답의
    `components`는 catalog 순서로 정리된 최종 목록입니다. 모르는 컴포넌트나 `available: false`인
-   컴포넌트는 `400`으로 거절합니다. 새 계획의 `nodes`는 항상 `role: "all-in-one"` 한 개입니다.
-   Placement·Horizon·Neutron은 같은 VM에 설치하며 선택한 서비스만큼 메모리가 증가합니다. 이 단계는 포트·메모리를 예약하지 않는 순수 계산입니다.
-3. `POST /farms`에 `id`, `components`, `external_host`, `owner`, `expires_at`을 전달합니다.
+   컴포넌트는 `400`으로 거절합니다. 새 farm은 항상 control VM 1대와 compute VM 1~3대이므로
+   `computes`는 1~3이고, 0이나 `layout`(`all-in-one`·`control`)은 `400`입니다. Nova와 그 의존성은
+   compute VM과 함께 들어갑니다. 이 단계는 포트·메모리를 예약하지 않는 순수 계산입니다.
+3. `POST /farms`에 `id`, `components`, `computes`(1~3), `external_host`, `owner`, `expires_at`을 전달합니다.
+   `snapshot_id` 없이 만드는 farm은 computes와 layout에도 같은 규칙이 적용됩니다.
    `host_id`는 `ready`인 호스트여야 하며, 없으면 `400`, 모르는 호스트는 `404`입니다.
    원격 호스트에는 타겟의 접근 가능한 IPv4/DNS `external_host`를 지정하세요.
    필수 값은 `id`와 `host_id`입니다. `expires_at`은 UTC Unix seconds이며 현재 metadata로만 저장합니다.
@@ -73,6 +75,10 @@ job 로그에 원본 compute 등록(nova-compute 서비스, placement, Neutron a
 단계가 이어집니다. 이 farm은 `ready`가 되면 위와 같이 compute를 추가할 수 있고, `deploy`와 farm 전체
 얼리기는 `409`입니다. compute 템플릿으로 `POST /farms`를 보내면 `409`입니다.
 
+스냅샷 복원은 얼린 layout을 그대로 따르므로 all-in-one·control 템플릿도 계속 복원할 수 있습니다.
+반면 `snapshot_id` 없이 새로 만드는 farm은 항상 control VM 1대와 compute VM 1~3대이고, compute를
+지우는 API는 없습니다. 그래서 compute 없이 시작하는 farm은 control 템플릿 복원 경로뿐입니다.
+
 `ready` 상태의 다중 VM farm이고 compute가 3대 미만일 때만 허용합니다(control 템플릿으로 만든 compute
 0대 farm 포함). 스냅샷에서 복원한 다중 VM farm도
 대상입니다. all-in-one farm, 다른 작업이 진행 중인 farm은 `409`입니다. 대상 호스트의 메모리 예산을 넘거나 원격
@@ -85,9 +91,10 @@ job 로그에 원본 compute 등록(nova-compute 서비스, placement, Neutron a
 릴리스부터 돌려줍니다. `arch`를 생략하면 coordinator의 아키텍처이고, `bucket`을 생략하면 등록된 모든
 버킷을 셉니다(조회하지 못한 버킷은 `unreachable`).
 
-`POST /releases/plan`은 `ReleaseCreateRequest`(`id`, `release`, `host_id`, `computes`, 선택:
+`POST /releases/plan`은 `ReleaseCreateRequest`(`id`, `release`, `host_id`, `computes`(1~3), 선택:
 `components`, `compute_hosts`, `control_template`, `compute_template`, `bucket`, `external_host`,
-`owner`, `expires_at`)로 아무것도 만들지 않고 계획(`ReleasePlan`)을 돌려줍니다. `control`과 `computes[]`의
+`owner`, `expires_at`)로 아무것도 만들지 않고 계획(`ReleasePlan`)을 돌려줍니다. `computes`가 0이거나
+`layout`을 주면 `400`입니다. `control`과 `computes[]`의
 각 VM은 `source`(`template`, `bucket`, `clean`), `snapshot_id`(버킷 템플릿은 가져올 ID), `bucket`/`key`,
 `reason`을 가집니다. 여러 템플릿이 맞으면 로컬 것 중 가장 최근, 없으면 버킷에서 가장 최근에 내보낸 것을
 고르며, 서비스(`components`를 주면 그 집합)와 아키텍처가 다른 템플릿은 제외하고 이유에 개수를 적습니다.
@@ -157,7 +164,7 @@ text frame은 제어 메시지입니다. 클라이언트는 `{"type":"resize","r
 연결이 끊기면 셸에 SIGHUP을 보내 그 안에서 실행 중인 작업도 함께 종료합니다.
 
 다중 노드 farm은 `&node=<control|compute-N>`으로 셸을 열 VM을 고릅니다(없는 VM은 `404`).
-생략하면 all-in-one VM, 다중 노드 farm에서는 control VM에 열립니다.
+생략하면 control VM에 열립니다(all-in-one farm은 그 VM).
 
 대상 VM이 실행 중이어야 하며(`409`), 배포 등 작업 중에도 열 수 있습니다. 원격 호스트 farm은
 farm-agent가 SSH로 중계하므로 이 기능이 들어간 agent를 호스트에 다시 설치해야 합니다.

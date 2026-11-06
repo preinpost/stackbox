@@ -101,8 +101,8 @@ enum Command {
     Plan {
         #[arg(long, value_delimiter = ',')]
         components: Vec<String>,
-        /// Compute VMs beside a control VM (0-3); 0 is one all-in-one VM
-        #[arg(long, default_value_t = 0)]
+        /// Compute VMs beside a control VM (1-3); a new farm always has one
+        #[arg(long, default_value_t = 1)]
         computes: u8,
         #[command(flatten)]
         compute: ComputeArgs,
@@ -116,8 +116,8 @@ enum Command {
         host_id: String,
         #[arg(long, value_delimiter = ',')]
         components: Vec<String>,
-        /// Compute VMs beside a control VM (0-3); 0 is one all-in-one VM. Adds Nova.
-        #[arg(long, default_value_t = 0, conflicts_with = "snapshot")]
+        /// Compute VMs beside a control VM (1-3); a new farm always has one. Adds Nova.
+        #[arg(long, default_value_t = 1, conflicts_with = "snapshot")]
         computes: u8,
         #[command(flatten)]
         compute: ComputeArgs,
@@ -129,7 +129,7 @@ enum Command {
         #[arg(long)]
         expires_at: Option<u64>,
         /// Start from a snapshot instead of an empty VM (this machine's host only; replaces --components).
-        /// A control template starts a multi-node farm without computes; add them with add-compute.
+        /// A control template starts a legacy multi-node farm without computes; add them with add-compute.
         #[arg(long, conflicts_with = "components")]
         snapshot: Option<String>,
         /// Run a compute VM on another host, as `compute-2=<host id>`; repeatable.
@@ -433,6 +433,7 @@ async fn main() -> Result<()> {
             compute,
             json,
         } => {
+            model::require_multi_node(*computes, None)?;
             let p = model::plan(&PlanRequest {
                 components: components.clone(),
                 computes: *computes,
@@ -586,6 +587,7 @@ async fn main() -> Result<()> {
                 bail!("a farm made by release takes its compute size from its templates");
             }
             let _ = (snapshot, placement);
+            model::require_multi_node(request.computes, request.layout)?;
             let plan = manager.preview_release(&request).await?;
             for line in manager::describe_release_plan(&plan) {
                 println!("{line}");
@@ -610,6 +612,11 @@ async fn main() -> Result<()> {
             placement,
             ..
         } => {
+            // A snapshot brings its own services and layout; a new farm has its computes.
+            let computes = if snapshot.is_some() { 0 } else { computes };
+            if snapshot.is_none() {
+                model::require_multi_node(computes, None)?;
+            }
             let job = manager.create(CreateRequest {
                 id: id.clone(),
                 host_id: Some(host_id),

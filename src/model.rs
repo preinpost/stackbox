@@ -22,8 +22,8 @@ pub fn now() -> u64 {
 #[serde(default, deny_unknown_fields)]
 pub struct PlanRequest {
     pub components: Vec<String>,
-    /// Compute VMs beside a control VM, up to 3; 0 runs everything in one all-in-one VM.
-    /// A multi-node farm always runs Nova and Neutron.
+    /// Compute VMs beside a control VM, 1-3. A farm always runs Nova and Neutron; a
+    /// request with none is refused, as are the legacy layouts below.
     pub computes: u8,
     /// Size of every compute VM; omitted for the default. Only for farms with compute VMs.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -31,13 +31,14 @@ pub struct PlanRequest {
     /// OpenStack release to install; omitted installs this coordinator's own release.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub release: Option<String>,
-    /// VMs of a farm without computes; omitted keeps the all-in-one default.
+    /// Layout of a farm without computes: read only, for farms and snapshots made before
+    /// every farm gained computes. New farms leave it out; [`require_multi_node`] refuses it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub layout: Option<FarmLayout>,
 }
 
-/// How a farm without compute VMs lays its service out, so that "one VM" and "a control
-/// VM that gains computes later" are never the same choice.
+/// The layout of a farm without computes, kept readable for farms and snapshots made
+/// before every new farm ran a control VM with computes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "kebab-case")]
 pub enum FarmLayout {
@@ -45,6 +46,22 @@ pub enum FarmLayout {
     AllInOne,
     /// A control VM alone, ready for computes to be added one at a time.
     Control,
+}
+
+/// A new farm always runs a control VM and at least one compute VM, so a compute can be
+/// added to it from a template at any time. The layouts in [`FarmLayout`] stay readable on
+/// existing farms and snapshots but no request makes one; a snapshot restore keeps the
+/// layout it was frozen with.
+pub fn require_multi_node(computes: u8, layout: Option<FarmLayout>) -> Result<()> {
+    if layout.is_some() {
+        bail!(
+            "a new farm runs computes beside a control VM; omit layout (all-in-one and control-only farms can no longer be created)"
+        );
+    }
+    if computes == 0 {
+        bail!("a new farm has at least one compute VM; set computes to 1-3");
+    }
+    Ok(())
 }
 
 /// A compute VM's size. Omitted fields keep the default compute VM's value.
@@ -1470,6 +1487,22 @@ mod tests {
         freeze("compute-3").validate().unwrap();
         for node in ["compute-0", "compute-4", "all-in-one", "controller"] {
             assert!(freeze(node).validate().is_err(), "{node}");
+        }
+    }
+
+    #[test]
+    fn a_new_farm_needs_a_control_vm_and_a_compute() {
+        // Any count a form offers makes the same shape: a control VM and computes.
+        for computes in 1..=3 {
+            assert!(require_multi_node(computes, None).is_ok());
+        }
+        let none = require_multi_node(0, None).unwrap_err();
+        assert!(none.to_string().contains("at least one compute VM"));
+        // The legacy layouts have no count to give them, and no request makes one.
+        for layout in [FarmLayout::AllInOne, FarmLayout::Control] {
+            let error = require_multi_node(0, Some(layout)).unwrap_err();
+            assert!(error.to_string().contains("omit layout"));
+            assert!(require_multi_node(1, Some(layout)).is_err());
         }
     }
 

@@ -1680,6 +1680,8 @@ async fn memory_reservations_and_failed_state_writes_prevent_creation() {
 async fn http_auth_validation_job_locations_and_schema() {
     let dir = tempfile::tempdir().unwrap();
     let manager = open_with(options(dir.path()), Arc::new(Fake::default())).await;
+    // A new farm runs a compute VM, whose guest links need the agent; this host has no build.
+    *manager.0.guest_agent.write().unwrap() = Some(dir.path().join("farm-agent"));
     let app = api::router(manager.clone(), Some("test-token".into()));
     let response = app
         .clone()
@@ -1722,14 +1724,38 @@ async fn http_auth_validation_job_locations_and_schema() {
         .oneshot(authorized("POST", "/api/v1/farms", r#"{"id":"http-demo"}"#))
         .await
         .unwrap();
-    // Every farm runs on a registered host.
+    // Every farm runs on a registered host, with a compute beside its control VM.
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    // A new farm without computes, or with one of the legacy layouts, is refused.
+    for payload in [
+        r#"{"id":"http-demo","host_id":"local"}"#,
+        r#"{"id":"http-demo","host_id":"local","layout":"all-in-one"}"#,
+        r#"{"id":"http-demo","host_id":"local","layout":"control"}"#,
+    ] {
+        let response = app
+            .clone()
+            .oneshot(authorized("POST", "/api/v1/farms", payload))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{payload}");
+    }
+    for payload in [
+        r#"{"components":[]}"#,
+        r#"{"components":[],"layout":"control"}"#,
+    ] {
+        let response = app
+            .clone()
+            .oneshot(authorized("POST", "/api/v1/plans", payload))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{payload}");
+    }
     let response = app
         .clone()
         .oneshot(authorized(
             "POST",
             "/api/v1/farms",
-            r#"{"id":"http-demo","host_id":"local"}"#,
+            r#"{"id":"http-demo","host_id":"local","computes":1}"#,
         ))
         .await
         .unwrap();
@@ -1793,7 +1819,6 @@ async fn http_auth_validation_job_locations_and_schema() {
         serde_json::from_slice(&to_bytes(response.into_body(), 1_000_000).await.unwrap()).unwrap();
     assert!(spec["paths"]["/api/v1/farms/{id}/logs/stream"].is_object());
     assert!(spec["components"]["schemas"]["CreateRequest"].is_object());
-    assert_eq!(model::plan(&PlanRequest::default()).unwrap().nodes.len(), 1);
     settle(&manager).await;
 }
 
@@ -5654,11 +5679,22 @@ async fn release_routes_preview_and_start_farms() {
         done_slowly(&manager, &job).await.status,
         JobStatus::Succeeded
     );
+    // A new farm always has computes, so a plan without them never reaches the release.
+    let response = app
+        .clone()
+        .oneshot(call(
+            "POST",
+            "/api/v1/releases/plan",
+            Some(serde_json::json!({"id": "x", "release": crate::kolla::OPENSTACK_RELEASE, "host_id": "local"})),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let response = app
         .oneshot(call(
             "POST",
             "/api/v1/releases/plan",
-            Some(serde_json::json!({"id": "x", "release": "1999.1", "host_id": "local"})),
+            Some(serde_json::json!({"id": "x", "release": "1999.1", "host_id": "local", "computes": 1})),
         ))
         .await
         .unwrap();
