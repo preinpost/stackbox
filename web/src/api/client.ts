@@ -237,7 +237,7 @@ export const api = {
   unregisterHost: (id: string) =>
     request<{ id: string }>(`/hosts/${encode(id)}`, { method: "DELETE" }),
   /** Delete this coordinator's farms and leftover VMs on the host, then unregister it.
-   * `snapshots` also deletes the snapshots, which only the local host keeps. */
+   * `snapshots` also deletes the snapshots whose original the host keeps. */
   purgeHost: (id: string, snapshots = false) =>
     request<HostJob>(
       `/hosts/${encode(id)}?purge=true${snapshots ? "&snapshots=true" : ""}`,

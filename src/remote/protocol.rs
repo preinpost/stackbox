@@ -185,6 +185,18 @@ pub enum Operation {
         transfer_id: String,
         snapshot_id: String,
     },
+    /// Write the snapshot at `reference` into transfer `transfer_id`'s staging file and
+    /// report its SHA-256 and size, so `SendArchive` can stream it to the coordinator.
+    ExportArchive {
+        transfer_id: String,
+        reference: String,
+    },
+    /// Stream transfer `transfer_id`'s staging file to the coordinator as `Frame::Terminal`
+    /// output, then delete it. Like a shell, stdin stays open until the session ends, but
+    /// nothing is read from it.
+    SendArchive {
+        transfer_id: String,
+    },
     /// Interactive shell in the farm's VM. After the request line, the coordinator keeps
     /// stdin open and writes one `TerminalFrame` per line until the session ends.
     Shell {
@@ -306,7 +318,9 @@ impl Operation {
             // A whole template disk crosses the network, then is loaded.
             Self::FetchArchive { .. }
             | Self::ReceiveArchive { .. }
-            | Self::ImportArchive { .. } => 7200,
+            | Self::ImportArchive { .. }
+            | Self::ExportArchive { .. }
+            | Self::SendArchive { .. } => 7200,
             Self::VerifyVm => 300,
             // Downloads the release bundle; the script itself stops after 600 s.
             Self::InstallMsb => 660,
@@ -431,7 +445,8 @@ pub enum Reply {
         #[serde(default)]
         build_id: String,
         /// Takes `FindSnapshot`, `FetchArchive`, `ReceiveArchive` and `ImportArchive`, so
-        /// templates can be copied to this host.
+        /// templates can be copied to this host. Agents built since also take
+        /// `ExportArchive` and `SendArchive`, which move a snapshot frozen there elsewhere.
         #[serde(default)]
         supports_template_transfer: bool,
     },
@@ -453,6 +468,11 @@ pub enum Reply {
     Imported {
         snapshot: ImportedSnapshot,
     },
+    /// The answer to `ExportArchive`: what `SendArchive` will stream.
+    Archived {
+        sha256: String,
+        size_bytes: u64,
+    },
     /// The answer to `FindSnapshot`: the msb reference of the cached copy, if any.
     Found {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -472,7 +492,10 @@ pub enum Reply {
 impl Operation {
     /// Whether the coordinator keeps writing `TerminalFrame` lines after the request.
     pub fn streams_input(&self) -> bool {
-        matches!(self, Self::Shell { .. } | Self::ReceiveArchive { .. })
+        matches!(
+            self,
+            Self::Shell { .. } | Self::ReceiveArchive { .. } | Self::SendArchive { .. }
+        )
     }
     /// Whether the agent reports phases and steps while running this operation.
     fn reports_progress(&self) -> bool {

@@ -457,7 +457,9 @@ impl server::Handler for Handler {
                         .retain(|_, cached| *cached != reference);
                     Reply::Done
                 }
-                Operation::ReceiveArchive { .. } => {
+                Operation::ReceiveArchive { .. }
+                | Operation::ExportArchive { .. }
+                | Operation::SendArchive { .. } => {
                     unimplemented!("the SSH fixture does not take streamed archives")
                 }
                 Operation::Freeze { .. }

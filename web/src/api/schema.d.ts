@@ -1545,13 +1545,21 @@ export interface components {
       /** @description CPU architecture of the frozen guest; its disks cannot boot on another one. */
       arch?: string;
       archive?: null | components["schemas"]["SnapshotArchive"];
-      /** @description Copies kept on other hosts, which farms and computes there boot from. */
+      /**
+       * @description Copies kept on hosts other than the original's, which farms and computes there boot
+       *     from.
+       */
       copies?: components["schemas"]["SnapshotCopy"][];
       /** Format: int64 */
       created_at: number;
       /** @description Whether OpenStack was deployed when frozen. Restored farms then start `ready`. */
       deployed: boolean;
       error?: string | null;
+      /**
+       * @description Remote host that keeps the original, which it was frozen on; `None` for the local
+       *     host, which keeps imported snapshots and every snapshot recorded before this field.
+       */
+      host_id?: string | null;
       id: string;
       /** @description The VM a template was frozen from (`control`, `compute-1`, ...). */
       node?: string | null;
@@ -2709,7 +2717,10 @@ export interface operations {
         id: string;
         /** @description Also delete this coordinator's farms and leftover VMs on the host, then unregister it. */
         purge: boolean;
-        /** @description With purge, also delete the snapshots kept on the host. Only the local host keeps them. */
+        /**
+         * @description With purge, also delete the snapshots frozen on the host, whose originals it keeps,
+         *     with their copies on other hosts. The local host also keeps imported snapshots.
+         */
         snapshots: boolean;
       };
       cookie?: never;

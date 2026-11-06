@@ -42,6 +42,7 @@ import {
   isMultiNodeFarm,
   memory,
   snapshotHost,
+  snapshotOrigin,
 } from "../lib";
 import { bucketLocation } from "./bucket-actions";
 import {
@@ -97,10 +98,9 @@ export const templateNodes = (farm: Farm) =>
 const templateLabel = (node: string) =>
   node === "control" ? "control (control 템플릿)" : `${node} (compute 템플릿)`;
 
-/** Snapshots live with this machine's host, so only its farms can be frozen. */
-export const canFreeze = (farm: Farm, localHostId?: string) =>
-  Boolean(localHostId) &&
-  farm.host_id === localHostId &&
+/** The farm's host keeps the snapshot, so the farm must be on a registered host. */
+export const canFreeze = (farm: Farm, hostIds: string[] = []) =>
+  Boolean(farm.host_id && hostIds.includes(farm.host_id)) &&
   !farm.active_job &&
   Boolean(farm.plan && farm.exposure) &&
   isDeployableFarm(farm) &&
@@ -109,10 +109,11 @@ export const canFreeze = (farm: Farm, localHostId?: string) =>
 
 export function FreezeFarmDialog({ farm }: { farm: Farm }) {
   const client = useQueryClient();
-  const host = useQuery(hostQuery());
-  const localHost = useQuery(hostsQuery()).data?.find(
-    (h) => h.kind === "local",
-  );
+  const hosts = useQuery(hostsQuery()).data;
+  const coordinator = useQuery(hostQuery());
+  // The farm's host keeps the snapshot, and its architecture decides where it boots.
+  const farmHost = hosts?.find((h) => h.id === farm.host_id);
+  const local = farmHost?.kind === "local";
   const snapshots = useQuery(snapshotsQuery());
   // A farm without computes yet is frozen as a control template only.
   const whole = !awaitsCompute(farm);
@@ -148,11 +149,22 @@ export function FreezeFarmDialog({ farm }: { farm: Farm }) {
   return (
     <Dialog.Root open={dialog.open} onOpenChange={dialog.onOpenChange}>
       <Dialog.Trigger
-        render={<Button disabled={!canFreeze(farm, localHost?.id)} />}
+        render={
+          <Button
+            disabled={
+              !canFreeze(
+                farm,
+                hosts?.map((h) => h.id),
+              )
+            }
+          />
+        }
         title={
-          farm.host_id !== localHost?.id
-            ? "스냅샷은 로컬 호스트의 farm만 만들 수 있습니다."
-            : "VM을 스냅샷으로 얼려둡니다."
+          !farmHost
+            ? "farm의 호스트가 등록되어 있지 않아 얼릴 수 없습니다."
+            : local
+              ? "VM을 스냅샷으로 얼려둡니다."
+              : `VM을 스냅샷으로 얼려 ${farmHost.id}에 둡니다.`
         }
       >
         <Snowflake size={14} />
@@ -261,11 +273,21 @@ export function FreezeFarmDialog({ farm }: { farm: Farm }) {
                 시작합니다. 여러 VM farm은 compute를 먼저 멈추고 control을 먼저
                 켭니다. 서비스가 다시 응답할 때까지 몇 분 정도 걸립니다. 이
                 스냅샷은{" "}
-                {snapshotHost({
-                  arch: host.data?.arch ?? undefined,
-                  platform: host.data?.os,
-                })}
+                {snapshotHost(
+                  local || !farmHost?.inspection
+                    ? {
+                        arch: coordinator.data?.arch ?? undefined,
+                        platform: coordinator.data?.os,
+                      }
+                    : {
+                        arch: farmHost.inspection.arch,
+                        platform: farmHost.inspection.os,
+                      },
+                )}
                 에서만 복원할 수 있습니다.
+                {!local &&
+                  farmHost &&
+                  ` 원본은 ${farmHost.id}에 두고, 다른 호스트에서 쓸 때 사본을 복사합니다.`}
               </div>
             )}
             {mutation.error && <ErrorNotice error={mutation.error} />}
@@ -303,10 +325,10 @@ export function RestoreSnapshotDialog({
   const client = useQueryClient();
   const navigate = useNavigate();
   const farms = useQuery(farmsQuery());
-  // A snapshot restores on this machine, where it is kept.
-  const localHost = useQuery(hostsQuery()).data?.find(
-    (h) => h.kind === "local",
-  );
+  // A snapshot restores on the host that keeps its original.
+  const hosts = useQuery(hostsQuery()).data;
+  const originId = snapshotOrigin(snapshot, hosts);
+  const target = hosts?.find((h) => h.id === originId);
   const [id, setId] = useState("");
   const [owner, setOwner] = useState("");
   const [hostName, setHostName] = useState("localhost");
@@ -314,7 +336,7 @@ export function RestoreSnapshotDialog({
     mutationFn: () =>
       api.create({
         id,
-        host_id: localHost?.id,
+        host_id: target?.id,
         snapshot_id: snapshot.id,
         external_host: hostName,
         ...(owner.trim() ? { owner: owner.trim() } : {}),
@@ -332,11 +354,11 @@ export function RestoreSnapshotDialog({
     mutation.reset();
   });
   const duplicate = farms.data?.some((f) => f.id === id);
-  const capacity = localHost?.capacity;
+  const capacity = target?.capacity;
   const remaining = capacity
     ? capacity.memory_budget_mib - capacity.memory_reserved_mib
     : null;
-  const hostMissing = !localHost || !hostReady(localHost);
+  const hostMissing = !target || !hostReady(target);
   const overBudget = remaining !== null && snapshot.plan.memory_mib > remaining;
   const ready =
     ["ready", "exporting"].includes(snapshot.status) && !foreignArch;
@@ -379,8 +401,10 @@ export function RestoreSnapshotDialog({
                       : " · 배포 전"}
                 </p>
                 <p>
-                  {snapshotHost(snapshot)}에서 얼린 게스트 · 이 호스트의
-                  아키텍처와 같아야 복원됩니다
+                  {snapshotHost(snapshot)}에서 얼린 게스트 ·{" "}
+                  {target
+                    ? `${target.id}에 복원합니다`
+                    : "원본 호스트에 복원합니다"}
                 </p>
               </div>
             </div>
@@ -449,9 +473,11 @@ export function RestoreSnapshotDialog({
             )}
             {hostMissing && (
               <div className="warning-notice">
-                {localHost
-                  ? hostNotice(localHost)
-                  : "스냅샷은 로컬 호스트로 복원합니다. Hosts에서 로컬 호스트를 등록하고 환경 준비를 마치세요."}
+                {target
+                  ? hostNotice(target)
+                  : snapshot.host_id
+                    ? `스냅샷 원본은 ${snapshot.host_id}에 있습니다. Hosts에서 이 호스트를 다시 등록하세요.`
+                    : "스냅샷은 로컬 호스트로 복원합니다. Hosts에서 로컬 호스트를 등록하고 환경 준비를 마치세요."}
               </div>
             )}
             {mutation.error && <ErrorNotice error={mutation.error} />}

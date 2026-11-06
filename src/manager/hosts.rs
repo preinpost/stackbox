@@ -407,8 +407,9 @@ impl FarmManager {
         }
         Ok(jobs)
     }
-    /// Purges the host; `delete_snapshots` also deletes the snapshots, which only the local
-    /// host keeps.
+    /// Purges the host; `delete_snapshots` also deletes the snapshots whose original it keeps,
+    /// with their copies on other hosts. Copies of other snapshots on it are forgotten either
+    /// way, and originals left without the flag stay recorded until the host returns.
     pub fn start_purge(&self, id: &str, delete_snapshots: bool) -> Result<HostJob> {
         self.start_job(id, HostJobKind::Purge, delete_snapshots)
     }
@@ -436,9 +437,6 @@ impl FarmManager {
                 return Err(conflict(
                     "only SSH hosts get an agent installed; this host runs its own",
                 ));
-            }
-            if delete_snapshots && host.kind != HostKind::Local {
-                return Err(bad_request("only the local host keeps snapshots"));
             }
             let job = HostJob {
                 id: uuid::Uuid::new_v4().to_string(),
@@ -512,7 +510,16 @@ impl FarmManager {
             }
         }
         if job.delete_snapshots {
-            let snapshots = self.snapshots()?;
+            // Only the originals this host keeps; their copies elsewhere go with them.
+            let local = stored.host.kind == HostKind::Local;
+            let snapshots: Vec<_> = self
+                .snapshots()?
+                .into_iter()
+                .filter(|snapshot| match &snapshot.host_id {
+                    Some(origin) => *origin == host_id,
+                    None => local,
+                })
+                .collect();
             if !snapshots.is_empty() {
                 self.host_event(
                     &job.id,
@@ -526,6 +533,27 @@ impl FarmManager {
                         snapshot.id
                     )
                 })?;
+            }
+        }
+        // Copies of other hosts' snapshots go too; unregistering forgets any left.
+        let copies: Vec<String> = self
+            .snapshots()?
+            .into_iter()
+            .filter(|snapshot| snapshot.copies.iter().any(|copy| copy.host_id == host_id))
+            .map(|snapshot| snapshot.id)
+            .collect();
+        if !copies.is_empty() {
+            self.host_event(
+                &job.id,
+                &format!("Removing copies of {} snapshot(s)", copies.len()),
+            )?;
+        }
+        for snapshot in &copies {
+            if let Err(error) = self.remove_snapshot_copy(snapshot, &host_id).await {
+                self.host_event(
+                    &job.id,
+                    &format!("The copy of snapshot {snapshot} stays on the host: {error:#}"),
+                )?;
             }
         }
 

@@ -2,7 +2,8 @@
 //! in a staging file, from a presigned bucket URL or streamed by the coordinator, and is
 //! loaded only once its size and SHA-256 match what the coordinator expects. The loaded
 //! copies are remembered per coordinator in `cache.json`, so `FindSnapshot` can answer
-//! for them.
+//! for them. A snapshot frozen on this host leaves the other way: exported into a staging
+//! file, then streamed to the coordinator, which checks its size and SHA-256.
 
 use super::{
     agent::{Emitter, lock},
@@ -290,6 +291,69 @@ pub async fn import(
     })
     .await?;
     Ok(imported)
+}
+
+/// Export the snapshot at `reference` into transfer `transfer_id`'s staging file, for
+/// [`send`]. Returns its SHA-256 and size.
+pub async fn export(
+    dir: &Path,
+    backend: &dyn Backend,
+    transfer_id: &str,
+    reference: &str,
+) -> Result<(String, u64)> {
+    let (partial, done) = staging(dir, transfer_id)?;
+    let _ = std::fs::remove_file(&partial);
+    if let Err(error) = backend
+        .export_snapshot(reference.into(), partial.clone())
+        .await
+    {
+        let _ = std::fs::remove_file(&partial);
+        return Err(error);
+    }
+    std::fs::rename(&partial, &done)?;
+    let hashed = tokio::task::spawn_blocking({
+        let done = done.clone();
+        move || -> Result<(String, u64)> {
+            let mut file = std::fs::File::open(done)?;
+            let mut hash = Sha256::new();
+            let size = std::io::copy(&mut file, &mut hash)?;
+            Ok((format!("{:x}", hash.finalize()), size))
+        }
+    })
+    .await?;
+    if hashed.is_err() {
+        let _ = std::fs::remove_file(&done);
+    }
+    hashed
+}
+
+/// Stream transfer `transfer_id`'s exported archive as `Frame::Terminal` output, then
+/// delete it whether or not it all went out.
+pub async fn send(dir: &Path, transfer_id: &str, emit: &Emitter) -> Result<()> {
+    use tokio::io::AsyncReadExt;
+    // Base64 in a JSON line must stay under the frame limit.
+    const CHUNK: usize = 96 * 1024;
+    let (_, done) = staging(dir, transfer_id)?;
+    ensure!(
+        done.is_file(),
+        "transfer {transfer_id} has no exported archive on this host"
+    );
+    let sent = async {
+        let mut file = tokio::fs::File::open(&done).await?;
+        let mut chunk = vec![0; CHUNK];
+        loop {
+            let read = file.read(&mut chunk).await?;
+            if read == 0 {
+                return Ok::<_, anyhow::Error>(());
+            }
+            emit(Frame::Terminal {
+                data: STANDARD.encode(&chunk[..read]),
+            })?;
+        }
+    }
+    .await;
+    let _ = std::fs::remove_file(&done);
+    sent
 }
 
 /// Forget cached copies at `reference` after it was removed.

@@ -2092,8 +2092,8 @@ async fn snapshots_freeze_restore_export_import_and_delete() {
     let mut from_foreign = request("foreign");
     from_foreign.snapshot_id = Some("clean".into());
     let error = manager.create(from_foreign).unwrap_err().to_string();
-    assert!(error.contains("cannot boot on this"), "{error}");
-    // Freezing records the architecture the daemon runs on.
+    assert!(error.contains("cannot boot on host"), "{error}");
+    // Freezing records the architecture of the farm's host.
     assert_eq!(manager.snapshot("clean").unwrap().arch, foreign.arch);
     let local = manager.freeze(
         "src",
@@ -2913,8 +2913,7 @@ async fn forgetting_removes_records_without_asking_the_host() {
 
 #[tokio::test]
 async fn purging_the_local_host_can_also_delete_its_snapshots() {
-    use crate::remote::{HostJobKind, test_server::Fixture};
-    let fixture = Fixture::start().await;
+    use crate::remote::HostJobKind;
     let dir = tempfile::tempdir().unwrap();
     let backend = Arc::new(Fake::default());
     let manager = open_with(options(dir.path()), backend.clone()).await;
@@ -2935,18 +2934,6 @@ async fn purging_the_local_host_can_also_delete_its_snapshots() {
         )
         .unwrap();
     assert_eq!(done(&manager, &freeze).await.status, JobStatus::Succeeded);
-
-    // Only the local host keeps snapshots, so a remote purge cannot take them.
-    manager
-        .register_host(fixture.registration("target"))
-        .unwrap();
-    assert!(
-        manager
-            .start_purge("target", true)
-            .unwrap_err()
-            .is::<BadRequest>()
-    );
-    manager.unregister_host("target").unwrap();
 
     let purge = manager.start_purge("local", true).unwrap();
     assert!(purge.delete_snapshots);

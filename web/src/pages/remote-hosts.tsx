@@ -411,7 +411,11 @@ export function RemoteHostsPage() {
                 kind="remove"
                 disabled={!!selected.active_job || action.isPending}
                 farms={farmCount(selected.id)}
-                snapshots={local ? (snapshots.data?.length ?? 0) : 0}
+                snapshots={
+                  snapshots.data?.filter((s) =>
+                    local ? !s.host_id : s.host_id === selected.id,
+                  ).length ?? 0
+                }
                 coordinatorBuildId={buildId}
                 run={(purge, deleteSnapshots) =>
                   action.mutateAsync({
@@ -807,7 +811,8 @@ function HostActionDialog({
   kind: "prepare" | "remove";
   disabled: boolean;
   farms: number;
-  /** Snapshots kept on this host; only the local host keeps any. */
+  /** Snapshots whose original this host keeps: the ones frozen there, and on the local
+   * host also imported and older ones. */
   snapshots?: number;
   coordinatorBuildId?: string;
   run: (purge: boolean, deleteSnapshots: boolean) => Promise<unknown>;
@@ -929,11 +934,15 @@ function HostActionDialog({
                       </Checkbox.Indicator>
                     </Checkbox.Root>
                     <span>
-                      스냅샷 {snapshots}개도 삭제
+                      {host.kind === "local"
+                        ? `스냅샷 ${snapshots}개도 삭제`
+                        : `이 호스트에서 얼린 스냅샷 ${snapshots}개도 삭제`}
                       <small>
                         {purging && deleteSnapshots
-                          ? "내보내지 않은 스냅샷은 되돌릴 수 없습니다."
-                          : `스냅샷은 ${place}에 남고, 지우려면 ${place}를 다시 등록해야 합니다.`}
+                          ? "내보내지 않은 스냅샷은 되돌릴 수 없습니다. 다른 호스트에 복사한 사본도 함께 지웁니다."
+                          : host.kind === "local"
+                            ? `스냅샷은 ${place}에 남고, 지우려면 ${place}를 다시 등록해야 합니다.`
+                            : "스냅샷은 이 호스트에 남습니다. 다시 등록할 때까지는 다른 호스트에 복사해 둔 사본으로만 farm을 만들 수 있습니다."}
                       </small>
                     </span>
                   </label>

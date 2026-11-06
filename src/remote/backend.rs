@@ -157,6 +157,82 @@ impl AgentBackend {
         session?;
         fed
     }
+    /// Export the snapshot at `reference` into transfer `transfer_id` on the host, for
+    /// [`Self::receive_archive`]. Returns its SHA-256 and size.
+    pub async fn export_archive(
+        &self,
+        transfer_id: String,
+        reference: String,
+    ) -> Result<(String, u64)> {
+        match self
+            .call(
+                Operation::ExportArchive {
+                    transfer_id,
+                    reference,
+                },
+                None,
+            )
+            .await?
+        {
+            Reply::Archived { sha256, size_bytes } => Ok((sha256, size_bytes)),
+            _ => bail!("unexpected farm-agent export response"),
+        }
+    }
+    /// Stream transfer `transfer_id`'s exported archive from the host into `path`, which
+    /// must end up `size_bytes` long with SHA-256 `sha256`; `progress` gets the bytes
+    /// received so far.
+    pub async fn receive_archive(
+        &self,
+        transfer_id: String,
+        path: PathBuf,
+        (sha256, size_bytes): (String, u64),
+        mut progress: impl FnMut(u64) + Send,
+    ) -> Result<()> {
+        use sha2::{Digest, Sha256};
+        use tokio::io::AsyncWriteExt;
+        // Held open until the session ends: some links hang up soon after the input closes.
+        let (_input, input_rx) = tokio::sync::mpsc::channel(1);
+        let (output, mut output_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(8);
+        let session = self.link.terminal(
+            self.request(Operation::SendArchive { transfer_id }),
+            crate::farm::TerminalIo {
+                input: input_rx,
+                output,
+            },
+        );
+        let write = async {
+            let mut file = tokio::fs::File::create(&path).await?;
+            let mut hash = Sha256::new();
+            let mut received = 0;
+            while let Some(data) = output_rx.recv().await {
+                received += data.len() as u64;
+                if received > size_bytes {
+                    bail!("the archive is longer than announced");
+                }
+                hash.update(&data);
+                file.write_all(&data).await?;
+                progress(received);
+            }
+            file.sync_all().await?;
+            Ok::<_, anyhow::Error>((received, format!("{:x}", hash.finalize())))
+        };
+        let (session, written) = tokio::join!(session, write);
+        let written = session.and(written);
+        let (received, digest) = match written {
+            Ok(written) => written,
+            Err(error) => {
+                let _ = tokio::fs::remove_file(&path).await;
+                return Err(error);
+            }
+        };
+        if received != size_bytes || !digest.eq_ignore_ascii_case(&sha256) {
+            let _ = tokio::fs::remove_file(&path).await;
+            bail!(
+                "received {received} bytes with SHA-256 {digest}, but the host exported {size_bytes} bytes with SHA-256 {sha256}"
+            );
+        }
+        Ok(())
+    }
     /// Load transfer `transfer_id`'s verified archive on the host as `snapshot_id`.
     pub async fn import_archive(
         &self,

@@ -57,6 +57,12 @@ export const agentBuildMismatch = (
     coordinatorBuildId &&
     artifact.build_id !== coordinatorBuildId,
   );
+/** The host that keeps a snapshot's original: the remote host it was frozen on, or the
+ * local host, which keeps imported snapshots and older ones. */
+export const snapshotOrigin = (
+  snapshot: { host_id?: string | null },
+  hosts: { id: string; kind?: string }[] = [],
+) => snapshot.host_id ?? hosts.find((h) => h.kind === "local")?.id;
 export const snapshotHost = (snapshot: {
   arch?: string | null;
   platform?: string | null;

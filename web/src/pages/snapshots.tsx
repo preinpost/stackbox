@@ -1,10 +1,11 @@
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
-import { Cloud, Cpu, LoaderCircle, Snowflake } from "lucide-react";
+import { Cloud, Cpu, LoaderCircle, Server, Snowflake } from "lucide-react";
 import {
   activeJob,
   farmsQuery,
   hostQuery,
+  hostsQuery,
   jobsQuery,
   snapshotsQuery,
   type Snapshot,
@@ -26,7 +27,14 @@ import {
   PageHeading,
   StatusBadge,
 } from "../components/ui";
-import { bytes, componentLabel, dateTime, memory, snapshotHost } from "../lib";
+import {
+  bytes,
+  componentLabel,
+  dateTime,
+  memory,
+  snapshotHost,
+  snapshotOrigin,
+} from "../lib";
 
 export function SnapshotsPage() {
   const snapshots = useQuery(snapshotsQuery());
@@ -128,8 +136,14 @@ function SnapshotRow({
   localArch?: string;
 }) {
   const farms = useQuery(farmsQuery());
-  // Architecture alone decides whether the guest can boot here; the label says where it came from.
-  const foreignArch = Boolean(localArch && snapshot.arch !== localArch);
+  const hosts = useQuery(hostsQuery());
+  // The host that froze a snapshot keeps it and boots it; one imported here must match this
+  // machine's architecture. The label says where it came from.
+  const origin = snapshotOrigin(snapshot, hosts.data);
+  const originRegistered = hosts.data?.some((h) => h.id === origin);
+  const foreignArch = Boolean(
+    !snapshot.host_id && localArch && snapshot.arch !== localArch,
+  );
   const sourceExists = farms.data?.some((f) => f.id === snapshot.source_farm);
   // An import learns its services from the archive only when it completes.
   const known = snapshot.status !== "importing" && snapshot.status !== "failed";
@@ -172,6 +186,19 @@ function SnapshotRow({
             <Cpu size={12} />
             {snapshotHost(snapshot)}
           </span>
+          {hosts.data && (
+            <span
+              className={`snapshot-host ${originRegistered ? "" : "snapshot-host-foreign"}`}
+              title={
+                originRegistered
+                  ? "원본 스냅샷을 보관하는 호스트"
+                  : "원본을 보관하던 호스트가 등록되어 있지 않습니다. 다시 등록할 때까지 다른 호스트의 사본으로만 복원할 수 있습니다"
+              }
+            >
+              <Server size={12} />
+              원본 · {origin ?? snapshot.host_id ?? "로컬 호스트"}
+            </span>
+          )}
         </div>
         {freezing && (
           <div className="mt-1.5">

@@ -743,8 +743,13 @@ function grownFarm(): Farm {
     ],
   };
 }
-/** Answers the portal's reads around a farm's actions, and records the POST to `post`. */
-function stubFarmApi(post: string, snapshots: unknown[] = []) {
+/** Answers the portal's reads around a farm's actions, and records the POST to `post`.
+ * `hosts` are registered next to the local host. */
+function stubFarmApi(
+  post: string,
+  snapshots: unknown[] = [],
+  hosts: unknown[] = [],
+) {
   const posted: { body?: unknown } = {};
   vi.stubGlobal(
     "fetch",
@@ -759,6 +764,7 @@ function stubFarmApi(post: string, snapshots: unknown[] = []) {
             inspection: { checked_at: Date.now() / 1000 },
             capacity: { memory_budget_mib: 8000, memory_reserved_mib: 0 },
           },
+          ...hosts,
         ]);
       if (path.endsWith("/host"))
         return Response.json({
@@ -862,6 +868,43 @@ test("freezes one compute VM of a deployed farm as a compute template", async ()
       node: "compute-1",
     }),
   );
+  cleanup();
+});
+
+test("freezes a farm on a remote host, which keeps the snapshot", async () => {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+  });
+  const user = userEvent.setup();
+  const posted = stubFarmApi(
+    "/farms/grow/snapshots",
+    [],
+    [
+      {
+        id: "edge",
+        kind: "ssh",
+        address: "10.0.0.5",
+        status: "ready",
+        inspection: { arch: "x86_64", os: "linux", checked_at: 0 },
+      },
+    ],
+  );
+  render(
+    <QueryClientProvider client={client}>
+      <FreezeFarmDialog farm={{ ...grownFarm(), host_id: "edge" }} />
+    </QueryClientProvider>,
+  );
+  const trigger = screen.getByRole("button", { name: "얼리기" });
+  await waitFor(() =>
+    expect((trigger as HTMLButtonElement).disabled).toBe(false),
+  );
+  await user.click(trigger);
+  expect(
+    await screen.findByText(/x86_64 · Linux에서만 복원할 수 있습니다/),
+  ).toBeTruthy();
+  expect(screen.getByText(/원본은 edge에 두고/)).toBeTruthy();
+  await user.click(screen.getByRole("button", { name: "얼리기 시작" }));
+  await waitFor(() => expect(posted.body).toEqual({ id: "grow-clean" }));
   cleanup();
 });
 

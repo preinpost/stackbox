@@ -40,6 +40,7 @@ fn keep_snapshot(manager: &FarmManager, backend: &Fake, id: &str, template: Opti
                     status: SnapshotStatus::Ready,
                     arch: current_arch(),
                     platform: None,
+                    host_id: None,
                     source_farm: None,
                     plan,
                     deployed: false,
@@ -621,5 +622,317 @@ async fn a_compute_on_a_remote_host_boots_from_a_template_the_host_downloads() {
             .unwrap()
             .contains(&"remove-snapshot:ssh/tmpl".to_string())
     );
+    settle(&manager).await;
+}
+
+/// The other architecture than this machine's, for a host that cannot boot its guests.
+fn foreign_arch() -> String {
+    if current_arch() == "aarch64" {
+        "x86_64".into()
+    } else {
+        "aarch64".into()
+    }
+}
+fn set_arch(manager: &FarmManager, host: &str, arch: &str) {
+    manager
+        .update(|state| {
+            let host = &mut state.hosts.get_mut(host).unwrap().host;
+            host.inspection.as_mut().unwrap().arch = arch.into();
+            Ok(())
+        })
+        .unwrap();
+}
+/// Farm `id` on host `edge`, frozen whole into snapshot `snapshot`.
+async fn freeze_on_edge(manager: &FarmManager, id: &str, snapshot: &str) {
+    if manager.get(id).is_err() {
+        let mut on_edge = request(id);
+        on_edge.host_id = Some("edge".into());
+        let created = done(manager, &manager.create(on_edge).unwrap()).await;
+        assert_eq!(created.status, JobStatus::Succeeded, "{:?}", created.error);
+    }
+    let frozen = manager
+        .freeze(
+            id,
+            SnapshotRequest {
+                id: snapshot.into(),
+                note: None,
+                node: None,
+            },
+        )
+        .unwrap();
+    let frozen = done(manager, &frozen).await;
+    assert_eq!(frozen.status, JobStatus::Succeeded, "{:?}", frozen.error);
+}
+
+#[tokio::test]
+async fn a_snapshot_frozen_on_a_remote_host_stays_there_and_is_copied_and_exported_from_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let backend = Arc::new(Fake::default());
+    let manager = open_with(options(dir.path()), backend.clone()).await;
+    let edge = dial_in(&manager, dir.path()).await;
+    // The host's architecture is recorded, not this coordinator's.
+    set_arch(&manager, "edge", &foreign_arch());
+    freeze_on_edge(&manager, "far", "remote").await;
+    let snapshot = manager.snapshot("remote").unwrap();
+    assert_eq!(snapshot.host_id.as_deref(), Some("edge"));
+    assert_eq!(snapshot.arch, foreign_arch());
+    assert_eq!(snapshot.platform.as_deref(), Some("linux"));
+    assert_eq!(snapshot.reference.as_deref(), Some("fake/remote"));
+    assert_eq!(
+        edge.remote.snapshots.lock().unwrap()["fake/remote"][label::ARCH],
+        foreign_arch()
+    );
+    assert!(backend.snapshots.lock().unwrap().is_empty());
+
+    // Its own host keeps the original; this machine cannot boot it.
+    assert_eq!(
+        manager
+            .ensure_snapshot_on_host("remote", "edge", None)
+            .await
+            .unwrap(),
+        "fake/remote"
+    );
+    let error = manager
+        .ensure_snapshot_on_host("remote", "local", None)
+        .await
+        .unwrap_err();
+    assert!(error.is::<Conflict>(), "{error:#}");
+    let mut here = request("here");
+    here.snapshot_id = Some("remote".into());
+    let error = manager.create(here.clone()).unwrap_err();
+    assert!(
+        error.to_string().contains("cannot boot on host 'local'"),
+        "{error}"
+    );
+
+    // On a host of the same architecture, it is streamed from the host that froze it.
+    set_arch(&manager, "edge", &current_arch());
+    manager
+        .update(|state| {
+            state.snapshots.get_mut("remote").unwrap().arch = current_arch();
+            Ok(())
+        })
+        .unwrap();
+    let reference = manager
+        .ensure_snapshot_on_host("remote", "local", None)
+        .await
+        .unwrap();
+    assert_eq!(reference, "fake/imported/remote");
+    assert_eq!(
+        backend.snapshots.lock().unwrap()[&reference],
+        edge.remote.snapshots.lock().unwrap()["fake/remote"]
+    );
+    let copies = manager.snapshot("remote").unwrap().copies;
+    assert_eq!(copies.len(), 1);
+    assert_eq!(
+        (copies[0].host_id.as_str(), copies[0].via),
+        ("local", CopySource::Stream)
+    );
+    let restored = done(&manager, &manager.create(here).unwrap()).await;
+    assert_eq!(
+        restored.status,
+        JobStatus::Succeeded,
+        "{:?}",
+        restored.error
+    );
+    assert!(backend.farms.lock().unwrap().contains_key("here"));
+    done(&manager, &manager.delete("here").unwrap()).await;
+
+    // An export reads the original on its host.
+    let output = dir.path().join("remote.msb");
+    manager
+        .export_snapshot(
+            "remote",
+            ExportRequest {
+                path: Some(output.display().to_string()),
+                bucket: None,
+                key: None,
+            },
+        )
+        .unwrap();
+    let exported = manager.wait_snapshot("remote").await.unwrap();
+    assert_eq!(exported.error, None);
+    assert_eq!(
+        std::fs::read(&output).unwrap(),
+        archive_of(&edge.remote, "remote")
+    );
+    assert_eq!(
+        std::fs::read_dir(dir.path().join("edge-agent/transfers"))
+            .unwrap()
+            .count(),
+        0
+    );
+
+    // Deleting it removes the original there and the copy here.
+    assert!(manager.delete_snapshot("remote").await.unwrap().is_empty());
+    assert!(
+        !edge
+            .remote
+            .snapshots
+            .lock()
+            .unwrap()
+            .contains_key("fake/remote")
+    );
+    assert!(backend.snapshots.lock().unwrap().is_empty());
+    drop(edge);
+    settle(&manager).await;
+}
+
+#[tokio::test]
+async fn a_snapshot_recorded_before_snapshots_had_a_host_is_the_local_hosts() {
+    let dir = tempfile::tempdir().unwrap();
+    let backend = Arc::new(Fake::default());
+    let manager = open_with(options(dir.path()), backend.clone()).await;
+    keep_snapshot(&manager, &backend, "old", None);
+    let mut record = serde_json::to_value(manager.snapshot("old").unwrap()).unwrap();
+    assert!(record.get("host_id").is_none());
+    record.as_object_mut().unwrap().remove("host_id");
+    let loaded: SnapshotRecord = serde_json::from_value(record).unwrap();
+    assert_eq!(loaded.host_id, None);
+    assert_eq!(
+        manager
+            .ensure_snapshot_on_host("old", "local", None)
+            .await
+            .unwrap(),
+        "fake/old"
+    );
+    let mut restore = request("again");
+    restore.snapshot_id = Some("old".into());
+    let restored = done(&manager, &manager.create(restore).unwrap()).await;
+    assert_eq!(
+        restored.status,
+        JobStatus::Succeeded,
+        "{:?}",
+        restored.error
+    );
+    done(&manager, &manager.delete("again").unwrap()).await;
+    manager.delete_snapshot("old").await.unwrap();
+    assert!(backend.snapshots.lock().unwrap().is_empty());
+    settle(&manager).await;
+}
+
+#[tokio::test]
+async fn purging_a_remote_host_keeps_its_snapshots_unless_asked_and_forgets_copies_there() {
+    let dir = tempfile::tempdir().unwrap();
+    let backend = Arc::new(Fake::default());
+    let manager = open_with(options(dir.path()), backend.clone()).await;
+    let edge = dial_in(&manager, dir.path()).await;
+    keep_snapshot(&manager, &backend, "clean", None);
+    manager
+        .ensure_snapshot_on_host("clean", "edge", None)
+        .await
+        .unwrap();
+    freeze_on_edge(&manager, "far", "kept").await;
+    manager
+        .ensure_snapshot_on_host("kept", "local", None)
+        .await
+        .unwrap();
+
+    let purge = manager.start_purge("edge", false).unwrap();
+    let finished = host_done(&manager, &purge.id).await;
+    assert_eq!(
+        finished.status,
+        JobStatus::Succeeded,
+        "{:?}",
+        finished.error
+    );
+    assert!(manager.host("edge").is_err());
+    // The copy there went with the host; the snapshot frozen there stays recorded.
+    assert!(manager.snapshot("clean").unwrap().copies.is_empty());
+    assert_eq!(
+        edge.remote
+            .snapshots
+            .lock()
+            .unwrap()
+            .keys()
+            .collect::<Vec<_>>(),
+        vec!["fake/kept"]
+    );
+    assert!(backend.snapshots.lock().unwrap().contains_key("fake/clean"));
+    let kept = manager.snapshot("kept").unwrap();
+    assert_eq!(kept.host_id.as_deref(), Some("edge"));
+    // Its copy here still boots farms; the original cannot be read until the host returns.
+    assert_eq!(
+        manager
+            .ensure_snapshot_on_host("kept", "local", None)
+            .await
+            .unwrap(),
+        "fake/imported/kept"
+    );
+    let error = manager
+        .export_snapshot(
+            "kept",
+            ExportRequest {
+                path: Some(dir.path().join("kept.msb").display().to_string()),
+                bucket: None,
+                key: None,
+            },
+        )
+        .unwrap_err();
+    assert!(error.is::<Conflict>());
+    assert!(
+        error
+            .to_string()
+            .contains("is kept on host 'edge', which is not registered"),
+        "{error}"
+    );
+    // Deleting it removes the copy here and the record.
+    assert!(manager.delete_snapshot("kept").await.unwrap().is_empty());
+    assert!(manager.snapshot("kept").unwrap_err().is::<NotFound>());
+    assert!(
+        !backend
+            .snapshots
+            .lock()
+            .unwrap()
+            .contains_key("fake/imported/kept")
+    );
+    drop(edge);
+    settle(&manager).await;
+}
+
+#[tokio::test]
+async fn purging_a_remote_host_with_its_snapshots_deletes_only_the_ones_frozen_there() {
+    let dir = tempfile::tempdir().unwrap();
+    let backend = Arc::new(Fake::default());
+    let manager = open_with(options(dir.path()), backend.clone()).await;
+    let edge = dial_in(&manager, dir.path()).await;
+    keep_snapshot(&manager, &backend, "clean", None);
+    manager
+        .ensure_snapshot_on_host("clean", "edge", None)
+        .await
+        .unwrap();
+    freeze_on_edge(&manager, "far", "gone").await;
+    manager
+        .ensure_snapshot_on_host("gone", "local", None)
+        .await
+        .unwrap();
+
+    let purge = manager.start_purge("edge", true).unwrap();
+    assert!(purge.delete_snapshots);
+    let finished = host_done(&manager, &purge.id).await;
+    assert_eq!(
+        finished.status,
+        JobStatus::Succeeded,
+        "{:?}",
+        finished.error
+    );
+    assert!(
+        finished
+            .events
+            .iter()
+            .any(|event| event.message == "Deleting 1 snapshot(s)"),
+        "{:?}",
+        finished.events
+    );
+    assert!(manager.snapshot("gone").unwrap_err().is::<NotFound>());
+    assert!(edge.remote.snapshots.lock().unwrap().is_empty());
+    // The local host's snapshot stays, without the copy the host had.
+    let clean = manager.snapshot("clean").unwrap();
+    assert!(clean.copies.is_empty());
+    assert_eq!(
+        backend.snapshots.lock().unwrap().keys().collect::<Vec<_>>(),
+        vec!["fake/clean"]
+    );
+    drop(edge);
     settle(&manager).await;
 }

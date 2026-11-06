@@ -170,7 +170,7 @@ export function FarmDetailPage({ id }: { id: string }) {
                 lastJob={history.find((j) => j.kind === "expand")}
               />
               <CheckServicesButton farm={farm} deployed={deployed} />
-              {host?.kind === "local" && <FreezeFarmDialog farm={farm} />}
+              <FreezeFarmDialog farm={farm} />
               <DeleteFarmDialog farm={farm} />
             </>
           )}

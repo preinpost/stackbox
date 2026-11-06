@@ -1347,17 +1347,21 @@ impl FarmManager {
             {
                 return Err(conflict(format!("farm '{id}' already exists")));
             }
-            if let Some(snapshot_id) = &request.snapshot_id {
-                plan = snapshots::restorable(state, snapshot_id)?.plan.clone();
-            }
             let host_id = request.host_id.clone().ok_or_else(|| {
                 bad_request("choose a host for the farm; register the local host or a server under Hosts first")
             })?;
-            // A host other than the local one gets a copy when the restore starts.
-            if let Some(snapshot_id) = &request.snapshot_id
-                && state.hosts.get(&host_id).is_some_and(|h| h.host.kind != HostKind::Local)
-            {
-                transfers::copyable(snapshots::restorable(state, snapshot_id)?)?;
+            if let Some(snapshot_id) = &request.snapshot_id {
+                let snapshot = snapshots::restorable(state, snapshot_id, &host_id)?;
+                plan = snapshot.plan.clone();
+                // A host other than the original's gets a copy when the restore starts, which
+                // needs the original unless the host has one already.
+                let origin = transfers::origin_host(state, snapshot);
+                if origin.as_deref() != Some(host_id.as_str()) {
+                    transfers::copyable(snapshot)?;
+                    if origin.is_none() && !snapshot.copies.iter().any(|c| c.host_id == host_id) {
+                        return Err(transfers::origin_missing(snapshot));
+                    }
+                }
             }
             // Computes placed on the control VM's host need no share of their own.
             let mut placed: std::collections::BTreeMap<String, Vec<String>> = Default::default();
@@ -1669,7 +1673,7 @@ impl FarmManager {
             let (budget, _, _, _) = self.admit_host(state, &target_host, true)?;
             if let Some(snapshot) = &request.from_snapshot {
                 // A host other than the local one gets a copy when the expansion starts.
-                transfers::copyable(snapshots::compute_template(state, snapshot, farm)?)?;
+                transfers::copyable(snapshots::compute_template(state, snapshot, farm, &target_host)?)?;
             }
             if target_host != primary {
                 let arch = |host: &str| {
@@ -2071,7 +2075,9 @@ impl FarmManager {
         // A compute template is checked again: it may have changed since the job was accepted.
         let source = match &job.snapshot_id {
             Some(snapshot) => {
-                self.read(|state| snapshots::compute_template(state, snapshot, farm).map(|_| ()))??;
+                self.read(|state| {
+                    snapshots::compute_template(state, snapshot, farm, &target_host).map(|_| ())
+                })??;
                 // The template boots on the new compute's host, which may need a copy first.
                 Some(
                     self.ensure_snapshot_on_host(

@@ -1408,7 +1408,7 @@
           {
             "name": "snapshots",
             "in": "path",
-            "description": "With purge, also delete the snapshots kept on the host. Only the local host keeps them.",
+            "description": "With purge, also delete the snapshots frozen on the host, whose originals it keeps,\nwith their copies on other hosts. The local host also keeps imported snapshots.",
             "required": true,
             "schema": {
               "type": "boolean"
@@ -4932,7 +4932,7 @@
             "items": {
               "$ref": "#/components/schemas/SnapshotCopy"
             },
-            "description": "Copies kept on other hosts, which farms and computes there boot from."
+            "description": "Copies kept on hosts other than the original's, which farms and computes there boot\nfrom."
           },
           "created_at": {
             "type": "integer",
@@ -4948,6 +4948,13 @@
               "string",
               "null"
             ]
+          },
+          "host_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Remote host that keeps the original, which it was frozen on; `None` for the local\nhost, which keeps imported snapshots and every snapshot recorded before this field."
           },
           "id": {
             "type": "string"

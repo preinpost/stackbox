@@ -1125,6 +1125,10 @@ pub struct SnapshotRecord {
     /// Host OS that froze it (`macos`, `linux`); recorded for the operator, not enforced.
     #[serde(default)]
     pub platform: Option<String>,
+    /// Remote host that keeps the original, which it was frozen on; `None` for the local
+    /// host, which keeps imported snapshots and every snapshot recorded before this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_id: Option<String>,
     /// Farm the snapshot was frozen from; `None` when imported from an archive.
     pub source_farm: Option<String>,
     pub plan: Plan,
@@ -1158,7 +1162,8 @@ pub struct SnapshotRecord {
     pub archive: Option<SnapshotArchive>,
     #[serde(default)]
     pub transfer: Option<SnapshotTransfer>,
-    /// Copies kept on other hosts, which farms and computes there boot from.
+    /// Copies kept on hosts other than the original's, which farms and computes there boot
+    /// from.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub copies: Vec<SnapshotCopy>,
     pub error: Option<String>,

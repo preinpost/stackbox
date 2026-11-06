@@ -443,6 +443,11 @@ impl Agent {
             super::cache::receive(&self.dir, transfer_id, (sha256, *size_bytes), input).await?;
             return Ok(Reply::Done);
         }
+        if let Operation::SendArchive { transfer_id } = &request.operation {
+            emit(Frame::Attached)?;
+            super::cache::send(&self.dir, transfer_id, &emit).await?;
+            return Ok(Reply::Done);
+        }
         let Operation::Shell {
             farm_id: id,
             generation,
@@ -834,7 +839,17 @@ impl Agent {
                     .await?,
                 });
             }
+            Operation::ExportArchive {
+                transfer_id,
+                reference,
+            } => {
+                let (sha256, size_bytes) =
+                    super::cache::export(&self.dir, self.backend.as_ref(), transfer_id, reference)
+                        .await?;
+                return Ok(Reply::Archived { sha256, size_bytes });
+            }
             Operation::ReceiveArchive { .. } => bail!("an archive needs an input stream"),
+            Operation::SendArchive { .. } => bail!("an archive goes out as a stream"),
             _ => {}
         }
         // A deploy outlives this request; its worker takes the farm's locks instead.

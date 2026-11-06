@@ -1,5 +1,6 @@
 //! Copies of single-VM snapshots on other hosts, so a farm or compute there can boot from a
-//! template the local host froze or imported.
+//! template another host froze. The original stays on the host that froze it, or on the
+//! local host for snapshots it imported and ones recorded before snapshots had a host.
 //!
 //! [`FarmManager::ensure_snapshot_on_host`] is the one way in. It asks the host's agent
 //! whether its copy is still there, and otherwise brings one over, cheapest first:
@@ -9,14 +10,15 @@
 //!    presigned GET URL for that one object, never the bucket's secret key, which stays
 //!    sealed in the vault. The agent checks the size and SHA-256 the metadata recorded.
 //! 2. When there is no such archive, or the host cannot reach the bucket or got other
-//!    bytes, the coordinator exports the snapshot from the local host and streams it over
-//!    the agent's own connection (SSH, the dial-in socket, or a pipe), as a shell's input
-//!    travels. The agent checks its size and SHA-256 against what was exported.
+//!    bytes, the coordinator exports the original and streams it over the agent's own
+//!    connection (SSH, the dial-in socket, or a pipe), as a shell's input travels. The agent
+//!    checks its size and SHA-256 against what was exported. An original on another remote
+//!    host reaches the coordinator the same way first, as that host's shell output would.
 //!
 //! Only a verified archive is loaded. The copy is recorded on the snapshot (`copies`), and
 //! deleting the snapshot removes the copies too, as far as their hosts can be reached.
 
-use super::{Backend, EventSink, FarmManager, HostKind, NotFound, conflict};
+use super::{Backend, EventSink, FarmManager, HostKind, NotFound, conflict, store::State};
 use crate::{
     kolla::DeployEvent,
     model::{CopySource, SnapshotCopy, SnapshotRecord, SnapshotStatus, now},
@@ -43,10 +45,43 @@ fn say(sink: &Option<EventSink>, message: String) {
     }
 }
 
+/// The registered host that keeps a snapshot's original: the remote host it was frozen on,
+/// or the local host. `None` while that host is not registered.
+pub(super) fn origin_host(state: &State, snapshot: &SnapshotRecord) -> Option<String> {
+    match &snapshot.host_id {
+        Some(id) => state.hosts.contains_key(id).then(|| id.clone()),
+        None => state
+            .hosts
+            .values()
+            .find(|stored| stored.host.kind == HostKind::Local)
+            .map(|stored| stored.host.id.clone()),
+    }
+}
+/// Why a snapshot whose original's host is not registered cannot be read.
+pub(super) fn origin_missing(snapshot: &SnapshotRecord) -> anyhow::Error {
+    match &snapshot.host_id {
+        Some(id) => conflict(format!(
+            "snapshot '{}' is kept on host '{id}', which is not registered; register that host again to use it",
+            snapshot.id
+        )),
+        None => conflict("register the local host under Hosts to keep snapshots on it"),
+    }
+}
+/// CPU architecture of a registered host, as its last check found it; the local host is
+/// this machine. `None` for a remote host not checked yet.
+pub(super) fn host_arch(state: &State, host_id: &str) -> Option<String> {
+    let host = &state.hosts.get(host_id)?.host;
+    match (&host.inspection, host.kind) {
+        (Some(inspection), _) => Some(inspection.arch.clone()),
+        (None, HostKind::Local) => Some(crate::model::current_arch()),
+        (None, _) => None,
+    }
+}
+
 impl FarmManager {
     /// Make sure host `host_id` keeps snapshot `snapshot_id`, copying it there if needed,
-    /// and return its msb reference on that host. On the local host this is the snapshot's
-    /// own reference. Calls for the same snapshot and host wait for each other, and a copy
+    /// and return its msb reference on that host. On the host that keeps the original this
+    /// is the snapshot's own reference. Calls for the same snapshot and host wait for each other, and a copy
     /// already there is reused, so this can be called before every use. Progress goes to
     /// `sink`, such as a job's log.
     pub async fn ensure_snapshot_on_host(
@@ -55,7 +90,7 @@ impl FarmManager {
         host_id: &str,
         sink: Option<EventSink>,
     ) -> Result<String> {
-        let (snapshot, kind) = self.read(|state| {
+        let (snapshot, kind, origin, arch) = self.read(|state| {
             let snapshot = state
                 .snapshots
                 .get(snapshot_id)
@@ -64,7 +99,12 @@ impl FarmManager {
                 .hosts
                 .get(host_id)
                 .ok_or_else(|| NotFound(format!("host '{host_id}'")))?;
-            Ok::<_, anyhow::Error>((snapshot.clone(), host.host.clone()))
+            Ok::<_, anyhow::Error>((
+                snapshot.clone(),
+                host.host.clone(),
+                origin_host(state, snapshot),
+                host_arch(state, host_id),
+            ))
         })??;
         let reference = match (&snapshot.status, &snapshot.reference) {
             (SnapshotStatus::Ready | SnapshotStatus::Exporting, Some(reference)) => {
@@ -72,7 +112,7 @@ impl FarmManager {
             }
             _ => return Err(conflict(format!("snapshot '{snapshot_id}' is not ready"))),
         };
-        if kind.kind == HostKind::Local {
+        if origin.as_deref() == Some(host_id) {
             return Ok(reference);
         }
         if !snapshot.nodes.is_empty() {
@@ -80,7 +120,7 @@ impl FarmManager {
                 "snapshot '{snapshot_id}' holds several VMs; only single-VM snapshots and templates can be copied to another host"
             )));
         }
-        if let Some(arch) = kind.inspection.as_ref().map(|i| i.arch.as_str())
+        if let Some(arch) = arch
             && arch != snapshot.arch
         {
             return Err(conflict(format!(
@@ -157,6 +197,10 @@ impl FarmManager {
             }
         }
         if via.is_none() {
+            // Only now is the original needed; a host down keeps other hosts' copies usable.
+            if origin.is_none() {
+                return Err(origin_missing(&snapshot));
+            }
             self.stream_snapshot(&agent, &snapshot, reference, &transfer_id, host_id, &sink)
                 .await?;
             via = Some(CopySource::Stream);
@@ -254,6 +298,65 @@ impl FarmManager {
         left
     }
 
+    /// The agent of the host that keeps a snapshot's original.
+    pub(super) fn origin_agent(&self, snapshot: &SnapshotRecord) -> Result<Arc<dyn Backend>> {
+        let host_id = self
+            .read(|state| origin_host(state, snapshot))?
+            .ok_or_else(|| origin_missing(snapshot))?;
+        Ok(Arc::new(self.host_agent(&host_id)?))
+    }
+    /// Write the archive of a snapshot's original to `path` on this machine. The local host
+    /// exports it there itself; another host exports it on its side and streams it over.
+    pub(super) async fn export_original(
+        &self,
+        snapshot: &SnapshotRecord,
+        reference: String,
+        path: &Path,
+        sink: &Option<EventSink>,
+    ) -> Result<()> {
+        let host_id = self
+            .read(|state| origin_host(state, snapshot))?
+            .ok_or_else(|| origin_missing(snapshot))?;
+        say(
+            sink,
+            format!("exporting snapshot {} on host {host_id}\n", snapshot.id),
+        );
+        let agent = self.host_agent(&host_id)?;
+        if snapshot.host_id.is_none() {
+            return agent.export_snapshot(reference, path.to_owned()).await;
+        }
+        let transfer_id = uuid::Uuid::new_v4().to_string();
+        let exported = agent
+            .export_archive(transfer_id.clone(), reference)
+            .await
+            .with_context(|| format!("export snapshot {} on host {host_id}", snapshot.id))?;
+        let size_bytes = exported.1;
+        say(
+            sink,
+            format!(
+                "streaming {} MiB from host {host_id}\n",
+                size_bytes / (1024 * 1024)
+            ),
+        );
+        let mut reported = 0;
+        agent
+            .receive_archive(transfer_id, path.to_owned(), exported, |received| {
+                if received >= reported + REPORT_EVERY {
+                    reported = received;
+                    say(
+                        sink,
+                        format!(
+                            "streamed {} of {} MiB from host {host_id}\n",
+                            received / (1024 * 1024),
+                            size_bytes / (1024 * 1024)
+                        ),
+                    );
+                }
+            })
+            .await
+            .with_context(|| format!("stream snapshot {} from host {host_id}", snapshot.id))
+    }
+
     /// The host's agent for operations that belong to no farm.
     fn host_agent(&self, host_id: &str) -> Result<crate::remote::backend::AgentBackend> {
         let digest = self.read(|state| {
@@ -349,7 +452,7 @@ impl FarmManager {
         None
     }
 
-    /// Export the snapshot on the local host and stream the archive to the host's agent.
+    /// Export the original and stream the archive to the host's agent.
     async fn stream_snapshot(
         &self,
         agent: &crate::remote::backend::AgentBackend,
@@ -368,12 +471,7 @@ impl FarmManager {
             {
                 // Exports read whole VM disks, one at a time.
                 let _permit = self.0.snapshot_gate.acquire().await?;
-                say(
-                    sink,
-                    format!("exporting snapshot {} on the local host\n", snapshot.id),
-                );
-                self.local_backend()?
-                    .export_snapshot(reference, path.clone())
+                self.export_original(snapshot, reference, &path, sink)
                     .await?;
             }
             let (sha256, size_bytes) = digest(&path).await?;
@@ -426,12 +524,12 @@ async fn digest(path: &Path) -> Result<(String, u64)> {
     .await?
 }
 
-/// Whether a snapshot can boot on a host other than the local one: a single VM, which is
-/// copied there first.
+/// Whether a snapshot can boot on a host other than the one keeping its original: a single
+/// VM, which is copied there first.
 pub(super) fn copyable(snapshot: &SnapshotRecord) -> Result<()> {
     if !snapshot.nodes.is_empty() {
         return Err(conflict(format!(
-            "snapshot '{}' holds several VMs, which start on the local host only",
+            "snapshot '{}' holds several VMs, which start only on the host it was frozen on",
             snapshot.id
         )));
     }

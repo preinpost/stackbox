@@ -58,6 +58,7 @@ import {
   memory,
   phases,
   resolveComponents,
+  snapshotOrigin,
 } from "../lib";
 import {
   Button,
@@ -750,11 +751,13 @@ export function DeployFarmDialog({
     },
   });
   const validNodes = isDeployableFarm(farm) && farmNodesRunning(farm);
-  // Kolla came with the control template; such a farm only gains computes.
+  // Kolla came with the control template; such a farm only gains computes. A control VM
+  // created clean still installs OpenStack on itself.
+  const restoredControl = awaitsCompute(farm) && Boolean(farm.snapshot_id);
   const allowed =
     ["created", "failed", "ready"].includes(farm.status) &&
     validNodes &&
-    !awaitsCompute(farm) &&
+    !restoredControl &&
     !farm.active_job;
   const resumable =
     (lastJob?.status === "failed" || lastJob?.status === "interrupted") &&
@@ -778,7 +781,7 @@ export function DeployFarmDialog({
         title={
           !isDeployableFarm(farm)
             ? "기존 다중 VM Farm은 재배포할 수 없습니다. Farm을 새로 만드세요."
-            : awaitsCompute(farm)
+            : restoredControl
               ? "control 템플릿으로 만든 farm에는 아직 compute VM이 없습니다. Compute를 추가하세요."
               : undefined
         }
@@ -882,17 +885,19 @@ export function AddComputeDialog({
   const hosts = useQuery(hostsQuery());
   const coordinator = useQuery(hostQuery());
   const snapshots = useQuery(snapshotsQuery());
+  // The guest must boot on the new compute's host.
   const templates = computeTemplatesFor(
     farm,
     snapshots.data,
-    coordinator.data?.arch,
+    hosts.data?.find((host) => host.id === hostId)?.inspection?.arch ??
+      coordinator.data?.arch,
   );
   // A template boots on any host; one without a copy gets it when the job starts.
-  const copying =
-    hostId !== hosts.data?.find((host) => host.kind === "local")?.id &&
-    !templates
-      .find((snapshot) => snapshot.id === template)
-      ?.copies?.some((copy) => copy.host_id === hostId);
+  const chosen = templates.find((snapshot) => snapshot.id === template);
+  const copying = chosen
+    ? hostId !== snapshotOrigin(chosen, hosts.data) &&
+      !chosen.copies?.some((copy) => copy.host_id === hostId)
+    : false;
   const plan = farm.plan;
   const computes = plan?.computes ?? 0;
   const next = computes + 1;

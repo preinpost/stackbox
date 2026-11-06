@@ -1,6 +1,10 @@
 //! Snapshots: freeze a farm's VM, restore farms from it, and move it between hosts as an archive.
 
-use super::{FarmManager, NotFound, bad_request, conflict, ensure_idle, store::State};
+use super::{
+    FarmManager, NotFound, bad_request, conflict, ensure_idle,
+    store::State,
+    transfers::{host_arch, origin_host, origin_missing},
+};
 use crate::{
     farm::Role,
     kolla::{DeployEvent, StepProgress},
@@ -24,8 +28,12 @@ pub(super) fn busy(status: SnapshotStatus) -> bool {
     )
 }
 
-/// A snapshot a new farm can start from. Exporting only reads it.
-pub(super) fn restorable<'a>(state: &'a State, id: &str) -> Result<&'a SnapshotRecord> {
+/// A snapshot a new farm on `host_id` can start from. Exporting only reads it.
+pub(super) fn restorable<'a>(
+    state: &'a State,
+    id: &str,
+    host_id: &str,
+) -> Result<&'a SnapshotRecord> {
     let snapshot = state
         .snapshots
         .get(id)
@@ -43,16 +51,18 @@ pub(super) fn restorable<'a>(state: &'a State, id: &str) -> Result<&'a SnapshotR
             "snapshot '{id}' is a compute template; add a compute from it to a deployed farm instead"
         )));
     }
-    ensure_compatible(snapshot)?;
+    ensure_compatible(state, snapshot, host_id)?;
     Ok(snapshot)
 }
 
-/// A compute template a new compute of `farm` can boot from: Kolla only reconfigures that
-/// VM, so its containers must be the farm's release and services, on this architecture.
+/// A compute template a new compute of `farm` on `host_id` can boot from: Kolla only
+/// reconfigures that VM, so its containers must be the farm's release and services, on the
+/// host's architecture.
 pub(super) fn compute_template<'a>(
     state: &'a State,
     id: &str,
     farm: &FarmRecord,
+    host_id: &str,
 ) -> Result<&'a SnapshotRecord> {
     let snapshot = state
         .snapshots
@@ -70,7 +80,7 @@ pub(super) fn compute_template<'a>(
     {
         return Err(conflict(format!("snapshot '{id}' is not ready")));
     }
-    ensure_compatible(snapshot)?;
+    ensure_compatible(state, snapshot, host_id)?;
     let release = farm_release(state, farm);
     if snapshot.release.as_deref() != Some(release.as_str()) {
         return Err(conflict(format!(
@@ -131,14 +141,19 @@ pub(super) fn recover_interrupted(state: &mut State) {
     }
 }
 
-/// A frozen guest carries one architecture's bootloader and kernel.
-fn ensure_compatible(snapshot: &SnapshotRecord) -> Result<()> {
-    if snapshot.arch != current_arch() {
+/// A frozen guest carries one architecture's bootloader and kernel. A remote host not
+/// checked yet is not refused here; copying the snapshot there checks again.
+pub(super) fn ensure_compatible(
+    state: &State,
+    snapshot: &SnapshotRecord,
+    host_id: &str,
+) -> Result<()> {
+    if let Some(arch) = host_arch(state, host_id)
+        && arch != snapshot.arch
+    {
         return Err(conflict(format!(
-            "snapshot '{}' was frozen on {}, so its guest cannot boot on this {} host",
-            snapshot.id,
-            snapshot.arch,
-            current_arch()
+            "snapshot '{}' was frozen on {}, so its guest cannot boot on host '{host_id}', which is {arch}",
+            snapshot.id, snapshot.arch
         )));
     }
     Ok(())
@@ -164,10 +179,12 @@ fn labels(snapshot: &SnapshotRecord) -> BTreeMap<String, String> {
                 .clone()
                 .unwrap_or_else(|| crate::kolla::OPENSTACK_RELEASE.into()),
         ),
-        // The guest image is built for the host architecture.
-        (label::ARCH.into(), current_arch()),
-        (label::PLATFORM.into(), current_platform()),
+        // The guest image is built for the architecture of the host that froze it.
+        (label::ARCH.into(), snapshot.arch.clone()),
     ]);
+    if let Some(platform) = &snapshot.platform {
+        labels.insert(label::PLATFORM.into(), platform.clone());
+    }
     if let Some(source) = &snapshot.source_farm {
         labels.insert(label::SOURCE.into(), source.clone());
     }
@@ -346,7 +363,7 @@ impl FarmManager {
     /// Freeze the farm's VM into a new snapshot. The VM stops for the capture and starts again.
     pub fn freeze(&self, farm_id: &str, request: SnapshotRequest) -> Result<Job> {
         request.validate().map_err(|e| bad_request(e.to_string()))?;
-        let job = self.update(|state| {
+        let (job, repinned) = self.update(|state| {
             self.ensure_accepting()?;
             if state.snapshots.contains_key(&request.id) {
                 return Err(conflict(format!(
@@ -354,21 +371,34 @@ impl FarmManager {
                     request.id
                 )));
             }
+            // The farm's host keeps the snapshot; another host's VMs are not captured.
+            let host_id = state
+                .farms
+                .get(farm_id)
+                .ok_or_else(|| NotFound(format!("farm '{farm_id}'")))?
+                .host_id
+                .clone()
+                .ok_or_else(|| conflict("farms imported from older versions cannot be frozen"))?;
+            let arch = host_arch(state, &host_id);
             let farm = state
                 .farms
                 .get_mut(farm_id)
                 .ok_or_else(|| NotFound(format!("farm '{farm_id}'")))?;
             ensure_idle(farm)?;
-            if farm
-                .host_id
-                .as_ref()
-                .and_then(|id| state.hosts.get(id))
-                .is_none_or(|stored| stored.host.kind != crate::remote::HostKind::Local)
-            {
-                return Err(conflict(
-                    "snapshots are available for farms on the local host only",
-                ));
-            }
+            let stored = state
+                .hosts
+                .get(&host_id)
+                .ok_or_else(|| conflict(format!("the farm's host '{host_id}' is not registered")))?;
+            let local = stored.host.kind == crate::remote::HostKind::Local;
+            let arch = arch.ok_or_else(|| {
+                conflict(format!(
+                    "host '{host_id}' has not been checked yet; check it from Hosts first"
+                ))
+            })?;
+            let platform = match &stored.host.inspection {
+                Some(inspection) if !local => inspection.os.clone(),
+                _ => current_platform(),
+            };
             if !matches!(
                 farm.status,
                 FarmStatus::Created | FarmStatus::Ready | FarmStatus::Failed
@@ -391,11 +421,12 @@ impl FarmManager {
                         "deploy the farm before freezing a control template from it",
                     ));
                 }
-                // Its computes stop while the control VM is captured; snapshots stay here.
+                // Its computes stop while the control VM is captured; the snapshot stays on
+                // the control VM's host.
                 if !farm.shares.is_empty() {
-                    return Err(conflict(
-                        "this farm has computes on other hosts; only a farm on the local host alone can be frozen as a control template",
-                    ));
+                    return Err(conflict(format!(
+                        "this farm has computes on other hosts; only a farm whose VMs all run on host '{host_id}' can be frozen as a control template"
+                    )));
                 }
             } else if let Some(node) = &request.node {
                 if plan.computes == 0
@@ -410,9 +441,9 @@ impl FarmManager {
                         "deploy the farm before freezing a compute template from it",
                     ));
                 }
-                if farm.host_of(node) != farm.host_id.as_deref() {
+                if farm.host_of(node) != Some(host_id.as_str()) {
                     return Err(conflict(format!(
-                        "{node} runs on another host; only the local host keeps snapshots"
+                        "{node} runs on another host than the farm's; only VMs on host '{host_id}' can be frozen"
                     )));
                 }
             }
@@ -429,6 +460,23 @@ impl FarmManager {
             if !layout_matches || farm.nodes.iter().any(|node| node.status != "running") {
                 return Err(conflict("the farm's VMs must be running to freeze it"));
             }
+            // A remote farm keeps the agent it was created with. Move it to the host's current
+            // agent once that agent matches this coordinator, as a deploy does, so the freeze
+            // and later transfers of the snapshot speak this coordinator's protocol.
+            let mut repinned = None;
+            if let Some(agent) = &stored.host.agent
+                && farm.agent_sha256.as_deref() != Some(agent.artifact.sha256.as_str())
+            {
+                if agent.artifact.build_id != crate::BUILD_ID {
+                    return Err(conflict(format!(
+                        "the agent installed on {host_id} was built from {} but this coordinator is {}; reinstall it from Hosts first",
+                        agent.artifact.build_id,
+                        crate::BUILD_ID
+                    )));
+                }
+                repinned = Some(agent.artifact.sha256.clone());
+                farm.agent_sha256 = repinned.clone();
+            }
             let template = request.node.as_deref().map(|node| match node {
                 "control" => TemplateRole::Control,
                 _ => TemplateRole::Compute,
@@ -436,8 +484,9 @@ impl FarmManager {
             let snapshot = SnapshotRecord {
                 id: request.id.clone(),
                 status: SnapshotStatus::Creating,
-                arch: current_arch(),
-                platform: Some(current_platform()),
+                arch,
+                platform: Some(platform),
+                host_id: (!local).then_some(host_id),
                 source_farm: Some(farm_id.into()),
                 plan: match template {
                     // What a farm restored from it runs until it gains computes.
@@ -479,8 +528,16 @@ impl FarmManager {
             farm.updated_at = now();
             state.snapshots.insert(snapshot.id.clone(), snapshot);
             state.jobs.insert(job.id.clone(), job.clone());
-            Ok(job)
+            Ok((job, repinned))
         })?;
+        if let Some(digest) = repinned {
+            self.log(
+                &job.farm_id,
+                &job.id,
+                None,
+                format!("agent: using the host's current agent {}\n", &digest[..12]),
+            )?;
+        }
         self.spawn(job.clone(), None);
         Ok(job)
     }
@@ -579,9 +636,9 @@ impl FarmManager {
             .clone()
             .context("restored farm has no snapshot")?;
         let snapshot = self.snapshot(&id)?;
-        ensure_compatible(&snapshot)?;
-        // On a host other than the local one, from a copy there.
+        // On a host other than the original's, from a copy there.
         let host_id = farm.host_id.clone().context("restored farm has no host")?;
+        self.read(|state| ensure_compatible(state, &snapshot, &host_id))??;
         let reference = self
             .ensure_snapshot_on_host(&id, &host_id, Some(self.event_sink(job, None)))
             .await?;
@@ -696,7 +753,7 @@ impl FarmManager {
             };
             let snapshot = state
                 .snapshots
-                .get_mut(id)
+                .get(id)
                 .ok_or_else(|| NotFound(format!("snapshot '{id}'")))?;
             let reference = match (&snapshot.status, &snapshot.reference) {
                 (SnapshotStatus::Ready, Some(reference)) => reference.clone(),
@@ -705,6 +762,10 @@ impl FarmManager {
             if !snapshot.nodes.is_empty() {
                 return Err(conflict("multi-node snapshots cannot be exported yet"));
             }
+            if origin_host(state, snapshot).is_none() {
+                return Err(origin_missing(snapshot));
+            }
+            let snapshot = state.snapshots.get_mut(id).context("snapshot missing")?;
             snapshot.status = SnapshotStatus::Exporting;
             snapshot.error = None;
             snapshot.transfer = match &target {
@@ -724,9 +785,10 @@ impl FarmManager {
         })?;
         let manager = self.clone();
         let id = id.to_owned();
+        let exported = snapshot.clone();
         tokio::spawn(async move {
             let result = match target {
-                Target::File(output) => manager.run_export(reference, &output).await,
+                Target::File(output) => manager.run_export(&exported, reference, &output).await,
                 Target::Bucket { bucket, key } => {
                     let key = key.unwrap_or_default();
                     manager.run_upload(&id, reference, &bucket, &key).await
@@ -772,7 +834,12 @@ impl FarmManager {
         }
         Ok(output)
     }
-    async fn run_export(&self, reference: String, output: &Path) -> Result<SnapshotArchive> {
+    async fn run_export(
+        &self,
+        snapshot: &SnapshotRecord,
+        reference: String,
+        output: &Path,
+    ) -> Result<SnapshotArchive> {
         let _permit = self.0.snapshot_gate.acquire().await?;
         if let Some(dir) = output.parent() {
             std::fs::create_dir_all(dir)?;
@@ -781,8 +848,7 @@ impl FarmManager {
         let partial = PathBuf::from(format!("{}.partial", output.display()));
         let _ = std::fs::remove_file(&partial);
         let exported = self
-            .local_backend()?
-            .export_snapshot(reference, partial.clone())
+            .export_original(snapshot, reference, &partial, &None)
             .await;
         if let Err(error) = exported {
             let _ = std::fs::remove_file(&partial);
@@ -825,8 +891,7 @@ impl FarmManager {
         }
         let archive = self.transfer_path(id, "export")?;
         let uploaded = async {
-            self.local_backend()?
-                .export_snapshot(reference, archive.clone())
+            self.export_original(&snapshot, reference, &archive, &None)
                 .await?;
             let upload_id = client.start_upload(key).await?;
             self.update(|state| {
@@ -969,6 +1034,7 @@ impl FarmManager {
                 status: SnapshotStatus::Importing,
                 arch: current_arch(),
                 platform: None,
+                host_id: None,
                 source_farm: None,
                 plan: plan(&PlanRequest::default())?,
                 deployed: false,
@@ -1114,8 +1180,9 @@ impl FarmManager {
         }
     }
 
-    /// Removes the snapshot, then its copies on other hosts as far as those answer.
-    /// Returns the copies that could not be removed, by host.
+    /// Removes the snapshot from the host that keeps it, then its copies on other hosts as
+    /// far as those answer. The original on a remote host that is no longer registered only
+    /// loses its record. Returns the copies that could not be removed, by host.
     pub async fn delete_snapshot(&self, id: &str) -> Result<Vec<String>> {
         self.remove_snapshot(id, false).await
     }
@@ -1125,7 +1192,7 @@ impl FarmManager {
         self.remove_snapshot(id, true).await.map(|_| ())
     }
     async fn remove_snapshot(&self, id: &str, forget: bool) -> Result<Vec<String>> {
-        let (references, previous, copies) = self.update(|state| {
+        let (references, previous, copies, snapshot) = self.update(|state| {
             self.ensure_accepting()?;
             if state
                 .jobs
@@ -1158,13 +1225,22 @@ impl FarmManager {
                     .map(|n| n.reference.clone())
                     .collect()
             };
-            Ok((references, previous, snapshot.copies.clone()))
+            Ok((
+                references,
+                previous,
+                snapshot.copies.clone(),
+                snapshot.clone(),
+            ))
         })?;
         let removed = async {
-            if forget {
+            // A remote host that is gone takes the original with it; only the record is left.
+            if forget
+                || snapshot.host_id.is_some()
+                    && self.read(|state| origin_host(state, &snapshot))?.is_none()
+            {
                 return Ok(());
             }
-            let backend = self.local_backend()?;
+            let backend = self.origin_agent(&snapshot)?;
             for reference in references {
                 backend.remove_snapshot(reference).await?;
             }

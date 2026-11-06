@@ -485,7 +485,8 @@ struct UnregisterQuery {
     /// Also delete this coordinator's farms and leftover VMs on the host, then unregister it.
     #[serde(default)]
     purge: bool,
-    /// With purge, also delete the snapshots kept on the host. Only the local host keeps them.
+    /// With purge, also delete the snapshots frozen on the host, whose originals it keeps,
+    /// with their copies on other hosts. The local host also keeps imported snapshots.
     #[serde(default)]
     snapshots: bool,
 }
