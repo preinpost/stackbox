@@ -3336,7 +3336,8 @@
           "failed",
           "broken",
           "deleting",
-          "deleted"
+          "deleted",
+          "snapshotting"
         ]
       },
       "HostCapacity": {

@@ -864,6 +864,7 @@ h2 {
 }
 .status-creating,
 .status-deploying,
+.status-snapshotting,
 .status-exporting,
 .status-importing,
 .status-running {
@@ -884,6 +885,7 @@ h2 {
 }
 .status-running .status-dot,
 .status-creating .status-dot,
+.status-snapshotting .status-dot,
 .status-exporting .status-dot,
 .status-importing .status-dot,
 .status-settling .status-dot,

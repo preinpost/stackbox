@@ -1452,6 +1452,7 @@ impl FarmManager {
                     created_at: now(),
                     updated_at: now(),
                     snapshot_id: request.snapshot_id,
+                    resume: None,
                     faults: Default::default(),
                     shares,
                     uplink_sha256,
@@ -2586,8 +2587,14 @@ impl FarmManager {
                 .is_some_and(|s| s.deployed);
             let farm = state.farms.get_mut(&job.farm_id).context("farm missing")?;
             farm.status = match (job.kind, error.is_some()) {
-                // Freezing leaves the farm as it was; a failure is reported on the job and snapshot.
-                (JobKind::Snapshot | JobKind::Assemble, _) => farm.status,
+                // Freezing leaves the farm as it was, ready, created or failed; the job and the
+                // snapshot report a failure of the capture itself.
+                (JobKind::Snapshot, _) => farm.resume.take().unwrap_or(if deployed {
+                    FarmStatus::Ready
+                } else {
+                    FarmStatus::Created
+                }),
+                (JobKind::Assemble, _) => farm.status,
                 // A check that fails leaves the VM as it was; the user can run it again.
                 (JobKind::Settle, true) => FarmStatus::Created,
                 (JobKind::Settle, false) => FarmStatus::Ready,

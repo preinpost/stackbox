@@ -39,6 +39,7 @@ const labels: Record<string, string> = {
   created: "VM 준비됨",
   creating: "생성 중",
   deploying: "배포 중",
+  snapshotting: "얼리는 중",
   settling: "응답 확인 중",
   ready: "Ready",
   failed: "실패",

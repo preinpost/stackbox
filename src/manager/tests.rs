@@ -32,6 +32,8 @@ pub(crate) struct Fake {
     pub(crate) deployed: AtomicUsize,
     pub(crate) fail: AtomicBool,
     pub(crate) deployment_gate: Option<Semaphore>,
+    /// Freezes started, finished or not; `Some(0)` holds a capture open.
+    pub(crate) freeze_gate: Option<Semaphore>,
     scan_delay: Mutex<Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>>,
     /// `(farm, node, impair)` of each fault set on a link.
     faults: Mutex<Vec<(String, String, crate::link::Impair)>>,
@@ -317,6 +319,9 @@ impl Backend for Fake {
             };
             step(1, "stop the VMs")?;
             step(2, "capture the VMs")?;
+            if let Some(gate) = &self.freeze_gate {
+                gate.acquire().await?.forget();
+            }
             if self.fail.load(Ordering::SeqCst) {
                 bail!("intentional freeze failure");
             }
@@ -1889,6 +1894,7 @@ async fn unreserved_vms_are_never_adopted_and_hostless_farms_can_only_be_removed
                 created_at: now(),
                 updated_at: now(),
                 snapshot_id: None,
+                resume: None,
                 faults: Default::default(),
                 shares: vec![],
                 uplink_sha256: None,
@@ -2983,6 +2989,72 @@ async fn purging_the_local_host_can_also_delete_its_snapshots() {
         "{:?}",
         finished.events
     );
+    settle(&manager).await;
+}
+
+#[tokio::test]
+async fn a_snapshot_shows_the_farm_as_snapshotting_and_puts_it_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let backend = Arc::new(Fake {
+        freeze_gate: Some(Semaphore::new(0)),
+        ..Default::default()
+    });
+    let manager = open_with(options(dir.path()), backend.clone()).await;
+    done(&manager, &manager.create(request("snap")).unwrap()).await;
+    done(
+        &manager,
+        &manager.deploy("snap", DeployRequest::default()).unwrap(),
+    )
+    .await;
+    let freeze = manager
+        .freeze(
+            "snap",
+            SnapshotRequest {
+                id: "clean".into(),
+                note: None,
+                node: None,
+            },
+        )
+        .unwrap();
+    // While the VM is stopped for the capture, the farm says so instead of claiming Ready,
+    // and it refuses other work until its VM has started again.
+    assert_eq!(
+        manager.get("snap").unwrap().status,
+        FarmStatus::Snapshotting
+    );
+    assert!(
+        manager
+            .deploy("snap", DeployRequest::default())
+            .unwrap_err()
+            .is::<Conflict>()
+    );
+    backend.freeze_gate.as_ref().unwrap().add_permits(1);
+    assert_eq!(
+        done(&manager, &freeze).await.status,
+        JobStatus::Succeeded,
+        "the capture itself finishes"
+    );
+    // The deployment still stands, so the farm is Ready again, not merely created.
+    let farm = manager.get("snap").unwrap();
+    assert_eq!(farm.status, FarmStatus::Ready);
+    assert!(farm.resume.is_none(), "the kept status is used up");
+    assert_eq!(farm.active_job, None);
+
+    // A capture that fails is reported on its job; the farm is what it was before it.
+    backend.fail.store(true, Ordering::SeqCst);
+    backend.freeze_gate.as_ref().unwrap().add_permits(1);
+    let failed = manager
+        .freeze(
+            "snap",
+            SnapshotRequest {
+                id: "broken".into(),
+                note: None,
+                node: None,
+            },
+        )
+        .unwrap();
+    assert_eq!(done(&manager, &failed).await.status, JobStatus::Failed);
+    assert_eq!(manager.get("snap").unwrap().status, FarmStatus::Ready);
     settle(&manager).await;
 }
 

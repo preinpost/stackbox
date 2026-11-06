@@ -1022,7 +1022,8 @@ export interface components {
       | "failed"
       | "broken"
       | "deleting"
-      | "deleted";
+      | "deleted"
+      | "snapshotting";
     HostCapacity: {
       /** Format: int64 */
       memory_budget_mib: number;

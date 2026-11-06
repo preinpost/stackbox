@@ -57,8 +57,10 @@ import {
   componentLabel,
   dateTime,
   farmComponents,
+  farmDeployed,
   farmMemory,
   farmNodeCount,
+  farmState,
   isAllInOneFarm,
   isDeployableFarm,
   isMultiNodeFarm,
@@ -138,7 +140,7 @@ export function FarmDetailPage({ id }: { id: string }) {
           <div>
             <div className="flex flex-wrap items-center gap-3">
               <h1>{farm.id}</h1>
-              <StatusBadge status={farm.status} />
+              <StatusBadge status={farmState(farm, activeJob)} />
             </div>
             <p>
               {farm.owner || "담당자 미지정"}
@@ -728,7 +730,8 @@ export function DeploymentPhases({ farm }: { farm: Farm }) {
       </div>
       <ol className="phase-list">
         {phases.map((phase) => {
-          const ready = farm.status === "ready";
+          // A snapshot stops the VM without undoing the deployment it finished.
+          const ready = farmDeployed(farm);
           const current = farm.phase === phase.id;
           const running = current && Boolean(farm.active_job) && !ready;
           return (
@@ -763,6 +766,8 @@ export function DeploymentPhases({ farm }: { farm: Farm }) {
 }
 function Endpoints({ farm }: { farm: Farm }) {
   const exposure = farm.status !== "deleted" ? farm.exposure : null;
+  const deployed = farmDeployed(farm);
+  // Credentials come from the VM, which a snapshot has stopped.
   const showLogin =
     farm.status === "ready" && farmComponents(farm).includes("horizon");
   const login = useQuery({
@@ -797,7 +802,7 @@ function Endpoints({ farm }: { farm: Farm }) {
       ) : (
         <>
           <p className="field-hint mb-4">
-            {farm.status === "ready"
+            {deployed
               ? "마지막 배포가 완료된 서비스 주소입니다."
               : "배포 완료 후 사용할 public 서비스 주소입니다."}
           </p>
@@ -816,7 +821,7 @@ function Endpoints({ farm }: { farm: Farm }) {
                     <strong>{s.name}</strong>
                     <small>{s.type}</small>
                   </div>
-                  {farm.status === "ready" ? (
+                  {deployed ? (
                     <a
                       href={s.url}
                       target="_blank"
@@ -877,11 +882,11 @@ const storeIcons: Record<string, React.ReactNode> = {
  * Shares the endpoints query cache with the service panel above.
  */
 function Datastores({ farm }: { farm: Farm }) {
-  const ready = farm.status === "ready";
+  const deployed = farmDeployed(farm);
   const query = useQuery({
     queryKey: keys.endpoints(farm.id),
     queryFn: () => api.endpoints(farm.id),
-    enabled: ready,
+    enabled: farm.status === "ready",
     staleTime: 60_000,
   });
   const stores = query.data?.datastores ?? [];
@@ -892,11 +897,11 @@ function Datastores({ farm }: { farm: Farm }) {
           <Database size={17} />
         </span>
         <h2>Data stores</h2>
-        {ready && stores.length > 0 && (
+        {deployed && stores.length > 0 && (
           <span className="count-pill ml-auto">{stores.length}</span>
         )}
       </div>
-      {!ready ? (
+      {!deployed ? (
         <div className="endpoint-note">
           배포가 끝나면 MariaDB와 RabbitMQ 접속 정보가 여기에 표시됩니다.
         </div>

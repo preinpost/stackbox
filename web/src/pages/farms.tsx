@@ -46,8 +46,10 @@ import {
 import {
   componentLabel,
   dateTime,
+  farmDeployed,
   farmMemory,
   farmNodeCount,
+  farmState,
   memory,
 } from "../lib";
 
@@ -64,6 +66,11 @@ export function FarmsPage() {
     () =>
       (farms.data ?? []).filter((f) => status === "all" || f.status === status),
     [farms.data, status],
+  );
+  // A snapshot job leaves its farm ready, so each row reads the job it is running.
+  const activeJobs = useMemo(
+    () => new Map((jobs.data ?? []).map((job) => [job.id, job])),
+    [jobs.data],
   );
   const columns = useMemo<ColumnDef<Farm>[]>(
     () => [
@@ -97,7 +104,14 @@ export function FarmsPage() {
       {
         accessorKey: "status",
         header: "상태",
-        cell: ({ row }) => <StatusBadge status={row.original.status} />,
+        cell: ({ row }) => (
+          <StatusBadge
+            status={farmState(
+              row.original,
+              activeJobs.get(row.original.active_job ?? ""),
+            )}
+          />
+        ),
       },
       {
         id: "resources",
@@ -147,7 +161,7 @@ export function FarmsPage() {
         ),
       },
     ],
-    [],
+    [activeJobs],
   );
   const table = useReactTable({
     data,
@@ -191,8 +205,7 @@ export function FarmsPage() {
           detail={
             <>
               <span className="metric-positive">
-                {farms.data?.filter((f) => f.status === "ready").length ?? "—"}{" "}
-                Ready
+                {farms.data?.filter((f) => farmDeployed(f)).length ?? "—"} Ready
               </span>
               <span className="metric-separator">/</span>
               {farms.data?.filter((f) =>
@@ -268,6 +281,7 @@ export function FarmsPage() {
               items={[
                 { value: "all", label: "모든 상태" },
                 { value: "ready", label: "Ready" },
+                { value: "snapshotting", label: "얼리는 중" },
                 { value: "created", label: "VM 준비됨" },
                 { value: "creating", label: "생성 중" },
                 { value: "deploying", label: "배포 중" },

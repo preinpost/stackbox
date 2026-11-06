@@ -109,7 +109,8 @@ job 로그에 원본 compute 등록(nova-compute 서비스, placement, Neutron a
 `POST /farms/{id}/computes`로 재시도할 수 있습니다. assemble job 자체는 farm의 `active_job`이 되지
 않고, daemon이 멈추면 `interrupted`로 남습니다(각 단계 job은 기존대로 복구).
 
-farm 상태는 `creating`, `created`, `deploying`, `settling`, `ready`, `failed`, `broken`, `deleting`, `deleted`입니다.
+farm 상태는 `creating`, `created`, `deploying`, `settling`, `ready`, `failed`, `broken`, `deleting`, `deleted`,
+`snapshotting`입니다(`snapshotting`은 얼리는 동안만이고 끝나면 이전 상태로 돌아갑니다).
 배포 중에는 `phase`와 함께 `step`이 채워집니다. `step`은 그 단계 안에서 지금 실행 중인 작업이며,
 설치·검증 등 farm이 직접 실행하는 구간은 단계 이름을, Kolla-Ansible 구간은 현재 Ansible task 이름을
 담습니다. 단계가 바뀌면 비워지고, 마지막 값은 job이 끝난 뒤에도 남습니다. 포탈은 이 값을 배포 단계
@@ -121,7 +122,10 @@ VM 관측 결과는 시작 시와 30초 주기로 갱신되며, 실행 중인 jo
 ## 스냅샷
 
 `POST /farms/{id}/snapshots`에 `{"id":"dev-clean"}`를 전달하면 `snapshot` job이 VM을 정지해
-디스크를 저장하고 다시 시작합니다. farm 상태는 바뀌지 않으며 진행 중에는 `active_job`이 설정됩니다.
+디스크를 저장하고 다시 시작합니다. job이 도는 동안 farm 상태는 `snapshotting`이고 `active_job`이
+설정됩니다. job이 끝나면 얼리기 전 상태(`ready`·`created`·`failed`)로 돌아가므로, 캡처가 실패해도
+farm은 실패로 바뀌지 않고 job과 스냅샷에만 오류가 남습니다. `snapshotting`인 동안에는 `endpoints`와
+다른 작업(배포·compute 추가·서비스 확인·얼리기·삭제)이 `409`입니다.
 job의 `steps`에는 시작한 순서대로 번호 붙은 단계가 쌓입니다(`step`, `index`/`total`, `started_at`,
 끝난 단계는 `finished_at`, 실패한 단계는 `failed: true`). 마지막 항목에 `finished_at`이 없으면 지금
 실행 중인 단계입니다. farm의 `step`에도 `2/5 capture ...` 형태로 같은 값이 들어갑니다.

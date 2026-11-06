@@ -88,6 +88,16 @@ export const isAllInOneFarm = (farm: Farm) => {
 };
 export const farmNodeCount = (farm: Farm) =>
   farm.plan?.nodes.length ?? farm.nodes.length;
+/** What a farm is doing now. A coordinator that predates `snapshotting` keeps a farm ready
+ * while its snapshot job stops the VMs, so the job names the state the badge should show. */
+export const farmState = (farm: Farm, job?: Job) =>
+  ["ready", "created"].includes(farm.status) && job?.kind === "snapshot"
+    ? "snapshotting"
+    : farm.status;
+/** A farm whose deployment still stands: ready, or holding still while its VM is captured.
+ * Its services cannot answer during a snapshot, so only labels use this, not requests. */
+export const farmDeployed = (farm: Farm) =>
+  ["ready", "snapshotting"].includes(farm.status);
 /** A control VM and compute VMs joined by the host's link switch. A farm made from a
  * control template has its control VM alone until a compute is added. */
 export const isMultiNodeFarm = (farm: Farm) =>

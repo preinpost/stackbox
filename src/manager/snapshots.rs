@@ -523,6 +523,9 @@ impl FarmManager {
             let mut job = super::new_job(farm_id, JobKind::Snapshot);
             job.snapshot_id = Some(request.id.clone());
             job.target_node = request.node.clone();
+            // The farm says its VM is stopping, and remembers what to be once it restarts.
+            farm.resume = Some(farm.status);
+            farm.status = FarmStatus::Snapshotting;
             farm.active_job = Some(job.id.clone());
             farm.error = None;
             farm.updated_at = now();

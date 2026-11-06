@@ -647,6 +647,9 @@ pub enum FarmStatus {
     Broken,
     Deleting,
     Deleted,
+    /// Its VM is stopping for a snapshot; [`FarmRecord::resume`] says what it was, so the
+    /// freeze leaves the farm as ready (or as failed) as it found it.
+    Snapshotting,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
@@ -711,6 +714,10 @@ pub struct FarmRecord {
     /// Snapshot this farm was restored from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub snapshot_id: Option<String>,
+    /// The status the farm had before a snapshot job stopped its VM. Set only while the
+    /// farm is `snapshotting`; the daemon keeps it with itself, not in the API.
+    #[serde(skip)]
+    pub resume: Option<FarmStatus>,
     /// Faults set on a multi-node farm's links, by VM (`control`, `compute-1`, ...).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub faults: BTreeMap<String, crate::link::Impair>,

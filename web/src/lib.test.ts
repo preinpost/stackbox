@@ -1,5 +1,30 @@
 import { expect, test } from "vitest";
-import { archiveSummary, snapshotHost } from "./lib";
+import type { Farm, Job } from "./api/client";
+import {
+  archiveSummary,
+  farmDeployed,
+  farmState,
+  snapshotHost,
+} from "./lib";
+
+test("shows a farm as snapshotting while its snapshot job keeps it ready", () => {
+  const farm = { id: "f", status: "ready" } as Farm;
+  const snapshot = { id: "j", kind: "snapshot" } as Job;
+  expect(farmState(farm, snapshot)).toBe("snapshotting");
+  // Every other job carries its own farm status, and a failed farm stays failed.
+  expect(farmState({ ...farm, status: "created" }, snapshot)).toBe(
+    "snapshotting",
+  );
+  expect(farmState(farm, { id: "j", kind: "deploy" } as Job)).toBe("ready");
+  expect(farmState(farm)).toBe("ready");
+  expect(farmState({ ...farm, status: "failed" }, snapshot)).toBe("failed");
+  // A coordinator that reports the state itself needs no help from the job.
+  expect(farmState({ ...farm, status: "snapshotting" })).toBe("snapshotting");
+  // A deployment still stands while its VM is captured; a created farm does not.
+  expect(farmDeployed({ ...farm, status: "snapshotting" })).toBe(true);
+  expect(farmDeployed({ ...farm, status: "created" })).toBe(false);
+});
+
 
 test("labels a snapshot with the platform that froze it", () => {
   expect(snapshotHost({ arch: "aarch64", platform: "macos" })).toBe(
