@@ -210,15 +210,7 @@ async fn deploy_on(
         }
         farm::wait_until_booted(&deployer).await?;
         // Farms created with a fixed guest identity bind every service to it; older farms use eth0.
-        let identity = run(
-            &deployer,
-            &format!(
-                "if [ -f {conf} ]; then . {conf}; echo \"{dummy} $FARM_ADDRESS\"; else echo \"eth0 $(ip -4 -o addr show dev eth0 | awk '{{split($4,a,\"/\"); print a[1]; exit}}')\"; fi",
-                conf = farm::IDENTITY_CONF,
-                dummy = farm::GUEST_INTERFACE,
-            ),
-        )
-        .await?;
+        let identity = run(&deployer, &identity_command()).await?;
         let (interface, address) = identity
             .trim()
             .split_once(' ')
@@ -244,6 +236,16 @@ async fn deploy_on(
         sandbox.detach().await;
     }
     result
+}
+
+/// Reads the guest's service interface and address on one line: the fixed identity a farm
+/// created with one binds to, or `eth0` on farms made before it.
+fn identity_command() -> String {
+    format!(
+        "if [ -f {conf} ]; then . {conf}; echo \"{dummy} $FARM_ADDRESS\"; else echo \"eth0 $(ip -4 -o addr show dev eth0 | awk '{{split($4,a,\"/\"); print a[1]; exit}}')\"; fi",
+        conf = farm::IDENTITY_CONF,
+        dummy = farm::GUEST_INTERFACE,
+    )
 }
 
 /// Give the control VM the key Kolla reaches the computes with.
@@ -277,15 +279,7 @@ pub async fn deploy_compute(
     let mut sandboxes: Vec<Sandbox> = Vec::new();
     let result = async {
         farm::wait_until_booted(&control).await?;
-        let identity = run(
-            &control,
-            &format!(
-                "if [ -f {conf} ]; then . {conf}; echo \"{dummy} $FARM_ADDRESS\"; else echo \"eth0 $(ip -4 -o addr show dev eth0 | awk '{{split($4,a,\"/\"); print a[1]; exit}}')\"); fi",
-                conf = farm::IDENTITY_CONF,
-                dummy = farm::GUEST_INTERFACE,
-            ),
-        )
-        .await?;
+        let identity = run(&control, &identity_command()).await?;
         let (interface, address) = identity
             .trim()
             .split_once(' ')
@@ -359,7 +353,10 @@ pub async fn deploy_compute(
             .await?;
         } else {
             sink(DeployEvent::Phase(Phase::Bootstrap))?;
-            step(&sink, format!("kolla-ansible bootstrap-servers --limit {host}"))?;
+            step(
+                &sink,
+                format!("kolla-ansible bootstrap-servers --limit {host}"),
+            )?;
             stream(
                 &control,
                 &kolla_ansible_limited("bootstrap-servers", &host),
@@ -377,6 +374,11 @@ pub async fn deploy_compute(
             )
             .await?;
         }
+        // Kolla restarts the control VM's OVS containers when the farm gains a compute, and the
+        // agent container that starts with them can find the database not yet listening and die.
+        // A compute would then join a farm whose network node has no agent, so give it one.
+        step(&sink, "control VM의 OVS agent 확인")?;
+        run(&control, RESTART_OVS_AGENT).await?;
         sink(DeployEvent::Phase(Phase::Verify))?;
         step(&sink, format!("{host}의 nova-compute·network agent 확인"))?;
         stream(
@@ -562,12 +564,36 @@ if [ ! -e $marker ]; then
 fi
 systemctl enable docker.service docker.socket
 systemctl start docker.service
+# A container keeps the hostname it was created with, and the template made them all with
+# the source VM's. Kolla's OVS agent takes its host from inside its container, so a copy that
+# kept it would register under the source compute. Dropping them lets reconfigure make them
+# again with this VM's hostname; their data is in volumes, which stay.
+me=$(hostname)
+for c in $(docker ps -a --format '{{{{.Names}}}}'); do
+  case "$c" in openvswitch_db | openvswitch_vswitchd) continue ;; esac
+  h=$(docker inspect -f '{{{{.Config.Hostname}}}}' "$c" 2>/dev/null || true)
+  if [ -n "$h" ] && [ "$h" != "$me" ]; then
+    echo "recreate $c: the template made it as $h"
+    docker rm -f "$c" >/dev/null
+  fi
+done
 if docker ps -a --format '{{{{.Names}}}}' | grep -qx openvswitch_db; then
   for _ in $(seq 60); do docker exec openvswitch_db ovs-vsctl show >/dev/null 2>&1 && break; sleep 2; done
   docker exec openvswitch_db ovs-vsctl set Open_vSwitch . external_ids:system-id={hostname}
 fi"#
     )
 }
+
+/// Wait for OVS on the control VM to answer, then restart its OVS agent if it is not healthy.
+/// Kolla's agent container exits when it starts while the database is still coming up, and
+/// nothing restarts it afterwards; the farm would keep a network node without an agent.
+const RESTART_OVS_AGENT: &str = r#"for _ in $(seq 40); do
+  docker ps --format '{{.Names}} {{.Status}}' | grep -q '^openvswitch_db Up .* (healthy)' && break
+  sleep 2
+done
+if ! docker ps --format '{{.Names}} {{.Status}}' | grep -q '^neutron_openvswitch_agent Up .* (healthy)'; then
+  docker restart neutron_openvswitch_agent >/dev/null 2>&1 || true
+fi"#;
 
 fn kolla_ansible_limited(command: &str, host: &str) -> String {
     format!("PATH={VENV}/bin:$PATH kolla-ansible {command} -i {INVENTORY} --limit {host}")
@@ -589,10 +615,14 @@ echo "nova-compute {host} up"
 "#
     );
     if neutron {
+        // `--agent-type` takes a choice of short names that change between client versions
+        // (`open-vswitch` now, the display name before); the host's agents are few, so their
+        // own type column decides.
         script.push_str(&format!(
             r#"alive=''
 for _ in $(seq 60); do
-  alive=$($os network agent list --host {host} --agent-type "Open vSwitch agent" -f value -c Alive 2>/dev/null || true)
+  alive=$($os network agent list --host {host} -f value -c "Agent Type" -c Alive 2>/dev/null \
+    | awk '$1 == "Open" && $2 == "vSwitch" {{ print $NF; exit }}' || true)
   [ "$alive" = True ] && break
   sleep 5
 done
@@ -1606,6 +1636,10 @@ mod tests {
             OVS_EXTEND_START_SCRIPT.to_owned(),
             include_str!("../../guest/farm/farm-external").to_owned(),
             include_str!("../../guest/farm/farm-identity").to_owned(),
+            // Deploying a farm and adding a compute read the guest's address the same way.
+            identity_command(),
+            // A compute booted from a template recreates the containers it inherited.
+            wipe_template_script("farm-compute-2"),
         ];
         for script in scripts {
             let mut child = Command::new("bash")
@@ -1640,6 +1674,23 @@ mod tests {
         ] {
             assert_heredocs_do_not_nest(&script);
         }
+
+        // A restarted OVS container can leave the control's agent dead; the expansion revives it.
+        assert!(RESTART_OVS_AGENT.contains("docker restart neutron_openvswitch_agent"));
+
+        // The agent check reads the host's own agents: `--agent-type` takes names that differ
+        // between client versions, and a rejected filter looked like a dead agent.
+        let verify = verify_compute_script("farm-compute-2", true);
+        assert!(verify.contains(r#"-c "Agent Type" -c Alive"#));
+        assert!(!verify.contains("--agent-type"));
+
+        // A template's containers carry its hostname; the copy drops the ones that are not its
+        // own, so Kolla's OVS agent registers under this VM and not the source one.
+        let wipe = wipe_template_script("farm-compute-2");
+        assert!(wipe.contains(r#"if [ -n "$h" ] && [ "$h" != "$me" ]"#));
+        assert!(wipe.contains(r#"docker rm -f "$c""#));
+        // The host's own OVS containers carry the farm's network state, not a copy's identity.
+        assert!(wipe.contains("openvswitch_db | openvswitch_vswitchd) continue"));
 
         // A control VM alone deploys as a multi-node farm: its external network is physnet2
         // on br-ex, and the computes that join later keep the same layout.

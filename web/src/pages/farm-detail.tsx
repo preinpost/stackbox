@@ -114,6 +114,17 @@ export function FarmDetailPage({ id }: { id: string }) {
     .filter((j) => j.farm_id === id)
     .sort((a, b) => b.created_at - a.created_at);
   const latestDeployment = history.find((j) => j.kind === "deploy");
+  // A compute addition that stopped midway: its VM may run while the plan never kept it.
+  const failedExpansion = history.find(
+    (j) =>
+      j.kind === "expand" &&
+      ["failed", "interrupted"].includes(j.status) &&
+      Boolean(j.target_node),
+  );
+  const resumableExpansion =
+    Boolean(failedExpansion) &&
+    ["failed", "broken"].includes(farm.status) &&
+    !farm.active_job;
   const activeJob = history.find((j) => j.id === farm.active_job);
   // A remote farm keeps the agent digest it was created with; updates need a new farm.
   const host = hosts.data?.find((h) => h.id === farm.host_id);
@@ -215,7 +226,15 @@ export function FarmDetailPage({ id }: { id: string }) {
                 : "마지막 작업을 완료하지 못했습니다"}
             </strong>
             <p>{farm.error}</p>
-            {latestDeployment?.phase && (
+            {resumableExpansion && failedExpansion && (
+              <p>
+                실패한 compute 추가:{" "}
+                <span className="font-mono">{failedExpansion.target_node}</span>
+                . Compute 추가에서 같은 VM·같은 방식으로 이어서 재시도할 수
+                있습니다.
+              </p>
+            )}
+            {!resumableExpansion && latestDeployment?.phase && (
               <p>
                 마지막 배포 단계:{" "}
                 <span className="font-mono">{latestDeployment.phase}</span>.
@@ -254,11 +273,9 @@ export function FarmDetailPage({ id }: { id: string }) {
         <div className="info-notice">
           <Cpu size={18} />
           <div>
-            <strong>
-              {activeJob.target_node ?? "compute"}을(를) 추가하는 중입니다.
-            </strong>{" "}
-            새 VM을 만들고 control VM의 Kolla inventory에 등록합니다. 기존
-            서비스는 그대로 동작합니다.
+            <strong>{activeJob.target_node ?? "compute"} 추가 중입니다.</strong>{" "}
+            호스트에 VM을 마련하고 control VM의 Kolla inventory에 등록한 뒤, 그
+            VM에만 배포합니다. 기존 서비스는 그대로 동작합니다.
           </div>
         </div>
       )}

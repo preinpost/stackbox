@@ -1607,7 +1607,11 @@ impl FarmManager {
                 })
                 .max_by_key(|job| job.created_at)
                 .cloned();
-            let resuming = farm.status == FarmStatus::Failed;
+            // A failed expansion leaves its new VM running on the host, and the inventory then
+            // differs from the plan, which marks the farm broken. Both mean the same attempt can
+            // go on from where it stopped.
+            let resuming = matches!(farm.status, FarmStatus::Failed | FarmStatus::Broken)
+                && previous.is_some();
             let (target_host, target_node) = if resuming {
                 let previous = previous.as_ref().ok_or_else(|| {
                     conflict(

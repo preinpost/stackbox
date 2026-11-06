@@ -66,12 +66,36 @@ pub async fn stream(sandbox: &Sandbox, script: &str, log: &str, sink: &EventSink
                 }
             }
             ExecEvent::Exited { code: 0 } => return Ok(()),
-            ExecEvent::Exited { code } => bail!("{}: exit {code} (log: {log})", sandbox.name()),
+            ExecEvent::Exited { code } => {
+                // The log keeps the whole run; the reason is its last lines, and a job's error
+                // is all a reader sees without opening a shell.
+                let tail = last_lines(sandbox, log).await;
+                bail!("{}: exit {code} (log: {log}){tail}", sandbox.name())
+            }
             ExecEvent::Failed(failure) => bail!("{}: failed to start: {failure:?}", sandbox.name()),
             _ => {}
         }
     }
     bail!("{}: output ended without an exit status", sandbox.name())
+}
+
+/// The reason a script failed, from the end of its log: step markers dropped, empty lines
+/// skipped, three lines at most.
+async fn last_lines(sandbox: &Sandbox, log: &str) -> String {
+    let script = format!(
+        "grep -v '^{STEP_PREFIX}' {log} 2>/dev/null | grep -v '^[[:space:]]*$' | tail -n 3"
+    );
+    match run(sandbox, &script).await {
+        Ok(tail) if !tail.trim().is_empty() => {
+            let lines: Vec<&str> = tail
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .collect();
+            format!(": {}", lines.join(" / "))
+        }
+        _ => String::new(),
+    }
 }
 
 #[cfg(test)]

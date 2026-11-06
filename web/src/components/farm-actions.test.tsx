@@ -3,7 +3,13 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, cleanup, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, test, vi } from "vitest";
-import { keys, type Farm, type Plan, type Snapshot } from "../api/client";
+import {
+  keys,
+  type Farm,
+  type Job,
+  type Plan,
+  type Snapshot,
+} from "../api/client";
 import {
   AddComputeDialog,
   CreateFarmForm,
@@ -627,6 +633,92 @@ test("allows deployment only for a running all-in-one VM and preserves legacy fa
     </QueryClientProvider>,
   );
   expect(deployButton().disabled).toBe(true);
+  client.clear();
+});
+
+test("retries a failed expansion on a farm its leftover VM marked broken", async () => {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+  });
+  const user = userEvent.setup();
+  let submitted: unknown;
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (path: string, options?: RequestInit) => {
+      if (path.endsWith("/hosts"))
+        return Response.json([
+          {
+            id: "local",
+            kind: "local",
+            address: "localhost",
+            status: "ready",
+            inspection: { checked_at: Date.now() / 1000 },
+            capacity: { memory_budget_mib: 8000, memory_reserved_mib: 0 },
+          },
+        ]);
+      if (path.endsWith("/host"))
+        return Response.json({ build_id: "b", relay_url: null });
+      if (path.endsWith("/snapshots")) return Response.json([]);
+      if (path.endsWith("/computes") && options?.method === "POST") {
+        submitted = JSON.parse(String(options.body));
+        return Response.json({
+          id: "job",
+          farm_id: "grow",
+          kind: "expand",
+          status: "queued",
+        });
+      }
+      if (path.endsWith("/releases")) return Response.json(releaseCatalog);
+      if (path.endsWith("/releases/plan"))
+        return Response.json(releasePreview(JSON.parse(String(options?.body))));
+      return Response.json([]);
+    }),
+  );
+  // The attempt died after compute-2 started, so the host runs a VM the plan never kept and
+  // the coordinator reports the farm as broken rather than ready.
+  const farm: Farm = {
+    ...grownFarm(),
+    status: "broken",
+    error: "VM inventory differs from the expected running nodes",
+    nodes: [
+      ...grownFarm().nodes,
+      {
+        name: "grow-compute-2",
+        role: "compute",
+        index: 2,
+        status: "running",
+        memory_mib: 3072,
+      },
+    ],
+  };
+  const failed = {
+    id: "job",
+    farm_id: "grow",
+    kind: "expand",
+    status: "failed",
+    created_at: 1,
+    target_host: "local",
+    target_node: "compute-2",
+  } as Job;
+  render(
+    <QueryClientProvider client={client}>
+      <AddComputeDialog farm={farm} lastJob={failed} />
+    </QueryClientProvider>,
+  );
+  const trigger = screen.getByRole("button", { name: "Compute 추가" });
+  expect((trigger as HTMLButtonElement).disabled).toBe(false);
+  await user.click(trigger);
+  // The retry keeps the host and the way it started; the server decides both anyway.
+  expect(
+    (
+      await screen.findByRole("combobox", {
+        name: "compute-2 호스트",
+      })
+    ).hasAttribute("data-disabled"),
+  ).toBe(true);
+  await user.click(await screen.findByRole("button", { name: "추가" }));
+  await waitFor(() => expect(submitted).toEqual({ host_id: "local" }));
+  cleanup();
   client.clear();
 });
 

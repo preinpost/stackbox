@@ -968,7 +968,9 @@ export function AddComputeDialog({
   const relay = coordinator.data?.relay_url;
   const allowed =
     isDeployableFarm(farm) &&
-    (farm.status === "ready" || (farm.status === "failed" && resumable)) &&
+    // A failed attempt leaves its VM running, and the inventory then no longer matches the
+    // plan: the farm reads `broken` although the same expansion can go on where it stopped.
+    (farm.status === "ready" || resumable) &&
     !farm.active_job &&
     isMultiNodeFarm(farm) &&
     computes < 3;
@@ -1012,7 +1014,9 @@ export function AddComputeDialog({
             ? "한 farm에는 compute VM을 3대까지 둘 수 있습니다."
             : !isMultiNodeFarm(farm)
               ? "all-in-one farm에는 compute를 추가할 수 없습니다. control과 compute로 이루어진 farm을 새로 만드세요."
-              : "배포가 끝난 farm에 다음 compute VM을 추가합니다."
+              : resumable
+                ? "실패한 compute 추가를 같은 VM·같은 방식으로 이어서 재시도합니다."
+                : "배포가 끝난 farm에 다음 compute VM을 추가합니다."
         }
       >
         <Cpu size={15} />

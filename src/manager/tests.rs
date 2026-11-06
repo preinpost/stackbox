@@ -5507,6 +5507,56 @@ async fn a_release_layout_is_checked_against_its_computes_and_templates() {
 }
 
 #[tokio::test]
+async fn an_expansion_retries_when_its_leftover_vm_marked_the_farm_broken() {
+    let dir = tempfile::tempdir().unwrap();
+    let (manager, backend) = release_templates(dir.path()).await;
+    // The control VM and compute-1 come up; the expansion that adds compute-2 fails.
+    backend.fail_expansion_from.store(2, Ordering::SeqCst);
+    let job = manager.create_release(by_release("r", 3)).await.unwrap();
+    let finished = done_slowly(&manager, &job).await;
+    assert_eq!(finished.status, JobStatus::Failed);
+    // The attempt died after its VM started, so the host runs a compute the plan never kept:
+    // the inventory no longer matches, and the farm is reported as broken rather than ready.
+    backend
+        .farms
+        .lock()
+        .unwrap()
+        .get_mut("r")
+        .unwrap()
+        .push(FarmNode {
+            name: "r-compute-2".into(),
+            index: Some(2),
+            role: Some(crate::farm::Role::Compute),
+            status: "running".into(),
+            memory_mib: 3072,
+            ip: Some("10.250.0.2".into()),
+        });
+    manager.reconcile().await.unwrap();
+    let farm = manager.get("r").unwrap();
+    assert_eq!(farm.status, FarmStatus::Broken);
+    assert_eq!(farm.plan.as_ref().unwrap().computes, 1);
+
+    // The same attempt goes on, adopting the VM the host already has.
+    backend.fail_expansion_from.store(0, Ordering::SeqCst);
+    let retry = manager
+        .add_compute(
+            "r",
+            AddComputeRequest {
+                host_id: None,
+                from_snapshot: Some("cpt".into()),
+            },
+        )
+        .unwrap();
+    assert_eq!(retry.target_node.as_deref(), Some("compute-2"));
+    assert_eq!(done(&manager, &retry).await.status, JobStatus::Succeeded);
+    let farm = manager.get("r").unwrap();
+    assert_eq!(farm.status, FarmStatus::Ready);
+    assert_eq!(farm.plan.unwrap().computes, 2);
+    assert_eq!(farm.nodes.len(), 3);
+    settle(&manager).await;
+}
+
+#[tokio::test]
 async fn a_release_farm_that_fails_midway_keeps_its_vms_and_is_retried_by_expansion() {
     let dir = tempfile::tempdir().unwrap();
     let (manager, backend) = release_templates(dir.path()).await;
