@@ -1004,6 +1004,10 @@ pub struct ReleasePlan {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct ReleaseTemplates {
     pub release: String,
+    /// Code name of the series (`wallaby`); the same as `release` from 2023.1 on, where the
+    /// names became `year.release`.
+    #[serde(default)]
+    pub series: String,
     pub local_control: usize,
     pub local_compute: usize,
     pub bucket_control: usize,

@@ -130,6 +130,7 @@ impl FarmManager {
                 .entry(release.into())
                 .or_insert_with(|| ReleaseTemplates {
                     release: release.into(),
+                    series: crate::kolla::releases::info(release).series,
                     installable: arch == current_arch()
                         && published.contains(&release.into())
                         && crate::kolla::releases::available_on(release, &arch),

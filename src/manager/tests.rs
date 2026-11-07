@@ -5286,12 +5286,16 @@ async fn a_release_plan_picks_the_newest_matching_templates_or_says_why_it_insta
     assert_eq!(own.local_control, 0);
     assert!(own.installable);
     assert!(!own.eol);
-    assert!(
-        catalog
-            .releases
-            .iter()
-            .any(|r| r.release == "2021.1" && r.eol)
-    );
+    // The legacy series carry the code name their images are tagged with.
+    let legacy = catalog
+        .releases
+        .iter()
+        .find(|r| r.release == "2021.1")
+        .expect("the legacy series are offered");
+    assert!(legacy.eol);
+    assert_eq!(legacy.series, "wallaby");
+    // A release still named year.release needs no separate code name.
+    assert_eq!(own.series, release);
     let catalog = manager
         .release_catalog(Some("riscv64".into()), None)
         .await

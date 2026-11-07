@@ -5,6 +5,8 @@ export function releaseLabel(r: ReleaseTemplates) {
   const control = r.local_control + r.bucket_control;
   const compute = r.local_compute + r.bucket_compute;
   const buckets = r.bucket_control + r.bucket_compute;
+  // The code name says which series a release is; the year.release names carry it already.
+  const codename = r.series && r.series !== r.release ? ` (${r.series})` : "";
   const parts = [
     ...(control + compute
       ? [`템플릿 control ${control} · compute ${compute}`]
@@ -15,7 +17,7 @@ export function releaseLabel(r: ReleaseTemplates) {
     // images run (amd64), so an aarch64 coordinator offers it without the clean install.
     ...(r.eol ? ["EOL"] : []),
   ];
-  return `OpenStack ${r.release}${parts.length ? ` · ${parts.join(" · ")}` : ""}`;
+  return `OpenStack ${r.release}${codename}${parts.length ? ` · ${parts.join(" · ")}` : ""}`;
 }
 
 /** One VM of the preview: where it comes from and why. */

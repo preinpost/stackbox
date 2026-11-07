@@ -420,10 +420,12 @@ test("labels releases by their templates and shows an assemble job's steps", () 
       installable: true,
     }),
   ).toBe("OpenStack 2026.2 · 템플릿 control 2 · compute 2 · 버킷 1");
-  // An end-of-life series is labelled, and has no clean install where its images cannot run.
+  // An end-of-life series shows its code name, and has no clean install where its images
+  // cannot run.
   expect(
     releaseLabel({
       release: "2021.1",
+      series: "wallaby",
       local_control: 0,
       local_compute: 0,
       bucket_control: 0,
@@ -431,7 +433,20 @@ test("labels releases by their templates and shows an assemble job's steps", () 
       installable: false,
       eol: true,
     }),
-  ).toBe("OpenStack 2021.1 · EOL");
+  ).toBe("OpenStack 2021.1 (wallaby) · EOL");
+  // From 2023.1 the series is the release name, so it is not repeated.
+  expect(
+    releaseLabel({
+      release: "2022.2",
+      series: "2022.2",
+      local_control: 0,
+      local_compute: 0,
+      bucket_control: 0,
+      bucket_compute: 0,
+      installable: false,
+      eol: true,
+    }),
+  ).toBe("OpenStack 2022.2 · EOL");
   const job = {
     id: "job",
     farm_id: "r",

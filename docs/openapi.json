@@ -6,7 +6,7 @@
     "license": {
       "name": ""
     },
-    "version": "0.1.6"
+    "version": "0.1.8"
   },
   "paths": {
     "/api/v1/agent-hosts": {
@@ -4661,6 +4661,10 @@
           },
           "release": {
             "type": "string"
+          },
+          "series": {
+            "type": "string",
+            "description": "Code name of the series (`wallaby`); the same as `release` from 2023.1 on, where the\nnames became `year.release`."
           }
         }
       },

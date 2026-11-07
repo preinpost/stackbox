@@ -1471,6 +1471,11 @@ export interface components {
       local_compute: number;
       local_control: number;
       release: string;
+      /**
+       * @description Code name of the series (`wallaby`); the same as `release` from 2023.1 on, where the
+       *     names became `year.release`.
+       */
+      series?: string;
     };
     RemoteHost: {
       active_job?: string | null;
