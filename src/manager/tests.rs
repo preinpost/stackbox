@@ -551,9 +551,21 @@ fn local_host(manager: &FarmManager) {
         .unwrap();
 }
 async fn open_with(options: ManagerOptions, backend: Arc<Fake>) -> FarmManager {
-    let manager = FarmManager::with_backend(options, backend).await.unwrap();
-    local_host(&manager);
-    manager
+    // A job task can outlive the manager that started it by a moment and still hold the state
+    // lock; the test harness opens the same state again right after dropping that manager.
+    for _ in 0..100 {
+        match FarmManager::with_backend(options.clone(), backend.clone()).await {
+            Ok(manager) => {
+                local_host(&manager);
+                return manager;
+            }
+            Err(error) if error.to_string().contains("locked by another process") => {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            Err(error) => panic!("{error:#}"),
+        }
+    }
+    panic!("farm state stayed locked by a finishing job");
 }
 fn request(id: &str) -> CreateRequest {
     CreateRequest {
