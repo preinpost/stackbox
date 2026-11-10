@@ -7,6 +7,7 @@ import type { Datastore } from "../api/client";
 import {
   DatastoreCard,
   DeploymentPhases,
+  FarmMeta,
   HorizonLogin,
   NodeTopology,
 } from "./farm-detail";
@@ -36,6 +37,47 @@ const farm: Farm = {
     },
   ],
 };
+
+test("names the farm's OpenStack release under its name, with a flag outside support", () => {
+  const { container, rerender } = render(
+    <FarmMeta
+      farm={{
+        ...farm,
+        host_id: "dev-machine",
+        openstack: {
+          release: "2024.1",
+          series: "2024.1",
+          eol: false,
+          supported: true,
+        },
+      }}
+    />,
+  );
+  expect(container.textContent).toContain("원격 · dev-machine");
+  // The year names are the series names, so the release stands alone.
+  expect(container.textContent).toContain("OpenStack 2024.1");
+  expect(container.querySelector(".release-flag")).toBeNull();
+  // zed names the images and release notes of 2022.2, which is end of life.
+  rerender(
+    <FarmMeta
+      farm={{
+        ...farm,
+        openstack: {
+          release: "2022.2",
+          series: "zed",
+          eol: true,
+          supported: false,
+        },
+      }}
+    />,
+  );
+  expect(container.textContent).toContain("OpenStack 2022.2 (zed)");
+  expect(container.querySelector(".release-flag")?.textContent).toBe("EOL");
+  // A farm made before plans kept their release says so instead of guessing one.
+  rerender(<FarmMeta farm={{ ...farm, plan: null }} />);
+  expect(container.textContent).toContain("릴리스 미기록");
+  expect(container.querySelector(".release-flag")).toBeNull();
+});
 
 test("shows selected services inside one VM without overlay or separate role nodes", () => {
   const { container } = render(<NodeTopology farm={farm} />);

@@ -37,6 +37,7 @@ import {
   type Farm,
   type Impair,
   type Job,
+  type RemoteHost,
 } from "../api/client";
 import {
   AddComputeDialog,
@@ -45,6 +46,7 @@ import {
   DeployFarmDialog,
 } from "../components/farm-actions";
 import { FreezeFarmDialog } from "../components/snapshot-actions";
+import { FarmRelease, farmReleaseLabel } from "../components/farm-release";
 import { LogViewer } from "../components/log-viewer";
 import {
   Button,
@@ -155,25 +157,7 @@ export function FarmDetailPage({ id }: { id: string }) {
               <h1>{farm.id}</h1>
               <StatusBadge status={farmState(farm, activeJob)} />
             </div>
-            <p>
-              {farm.owner || "담당자 미지정"}
-              <span>·</span>
-              {!farm.host_id
-                ? "호스트 없음"
-                : host?.kind === "local"
-                  ? `로컬 · ${farm.host_id}`
-                  : `원격 · ${farm.host_id}`}
-              <span>·</span>
-              {dateTime(farm.created_at)} 생성
-              {farm.snapshot_id && (
-                <>
-                  <span>·</span>
-                  <Link to="/snapshots" className="hover:underline">
-                    스냅샷 {farm.snapshot_id}에서 복원
-                  </Link>
-                </>
-              )}
-            </p>
+            <FarmMeta farm={farm} host={host} />
           </div>
         </div>
         <div className="flex gap-2">
@@ -413,6 +397,33 @@ export function FarmDetailPage({ id }: { id: string }) {
         </Tabs.Panel>
       </Tabs.Root>
     </>
+  );
+}
+/** The facts under a farm's name: its owner, where its VMs run, the OpenStack release it
+ * installs and when it was made. */
+export function FarmMeta({ farm, host }: { farm: Farm; host?: RemoteHost }) {
+  return (
+    <p>
+      {farm.owner || "담당자 미지정"}
+      <span>·</span>
+      {!farm.host_id
+        ? "호스트 없음"
+        : host?.kind === "local"
+          ? `로컬 · ${farm.host_id}`
+          : `원격 · ${farm.host_id}`}
+      <span>·</span>
+      {farmReleaseLabel(farm) ? <FarmRelease farm={farm} /> : "릴리스 미기록"}
+      <span>·</span>
+      {dateTime(farm.created_at)} 생성
+      {farm.snapshot_id && (
+        <>
+          <span>·</span>
+          <Link to="/snapshots" className="hover:underline">
+            스냅샷 {farm.snapshot_id}에서 복원
+          </Link>
+        </>
+      )}
+    </p>
   );
 }
 const roleInfo: Record<string, { label: string; service: string }> = {

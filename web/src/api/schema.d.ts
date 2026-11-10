@@ -977,6 +977,26 @@ export interface components {
       role?: null | components["schemas"]["Role"];
       status: string;
     };
+    /**
+     * @description The OpenStack release a farm installs, named as the images and documents name it: the code
+     *     name beside the number (`2022.2` is `zed`), and whether this coordinator still supports it.
+     */
+    FarmOpenStack: {
+      /** @description kolla-ansible keeps no branch for it any more, so it installs from the series' last tag. */
+      eol: boolean;
+      /** @description What the farm records, `2022.2`. */
+      release: string;
+      /**
+       * @description Its series name, `zed`; the same as `release` from 2023.1 on, where the names became
+       *     `year.release`.
+       */
+      series: string;
+      /**
+       * @description False below the oldest supported release, whatever the host's
+       *     `FARM_ALLOW_UNSUPPORTED_RELEASES` says: such a farm keeps working but is out of support.
+       */
+      supported: boolean;
+    };
     FarmRecord: {
       active_job?: string | null;
       agent_sha256?: string | null;
@@ -1024,6 +1044,14 @@ export interface components {
       | "deleting"
       | "deleted"
       | "snapshotting";
+    /**
+     * @description A farm as the API returns it: the stored record plus the release facts the portal labels the
+     *     farm with. Only the record is kept; the release comes from the release tables, so the names
+     *     live in one place and a farm's state stays what it was created with.
+     */
+    FarmView: components["schemas"]["FarmRecord"] & {
+      openstack?: null | components["schemas"]["FarmOpenStack"];
+    };
     HostCapacity: {
       /** Format: int64 */
       memory_budget_mib: number;
@@ -2059,7 +2087,7 @@ export interface operations {
           [name: string]: unknown;
         };
         content: {
-          "application/json": components["schemas"]["FarmRecord"][];
+          "application/json": components["schemas"]["FarmView"][];
         };
       };
     };
@@ -2119,7 +2147,7 @@ export interface operations {
           [name: string]: unknown;
         };
         content: {
-          "application/json": components["schemas"]["FarmRecord"];
+          "application/json": components["schemas"]["FarmView"];
         };
       };
       404: {
@@ -2348,7 +2376,7 @@ export interface operations {
           [name: string]: unknown;
         };
         content: {
-          "application/json": components["schemas"]["FarmRecord"];
+          "application/json": components["schemas"]["FarmView"];
         };
       };
       400: {

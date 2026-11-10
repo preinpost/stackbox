@@ -34,6 +34,7 @@ import {
   type Farm,
 } from "../api/client";
 import { CreateFarmDialog } from "../components/farm-actions";
+import { FarmRelease, farmReleaseLabel } from "../components/farm-release";
 import {
   Button,
   EmptyState,
@@ -91,6 +92,21 @@ export function FarmsPage() {
               <small>{row.original.owner || "담당자 미지정"}</small>
             </span>
           </Link>
+        ),
+      },
+      {
+        id: "openstack",
+        header: "OpenStack",
+        accessorFn: (farm) =>
+          farm.openstack?.release ?? farm.plan?.release ?? "",
+        cell: ({ row }) => (
+          <span className="release-cell">
+            {farmReleaseLabel(row.original) ? (
+              <FarmRelease farm={row.original} />
+            ) : (
+              "릴리스 미기록"
+            )}
+          </span>
         ),
       },
       {

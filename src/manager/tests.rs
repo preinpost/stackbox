@@ -1793,6 +1793,13 @@ async fn http_auth_validation_job_locations_and_schema() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
+    // The portal names a farm's release from the release tables, not from a second list of
+    // names of its own. This farm was created without naming a release, so its record carries
+    // none and the portal says so rather than guessing the coordinator's own.
+    let farm: serde_json::Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), 1_000_000).await.unwrap()).unwrap();
+    assert_eq!(farm["id"], "http-demo");
+    assert!(farm["openstack"].is_null());
     let response = app
         .clone()
         .oneshot(authorized("GET", "/api/v1/jobs/missing", ""))
@@ -1836,6 +1843,52 @@ async fn http_auth_validation_job_locations_and_schema() {
         serde_json::from_slice(&to_bytes(response.into_body(), 1_000_000).await.unwrap()).unwrap();
     assert!(spec["paths"]["/api/v1/farms/{id}/logs/stream"].is_object());
     assert!(spec["components"]["schemas"]["CreateRequest"].is_object());
+    settle(&manager).await;
+}
+
+#[tokio::test]
+async fn the_farms_api_names_the_release_each_farm_recorded() {
+    let dir = tempfile::tempdir().unwrap();
+    let manager = open_with(options(dir.path()), Arc::new(Fake::default())).await;
+    let created = manager
+        .create(CreateRequest {
+            release: Some(crate::kolla::OPENSTACK_RELEASE.into()),
+            ..request("released")
+        })
+        .unwrap();
+    done(&manager, &created).await;
+    let app = api::router(manager.clone(), None);
+    // The portal labels farms with the release they record, named as the images name it, so
+    // both the list and the detail carry the series and whether the release is still supported.
+    for uri in ["/api/v1/farms", "/api/v1/farms/released"] {
+        let response = app
+            .clone()
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{uri}");
+        let body: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
+                .unwrap();
+        let farm = if uri.ends_with("released") {
+            &body
+        } else {
+            &body[0]
+        };
+        assert_eq!(farm["id"], "released", "{uri}");
+        assert_eq!(
+            farm["openstack"]["release"],
+            crate::kolla::OPENSTACK_RELEASE,
+            "{uri}"
+        );
+        assert_eq!(
+            farm["openstack"]["series"],
+            crate::kolla::OPENSTACK_RELEASE,
+            "{uri}"
+        );
+        assert_eq!(farm["openstack"]["eol"], false, "{uri}");
+        assert_eq!(farm["openstack"]["supported"], true, "{uri}");
+    }
     settle(&manager).await;
 }
 

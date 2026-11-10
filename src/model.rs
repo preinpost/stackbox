@@ -744,6 +744,53 @@ pub struct FarmRecord {
     pub uplink_sha256: Option<String>,
 }
 
+/// The OpenStack release a farm installs, named as the images and documents name it: the code
+/// name beside the number (`2022.2` is `zed`), and whether this coordinator still supports it.
+#[derive(Clone, Debug, PartialEq, Serialize, ToSchema)]
+pub struct FarmOpenStack {
+    /// What the farm records, `2022.2`.
+    pub release: String,
+    /// Its series name, `zed`; the same as `release` from 2023.1 on, where the names became
+    /// `year.release`.
+    pub series: String,
+    /// kolla-ansible keeps no branch for it any more, so it installs from the series' last tag.
+    pub eol: bool,
+    /// False below the oldest supported release, whatever the host's
+    /// `FARM_ALLOW_UNSUPPORTED_RELEASES` says: such a farm keeps working but is out of support.
+    pub supported: bool,
+}
+
+/// A farm as the API returns it: the stored record plus the release facts the portal labels the
+/// farm with. Only the record is kept; the release comes from the release tables, so the names
+/// live in one place and a farm's state stays what it was created with.
+#[derive(Clone, Debug, Serialize, ToSchema)]
+pub struct FarmView {
+    #[serde(flatten)]
+    pub farm: FarmRecord,
+    /// Absent on a farm created before plans kept their release.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub openstack: Option<FarmOpenStack>,
+}
+
+impl FarmView {
+    pub fn of(farm: FarmRecord) -> Self {
+        let openstack = farm
+            .plan
+            .as_ref()
+            .and_then(|plan| plan.release.as_deref())
+            .map(|release| {
+                let info = crate::kolla::releases::info(release);
+                FarmOpenStack {
+                    release: info.release,
+                    series: info.series,
+                    eol: info.eol,
+                    supported: crate::kolla::releases::in_supported_range(release),
+                }
+            });
+        Self { farm, openstack }
+    }
+}
+
 /// The compute VMs of a farm that one other host runs.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
@@ -1715,5 +1762,66 @@ mod tests {
         legacy["profile"] = "full".into();
         let restored: Plan = serde_json::from_value(legacy).unwrap();
         assert_eq!(restored.components, ["keystone", "glance"]);
+    }
+
+    #[test]
+    fn the_api_view_names_the_release_a_farm_installs() {
+        let farm = |release: Option<&str>| FarmRecord {
+            id: "demo".into(),
+            host_id: Some("local".into()),
+            remote_generation: None,
+            agent_sha256: None,
+            observation_error: None,
+            last_seen_at: None,
+            status: FarmStatus::Created,
+            plan: Some(Plan {
+                components: vec!["keystone".into()],
+                release: release.map(str::to_owned),
+                computes: 0,
+                compute: None,
+                nodes: vec![],
+                memory_mib: 3072,
+                disk_mib: 20480,
+                warnings: vec![],
+            }),
+            exposure: None,
+            owner: None,
+            expires_at: None,
+            nodes: vec![],
+            phase: None,
+            step: None,
+            error: None,
+            active_job: None,
+            created_at: 0,
+            updated_at: 0,
+            snapshot_id: None,
+            resume: None,
+            faults: Default::default(),
+            shares: vec![],
+            uplink_sha256: None,
+        };
+        // The series carries the name the images and release notes use, and an end-of-life
+        // series below the supported minimum is flagged as both.
+        let openstack = FarmView::of(farm(Some("2022.2")))
+            .openstack
+            .expect("the plan kept its release");
+        assert_eq!(openstack.release, "2022.2");
+        assert_eq!(openstack.series, "zed");
+        assert!(openstack.eol && !openstack.supported);
+        // A `year.release` names its own series, and the supported range starts at Caracal.
+        let openstack = FarmView::of(farm(Some("2026.2"))).openstack.unwrap();
+        assert_eq!(openstack.series, "2026.2");
+        assert!(!openstack.eol && openstack.supported);
+        // 2023.x has neither images nor a branch: outside support, but not end of life.
+        let openstack = FarmView::of(farm(Some("2023.1"))).openstack.unwrap();
+        assert!(!openstack.eol && !openstack.supported);
+        // A plan recorded before releases were kept says nothing rather than guessing one.
+        assert!(FarmView::of(farm(None)).openstack.is_none());
+        // The recorded farm is still flat in the response, so clients read it as a farm.
+        let value = serde_json::to_value(FarmView::of(farm(Some("2024.1")))).unwrap();
+        assert_eq!(value["id"], "demo");
+        assert_eq!(value["plan"]["release"], "2024.1");
+        assert_eq!(value["openstack"]["release"], "2024.1");
+        assert_eq!(value["openstack"]["supported"], true);
     }
 }

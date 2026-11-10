@@ -566,16 +566,18 @@ async fn plan_handler(
     request.check_release().map_err(bad)?;
     Ok(Json(plan(&request).map_err(bad)?))
 }
-#[utoipa::path(get, path="/api/v1/farms", responses((status=200, body=Vec<FarmRecord>)))]
-async fn list(State(app): State<App>) -> Result<Json<Vec<FarmRecord>>, ApiError> {
-    Ok(Json(app.manager.list()?))
+#[utoipa::path(get, path="/api/v1/farms", responses((status=200, body=Vec<FarmView>)))]
+async fn list(State(app): State<App>) -> Result<Json<Vec<FarmView>>, ApiError> {
+    Ok(Json(
+        app.manager.list()?.into_iter().map(FarmView::of).collect(),
+    ))
 }
-#[utoipa::path(get, path="/api/v1/farms/{id}", params(("id"=String, Path)), responses((status=200, body=FarmRecord), (status=404, body=ErrorBody)))]
+#[utoipa::path(get, path="/api/v1/farms/{id}", params(("id"=String, Path)), responses((status=200, body=FarmView), (status=404, body=ErrorBody)))]
 async fn detail(
     State(app): State<App>,
     Path(id): Path<String>,
-) -> Result<Json<FarmRecord>, ApiError> {
-    Ok(Json(app.manager.get(&id)?))
+) -> Result<Json<FarmView>, ApiError> {
+    Ok(Json(FarmView::of(app.manager.get(&id)?)))
 }
 #[utoipa::path(post, path="/api/v1/farms", request_body=CreateRequest, responses((status=202, body=Job), (status=400, body=ErrorBody), (status=409, body=ErrorBody)))]
 async fn create(
@@ -713,13 +715,15 @@ async fn endpoints(
 ) -> Result<Json<Endpoints>, ApiError> {
     Ok(Json(app.manager.endpoints(&id).await?))
 }
-#[utoipa::path(put, path="/api/v1/farms/{id}/nodes/{node}/faults", params(("id"=String, Path), ("node"=String, Path, description="VM of a multi-node farm: control, compute-1, ...")), request_body=crate::link::Impair, responses((status=200, description="The farm with the VM's faults applied; no delay and no loss heals it", body=FarmRecord), (status=400, body=ErrorBody), (status=404, body=ErrorBody), (status=409, body=ErrorBody)))]
+#[utoipa::path(put, path="/api/v1/farms/{id}/nodes/{node}/faults", params(("id"=String, Path), ("node"=String, Path, description="VM of a multi-node farm: control, compute-1, ...")), request_body=crate::link::Impair, responses((status=200, description="The farm with the VM's faults applied; no delay and no loss heals it", body=FarmView), (status=400, body=ErrorBody), (status=404, body=ErrorBody), (status=409, body=ErrorBody)))]
 async fn set_faults(
     State(app): State<App>,
     Path((id, node)): Path<(String, String)>,
     value: Result<Json<crate::link::Impair>, JsonRejection>,
-) -> Result<Json<FarmRecord>, ApiError> {
-    Ok(Json(app.manager.impair(&id, &node, body(value)?).await?))
+) -> Result<Json<FarmView>, ApiError> {
+    Ok(Json(FarmView::of(
+        app.manager.impair(&id, &node, body(value)?).await?,
+    )))
 }
 #[utoipa::path(post, path="/api/v1/farms/{id}/snapshots", params(("id"=String, Path)), request_body=SnapshotRequest, responses((status=202, description="Snapshot job; the farm's VM stops for the capture and starts again. With `node: control` every VM stops, computes first, but only the control VM is captured, as a control template", body=Job), (status=400, body=ErrorBody), (status=409, body=ErrorBody)))]
 async fn freeze(

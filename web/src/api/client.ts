@@ -2,7 +2,7 @@ import { queryOptions } from "@tanstack/react-query";
 import type { components } from "./schema";
 
 type Schema = components["schemas"];
-export type Farm = Schema["FarmRecord"];
+export type Farm = Schema["FarmView"];
 export type Host = Schema["HostInfo"];
 export type RelayStatus = Schema["RelayStatus"];
 export type RelaySettings = Schema["RelaySettings"];

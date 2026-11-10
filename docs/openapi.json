@@ -489,7 +489,7 @@
                 "schema": {
                   "type": "array",
                   "items": {
-                    "$ref": "#/components/schemas/FarmRecord"
+                    "$ref": "#/components/schemas/FarmView"
                   }
                 }
               }
@@ -564,7 +564,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/FarmRecord"
+                  "$ref": "#/components/schemas/FarmView"
                 }
               }
             }
@@ -917,7 +917,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/FarmRecord"
+                  "$ref": "#/components/schemas/FarmView"
                 }
               }
             }
@@ -3165,6 +3165,34 @@
           }
         }
       },
+      "FarmOpenStack": {
+        "type": "object",
+        "description": "The OpenStack release a farm installs, named as the images and documents name it: the code\nname beside the number (`2022.2` is `zed`), and whether this coordinator still supports it.",
+        "required": [
+          "release",
+          "series",
+          "eol",
+          "supported"
+        ],
+        "properties": {
+          "eol": {
+            "type": "boolean",
+            "description": "kolla-ansible keeps no branch for it any more, so it installs from the series' last tag."
+          },
+          "release": {
+            "type": "string",
+            "description": "What the farm records, `2022.2`."
+          },
+          "series": {
+            "type": "string",
+            "description": "Its series name, `zed`; the same as `release` from 2023.1 on, where the names became\n`year.release`."
+          },
+          "supported": {
+            "type": "boolean",
+            "description": "False below the oldest supported release, whatever the host's\n`FARM_ALLOW_UNSUPPORTED_RELEASES` says: such a farm keeps working but is out of support."
+          }
+        }
+      },
       "FarmRecord": {
         "type": "object",
         "required": [
@@ -3339,6 +3367,30 @@
           "deleted",
           "snapshotting"
         ]
+      },
+      "FarmView": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/FarmRecord"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "openstack": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/FarmOpenStack",
+                    "description": "Absent on a farm created before plans kept their release."
+                  }
+                ]
+              }
+            }
+          }
+        ],
+        "description": "A farm as the API returns it: the stored record plus the release facts the portal labels the\nfarm with. Only the record is kept; the release comes from the release tables, so the names\nlive in one place and a farm's state stays what it was created with."
       },
       "HostCapacity": {
         "type": "object",

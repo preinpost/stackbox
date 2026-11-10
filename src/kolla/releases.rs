@@ -43,6 +43,13 @@ pub fn supported(release: &str) -> bool {
     supported_when(allow_unsupported(), release)
 }
 
+/// Whether `release` is inside the range the project supports at all, [`MIN_SUPPORTED_RELEASE`]
+/// and newer. The opt-in does not move this line: a farm below it keeps working but stays out of
+/// support, which is what the portal marks beside its version.
+pub fn in_supported_range(release: &str) -> bool {
+    year_release(release) && release >= MIN_SUPPORTED_RELEASE
+}
+
 /// Whether this host allows releases below [`MIN_SUPPORTED_RELEASE`]
 /// (`FARM_ALLOW_UNSUPPORTED_RELEASES=1`). The switch is read per call, so a running daemon
 /// can change its catalog by restarting with the variable set.
@@ -62,8 +69,7 @@ pub fn unsupported(release: &str) -> Option<String> {
 fn supported_when(allow_unsupported: bool, release: &str) -> bool {
     // The opt-in reopens only the end-of-life series whose compatibility code is still here.
     // 2023.1 and 2023.2 have neither images nor an entry, so they stay unsupported for good.
-    year_release(release)
-        && (release >= MIN_SUPPORTED_RELEASE || (allow_unsupported && legacy(release).is_some()))
+    in_supported_range(release) || (allow_unsupported && legacy(release).is_some())
 }
 
 fn unsupported_when(allow_unsupported: bool, release: &str) -> Option<String> {
@@ -828,6 +834,14 @@ mod tests {
         assert!(!allow_unsupported_value(Some("no")));
         for value in ["1", "true", " YES ", "on"] {
             assert!(allow_unsupported_value(Some(value)), "{value}");
+        }
+        // The supported range itself never moves with the opt-in: a farm below it stays
+        // marked as outside support, which is what the portal shows beside its version.
+        for release in ["2022.2", "2023.2", "2022.1", "zed", ""] {
+            assert!(!in_supported_range(release), "{release}");
+        }
+        for release in ["2024.1", "2025.1", "2026.2"] {
+            assert!(in_supported_range(release), "{release}");
         }
     }
 
