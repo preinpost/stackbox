@@ -1459,6 +1459,8 @@ export interface components {
     };
     /** @description Templates of one OpenStack release. */
     ReleaseTemplates: {
+      /** @description CPU architectures its images are published for (`x86_64`, `aarch64`). */
+      arches?: string[];
       bucket_compute: number;
       bucket_control: number;
       /**

@@ -1,7 +1,17 @@
 import type { PlannedNode, ReleaseTemplates } from "../api/client";
 
-/** How a release is offered: its templates here and in buckets, and whether it installs clean. */
-export function releaseLabel(r: ReleaseTemplates) {
+const archNames: Record<string, string> = { x86_64: "amd64", aarch64: "arm64" };
+/** An architecture by its image name, `amd64` or `arm64`. */
+export const archName = (arch: string) => archNames[arch] ?? arch;
+
+/** Whether a host of `arch` can run the release's images; unknown when either is missing. */
+export function runsOn(r: ReleaseTemplates, arch?: string | null) {
+  return !arch || !r.arches?.length || r.arches.includes(arch);
+}
+
+/** How a release is offered: its templates here and in buckets, whether it installs clean,
+ * and the architectures its images run on, saying so when the chosen host cannot. */
+export function releaseLabel(r: ReleaseTemplates, arch?: string | null) {
   const control = r.local_control + r.bucket_control;
   const compute = r.local_compute + r.bucket_compute;
   const buckets = r.bucket_control + r.bucket_compute;
@@ -16,6 +26,9 @@ export function releaseLabel(r: ReleaseTemplates) {
     // End of life: installed from its last kolla-ansible tag, and only where its older
     // images run (amd64), so an aarch64 coordinator offers it without the clean install.
     ...(r.eol ? ["EOL"] : []),
+    ...(r.arches?.length ? [r.arches.map(archName).join("/")] : []),
+    // `runsOn` already said no, which means `arch` names one.
+    ...(arch && !runsOn(r, arch) ? [`${archName(arch)} 호스트 불가`] : []),
   ];
   return `OpenStack ${r.release}${codename}${parts.length ? ` · ${parts.join(" · ")}` : ""}`;
 }

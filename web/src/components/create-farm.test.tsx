@@ -399,6 +399,108 @@ test("turns a bucket's transport error into one line and keeps the log", () => {
   });
 });
 
+test("disables a release whose images miss the chosen host's architecture", async () => {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+  });
+  const hostsByArch = [
+    {
+      id: "amd",
+      kind: "ssh",
+      address: "10.0.0.21",
+      ...ready,
+      inspection: { ...ready.inspection, arch: "x86_64" },
+    },
+    {
+      id: "local",
+      kind: "local",
+      address: "localhost",
+      ...ready,
+      inspection: { ...ready.inspection, arch: "aarch64" },
+    },
+  ];
+  const requested: string[] = [];
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (path: string) => {
+      requested.push(path);
+      if (path.includes("/releases")) {
+        const arch = path.includes("?") ? path.split("arch=")[1] : "x86_64";
+        return Response.json({
+          arch,
+          releases: [
+            {
+              release: "2026.2",
+              local_control: 2,
+              local_compute: 0,
+              bucket_control: 0,
+              bucket_compute: 0,
+              installable: true,
+              arches: ["x86_64", "aarch64"],
+            },
+            {
+              release: "2024.1",
+              local_control: 1,
+              local_compute: 0,
+              bucket_control: 0,
+              bucket_compute: 0,
+              installable: true,
+              arches: ["x86_64"],
+            },
+          ],
+          unreachable: [],
+        });
+      }
+      if (path.endsWith("/catalog")) return Response.json(catalog);
+      if (path.endsWith("/plans")) return Response.json(resourcePlan);
+      if (path.endsWith("/host"))
+        return Response.json({
+          build_id: "b",
+          arch: "aarch64",
+          relay_url: "https://relay.test",
+        });
+      if (path.endsWith("/hosts")) return Response.json(hostsByArch);
+      return Response.json([]);
+    }),
+  );
+  render(
+    <QueryClientProvider client={client}>
+      <Dialog.Root open>
+        <CreateFarmForm close={vi.fn()} onPending={vi.fn()} initialHost="amd" />
+      </Dialog.Root>
+    </QueryClientProvider>,
+  );
+  const user = userEvent.setup();
+  // The amd64 host offers both releases; the arm64-only images do not narrow this one.
+  const releases = await screen.findByRole("combobox", {
+    name: "OpenStack 릴리스",
+  });
+  await waitFor(() => expect(releases.textContent).toContain("2026.2"));
+  await user.click(releases);
+  await user.click(
+    await screen.findByRole("option", { name: /OpenStack 2024\.1/ }),
+  );
+  expect(releases.textContent).toContain("2024.1");
+  expect(releases.textContent).not.toContain("호스트 불가");
+
+  // The same release on an arm64 host cannot run, and the form says so.
+  await user.click(screen.getByRole("combobox", { name: "실행 호스트" }));
+  await user.click(await screen.findByRole("option", { name: "local · 로컬" }));
+  await screen.findByText(
+    /OpenStack 2024\.1의 이미지는 amd64용만 있어 arm64 호스트\(local\)에서 만들 수 없습니다/,
+  );
+  expect(requested).toContain("/api/v1/releases?arch=aarch64");
+  await user.click(screen.getByRole("combobox", { name: "OpenStack 릴리스" }));
+  const blocked = await screen.findByRole("option", {
+    name: /OpenStack 2024\.1/,
+  });
+  expect(blocked.getAttribute("aria-disabled")).toBe("true");
+  expect(blocked.textContent).toContain("arm64 호스트 불가");
+  const allowed = screen.getByRole("option", { name: /OpenStack 2026\.2/ });
+  expect(allowed.getAttribute("aria-disabled")).not.toBe("true");
+  client.clear();
+});
+
 test("labels releases by their templates and shows an assemble job's steps", () => {
   expect(
     releaseLabel({
@@ -447,6 +549,22 @@ test("labels releases by their templates and shows an assemble job's steps", () 
       eol: true,
     }),
   ).toBe("OpenStack 2022.2 · EOL");
+  // A release's images name the architectures they run on, and say when the chosen host is
+  // not one of them.
+  expect(
+    releaseLabel(
+      {
+        release: "2024.1",
+        local_control: 0,
+        local_compute: 0,
+        bucket_control: 0,
+        bucket_compute: 0,
+        installable: true,
+        arches: ["x86_64"],
+      },
+      "aarch64",
+    ),
+  ).toBe("OpenStack 2024.1 · 클린 설치 · amd64 · arm64 호스트 불가");
   const job = {
     id: "job",
     farm_id: "r",

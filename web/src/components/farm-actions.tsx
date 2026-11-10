@@ -70,7 +70,7 @@ import {
   Modal,
   SelectInput,
 } from "./ui";
-import { releaseLabel, sourceLabel } from "./release-create";
+import { archName, releaseLabel, runsOn, sourceLabel } from "./release-create";
 
 async function refresh(client: ReturnType<typeof useQueryClient>) {
   await Promise.all([
@@ -247,21 +247,10 @@ export function CreateFarmForm({
   const catalog = useQuery(catalogQuery());
   const coordinator = useQuery(hostQuery());
   const hosts = useQuery(hostsQuery());
-  const releases = useQuery(releasesQuery());
   const buildId = coordinator.data?.build_id;
   const [name, setName] = useState("");
   const [owner, setOwner] = useState("");
-  // One release for every VM: templates of it boot a VM when they match the services.
-  const offered = releases.data?.releases ?? [];
   const [pickedRelease, setPickedRelease] = useState<string>();
-  const release =
-    pickedRelease ??
-    [...offered].sort(
-      (a, b) =>
-        b.local_control +
-        b.bucket_control -
-        (a.local_control + a.bucket_control),
-    )[0]?.release;
   const [selected, setSelected] = useState<string[]>([]);
   // A new farm always runs a control VM and the compute VMs it is made with; one compute
   // by default so a compute template can join it later.
@@ -288,6 +277,25 @@ export function CreateFarmForm({
   const [editedHostName, setHostName] = useState<string>();
   const hostName = editedHostName ?? publicHostName(hostId ?? "", hosts.data);
   const target = hosts.data?.find((h) => h.id === hostId);
+  // Releases and templates are offered for the control VM's host, not this coordinator.
+  const hostArch =
+    target?.inspection?.arch ??
+    (target?.kind === "local" ? coordinator.data?.arch : undefined);
+  const releases = useQuery(releasesQuery(hostArch));
+  // One release for every VM: templates of it boot a VM when they match the services, and
+  // only a release whose images run on the host is picked by default.
+  const offered = releases.data?.releases ?? [];
+  const release =
+    pickedRelease ??
+    [...offered]
+      .filter((r) => runsOn(r, hostArch))
+      .sort(
+        (a, b) =>
+          b.local_control +
+          b.bucket_control -
+          (a.local_control + a.bucket_control),
+      )[0]?.release;
+  const releaseInfo = offered.find((r) => r.release === release);
   // Only the computes that exist, on hosts other than the control VM's.
   const placement = Object.fromEntries(
     Object.entries(placed).filter(
@@ -583,9 +591,20 @@ export function CreateFarmForm({
                   label="OpenStack 릴리스"
                   items={offered.map((r) => ({
                     value: r.release,
-                    label: releaseLabel(r),
+                    label: releaseLabel(r, hostArch),
+                    // A selected release that the new host cannot run stays in the list so
+                    // the warning below can name it; it is still not choosable here.
+                    disabled: !runsOn(r, hostArch),
                   }))}
                 />
+                {releaseInfo && hostArch && !runsOn(releaseInfo, hostArch) && (
+                  <div className="warning-notice mt-2">
+                    OpenStack {releaseInfo.release}의 이미지는{" "}
+                    {(releaseInfo.arches ?? []).map(archName).join("/")}용만
+                    있어 {archName(hostArch)} 호스트({hostId})에서 만들 수
+                    없습니다. 다른 릴리스나 호스트를 고르세요.
+                  </div>
+                )}
                 <p className="field-hint mt-2">
                   고른 릴리스의 템플릿이 구성과 맞으면 그 템플릿으로 VM을
                   만들고, 없으면 그 릴리스의 kolla-ansible 브랜치로 클린

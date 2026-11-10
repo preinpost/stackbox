@@ -163,11 +163,15 @@ export const bucketObjectsQuery = (id: string) =>
     staleTime: 0,
     retry: false,
   });
-/** Releases with the templates kept here and in every bucket, on this host's architecture. */
-export const releasesQuery = () =>
+/** Releases with the templates kept here and in every bucket, on `arch` (this host's by default). */
+export const releasesQuery = (arch?: string) =>
   queryOptions({
-    queryKey: keys.releases,
-    queryFn: ({ signal }) => request<ReleaseCatalog>("/releases", { signal }),
+    queryKey: [...keys.releases, arch ?? null],
+    queryFn: ({ signal }) =>
+      request<ReleaseCatalog>(
+        arch ? `/releases?arch=${encode(arch)}` : "/releases",
+        { signal },
+      ),
     staleTime: 30_000,
   });
 export const catalogQuery = () =>
