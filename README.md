@@ -265,15 +265,44 @@ kolla-ansible이 브랜치를 지우므로 마지막 태그(예: victoria `11.4.
 - 그 시리즈의 Kolla 이미지는 **amd64 전용**입니다. aarch64 호스트(Apple Silicon 포함)에서는
   설치할 수 없고, 릴리스 목록에서도 `installable: false`로 나옵니다. x86_64 Linux 호스트에서만 됩니다.
 - 그 시대 Ansible은 게스트의 Python 3.12에서 돌지 않습니다(ussuri 3.8, victoria~xena 3.9,
-  yoga·zed 3.10). 게스트에 해당 `python3.x`가 없으면 설치 단계가 그 이유를 밝히고 멈춥니다.
-  골든 이미지나 호스트에서 `/opt/python3.9`처럼 준비해 두세요.
-- 설치 중 적용하는 커널 호환 패치(OVS netdev, br_netfilter 등)는 최신 Kolla의 task 파일을
-  전제로 합니다. 구버전 Kolla에서 그 파일이 다르면 패치 단계가 명시적으로 실패합니다.
+  yoga·zed 3.10). 게스트에 해당 `python3.x`가 없으면 설치 단계가 `/opt/farm-uv`의 uv로 그 minor를
+  `/opt/farm-python`에 받아 씁니다. 골든 이미지에 `/opt/python3.9`나 `/usr/local/bin/python3.9`처럼
+  미리 준비해 두면 그쪽을 먼저 씁니다.
+- 설치 중 적용하는 커널 호환 패치(OVS netdev, userspace TSO, br_netfilter)는 태그마다 다른
+  task 파일 구조를 따릅니다. 릴리스별 패치 목록이 바꿀 문자열을 직접 지정하고, 검토했던 파일과
+  다르면 그 단계를 실패시킵니다. 조용히 건너뛰지 않습니다.
 
-`FARM_OPENSTACK_RELEASES=2026.2,2021.1`처럼 직접 넣으면 EOL 시리즈도 핀할 수 있습니다. 템플릿이 없는 릴리스는 그 브랜치로 클린 설치하므로, 이 binary가 배포하는
-릴리스가 아니어도 farm을 만들 수 있습니다. control VM은 그 릴리스의 control 템플릿 중 가장 최근 것(로컬 스냅샷을 먼저, 없으면 버킷의
-아카이브)에서, 각 compute는 같은 릴리스·서비스의 compute 템플릿에서 만들고, 쓸 수 있는 템플릿이 없으면
-클린 설치합니다.
+EOL 릴리스는 그 시대 도구가 전제하던 환경을 게스트에 맞춰 채웁니다. 설치 단계는
+`libxcrypt-compat`(Rocky 10에 없는 `libcrypt.so.1`), 같은 가상환경의 Ansible과 `Jinja2<3.1`,
+그리고 Ansible 2.9가 Python 3.12와 Rocky에서 동작하도록 필요한 것들(번들 six 1.16, setuptools의
+`distutils`, Python 3.12가 지운 `http.client` 속성, OS family 표의 Rocky 항목)을 넣습니다. 태그의
+`kolla-ansible`은 venv를 활성화하지 않으면 playbook을 `bin/` 옆 소스 트리에서 찾으므로
+`VIRTUAL_ENV`도 함께 넘깁니다. prepare 단계는 `python3-setuptools`·`gnupg2`와 Docker SDK
+4.x(requests 2.32 미만, urllib3 1.x)를 게스트의 시스템 Python에 설치하고, globals.yml에는 그
+태그가 거부하는 host OS precheck를 끄는 값과 docker-ce가 게시된 `/linux/centos` 저장소를
+적습니다. dnf5가 없앤 deltarpm task는 그 태그의 role에서 제거합니다.
+
+EOL 이미지는 시리즈마다 출처가 다릅니다. zed(2022.2)는 2024.1·2024.2와 같은 방식으로 이 저장소가
+빌드한 Kolla 이미지를 공개 미러 `ghcr.io/preinpost/kolla`에 `zed-rocky-9` 태그로 게시합니다
+(amd64 전용, 익명 pull). 그래서 zed farm은 `kolla_base_distro: rocky`와 그 레지스트리를 globals.yml에
+적고 이미지 안의 Python 3.9에 Neutron 패치를 넣어, deploy와 서비스 검증까지 진행합니다. 미러를
+따로 두면 `FARM_EOL_REGISTRY`·`FARM_EOL_NAMESPACE`로 바꿀 수 있습니다. yoga 이하 시리즈는 아직 그
+태그의 기본 레지스트리(`quay.io/openstack.kolla`)를 그대로 쓰며, 그곳에 EOL 이미지가 없으므로
+deploy 단계에서 pull 404로 멈춥니다. 그 시리즈도 빌드해 게시하면 릴리스 표(`Legacy`)의 `built`에
+base distro를 적어 켭니다.
+
+설치 단계는 그 태그의 kolla-ansible만으로는 부족한 Ansible을 같은 가상환경에 함께 넣습니다.
+태그의 `requirements.txt`가 Ansible을 선언하지 않기 때문이고, 범위는 시리즈마다 그 태그의 quickstart가
+밝히는 값을 그대로 씁니다(ussuri `ansible>=2.8,<2.10`, victoria `ansible>=2.9,<2.10`, wallaby
+`ansible>=2.9,<3.0`, xena `ansible>=2.10,<5.0`, yoga·zed `ansible>=4,<6`). `kolla-ansible
+install-deps`는 yoga(14.11.0)에 생긴 명령이라 xena 이하 태그에는 없습니다. 그 릴리스에서는 Galaxy
+의존성 단계를 건너뛰며, role은 그 태그의 저장소에 함께 들어 있습니다.
+
+`FARM_OPENSTACK_RELEASES`는 목록을 고정하며, 지원 범위 밖의 릴리스는 넣어도 무시됩니다(위 opt-in을
+켜면 EOL 시리즈도 포함). 템플릿이 없는 릴리스는 그 브랜치·태그로 클린 설치하므로, 이 binary가
+배포하는 릴리스가 아니어도 farm을 만들 수 있습니다. control VM은 그 릴리스의 control 템플릿 중 가장
+최근 것(로컬 스냅샷을 먼저, 없으면 버킷의 아카이브)에서, 각 compute는 같은 릴리스·서비스의 compute
+템플릿에서 만들고, 쓸 수 있는 템플릿이 없으면 클린 설치합니다.
 
 ```bash
 farm releases                                                        # 릴리스별 control/compute 템플릿 수(로컬·버킷)
@@ -288,8 +317,8 @@ farm create c13 --host-id local --release 2026.2 --computes 3 \
   새로 받지 않고 기다립니다.
 - 다른 호스트에 둔 control이나 compute도 템플릿으로 부팅합니다. restore·expand 단계가 템플릿을 그
   호스트에 먼저 복사하고, 이미 복사본이 있으면 그대로 씁니다(아래 "다른 호스트로 복사").
-- control 템플릿이 없거나 쓸 수 없으면 이 coordinator가 배포하는 릴리스(현재 2026.2)만 기존 경로대로
-  클린 생성(`create`) → 배포(`deploy`)하고, 다른 릴리스는 `409`로 거절합니다.
+- control 템플릿이 없거나 쓸 수 없으면 클린 설치가 가능한(`installable`) 릴리스만 기존 경로대로
+  클린 생성(`create`) → 배포(`deploy`)하고, 그 밖의 릴리스는 `409`로 거절합니다.
 - 중간 단계가 실패하면 farm은 그때까지 붙은 VM을 유지합니다. 실패한 compute는 job 오류에 적힌 대로
   `farm add-compute`(같은 템플릿 또는 클린 설치)로 재시도하고 나머지도 이어 붙이면 됩니다.
 

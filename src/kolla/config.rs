@@ -102,8 +102,9 @@ pub fn globals(
     multinode: bool,
     release: &crate::kolla::releases::ReleaseInfo,
 ) -> String {
-    // The legacy series' images are amd64 only, so they carry no architecture suffix.
-    let tag_suffix = if arch == "aarch64" && !release.eol {
+    // Only the releases whose Rocky images are published for aarch64 carry the suffix; the
+    // series the farm builds itself and the older maintained ones are amd64 only on Rocky.
+    let tag_suffix = if arch == "aarch64" && release.arm64 {
         "-aarch64"
     } else {
         ""
@@ -112,6 +113,17 @@ pub fn globals(
     // year.release name from 2023.1 on.
     let image_tag = &release.series;
     let distro = release.base_distro();
+    // The tag's default registry carries no end-of-life images. A series the farm builds and
+    // publishes itself names its own registry and namespace; the image tag then follows its
+    // base distro (`zed-rocky-9`) rather than the tag's default.
+    let images = match &release.images {
+        Some(images) => format!(
+            "# Kolla images the farm built and published for this series.\ndocker_registry: \"{registry}\"\ndocker_namespace: \"{namespace}\"\n",
+            registry = images.registry,
+            namespace = images.namespace,
+        ),
+        None => String::new(),
+    };
     let enabled = ["placement", "horizon", "neutron", "nova"]
         .iter()
         .map(|id| format!("enable_{id}: {}\n", components.iter().any(|c| c == id)))
@@ -132,8 +144,8 @@ pub fn globals(
     let neutron = if components.iter().any(|c| c == "neutron") {
         // The guest kernel has no openvswitch datapath, so OVS forwards in userspace.
         // `farm-ext` is a veth the network node routes and masquerades for the external network.
-        // The Neutron patch lives in the release's own Python: `python3.9` for the legacy
-        // series, `python3.12` for the current ones.
+        // The Neutron patch lives in the image's own Python: `python3.9` for the farm's Rocky 9
+        // build, the release's minor on its other images.
         format!(
             concat!(
                 "neutron_plugin_agent: \"openvswitch\"\n",
@@ -142,10 +154,55 @@ pub fn globals(
                 // The kernel lacks xt_connmark; see neutron_sitecustomize.py.
                 "neutron_l3_agent_extra_volumes: \"{{{{ neutron_extra_volumes + ['/etc/farm/neutron-sitecustomize.py:/var/lib/kolla/venv/lib64/python{python}/site-packages/sitecustomize.py:ro'] }}}}\"\n",
             ),
-            python = release.python
+            python = release.image_python()
         )
     } else {
         String::new()
+    };
+    // Releases before 2025.1 predate this guest: their host-OS precheck lists Rocky 9 only,
+    // their baremetal role imports `selinux` from a venv without the binding, and their Neutron
+    // defaults load ip6_tables with modprobe, which the guest kernel has built in and no kmod.
+    // The farm chooses the guest, and every other precheck still runs.
+    let older_guest_globals = if release.release.as_str() < "2025.1" {
+        "# This release's list of supported host distributions predates this guest.\nprechecks_enable_host_os_checks: false\n# This guest has no SELinux, and the venv's Python has no `selinux` binding; the role's\n# no-op would fail importing it.\nchange_selinux: false\n# The guest kernel has ip6_tables built in and no kmod, so `modprobe` is absent.\nneutron_modules_default: []\n"
+    } else {
+        ""
+    };
+    // Docker publishes docker-ce for the RHEL rebuilds under /linux/centos; the tags whose
+    // baremetal role is in-tree build the repository URL from the distribution name (rocky),
+    // where the package is missing. 2024.2 and newer read the Galaxy collection's default.
+    let eol_docker = if release.eol {
+        "# docker-ce is published under /linux/centos for RHEL rebuilds; /linux/rocky lacks it.\ndocker_yum_url: \"https://download.docker.com/linux/centos\"\n"
+    } else {
+        ""
+    };
+    // The Docker SDK role's build dependencies miss this guest's Rocky 10 twice. 2024.1's
+    // collection (unmaintained/2024.1) names them only when it is handed a virtualenv, but its
+    // pip step otherwise runs on kolla-ansible's own Python, where that list is skipped: the
+    // dbus-python wheel stops on the missing `dbus-1` pkg-config entry. 2024.2's (6.3.0) names
+    // `dbus-glib-devel` and `dbus-x11`, which Rocky 10 no longer ships, and needs no virtualenv
+    // of its own. 2025.1 gates those two on Rocky 9 and a maintained branch reads the fixed
+    // list, so both keep the role's own answer.
+    let docker_sdk = match release.release.as_str() {
+        "2024.1" => {
+            "docker_sdk_packages_default:\n  - python3-setuptools\n  - python3-pip\n  - dbus-devel\n  - glib2-devel\n  - gcc\n  - python3-devel\n"
+        }
+        "2024.2" => {
+            "docker_sdk_packages_dbus_deps_redhat:\n  - dbus-daemon\n  - dbus-devel\n  - gcc\n  - glib2-devel\n  - python3-devel\n"
+        }
+        _ => "",
+    };
+    // What an older series adds between the NTP line and the API comment; a maintained branch
+    // writes an empty line there, as it deployed before. Each block already ends in a newline,
+    // so the placeholder's own line separates them from the comment when they are present.
+    let guest_overrides = format!("{older_guest_globals}{eol_docker}{docker_sdk}");
+    // These series derive `enable_heat` from `enable_openstack_core`, which the farm turns off
+    // below; naming the flag keeps a series whose published images leave heat out from pulling
+    // one anyway. A maintained branch keeps the flag implicit, as it deployed before.
+    let heat = if release.release.as_str() < "2025.1" {
+        "enable_heat: false\n"
+    } else {
+        ""
     };
     let nova = if components.iter().any(|c| c == "nova") {
         if kvm {
@@ -160,7 +217,7 @@ pub fn globals(
     format!(
         r#"---
 kolla_base_distro: "{distro}"
-openstack_release: "{image_tag}"
+{images}openstack_release: "{image_tag}"
 openstack_tag_suffix: "{tag_suffix}"
 kolla_internal_vip_address: "{vip}"
 network_interface: "{interface}"
@@ -173,7 +230,7 @@ kolla_external_vip_interface: "{interface}"
 kolla_test_images: true
 # msb keeps the guest clock in step with the host; there is no NTP daemon to detect.
 prechecks_enable_host_ntp_checks: false
-
+{guest_overrides}
 # The API services bind directly to this VM; SDK port mappings expose them.
 enable_keepalived: false
 enable_haproxy: false
@@ -187,7 +244,7 @@ memcached_max_memory: 64
 rabbitmq_server_additional_erl_args: "+S 1:1 +sbwt none +sbwtdcpu none +sbwtdio none"
 
 enable_openstack_core: false
-enable_mariadb: true
+{heat}enable_mariadb: true
 enable_memcached: true
 enable_rabbitmq: true
 enable_keystone: true
@@ -471,6 +528,187 @@ mod tests {
         assert!(globals.contains("neutron-sitecustomize.py"));
         assert!(globals.contains("ovs-extend-start"));
         assert!(!globals.contains("nova_compute_virt_type"));
+        // The current branch runs on the guest as it is; only older series (2024.x and the
+        // end-of-life tags) need their host checks and module loads relaxed.
+        assert!(globals.matches("prechecks_enable_host_os_checks").count() == 0);
+        for absent in [
+            "prechecks_enable_host_os_checks",
+            "docker_yum_url",
+            "change_selinux",
+            "enable_heat",
+            "docker_sdk_",
+        ] {
+            assert!(!globals.contains(absent), "{absent}");
+        }
+        let legacy = self::globals(
+            "192.168.127.2",
+            "eth0",
+            "x86_64",
+            false,
+            &selected,
+            false,
+            &crate::kolla::releases::info("2020.1"),
+        );
+        assert_eq!(
+            legacy
+                .matches("prechecks_enable_host_os_checks: false")
+                .count(),
+            1
+        );
+        assert_eq!(legacy.matches("docker_yum_url:").count(), 1);
+        assert!(legacy.contains("docker_yum_url: \"https://download.docker.com/linux/centos\"\n"));
+        // The tag's baremetal role would load the `selinux` module in a venv that has no
+        // binding for it; the guest kernel has none either.
+        assert_eq!(legacy.matches("change_selinux: false").count(), 1);
+        // No kmod in the guest; the tags' Neutron role would call modprobe for ip6_tables.
+        assert_eq!(legacy.matches("neutron_modules_default: []").count(), 1);
+    }
+
+    #[test]
+    fn a_maintained_release_writes_the_globals_it_had() {
+        // The end-of-life image work must not change the file a maintained release already
+        // deployed with: only a series the farm builds itself names a registry. The fixture
+        // is this function's output at the commit before that work, blank line and all, so an
+        // equality failure means the shipped file changed rather than the fixture following
+        // the code.
+        let selected = [
+            "keystone",
+            "glance",
+            "placement",
+            "horizon",
+            "neutron",
+            "nova",
+        ]
+        .map(String::from);
+        let text = globals(
+            "10.254.0.2",
+            "farm0",
+            "x86_64",
+            false,
+            &selected,
+            false,
+            &crate::kolla::releases::info(OPENSTACK_RELEASE),
+        );
+        assert_eq!(
+            text,
+            include_str!("../../tests/fixtures/kolla/globals-2026.2.yml")
+        );
+        assert!(!text.contains("docker_registry"));
+        assert!(!text.contains("docker_namespace"));
+    }
+
+    #[test]
+    fn a_series_the_farm_builds_pulls_from_its_registry_on_its_base_distro() {
+        let selected = [
+            "keystone",
+            "glance",
+            "placement",
+            "horizon",
+            "neutron",
+            "nova",
+        ]
+        .map(String::from);
+        let zed = globals(
+            "192.168.127.2",
+            "eth0",
+            "x86_64",
+            false,
+            &selected,
+            false,
+            &crate::kolla::releases::info("2022.2"),
+        );
+        // kolla-ansible 15.6.0 computes `zed-rocky-9` from these two values.
+        assert!(zed.contains("kolla_base_distro: \"rocky\"\n"));
+        assert!(zed.contains("docker_registry: \"ghcr.io\"\n"));
+        assert!(zed.contains("docker_namespace: \"preinpost/kolla\"\n"));
+        assert!(zed.contains("openstack_release: \"zed\"\n"));
+        // The L3 patch goes into the Rocky 9 image's venv, not the Ubuntu one's.
+        assert!(zed.contains("python3.9/site-packages/sitecustomize.py"));
+        assert!(!zed.contains("python3.10/site-packages"));
+        // The guest has no kmod; the tag's Neutron role would call modprobe for ip6_tables.
+        assert_eq!(zed.matches("neutron_modules_default: []").count(), 1);
+        // The series carries no heat image; `enable_openstack_core: false` alone would leave
+        // the flag to kolla-ansible's indirection.
+        assert_eq!(zed.matches("enable_heat: false").count(), 1);
+
+        // 2024.1/2024.2 are supported, but quay no longer carries them: the farm builds
+        // Rocky 9 images and kolla-ansible computes the tag `2024.x-rocky-9`.
+        for release in ["2024.1", "2024.2"] {
+            let text = globals(
+                "192.168.127.2",
+                "eth0",
+                "x86_64",
+                false,
+                &selected,
+                false,
+                &crate::kolla::releases::info(release),
+            );
+            assert!(text.contains("kolla_base_distro: \"rocky\"\n"), "{release}");
+            assert!(text.contains("docker_registry: \"ghcr.io\"\n"), "{release}");
+            assert!(
+                text.contains("docker_namespace: \"preinpost/kolla\"\n"),
+                "{release}"
+            );
+            assert!(
+                text.contains(&format!("openstack_release: \"{release}\"\n")),
+                "{release}"
+            );
+            assert!(text.contains("openstack_tag_suffix: \"\"\n"), "{release}");
+            // The L3 patch goes into the Rocky 9 image's venv, not the guest tooling's 3.12.
+            assert!(
+                text.contains("python3.9/site-packages/sitecustomize.py"),
+                "{release}"
+            );
+            // It predates this guest (Rocky 10), so the host-OS, SELinux and module
+            // overrides apply; the collection already names Docker's /linux/centos.
+            assert_eq!(
+                text.matches("prechecks_enable_host_os_checks: false")
+                    .count(),
+                1,
+                "{release}"
+            );
+            assert_eq!(
+                text.matches("change_selinux: false").count(),
+                1,
+                "{release}"
+            );
+            assert_eq!(
+                text.matches("neutron_modules_default: []").count(),
+                1,
+                "{release}"
+            );
+            assert!(!text.contains("docker_yum_url"), "{release}");
+            // Its published image set leaves heat out.
+            assert_eq!(text.matches("enable_heat: false").count(), 1, "{release}");
+            // Only 2024.1's collection skips dbus-python's build dependencies when it has no
+            // virtualenv, and only 2024.2's names the two Rocky 10 dropped.
+            let key = match release {
+                "2024.1" => "docker_sdk_packages_default:",
+                _ => "docker_sdk_packages_dbus_deps_redhat:",
+            };
+            assert_eq!(text.matches(key).count(), 1, "{release}");
+            assert_eq!(
+                text.matches("docker_sdk_").count(),
+                1,
+                "{release}: one override, not both"
+            );
+        }
+
+        // A series the farm has not built keeps exactly what it pulled before: the tag's own
+        // registry and its Ubuntu images.
+        let yoga = globals(
+            "192.168.127.2",
+            "eth0",
+            "x86_64",
+            false,
+            &selected,
+            false,
+            &crate::kolla::releases::info("2022.1"),
+        );
+        assert!(yoga.contains("kolla_base_distro: \"ubuntu\"\n"));
+        assert!(yoga.contains("python3.10/site-packages/sitecustomize.py"));
+        assert!(!yoga.contains("docker_registry"));
+        assert!(!yoga.contains("docker_namespace"));
     }
 
     #[test]

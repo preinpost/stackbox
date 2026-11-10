@@ -392,6 +392,7 @@ impl Backend for AgentBackend {
         // The agent prepares with what it recorded at create.
         _: Vec<String>,
         _: String,
+        _: String,
     ) -> BoxFuture<'_, Result<()>> {
         Box::pin(self.done(
             Operation::Prepare {

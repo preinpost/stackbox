@@ -1982,7 +1982,12 @@ impl FarmManager {
                     for (share, backend) in self.share_backends(&farm)? {
                         self.log(&farm.id, &job.id, None, format!("preparing {} on host {}\n", share.nodes.join(", "), share.host_id))?;
                         backend
-                            .prepare(farm.id.clone(), farm_components(&farm), String::new())
+                            .prepare(
+                                farm.id.clone(),
+                                farm_components(&farm),
+                                farm_release(&farm),
+                                String::new(),
+                            )
                             .await
                             .with_context(|| format!("prepare the VMs on host {}", share.host_id))?;
                     }
@@ -2232,6 +2237,7 @@ impl FarmManager {
                 .prepare(
                     id.clone(),
                     components.clone(),
+                    farm_release(farm),
                     keys.as_ref().context("no control key")?.0.clone(),
                 )
                 .await?;
@@ -2278,6 +2284,7 @@ impl FarmManager {
                 .prepare(
                     id.clone(),
                     components.clone(),
+                    farm_release(farm),
                     keys.as_ref().context("no control key")?.0.clone(),
                 )
                 .await?;
@@ -2830,6 +2837,14 @@ fn new_job(farm: &str, kind: JobKind) -> Job {
         assembly: Vec::new(),
     }
 }
+/// The release the farm installs; plans recorded before it was kept read as this build's own.
+fn farm_release(farm: &FarmRecord) -> String {
+    farm.plan
+        .as_ref()
+        .and_then(|plan| plan.release.clone())
+        .unwrap_or_else(|| crate::kolla::OPENSTACK_RELEASE.to_owned())
+}
+
 fn farm_components(farm: &FarmRecord) -> Vec<String> {
     farm.plan.as_ref().map_or_else(
         || {

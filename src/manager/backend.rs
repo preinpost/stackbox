@@ -101,6 +101,7 @@ pub trait Backend: Send + Sync + 'static {
         &self,
         _id: String,
         _components: Vec<String>,
+        _release: String,
         _ssh_public_key: String,
     ) -> BoxFuture<'_, Result<()>> {
         Box::pin(async { Err(anyhow!("this backend runs farms on one host only")) })
@@ -365,9 +366,12 @@ impl Backend for MicrosandboxBackend {
         &self,
         id: String,
         components: Vec<String>,
+        release: String,
         ssh_public_key: String,
     ) -> BoxFuture<'_, Result<()>> {
-        Box::pin(async move { kolla::prepare_share(&id, &components, &ssh_public_key).await })
+        Box::pin(
+            async move { kolla::prepare_share(&id, &components, &release, &ssh_public_key).await },
+        )
     }
     fn deploy_spanning(
         &self,

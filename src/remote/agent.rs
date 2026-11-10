@@ -949,10 +949,17 @@ impl Agent {
                     !share.has_control(),
                     "the control VM's host prepares its VMs as it deploys"
                 );
+                // The release is already fixed by what this host created.
+                let release = entry
+                    .plan
+                    .release
+                    .clone()
+                    .unwrap_or_else(|| crate::kolla::OPENSTACK_RELEASE.to_owned());
                 self.backend
                     .prepare(
                         id.into(),
                         entry.plan.components.clone(),
+                        release,
                         share.ssh_public_key.clone(),
                     )
                     .await?;
