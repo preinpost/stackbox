@@ -563,6 +563,7 @@ async fn plan_handler(
 ) -> Result<Json<Plan>, ApiError> {
     let request = body(value)?;
     require_multi_node(request.computes, request.layout).map_err(bad)?;
+    request.check_release().map_err(bad)?;
     Ok(Json(plan(&request).map_err(bad)?))
 }
 #[utoipa::path(get, path="/api/v1/farms", responses((status=200, body=Vec<FarmRecord>)))]

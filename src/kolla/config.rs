@@ -111,7 +111,7 @@ pub fn globals(
     // Kolla's images are tagged with the series name on the legacy releases and with the
     // year.release name from 2023.1 on.
     let image_tag = &release.series;
-    let distro = &release.base_distro;
+    let distro = release.base_distro();
     let enabled = ["placement", "horizon", "neutron", "nova"]
         .iter()
         .map(|id| format!("enable_{id}: {}\n", components.iter().any(|c| c == id)))

@@ -90,11 +90,16 @@ job 로그에 원본 compute 등록(nova-compute 서비스, placement, Neutron a
 (`bucket_control`, `bucket_compute`)의 템플릿 수, 그리고 클린 설치 가능 여부(`installable`)를 최신
 릴리스부터 돌려줍니다.
 
-EOL 시리즈(`2022.2`~`2020.1`)도 목록에 포함되고 `eol: true`로 표시됩니다. 이들은 kolla-ansible
-마지막 태그로 설치하며(`2021.1` → `12.8.0`), 이미지가 amd64 전용이라 aarch64에서는
-`installable: false`입니다. 계획(`POST /releases/plan`)의 `notes`에도 릴리스·태그·필요한 Python이
-적힙니다. `arch`를 생략하면 coordinator의 아키텍처이고, `bucket`을 생략하면 등록된 모든
-버킷을 셉니다(조회하지 못한 버킷은 `unreachable`).
+지원 범위는 2024.1(Caracal) 이상입니다. 목록과 계획·생성 API는 그보다 오래된 릴리스(2023.x 포함)를
+거절합니다. 2024.1·2024.2는 `eol: false`로 나오며, `quay.io`에 없는 이미지를 이 저장소가 게시한
+`ghcr.io/preinpost/kolla`의 `2024.x-rocky-9`(amd64)에서 받아 클린 설치합니다. `arches`는 이미지가
+게시된 CPU 아키텍처이고(2026.2만 `aarch64` 포함), 그 밖의 아키텍처에서는 `installable: false`입니다.
+
+2022.2 이하 EOL 시리즈는 `FARM_ALLOW_UNSUPPORTED_RELEASES=1`인 coordinator에서만 목록에 포함되고
+`eol: true`로 표시됩니다. 이들은 kolla-ansible 마지막 태그로 설치하며(`2021.1` → `12.8.0`), 이미지가
+amd64 전용이라 aarch64에서는 `installable: false`입니다. 계획(`POST /releases/plan`)의 `notes`에도
+릴리스·태그·필요한 Python이 적힙니다. `arch`를 생략하면 coordinator의 아키텍처이고, `bucket`을
+생략하면 등록된 모든 버킷을 셉니다(조회하지 못한 버킷은 `unreachable`).
 
 `POST /releases/plan`은 `ReleaseCreateRequest`(`id`, `release`, `host_id`, `computes`(1~3), 선택:
 `components`, `compute_hosts`, `control_template`, `compute_template`, `bucket`, `external_host`,

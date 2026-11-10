@@ -126,15 +126,20 @@ impl FarmManager {
         let published = crate::kolla::releases::published().await;
         let mut counts: BTreeMap<String, ReleaseTemplates> = BTreeMap::new();
         let mut add = |release: &str, role: Option<TemplateRole>, local: bool| {
+            // Releases below the minimum stay reachable only through the opt-in; their
+            // templates are hidden too, so a new farm cannot pick one by accident.
+            if !crate::kolla::releases::supported(release) {
+                return;
+            }
             let counted = counts
                 .entry(release.into())
                 .or_insert_with(|| ReleaseTemplates {
                     release: release.into(),
                     series: crate::kolla::releases::info(release).series,
-                    installable: arch == current_arch()
-                        && published.contains(&release.into())
+                    installable: published.contains(&release.into())
                         && crate::kolla::releases::available_on(release, &arch),
                     eol: crate::kolla::releases::legacy(release).is_some(),
+                    arches: crate::kolla::releases::arches(release),
                     ..Default::default()
                 });
             match (role, local) {
@@ -203,17 +208,17 @@ impl FarmManager {
         Ok((found, unreachable))
     }
 
-    /// Templates of `role` for `release` on this architecture, running `components` when
-    /// given; `buckets` holds every bucket template of the release.
+    /// Templates of `role` for `release` on `arch`, running `components` when given;
+    /// `buckets` holds every bucket template of the release.
     fn found(
         &self,
         state: &State,
+        arch: &str,
         release: &str,
         role: TemplateRole,
         components: Option<&[String]>,
         buckets: &[(String, ArchiveMetadata)],
     ) -> Found {
-        let arch = current_arch();
         let services = |c: &[String]| components.is_none_or(|wanted| sorted(wanted) == sorted(c));
         let mut local: Vec<_> = state
             .snapshots
@@ -288,6 +293,7 @@ impl FarmManager {
     /// A template the request names, checked against the release and services.
     fn preferred(
         state: &State,
+        arch: &str,
         id: &str,
         role: TemplateRole,
         release: &str,
@@ -315,11 +321,10 @@ impl FarmManager {
                     .unwrap_or("of an unknown release")
             )));
         }
-        if snapshot.arch != current_arch() {
+        if snapshot.arch != arch {
             return Err(conflict(format!(
-                "template '{id}' was frozen on {}; this host is {}",
-                snapshot.arch,
-                current_arch()
+                "template '{id}' was frozen on {}; the control VM's host is {arch}",
+                snapshot.arch
             )));
         }
         if components.is_some_and(|c| sorted(c) != sorted(&snapshot.plan.components)) {
@@ -350,9 +355,11 @@ impl FarmManager {
             )
         };
         self.check_release_request(request)?;
+        // Templates and images must run on the control VM's host, not on this coordinator.
+        let arch = self.read(|state| self.plan_arch(state, request))??;
         let query = TemplateQuery {
             release: Some(request.release.clone()),
-            arch: Some(current_arch()),
+            arch: Some(arch.clone()),
             ..Default::default()
         };
         let (buckets, unreachable) = self.search_buckets(request.bucket.clone(), &query).await?;
@@ -365,18 +372,28 @@ impl FarmManager {
             .await
             .iter()
             .any(|known| known == request.release.trim())
-            && crate::kolla::releases::available_on(&info.release, &current_arch());
+            && crate::kolla::releases::available_on(&info.release, &arch);
         if info.eol {
             // Said up front: the series is closed, so an install may need an older Python in
-            // the guest and cannot run on aarch64 at all.
+            // the guest and cannot run on aarch64 at all. Say where its images come from, or
+            // that there are none to pull.
+            let images = match &info.images {
+                Some(images) => format!(
+                    "its images are the farm's own {}/{}, built for amd64 only",
+                    images.registry, images.namespace
+                ),
+                None => "no public images exist for it, so its install stops at the image pull"
+                    .to_owned(),
+            };
             notes.push(format!(
-                "OpenStack {} ({}) is end of life: installed from kolla-ansible {} on Python {}; its images are amd64 only",
+                "OpenStack {} ({}) is end of life: installed from kolla-ansible {} on Python {}; {images}",
                 info.release, info.series, info.reference, info.python
             ));
         }
         self.read(|state| {
             self.resolve(
                 state,
+                &arch,
                 request,
                 requested.as_deref(),
                 &buckets,
@@ -427,6 +444,9 @@ impl FarmManager {
                 "release must be an OpenStack release such as 2026.2",
             ));
         }
+        if let Some(why) = crate::kolla::releases::unsupported(release) {
+            return Err(bad_request(why));
+        }
         if request.computes > crate::farm::MAX_COMPUTES {
             return Err(bad_request(format!(
                 "a farm has at most {} compute VMs",
@@ -466,9 +486,11 @@ impl FarmManager {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn resolve(
         &self,
         state: &State,
+        arch: &str,
         request: &ReleaseCreateRequest,
         requested: Option<&[String]>,
         buckets: &[(String, ArchiveMetadata)],
@@ -482,6 +504,7 @@ impl FarmManager {
         // compute VM applies to it.
         if request.layout == Some(FarmLayout::AllInOne) {
             return self.clean_plan(
+                arch,
                 request,
                 "an all-in-one farm runs every selected service in one VM".into(),
                 notes,
@@ -510,11 +533,19 @@ impl FarmManager {
         };
 
         // The control VM.
-        let found = self.found(state, release, TemplateRole::Control, requested, buckets);
+        let found = self.found(
+            state,
+            arch,
+            release,
+            TemplateRole::Control,
+            requested,
+            buckets,
+        );
         let (pick, why) = match &request.control_template {
             Some(id) => (
                 Some(Pick::Local(Box::new(Self::preferred(
                     state,
+                    arch,
                     id,
                     TemplateRole::Control,
                     release,
@@ -554,26 +585,28 @@ impl FarmManager {
                 )),
             },
             None => Err(format!(
-                "no control template of OpenStack {release} for {}{}",
-                current_arch(),
+                "no control template of OpenStack {release} for {arch}{}",
                 mismatch(found.other_services, "control")
             )),
         };
         let control = match control {
             Ok(pick) => pick,
             Err(why) if installable => {
-                return self.clean_plan(request, why, notes);
+                return self.clean_plan(arch, request, why, notes);
             }
             Err(why) => {
                 let release = request.release.trim();
-                // An end-of-life series only runs where its older images do.
-                let hint = match crate::kolla::releases::legacy(release) {
-                    Some(_) if current_arch() == "aarch64" => format!(
-                        "OpenStack {release} is end of life and its images are amd64 only; create it on an x86_64 host"
-                    ),
-                    _ => format!(
+                // The images of a series only run on the architectures they were published
+                // for; the control VM's host cannot boot it elsewhere.
+                let hint = if !crate::kolla::releases::available_on(release, arch) {
+                    format!(
+                        "OpenStack {release} runs on {} only; the control VM's host '{control_host}' is {arch}, choose a host of one of those architectures",
+                        crate::kolla::releases::arches(release).join("/")
+                    )
+                } else {
+                    format!(
                         "this coordinator cannot install OpenStack {release} clean, and only published kolla-ansible releases can be"
-                    ),
+                    )
                 };
                 return Err(conflict(format!("{why}; {hint}")));
             }
@@ -590,6 +623,7 @@ impl FarmManager {
         // Each compute, with the control template's services.
         let found = self.found(
             state,
+            arch,
             release,
             TemplateRole::Compute,
             Some(&components),
@@ -599,6 +633,7 @@ impl FarmManager {
             Some(id) => (
                 Some(Pick::Local(Box::new(Self::preferred(
                     state,
+                    arch,
                     id,
                     TemplateRole::Compute,
                     release,
@@ -656,7 +691,7 @@ impl FarmManager {
         Ok(ReleasePlan {
             farm_id: id.clone(),
             release: release.into(),
-            arch: current_arch(),
+            arch: arch.into(),
             components,
             control: control_node,
             computes,
@@ -667,6 +702,7 @@ impl FarmManager {
     /// The plan of a farm installed clean with its computes, as `POST /farms` does.
     fn clean_plan(
         &self,
+        arch: &str,
         request: &ReleaseCreateRequest,
         why: String,
         notes: &mut Vec<String>,
@@ -692,7 +728,7 @@ impl FarmManager {
         Ok(ReleasePlan {
             farm_id: request.id.clone(),
             release: request.release.trim().into(),
-            arch: current_arch(),
+            arch: arch.into(),
             components: planned.components.clone(),
             control: clean(
                 node.into(),
@@ -715,6 +751,28 @@ impl FarmManager {
                 .collect(),
             notes: std::mem::take(notes),
         })
+    }
+
+    /// CPU architecture the farm runs on: its control VM's host's, which every compute host
+    /// must share since Kolla images cannot mix architectures. A remote host not checked yet
+    /// is taken to match this coordinator.
+    fn plan_arch(&self, state: &State, request: &ReleaseCreateRequest) -> Result<String> {
+        let control_host = request.host_id.as_deref().context("no control host")?;
+        let arch = super::transfers::host_arch(state, control_host).unwrap_or_else(current_arch);
+        for host in request
+            .compute_hosts
+            .iter()
+            .filter(|h| !h.trim().is_empty())
+        {
+            if let Some(other) = super::transfers::host_arch(state, host)
+                && other != arch
+            {
+                return Err(conflict(format!(
+                    "host '{host}' is {other} but the control VM's host '{control_host}' is {arch}; Kolla images cannot mix CPU architectures"
+                )));
+            }
+        }
+        Ok(arch)
     }
 
     /// A create request carrying the farm's ID, host and metadata, for either path.

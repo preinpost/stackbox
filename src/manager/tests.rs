@@ -5277,11 +5277,17 @@ async fn a_release_plan_picks_the_newest_matching_templates_or_says_why_it_insta
         "{error:#}"
     );
 
-    // Templates of another architecture never match.
+    // Templates of another architecture never match, and a clean install still runs where
+    // the release's images are published.
+    let foreign = if current_arch() == "aarch64" {
+        "x86_64"
+    } else {
+        "aarch64"
+    };
     manager
         .update(|state| {
             for snapshot in state.snapshots.values_mut() {
-                snapshot.arch = "riscv64".into();
+                snapshot.arch = foreign.into();
             }
             Ok(())
         })
@@ -5289,7 +5295,6 @@ async fn a_release_plan_picks_the_newest_matching_templates_or_says_why_it_insta
     let plan = manager.preview_release(&by_release("r", 1)).await.unwrap();
     assert_eq!(plan.control.source, NodeSource::Clean);
     let catalog = manager.release_catalog(None, None).await.unwrap();
-    // The end-of-life series are offered beside the maintained ones, marked as such.
     let own = catalog
         .releases
         .iter()
@@ -5298,18 +5303,35 @@ async fn a_release_plan_picks_the_newest_matching_templates_or_says_why_it_insta
     assert_eq!(own.local_control, 0);
     assert!(own.installable);
     assert!(!own.eol);
-    // The legacy series carry the code name their images are tagged with.
-    let legacy = catalog
+    assert_eq!(own.arches, ["x86_64", "aarch64"]);
+    // 2024.1 and 2024.2 are offered with the images the farm publishes for them.
+    for built in ["2024.1", "2024.2"] {
+        let templates = catalog
+            .releases
+            .iter()
+            .find(|r| r.release == built)
+            .unwrap_or_else(|| panic!("{built} is offered"));
+        assert!(!templates.eol, "{built}");
+        assert_eq!(templates.series, built, "{built}");
+        assert_eq!(templates.arches, ["x86_64"], "{built}");
+        assert_eq!(templates.installable, current_arch() == "x86_64", "{built}");
+    }
+    // The end-of-life series appear in this catalog only when the host running the tests
+    // opted in, which `release_support_policy_is_enforced_and_can_be_opted_into` proves in a
+    // child of its own. Either way they are closed, and amd64 only. The test's own premise
+    // stays out of this process's environment.
+    for closed in catalog
         .releases
         .iter()
-        .find(|r| r.release == "2021.1")
-        .expect("the legacy series are offered");
-    assert!(legacy.eol);
-    assert_eq!(legacy.series, "wallaby");
+        .filter(|r| crate::kolla::releases::legacy(&r.release).is_some())
+    {
+        assert!(closed.eol, "{}", closed.release);
+        assert_eq!(closed.arches, ["x86_64"], "{}", closed.release);
+    }
     // A release still named year.release needs no separate code name.
     assert_eq!(own.series, release);
     let catalog = manager
-        .release_catalog(Some("riscv64".into()), None)
+        .release_catalog(Some(foreign.into()), None)
         .await
         .unwrap();
     let counts: Vec<_> = catalog
@@ -5324,21 +5346,18 @@ async fn a_release_plan_picks_the_newest_matching_templates_or_says_why_it_insta
             )
         })
         .collect();
-    // The two releases that keep templates, then the end-of-life series this coordinator
-    // could still install elsewhere.
+    // The two releases that keep templates; the rest are offered from published images only.
     assert_eq!(
         &counts[..2],
-        [(release, 2, 0, false), ("2025.1", 0, 1, false)]
+        [(release, 2, 0, true), ("2025.1", 0, 1, false)]
     );
-    // The end-of-life series carry no templates here and are marked as closed.
     assert!(counts[2..].iter().all(|entry| entry.1 == 0 && entry.2 == 0));
-    assert!(
-        catalog
-            .releases
-            .iter()
-            .find(|r| r.release == "2021.1")
-            .is_some_and(|r| r.eol)
-    );
+    for built in &catalog.releases[2..] {
+        if built.release.starts_with("2024.") {
+            assert_eq!(built.arches, ["x86_64"], "{}", built.release);
+            assert_eq!(built.installable, foreign == "x86_64", "{}", built.release);
+        }
+    }
 
     // A farm ID in use is refused before anything else.
     assert!(
@@ -5348,6 +5367,161 @@ async fn a_release_plan_picks_the_newest_matching_templates_or_says_why_it_insta
             .unwrap_err()
             .is::<Conflict>()
     );
+}
+
+/// The opt-in is read from this process's environment, and tests share it. Each case runs in
+/// a child of this test binary with its own environment, so tests do not race each other and
+/// a developer's shell cannot change the result.
+#[test]
+fn release_support_policy_is_enforced_and_can_be_opted_into() {
+    for (mode, allow) in [("reject", false), ("allow", true)] {
+        let mut command =
+            std::process::Command::new(std::env::current_exe().expect("the test binary"));
+        command
+            .args([
+                "--exact",
+                "--nocapture",
+                "manager::tests::release_support_policy_probe",
+            ])
+            .env("FARM_TEST_RELEASE_POLICY", mode);
+        if allow {
+            command.env("FARM_ALLOW_UNSUPPORTED_RELEASES", "1");
+        } else {
+            command.env_remove("FARM_ALLOW_UNSUPPORTED_RELEASES");
+        }
+        let output = command.output().expect("run the test binary");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success(),
+            "policy {mode} child failed:\n{stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            stdout.contains(&format!("release policy {mode}: ok")),
+            "policy {mode} child did not run: {stdout}"
+        );
+    }
+}
+
+/// The child half of [`release_support_policy_is_enforced_and_can_be_opted_into`].
+#[tokio::test]
+async fn release_support_policy_probe() {
+    let Ok(mode) = std::env::var("FARM_TEST_RELEASE_POLICY") else {
+        return;
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let manager = open_with(options(dir.path()), Arc::new(Fake::default())).await;
+    let catalog = manager
+        .release_catalog(Some("x86_64".into()), None)
+        .await
+        .unwrap();
+    let request = |id: &str, release: &str| ReleaseCreateRequest {
+        id: id.into(),
+        release: release.into(),
+        host_id: Some("local".into()),
+        computes: 1,
+        external_host: "localhost".into(),
+        ..Default::default()
+    };
+    match mode.as_str() {
+        "reject" => {
+            assert!(
+                !catalog.releases.iter().any(|r| r.release == "2021.1"),
+                "the end-of-life series need the opt-in"
+            );
+            assert!(!catalog.releases.iter().any(|r| r.release == "2023.1"));
+            for release in ["2024.1", "2024.2"] {
+                let offered = catalog
+                    .releases
+                    .iter()
+                    .find(|r| r.release == release)
+                    .unwrap_or_else(|| panic!("{release} is offered"));
+                assert!(offered.installable, "{release}");
+                assert_eq!(offered.arches, ["x86_64"], "{release}");
+            }
+            for (id, release) in [("old", "2021.1"), ("gone", "2023.1")] {
+                let why = manager
+                    .preview_release(&request(id, release))
+                    .await
+                    .unwrap_err();
+                assert!(why.is::<BadRequest>(), "{release}: {why:#}");
+                assert!(
+                    why.to_string()
+                        .contains(crate::kolla::releases::MIN_SUPPORTED_RELEASE),
+                    "{release}: {why:#}"
+                );
+                let why = manager
+                    .create_release(request(id, release))
+                    .await
+                    .unwrap_err();
+                assert!(why.is::<BadRequest>(), "{release}: {why:#}");
+            }
+        }
+        "allow" => {
+            let legacy = catalog
+                .releases
+                .iter()
+                .find(|r| r.release == "2021.1")
+                .expect("the opt-in offers the end-of-life series");
+            assert!(legacy.eol);
+            assert_eq!(legacy.series, "wallaby");
+            assert!(legacy.installable);
+            assert_eq!(legacy.arches, ["x86_64"]);
+            // 2023.1/2023.2 have no images and are not part of the end-of-life opt-in.
+            assert!(!catalog.releases.iter().any(|r| r.release == "2023.1"));
+            // The opt-in does not make a code name a farm's release name.
+            let why = manager
+                .preview_release(&request("old", "zed"))
+                .await
+                .unwrap_err();
+            assert!(
+                why.to_string()
+                    .contains(crate::kolla::releases::MIN_SUPPORTED_RELEASE),
+                "{why:#}"
+            );
+        }
+        other => panic!("unknown policy {other}"),
+    }
+    println!("release policy {mode}: ok");
+}
+
+#[tokio::test]
+async fn an_existing_farm_of_an_unsupported_release_still_loads_and_deletes() {
+    let dir = tempfile::tempdir().unwrap();
+    let (manager, _) = release_templates(dir.path()).await;
+    // A farm frozen before the supported range changed keeps its own release; only new
+    // create and plan requests are held to the minimum.
+    manager
+        .update(|state| {
+            let snapshot = state.snapshots.get_mut("ctl").unwrap();
+            snapshot.release = Some("2021.1".into());
+            snapshot.plan.release = Some("2021.1".into());
+            Ok(())
+        })
+        .unwrap();
+    // Below the supported minimum, whether or not this host opted into the older series: a
+    // farm recorded before the range changed keeps the release it was made with.
+    assert!("2021.1" < crate::kolla::releases::MIN_SUPPORTED_RELEASE);
+    let job = manager
+        .create(CreateRequest {
+            snapshot_id: Some("ctl".into()),
+            ..request("legacy")
+        })
+        .unwrap();
+    assert_eq!(done(&manager, &job).await.status, JobStatus::Succeeded);
+    let farm = manager.get("legacy").unwrap();
+    assert_eq!(
+        farm.plan.as_ref().unwrap().release.as_deref(),
+        Some("2021.1")
+    );
+    // Deploy still reads the farm's own release; only new create and plan requests are held
+    // to the minimum. This farm has no compute yet, which is the ordinary refusal here.
+    let deploy = manager
+        .deploy("legacy", DeployRequest::default())
+        .unwrap_err();
+    assert!(deploy.to_string().contains("no compute VM"), "{deploy:#}");
+    let delete = manager.delete("legacy").unwrap();
+    assert_eq!(done(&manager, &delete).await.status, JobStatus::Succeeded);
 }
 
 #[tokio::test]
@@ -5866,5 +6040,14 @@ async fn release_routes_preview_and_start_farms() {
         ))
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::CONFLICT);
+    // Below the supported minimum, the request is refused before any plan is made.
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let error: serde_json::Value =
+        serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
+    assert!(
+        error["error"]
+            .as_str()
+            .is_some_and(|e| e.contains(crate::kolla::releases::MIN_SUPPORTED_RELEASE)),
+        "{error}"
+    );
 }

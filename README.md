@@ -4,6 +4,7 @@ Farm마다 microsandbox VM을 만들고 Kolla로 OpenStack을 설치하는 Rust 
 새 farm은 **control 1 + compute 1~3**으로 만들어지며 기본은 compute 1대입니다. VM들은 호스트의 링크
 스위치로 이어지고, compute VM을 고립시켜 evacuate 같은 장애 대응을 시험할 수 있습니다
 ([다중 VM farm](#다중-vm-farm)).
+지원하는 OpenStack 릴리스는 **2024.1(Caracal) 이상**입니다([릴리스로 만들기](#릴리스로-만들기)).
 웹포탈 backend는 `farm serve`의 API를 호출해 farm 생성·배포·삭제 작업과 로그를 추적할 수 있습니다.
 
 항상 **Keystone + Glance**를 배포하고, 선택 서비스로 **Placement**, **Horizon**, **Neutron**,
@@ -244,10 +245,22 @@ OpenStack 릴리스를 고르면, coordinator가 그 릴리스의 저장된 템�
 브랜치에서 읽어 오고(10분 캐시), 저장소에 닿지 않는 호스트는 `FARM_OPENSTACK_RELEASES=2026.2,2025.2`처럼
 목록을 고정할 수 있습니다.
 
-**EOL 릴리스도 고를 수 있습니다.** kolla-ansible은 시리즈가 EOL이 되면 브랜치를 지우므로,
-2022.2(zed)부터 2020.1(ussuri)까지는 마지막 태그(예: victoria `11.4.0`)로 설치합니다. 대상은
-`2022.2`, `2022.1`, `2021.2`, `2021.1`, `2020.2`, `2020.1`이고, 포털의 릴리스 목록에 **EOL**로
-표시됩니다. 세 가지 제약이 있습니다.
+**지원 범위는 2024.1(Caracal) 이상입니다.** 릴리스 목록과 계획·생성 API는 그보다 오래된 릴리스를
+받지 않습니다. 2024.1·2024.2는 kolla-ansible 브랜치나 마지막 태그는 남아 있지만
+`quay.io/openstack.kolla`에 이미지가 없어, 이 저장소가 빌드해 게시한 Rocky 9 이미지
+(`ghcr.io/preinpost/kolla`, amd64 전용)를 씁니다. 2024.1은 `unmaintained/2024.1`, 2024.2는
+`2024.2-eol` 태그로 설치하고 이미지 태그는 각각 `2024.1-rocky-9`, `2024.2-rocky-9`입니다.
+2023.1·2023.2는 지원하지 않습니다. 2025.1 이상은 `quay.io/openstack.kolla`의 그 릴리스 이미지를
+그대로 씁니다. 2026.2만 Rocky 10 `aarch64` 이미지가 있어 arm64 호스트를 지원하고, 그 밖의
+릴리스는 amd64 전용입니다. 2024.1의 requirements에는 Ansible이 없어 설치 단계가
+ansible-core 2.16(이 릴리스가 허용하는 상한)을 넣고, 2024.2는 자체 requirements의
+ansible-core 2.16~2.18을 씁니다. 두 릴리스 모두 Rocky 10 guest를 지원하지 않으므로
+globals.yml에서 host OS precheck를 끄고 SELinux·Neutron 모듈 기본값을 guest에 맞춥니다.
+
+2022.2(zed) 이하 EOL 지원 코드는 남아 있지만 기본 릴리스 목록과 계획·생성 API에서는 빠집니다.
+coordinator에 `FARM_ALLOW_UNSUPPORTED_RELEASES=1`을 설정한 경우에만 고를 수 있습니다. 그 시리즈는
+kolla-ansible이 브랜치를 지우므로 마지막 태그(예: victoria `11.4.0`, zed `15.6.0`)로 설치하며,
+포털의 릴리스 목록에는 **EOL**로 표시됩니다. 세 가지 제약이 있습니다.
 
 - 그 시리즈의 Kolla 이미지는 **amd64 전용**입니다. aarch64 호스트(Apple Silicon 포함)에서는
   설치할 수 없고, 릴리스 목록에서도 `installable: false`로 나옵니다. x86_64 Linux 호스트에서만 됩니다.

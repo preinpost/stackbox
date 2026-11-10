@@ -936,3 +936,45 @@ async fn purging_a_remote_host_with_its_snapshots_deletes_only_the_ones_frozen_t
     drop(edge);
     settle(&manager).await;
 }
+
+#[tokio::test]
+async fn a_release_plan_follows_the_architecture_of_the_control_vms_host() {
+    let dir = tempfile::tempdir().unwrap();
+    let manager = open_with(options(dir.path()), Arc::new(Fake::default())).await;
+    let _edge = dial_in(&manager, dir.path()).await;
+    let request = |host: &str, release: &str| ReleaseCreateRequest {
+        id: "eol".into(),
+        release: release.into(),
+        host_id: Some(host.into()),
+        computes: 1,
+        external_host: "localhost".into(),
+        ..Default::default()
+    };
+    // The 2024.x images the farm publishes are amd64 only, whichever host coordinates.
+    set_arch(&manager, "edge", "x86_64");
+    let plan = manager
+        .preview_release(&request("edge", "2024.1"))
+        .await
+        .unwrap();
+    assert_eq!(plan.arch, "x86_64");
+    assert_eq!(plan.control.source, NodeSource::Clean);
+    set_arch(&manager, "edge", "aarch64");
+    let error = manager
+        .preview_release(&request("edge", "2024.1"))
+        .await
+        .unwrap_err();
+    assert!(error.is::<Conflict>(), "{error:#}");
+    assert!(
+        error.to_string().contains("host 'edge' is aarch64"),
+        "{error:#}"
+    );
+    // Its computes share the control VM's architecture.
+    let mut mixed = request("local", crate::kolla::OPENSTACK_RELEASE);
+    mixed.compute_hosts = vec!["edge".into()];
+    set_arch(&manager, "edge", &foreign_arch());
+    let error = manager.preview_release(&mixed).await.unwrap_err();
+    assert!(
+        error.to_string().contains("cannot mix CPU architectures"),
+        "{error:#}"
+    );
+}

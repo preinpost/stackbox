@@ -358,6 +358,19 @@ pub fn plan(request: &PlanRequest) -> Result<Plan> {
     layout(&request)
 }
 
+impl PlanRequest {
+    /// Refuses a release older than this coordinator supports, unless it opted in. A request
+    /// without a release installs this build's own; a snapshot restore keeps the snapshot's.
+    pub fn check_release(&self) -> Result<()> {
+        if let Some(release) = &self.release
+            && let Some(why) = crate::kolla::releases::unsupported(release.trim())
+        {
+            bail!("{why}");
+        }
+        Ok(())
+    }
+}
+
 /// A multi-node farm's control VM alone, as a control template restores it: its farm's
 /// plan without the compute VMs, which are added one at a time afterwards. The compute size
 /// is kept for them.
@@ -559,13 +572,15 @@ impl CreateRequest {
         {
             bail!("external_host must be an IPv4 address or DNS hostname without a scheme or port");
         }
-        plan(&PlanRequest {
+        let request = PlanRequest {
             components: self.components.clone(),
             computes: self.computes,
             compute: self.compute,
             release: self.release.clone(),
             layout: self.layout,
-        })
+        };
+        request.check_release()?;
+        plan(&request)
     }
 }
 pub fn validate_id(id: &str) -> Result<()> {
@@ -1018,6 +1033,9 @@ pub struct ReleaseTemplates {
     /// and only where its older images run.
     #[serde(default)]
     pub eol: bool,
+    /// CPU architectures its images are published for (`x86_64`, `aarch64`).
+    #[serde(default)]
+    pub arches: Vec<String>,
 }
 
 /// Releases a farm can be created with on one architecture, newest first.

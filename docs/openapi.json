@@ -4635,6 +4635,13 @@
           "installable"
         ],
         "properties": {
+          "arches": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "CPU architectures its images are published for (`x86_64`, `aarch64`)."
+          },
           "bucket_compute": {
             "type": "integer",
             "minimum": 0
