@@ -32,6 +32,7 @@ vi.mock("@tanstack/react-router", () => ({
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
+  navigate.mockClear();
 });
 
 const releaseCatalog = {
@@ -1189,6 +1190,13 @@ test("starts a farm from a control template through the restore dialog", async (
       host_id: "local",
       snapshot_id: "control-tpl",
       external_host: "localhost",
+    }),
+  );
+  // Restoring a farm opens the farm it made, as a release does.
+  await waitFor(() =>
+    expect(navigate).toHaveBeenCalledWith({
+      to: "/farms/$farmId",
+      params: { farmId: "grow" },
     }),
   );
   cleanup();

@@ -366,14 +366,18 @@ export function CreateFarmForm({
     mutationFn: api.createRelease,
     onMutate: () => onPending(true),
     onSettled: () => onPending(false),
-    onSuccess: async () => {
+    onSuccess: async (job) => {
       await Promise.all([
         refresh(client),
         client.invalidateQueries({ queryKey: keys.snapshots }),
       ]);
       close();
-      // The farm appears once its first step starts; the job shows every step.
-      await navigate({ to: "/jobs" });
+      // The dialog closes on the farm it made: its page lists the assemble job and every step
+      // under it while the farm still reads as deploying.
+      await navigate({
+        to: "/farms/$farmId",
+        params: { farmId: job.farm_id },
+      });
     },
   });
   const duplicate = farms.data?.some((f) => f.id === name);

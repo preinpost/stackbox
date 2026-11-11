@@ -209,7 +209,14 @@ test("previews each VM's source for the chosen release and starts the plan", asy
       compute_hosts: ["", "edge"],
     }),
   );
-  await waitFor(() => expect(navigate).toHaveBeenCalledWith({ to: "/jobs" }));
+  // The dialog closes on the farm it made, whose page shows the assemble job from its first
+  // step, instead of leaving the reader on the jobs list.
+  await waitFor(() =>
+    expect(navigate).toHaveBeenCalledWith({
+      to: "/farms/$farmId",
+      params: { farmId: "r" },
+    }),
+  );
   expect(close).toHaveBeenCalled();
   client.clear();
 });
