@@ -2,14 +2,17 @@ import { Link, Outlet, useRouterState } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
 import {
   Activity,
+  ArrowRight,
   ArrowUpRight,
   Boxes,
   ExternalLink,
   LayoutGrid,
   Menu,
+  Moon,
   PanelLeftClose,
   Server,
   Snowflake,
+  Sun,
   Terminal,
 } from "lucide-react";
 import { Fragment, useEffect, useState } from "react";
@@ -20,7 +23,14 @@ import {
   hostJobsQuery,
   activeJob,
 } from "../api/client";
-import { hostReady } from "../lib";
+import { hostReady, memory } from "../lib";
+import {
+  applyTheme,
+  preferredTheme,
+  setTheme as storeTheme,
+  watchSystemTheme,
+  type Theme,
+} from "../theme";
 
 type Crumb = {
   label: string;
@@ -43,6 +53,12 @@ function breadcrumb(pathname: string): Crumb[] {
 
 export function Shell() {
   const [menuOpen, setMenuOpen] = useState(false);
+  const [theme, setCurrentTheme] = useState<Theme>(() => preferredTheme());
+  useEffect(() => {
+    applyTheme(theme);
+  }, [theme]);
+  // Until the operator picks a theme, the page follows the OS as it changes.
+  useEffect(() => watchSystemTheme(setCurrentTheme), []);
   useEffect(() => {
     if (!menuOpen) return;
     const close = (event: KeyboardEvent) => {
@@ -62,6 +78,14 @@ export function Shell() {
       .length ?? 0);
   const readyHosts =
     hosts.data?.filter((h) => hostReady(h, coordinator.data?.build_id)) ?? [];
+  const capacities =
+    hosts.data?.flatMap((h) => (h.capacity ? [h.capacity] : [])) ?? [];
+  const reserved = capacities.reduce(
+    (sum, c) => sum + c.memory_reserved_mib,
+    0,
+  );
+  const budget = capacities.reduce((sum, c) => sum + c.memory_budget_mib, 0);
+  const reservation = budget ? Math.min(100, (reserved / budget) * 100) : 0;
   const navigation = [
     // Hosts come first: a farm is always created on one of them.
     { to: "/hosts" as const, label: "Hosts", icon: Server },
@@ -71,6 +95,11 @@ export function Shell() {
   ];
   const sectionActive = (to: string) =>
     to === "/" && pathname.startsWith("/farms/");
+  const navActive = (to: string) =>
+    to === "/"
+      ? pathname === "/" || pathname.startsWith("/farms/")
+      : pathname.startsWith(to);
+  const dark = theme === "dark";
   return (
     <div className="app-layout">
       {menuOpen && (
@@ -86,7 +115,7 @@ export function Shell() {
       >
         <Link to="/" className="brand" onClick={() => setMenuOpen(false)}>
           <span className="brand-mark">
-            <Boxes size={19} strokeWidth={1.8} />
+            <Boxes size={18} strokeWidth={1.8} />
           </span>
           <span className="brand-name">
             farm<span className="brand-period">.</span>
@@ -95,7 +124,7 @@ export function Shell() {
         </Link>
         <div className="workspace">
           <span className="workspace-avatar">
-            <Terminal size={15} />
+            <Terminal size={14} />
             <span className="online-dot" />
           </span>
           <div className="workspace-text">
@@ -103,30 +132,33 @@ export function Shell() {
             <span>OpenStack VMs</span>
           </div>
         </div>
-        <p className="nav-label">Workspace</p>
-        <nav aria-label="주 메뉴">
-          {navigation.map(({ to, label, icon: Icon }) => (
-            <Link
-              key={to}
-              to={to}
-              activeOptions={{ exact: to === "/" }}
-              className={`nav-item ${sectionActive(to) ? "nav-active" : ""}`}
-              activeProps={{ className: "nav-item nav-active" }}
-              onClick={() => setMenuOpen(false)}
-            >
-              <Icon size={17} />
-              <span>{label}</span>
-              {label === "Jobs" && running > 0 && (
-                <span className="nav-count">{running}</span>
-              )}
-            </Link>
-          ))}
-        </nav>
+        <div className="sidebar-nav">
+          <p className="nav-label">Workspace</p>
+          <nav className="nav" aria-label="주 메뉴">
+            {navigation.map(({ to, label, icon: Icon }) => (
+              <Link
+                key={to}
+                to={to}
+                activeOptions={{ exact: to === "/" }}
+                className={`nav-item ${sectionActive(to) ? "nav-active" : ""}`}
+                activeProps={{ className: "nav-item nav-active" }}
+                aria-current={navActive(to) ? "page" : undefined}
+                onClick={() => setMenuOpen(false)}
+              >
+                <Icon size={16} />
+                <span>{label}</span>
+                {label === "Jobs" && running > 0 && (
+                  <span className="nav-count live">{running}</span>
+                )}
+              </Link>
+            ))}
+          </nav>
+        </div>
         <div className="sidebar-bottom">
           <div className="host-mini">
             <div className="host-mini-head">
               <span
-                className={`status-dot ${readyHosts.length ? "text-emerald-500" : "text-amber-500"}`}
+                className={`status-dot ${readyHosts.length ? "is-ready" : "is-pending"}`}
               />
               <strong>
                 {hosts.isError
@@ -137,13 +169,45 @@ export function Shell() {
                       ? "호스트 등록 필요"
                       : `호스트 ${readyHosts.length} / ${hosts.data.length} 준비됨`}
               </strong>
+              {hosts.data?.length ? (
+                <span className="host-dots" aria-hidden="true">
+                  {hosts.data.slice(0, 5).map((h) => (
+                    <i
+                      key={h.id}
+                      className={`host-dot ${
+                        readyHosts.some((ready) => ready.id === h.id)
+                          ? "on"
+                          : "setup"
+                      }`}
+                    />
+                  ))}
+                </span>
+              ) : null}
             </div>
             {hosts.data?.length ? (
-              <ul className="host-mini-specs">
-                {hosts.data.slice(0, 3).map((h) => (
-                  <li key={h.id}>{h.id}</li>
-                ))}
-              </ul>
+              <>
+                <div
+                  className="mini-meter"
+                  role="img"
+                  aria-label={`호스트 예약 메모리 ${Math.round(reservation)}%`}
+                >
+                  <i style={{ width: `${reservation}%` }} />
+                </div>
+                <div className="host-mini-foot">
+                  <span>
+                    예약 {memory(reserved)} / {memory(budget)}
+                  </span>
+                  <Link to="/hosts" onClick={() => setMenuOpen(false)}>
+                    <span>호스트 관리</span>
+                    <ArrowRight size={10} />
+                  </Link>
+                </div>
+                <ul className="host-mini-specs">
+                  {hosts.data.slice(0, 3).map((h) => (
+                    <li key={h.id}>{h.id}</li>
+                  ))}
+                </ul>
+              </>
             ) : (
               <p>
                 {hosts.isError
@@ -151,10 +215,12 @@ export function Shell() {
                   : "로컬 호스트나 원격 서버를 등록하세요"}
               </p>
             )}
-            <Link to="/hosts" onClick={() => setMenuOpen(false)}>
-              <span>호스트 관리</span>
-              <ArrowUpRight size={13} />
-            </Link>
+            {!hosts.data?.length && (
+              <Link to="/hosts" onClick={() => setMenuOpen(false)}>
+                <span>호스트 관리</span>
+                <ArrowRight size={10} />
+              </Link>
+            )}
           </div>
           <a
             className="documentation-link"
@@ -162,9 +228,9 @@ export function Shell() {
             target="_blank"
             rel="noreferrer"
           >
-            <ExternalLink size={15} />
+            <ExternalLink size={13} />
             <span>API specification</span>
-            <ArrowUpRight size={13} />
+            <ArrowUpRight size={12} />
           </a>
           <div className="sidebar-footer">
             <span className="operator-avatar">L</span>
@@ -177,31 +243,63 @@ export function Shell() {
       </aside>
       <div className="main-layout">
         <header className="topbar">
-          <div className="flex items-center gap-3">
-            <button
-              className="icon-button mobile-menu"
-              aria-expanded={menuOpen}
-              aria-controls="workspace-navigation"
-              aria-label={menuOpen ? "메뉴 닫기" : "메뉴 열기"}
-              onClick={() => setMenuOpen(!menuOpen)}
+          <button
+            className="icon-button mobile-menu"
+            aria-expanded={menuOpen}
+            aria-controls="workspace-navigation"
+            aria-label={menuOpen ? "메뉴 닫기" : "메뉴 열기"}
+            onClick={() => setMenuOpen(!menuOpen)}
+          >
+            {menuOpen ? <PanelLeftClose size={18} /> : <Menu size={18} />}
+          </button>
+          <nav aria-label="현재 위치" className="breadcrumb">
+            <Link to="/" className="crumb-workspace">
+              Workspace
+            </Link>
+            {breadcrumb(pathname).map(({ label, to }, i) => (
+              <Fragment key={i}>
+                <span className="crumb-sep" aria-hidden="true">
+                  /
+                </span>
+                {to ? (
+                  <Link to={to}>{label}</Link>
+                ) : (
+                  <strong aria-current="page">{label}</strong>
+                )}
+              </Fragment>
+            ))}
+          </nav>
+          <span className="topbar-spacer" />
+          {coordinator.data?.build_id && (
+            <span
+              className="build-chip"
+              title={`farmd build ${coordinator.data.build_id}`}
             >
-              {menuOpen ? <PanelLeftClose size={20} /> : <Menu size={20} />}
-            </button>
-            <Server size={15} />
-            <nav aria-label="현재 위치" className="breadcrumb">
-              <Link to="/">Workspace</Link>
-              {breadcrumb(pathname).map(({ label, to }, i) => (
-                <Fragment key={i}>
-                  <span className="text-stone-300">/</span>
-                  {to ? (
-                    <Link to={to}>{label}</Link>
-                  ) : (
-                    <strong aria-current="page">{label}</strong>
-                  )}
-                </Fragment>
-              ))}
-            </nav>
-          </div>
+              <span className="dot" aria-hidden="true" />
+              farmd {coordinator.data.build_id.slice(0, 7)}
+            </span>
+          )}
+          <button
+            className="icon-button line"
+            type="button"
+            aria-pressed={dark}
+            aria-label="다크 모드"
+            title="다크 모드"
+            onClick={() => {
+              const next: Theme = dark ? "light" : "dark";
+              storeTheme(next);
+              setCurrentTheme(next);
+            }}
+          >
+            {dark ? <Sun size={16} /> : <Moon size={16} />}
+          </button>
+          <span
+            className="operator-avatar"
+            title="Local operator"
+            aria-hidden="true"
+          >
+            L
+          </span>
         </header>
         <main id="main-content" className="page-container">
           <Outlet />

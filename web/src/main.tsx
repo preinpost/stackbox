@@ -4,7 +4,12 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { RouterProvider } from "@tanstack/react-router";
 import { router } from "./router";
 import { ApiError } from "./api/client";
+import { applyTheme, preferredTheme } from "./theme";
 import "./styles.css";
+
+// index.html sets the theme before first paint; this keeps the meta color in step
+// when the page is opened without that script (for example in tests).
+applyTheme(preferredTheme());
 
 const client = new QueryClient({
   defaultOptions: {
