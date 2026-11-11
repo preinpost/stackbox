@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
-import { Cloud, Cpu, LoaderCircle, Server, Snowflake } from "lucide-react";
+import { Cloud, HardDrive, LoaderCircle, Snowflake } from "lucide-react";
 import {
   activeJob,
   farmsQuery,
@@ -36,12 +36,16 @@ import {
   snapshotOrigin,
 } from "../lib";
 
+/** The mock shows four services and folds the rest into a count. */
+const tagLimit = 4;
+
 export function SnapshotsPage() {
   const snapshots = useQuery(snapshotsQuery());
   const host = useQuery(hostQuery());
   const sorted = [...(snapshots.data ?? [])].sort(
     (a, b) => b.created_at - a.created_at,
   );
+  const archived = sorted.filter((snapshot) => snapshot.archive).length;
   return (
     <>
       <PageHeading
@@ -61,9 +65,15 @@ export function SnapshotsPage() {
       <section className="panel" aria-label="스냅샷 목록">
         <div className="panel-toolbar">
           <div className="flex items-center gap-2.5">
-            <h2>모든 스냅샷</h2>
+            <h2>
+              <Snowflake size={14} />
+              모든 스냅샷
+            </h2>
             <span className="count-pill">{sorted.length}</span>
           </div>
+          <span className="field-hint">
+            복원은 같은 아키텍처의 호스트에서만 가능합니다
+          </span>
         </div>
         {snapshots.isPending ? (
           <Loading label="스냅샷을 불러오는 중" />
@@ -74,13 +84,22 @@ export function SnapshotsPage() {
             description="Farm 상세 화면의 얼리기로 배포가 끝난 VM을 저장하거나, 내보낸 .msb 파일을 파일 경로나 S3 버킷에서 가져오세요."
           />
         ) : (
-          sorted.map((snapshot) => (
-            <SnapshotRow
-              snapshot={snapshot}
-              localArch={host.data?.arch}
-              key={snapshot.id}
-            />
-          ))
+          <>
+            {sorted.map((snapshot) => (
+              <SnapshotRow
+                snapshot={snapshot}
+                localArch={host.data?.arch}
+                key={snapshot.id}
+              />
+            ))}
+            <div className="panel-foot">
+              <span>
+                스냅샷은 같은 아키텍처의 호스트에서만 부팅됩니다. 복원할 때 새
+                farm이 만들어집니다.
+              </span>
+              <span className="chip">아카이브 {archived}개</span>
+            </div>
+          </>
         )}
       </section>
       <BucketsPanel />
@@ -106,23 +125,29 @@ function TransferProgress({ snapshot }: { snapshot: Snapshot }) {
         ? "내려받음 · 스냅샷 등록 중"
         : `${exporting ? "S3에 올리는 중" : "S3에서 내려받는 중"} · ${percent}% (${bytes(transfer.done_bytes)} / ${bytes(total)})`;
   return (
-    <div className="mt-2.5 max-w-xl">
-      <div className="job-meta mt-0 flex-wrap">
+    <div className="snap-progress">
+      <span className="cap">
         {waiting ? (
-          <LoaderCircle size={13} className="animate-spin" />
+          <LoaderCircle size={11} className="animate-spin" />
         ) : (
-          <Cloud size={13} />
+          <Cloud size={11} />
         )}
-        <span>{label}</span>
-        <span>·</span>
-        <span className="font-mono">
+        {label}
+        <code>
           {transfer.bucket}:{transfer.key}
-        </span>
-      </div>
+        </code>
+      </span>
       {total != null && (
-        <div className="meter mt-2" aria-hidden>
-          <span style={{ width: `${percent}%` }} />
-        </div>
+        <span
+          className="bar"
+          role="progressbar"
+          aria-valuenow={percent}
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-label={`${exporting ? "S3 업로드" : "S3 다운로드"} ${percent}%`}
+        >
+          <i style={{ width: `${percent}%` }} />
+        </span>
       )}
     </div>
   );
@@ -157,70 +182,36 @@ function SnapshotRow({
           activeJob(j),
       )
     : undefined;
+  const components = known ? snapshot.plan.components : [];
+  const shown = components.slice(0, tagLimit);
   return (
-    <div className="job-row snapshot-row">
-      <span className={`job-kind-icon ${snapshot.status}`}>
-        <Snowflake size={16} />
+    <article className="snap">
+      <span className="snap-glyph" aria-hidden>
+        <Snowflake size={14} />
       </span>
-      <div className="job-row-main">
-        <div className="flex flex-wrap items-center gap-2.5">
-          <strong className="font-mono text-stone-800">{snapshot.id}</strong>
+      <div className="snap-body">
+        <div className="snap-title">
+          <strong>{snapshot.id}</strong>
           <StatusBadge status={snapshot.status} />
           {known && (
-            <span className="muted text-xs">
+            <span className={snapshot.deployed ? "chip accent" : "chip"}>
               {snapshot.template
-                ? `${snapshot.template === "control" ? "Control" : "Compute"} 템플릿${snapshot.release ? ` · OpenStack ${snapshot.release}` : ""}`
+                ? `${snapshot.template === "control" ? "Control" : "Compute"} 템플릿`
                 : snapshot.deployed
                   ? "OpenStack 배포 완료"
                   : "배포 전 VM"}
             </span>
           )}
-          <span
-            className={`snapshot-host ${foreignArch ? "snapshot-host-foreign" : ""}`}
-            title={
-              foreignArch
-                ? `이 호스트는 ${localArch}이므로 복원할 수 없습니다`
-                : "이 스냅샷을 얼린 호스트"
-            }
-          >
-            <Cpu size={12} />
-            {snapshotHost(snapshot)}
-          </span>
-          {hosts.data && (
-            <span
-              className={`snapshot-host ${originRegistered ? "" : "snapshot-host-foreign"}`}
-              title={
-                originRegistered
-                  ? "원본 스냅샷을 보관하는 호스트"
-                  : "원본을 보관하던 호스트가 등록되어 있지 않습니다. 다시 등록할 때까지 다른 호스트의 사본으로만 복원할 수 있습니다"
-              }
-            >
-              <Server size={12} />
-              원본 · {origin ?? snapshot.host_id ?? "로컬 호스트"}
-            </span>
-          )}
+          {snapshot.release && <span className="chip">{snapshot.release}</span>}
         </div>
-        {freezing && (
-          <div className="mt-1.5">
-            <StepProgress job={freezing} />
-          </div>
-        )}
-        {snapshot.note && <p className="mt-1.5">{snapshot.note}</p>}
-        {known && (
-          <div className="service-tags mt-2.5">
-            {snapshot.plan.components.map((c) => (
-              <span key={c}>{componentLabel(c)}</span>
-            ))}
-          </div>
-        )}
-        <div className="job-meta flex-wrap">
+        <div className="snap-meta">
           <span>
+            원본{" "}
             {snapshot.source_farm ? (
               sourceExists ? (
                 <Link
                   to="/farms/$farmId"
                   params={{ farmId: snapshot.source_farm }}
-                  className="hover:underline"
                 >
                   {snapshot.source_farm}
                 </Link>
@@ -230,34 +221,83 @@ function SnapshotRow({
             ) : (
               "가져온 파일"
             )}
-            에서 생성
           </span>
-          <span>·</span>
+          <span className="sep">·</span>
+          <span
+            className={foreignArch ? "snap-flag" : undefined}
+            title={
+              foreignArch
+                ? `이 호스트는 ${localArch}이므로 복원할 수 없습니다`
+                : "이 스냅샷을 얼린 호스트"
+            }
+          >
+            {snapshotHost(snapshot)}
+          </span>
+          {hosts.data && (
+            <>
+              <span className="sep">·</span>
+              <span
+                className={originRegistered ? undefined : "snap-flag"}
+                title={
+                  originRegistered
+                    ? "원본 스냅샷을 보관하는 호스트"
+                    : "원본을 보관하던 호스트가 등록되어 있지 않습니다. 다시 등록할 때까지 다른 호스트의 사본으로만 복원할 수 있습니다"
+                }
+              >
+                <code>{origin ?? snapshot.host_id ?? "로컬 호스트"}</code>에
+                보관
+              </span>
+            </>
+          )}
+          <span className="sep">·</span>
           <span>{dateTime(snapshot.created_at)}</span>
           {known && (
             <>
-              <span>·</span>
+              <span className="sep">·</span>
               <span>VM 메모리 {memory(snapshot.plan.memory_mib)}</span>
             </>
           )}
         </div>
+        {freezing && <StepProgress job={freezing} />}
+        {snapshot.note && <p className="snap-note">{snapshot.note}</p>}
+        {shown.length > 0 && (
+          <div className="tags snap-tags">
+            {shown.map((c) => (
+              <span className="tag" key={c}>
+                {componentLabel(c)}
+              </span>
+            ))}
+            {components.length > shown.length && (
+              <span className="tag more">
+                +{components.length - shown.length}
+              </span>
+            )}
+          </div>
+        )}
         <TransferProgress snapshot={snapshot} />
         <SnapshotCopies snapshot={snapshot} />
         {snapshot.archive && (
-          <div className="job-meta flex-wrap">
+          <div className="snap-archive">
+            <HardDrive size={11} />
+            <code>{snapshot.archive.path}</code>
+            <span>· {bytes(snapshot.archive.size_bytes)}</span>
             <span>
+              ·{" "}
               {snapshot.archive.bucket
                 ? `S3(${snapshot.archive.bucket})에 올림`
-                : "내보낸 파일"}{" "}
-              · {bytes(snapshot.archive.size_bytes)} ·{" "}
-              {dateTime(snapshot.archive.exported_at)}
+                : "내보낸 파일"}
             </span>
-            <CopyText value={snapshot.archive.path} />
+            <span>· {dateTime(snapshot.archive.exported_at)}</span>
+            <CopyText
+              value={snapshot.archive.path}
+              hideValue
+              name="아카이브 경로"
+            />
           </div>
         )}
         {snapshot.error && <p className="job-error">{snapshot.error}</p>}
       </div>
-      <div className="flex shrink-0 flex-wrap items-center gap-2">
+      <div className="snap-actions">
         {snapshot.template !== "compute" && (
           <RestoreSnapshotDialog
             snapshot={snapshot}
@@ -267,6 +307,6 @@ function SnapshotRow({
         <ExportSnapshotDialog snapshot={snapshot} />
         <DeleteSnapshotDialog snapshot={snapshot} />
       </div>
-    </div>
+    </article>
   );
 }

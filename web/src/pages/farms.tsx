@@ -21,6 +21,7 @@ import {
   ChevronRight,
   Cpu,
   Layers,
+  Monitor,
   Network,
   Search,
   Server,
@@ -51,8 +52,12 @@ import {
   farmMemory,
   farmNodeCount,
   farmState,
+  jobKindLabels,
   memory,
 } from "../lib";
+
+/** The mock shows four services and folds the rest into a count. */
+const tagLimit = 4;
 
 export function FarmsPage() {
   const farms = useQuery(farmsQuery());
@@ -73,6 +78,14 @@ export function FarmsPage() {
     () => new Map((jobs.data ?? []).map((job) => [job.id, job])),
     [jobs.data],
   );
+  // A local farm runs on this machine, which the list names instead of the host ID.
+  const localHosts = useMemo(
+    () =>
+      new Set(
+        (hosts.data ?? []).filter((h) => h.kind === "local").map((h) => h.id),
+      ),
+    [hosts.data],
+  );
   const columns = useMemo<ColumnDef<Farm>[]>(
     () => [
       {
@@ -85,7 +98,7 @@ export function FarmsPage() {
             className="farm-name-cell"
           >
             <span className="farm-avatar">
-              <Boxes size={19} strokeWidth={1.7} />
+              <Boxes size={16} strokeWidth={1.7} />
             </span>
             <span>
               <strong>{row.original.id}</strong>
@@ -111,52 +124,85 @@ export function FarmsPage() {
       },
       {
         id: "host",
-        header: "실행 호스트",
+        header: "호스트",
         accessorFn: (farm) => farm.host_id ?? "—",
-        cell: ({ row }) => (
-          <span className="text-xs">{row.original.host_id ?? "—"}</span>
-        ),
+        cell: ({ row }) => {
+          const host = row.original.host_id;
+          const local = host ? localHosts.has(host) : false;
+          return (
+            <span className="hostname">
+              {local ? (
+                <Monitor size={11} strokeWidth={1.9} />
+              ) : (
+                <Server size={11} strokeWidth={1.9} />
+              )}
+              {host ? (local ? "로컬" : host) : "—"}
+            </span>
+          );
+        },
       },
       {
         accessorKey: "status",
         header: "상태",
-        cell: ({ row }) => (
-          <StatusBadge
-            status={farmState(
-              row.original,
-              activeJobs.get(row.original.active_job ?? ""),
-            )}
-          />
-        ),
+        cell: ({ row }) => {
+          const job = activeJobs.get(row.original.active_job ?? "");
+          return (
+            <>
+              <StatusBadge status={farmState(row.original, job)} />
+              {job && (
+                <span className="cellnote">
+                  {jobKindLabels[job.kind]}
+                  {job.phase ? ` · ${job.phase}` : ""}
+                </span>
+              )}
+            </>
+          );
+        },
       },
       {
         id: "resources",
-        header: "리소스",
-        accessorFn: farmMemory,
+        header: "VM",
+        // The column counts running VMs, so the header sorts by that count.
+        accessorFn: (farm) =>
+          farm.nodes.filter((n) => n.status === "running").length,
         cell: ({ row }) => (
-          <div className="resource-cell">
-            <strong>{memory(farmMemory(row.original))}</strong>
-            <small>
-              {row.original.nodes.length} / {farmNodeCount(row.original)} VM
+          <span className="vmcount">
+            {row.original.nodes.filter((n) => n.status === "running").length}
+            <small> / {farmNodeCount(row.original)}</small>
+            <small className="cellnote">
+              {memory(farmMemory(row.original))}
             </small>
-          </div>
+          </span>
         ),
       },
       {
         id: "services",
         header: "서비스",
         enableSorting: false,
-        cell: ({ row }) => (
-          <div className="service-tags">
-            {row.original.plan?.components.map((c) => (
-              <span key={c}>{componentLabel(c)}</span>
-            )) ?? <span>기존 환경</span>}
-          </div>
-        ),
+        cell: ({ row }) => {
+          const components = row.original.plan?.components;
+          if (!components?.length)
+            return <span className="muted">기존 환경</span>;
+          const shown = components.slice(0, tagLimit);
+          return (
+            <div className="tags">
+              {shown.map((c) => (
+                <span className="tag" key={c}>
+                  {componentLabel(c)}
+                </span>
+              ))}
+              {components.length > shown.length && (
+                <span className="tag more">
+                  +{components.length - shown.length}
+                </span>
+              )}
+            </div>
+          );
+        },
       },
       {
         accessorKey: "created_at",
-        header: "생성 시각",
+        header: "생성",
         cell: ({ row }) => (
           <span className="date-cell">{dateTime(row.original.created_at)}</span>
         ),
@@ -172,12 +218,12 @@ export function FarmsPage() {
             className="icon-button"
             aria-label={`${row.original.id} 상세 보기`}
           >
-            <ArrowRight size={17} />
+            <ChevronRight size={16} />
           </Link>
         ),
       },
     ],
-    [activeJobs],
+    [activeJobs, localHosts],
   );
   const table = useReactTable({
     data,
@@ -213,17 +259,17 @@ export function FarmsPage() {
         description="OpenStack 환경을 만들고, 배포하고, 한곳에서 관리하세요."
         actions={<CreateFarmDialog />}
       />
-      <div className="metrics-grid">
+      <section className="metrics-grid" aria-label="Farm 요약">
         <Metric
           label="전체 farm"
-          icon={<Layers size={17} />}
+          icon={<Layers size={14} />}
           value={farms.data?.length}
           detail={
             <>
               <span className="metric-positive">
                 {farms.data?.filter((f) => farmDeployed(f)).length ?? "—"} Ready
               </span>
-              <span className="metric-separator">/</span>
+              <span className="metric-separator">·</span>
               {farms.data?.filter((f) =>
                 ["failed", "broken"].includes(f.status),
               ).length ?? "—"}{" "}
@@ -233,18 +279,18 @@ export function FarmsPage() {
         />
         <Metric
           label="실행 중인 VM"
-          icon={<Server size={17} />}
+          icon={<Server size={14} />}
           value={farms.data?.reduce(
             (sum, f) =>
               sum + f.nodes.filter((n) => n.status === "running").length,
             0,
           )}
-          detail="Farm별 독립된 가상 머신"
+          detail="farm마다 독립된 가상 머신"
         />
         <div className="metric-card">
           <div className="metric-label">
             호스트 예약 메모리
-            <Cpu size={17} />
+            <Cpu size={14} />
           </div>
           <div className="metric-value">
             {hosts.data ? memory(reserved) : "—"}
@@ -256,16 +302,16 @@ export function FarmsPage() {
         </div>
         <Metric
           label="진행 중인 작업"
-          icon={<Activity size={17} />}
+          icon={<Activity size={14} />}
           value={jobs.data?.filter(activeJob).length}
           detail={
             <Link to="/jobs" className="metric-link">
               작업 내역 보기
-              <ArrowRight size={13} />
+              <ArrowRight size={11} />
             </Link>
           }
         />
-      </div>
+      </section>
       {farms.error && (
         <ErrorNotice
           error={farms.error}
@@ -274,40 +320,36 @@ export function FarmsPage() {
           }}
         />
       )}
-      <section className="panel farm-panel" aria-label="Farm 목록">
-        <div className="panel-toolbar">
-          <div className="flex items-center gap-2.5">
-            <h2>모든 farm</h2>
-            <span className="count-pill">{farms.data?.length ?? 0}</span>
-          </div>
-          <div className="table-filters">
-            <div className="search-input">
-              <Search size={16} />
-              <input
-                aria-label="Farm 검색"
-                placeholder="이름 또는 담당자 검색…"
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-              />
-            </div>
-            <SelectInput
-              label="Farm 상태 필터"
-              value={status}
-              onChange={setStatus}
-              items={[
-                { value: "all", label: "모든 상태" },
-                { value: "ready", label: "Ready" },
-                { value: "snapshotting", label: "얼리는 중" },
-                { value: "created", label: "VM 준비됨" },
-                { value: "creating", label: "생성 중" },
-                { value: "deploying", label: "배포 중" },
-                { value: "deleting", label: "삭제 중" },
-                { value: "failed", label: "실패" },
-                { value: "broken", label: "점검 필요" },
-              ]}
+      <div className="toolbar">
+        <div className="toolbar-right">
+          <div className="search-input">
+            <Search size={14} />
+            <input
+              aria-label="Farm 검색"
+              placeholder="이름 또는 담당자 검색…"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
             />
           </div>
+          <SelectInput
+            label="Farm 상태 필터"
+            value={status}
+            onChange={setStatus}
+            items={[
+              { value: "all", label: "모든 상태" },
+              { value: "ready", label: "Ready" },
+              { value: "snapshotting", label: "얼리는 중" },
+              { value: "created", label: "VM 준비됨" },
+              { value: "creating", label: "생성 중" },
+              { value: "deploying", label: "배포 중" },
+              { value: "deleting", label: "삭제 중" },
+              { value: "failed", label: "실패" },
+              { value: "broken", label: "점검 필요" },
+            ]}
+          />
         </div>
+      </div>
+      <section className="panel" aria-label="Farm 목록">
         {farms.isPending ? (
           <Loading label="Farm을 불러오는 중" />
         ) : !farms.error && !farms.data?.length ? (
@@ -421,75 +463,77 @@ export function FarmsPage() {
         )}
       </section>
       <div className="below-grid">
-        <section className="host-overview panel">
-          <div className="section-label">
-            <span className="small-icon">
-              <Cpu size={17} />
-            </span>
-            <h2>호스트 용량</h2>
+        <section className="panel host-overview" aria-label="호스트 용량">
+          <div className="panel-toolbar">
+            <h2 className="flex items-center gap-2">
+              <Cpu size={14} />
+              호스트 용량
+            </h2>
             <Link to="/hosts" className="text-link">
-              상세 보기
-              <ArrowRight size={13} />
+              Hosts
+              <ArrowRight size={11} />
             </Link>
           </div>
-          {hosts.error ? (
-            <ErrorNotice error={hosts.error} />
-          ) : hosts.isPending ? (
-            <Loading />
-          ) : !capacities.length ? (
-            <p className="capacity-note">
-              준비된 호스트가 없습니다. Hosts에서 로컬 호스트나 원격 서버를
-              등록하세요.
-            </p>
-          ) : (
-            hosts.data && (
-              <>
-                <div className="capacity-top">
-                  <span>
-                    {memory(reserved)} <small>예약됨</small>
-                  </span>
-                  <span className="muted">한도 {memory(budget)}</span>
-                </div>
-                <div className="capacity-meter">
-                  <span style={{ width: `${ratio}%` }} />
-                </div>
-                <div className="capacity-legend">
-                  <span>
-                    <i className="bg-emerald-600" />
-                    Farm 예약
-                  </span>
-                  <span>
-                    <i className="bg-stone-200" />
-                    추가 예약 가능 {memory(Math.max(0, budget - reserved))}
-                  </span>
-                </div>
-                <p className="capacity-note">
-                  점검한 호스트 {capacities.length}대의 게스트 메모리 예약
-                  합계입니다. 현재 호스트 사용량과는 다를 수 있습니다.
-                </p>
-              </>
-            )
-          )}
+          <div className="panel-body">
+            {hosts.error ? (
+              <ErrorNotice error={hosts.error} />
+            ) : hosts.isPending ? (
+              <Loading />
+            ) : !capacities.length ? (
+              <p className="capacity-note">
+                준비된 호스트가 없습니다. Hosts에서 로컬 호스트나 원격 서버를
+                등록하세요.
+              </p>
+            ) : (
+              hosts.data && (
+                <>
+                  <div className="capacity-top">
+                    <span>
+                      {memory(reserved)} <small>예약됨</small>
+                    </span>
+                    <span className="muted">한도 {memory(budget)}</span>
+                  </div>
+                  <div className="capacity-meter">
+                    <span style={{ width: `${ratio}%` }} />
+                  </div>
+                  <div className="capacity-legend">
+                    <span>
+                      <i />
+                      Farm 예약
+                    </span>
+                    <span>
+                      <i className="ghost" />
+                      추가 예약 가능 {memory(Math.max(0, budget - reserved))}
+                    </span>
+                  </div>
+                  <p className="capacity-note">
+                    점검한 호스트 {capacities.length}대의 게스트 메모리 예약
+                    합계입니다. 현재 호스트 사용량과는 다를 수 있습니다.
+                  </p>
+                </>
+              )
+            )}
+          </div>
         </section>
-        <section className="getting-started">
-          <div className="section-label">
-            <span className="small-icon">
-              <Network size={17} />
-            </span>
-            <h2>작은 환경, 완전한 워크플로</h2>
+        <section className="getting-started" aria-label="작업 흐름">
+          <div className="panel-toolbar">
+            <h2 className="flex items-center gap-2">
+              <Network size={14} />
+              작은 환경, 완전한 워크플로
+            </h2>
           </div>
           <div className="workflow-steps">
             <span>
               <b>01</b>VM 생성
             </span>
-            <ArrowRight size={13} />
+            <ArrowRight size={12} />
             <span>
               <b>02</b>OpenStack 배포
             </span>
-            <ArrowRight size={13} />
+            <ArrowRight size={12} />
             <span>
               <b>03</b>API 연결
-              <Check size={13} />
+              <Check size={12} />
             </span>
           </div>
           <p>

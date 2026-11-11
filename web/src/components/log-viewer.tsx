@@ -1,4 +1,8 @@
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import {
+  useQuery,
+  useQueryClient,
+  type QueryClient,
+} from "@tanstack/react-query";
 import {
   ArrowDownToLine,
   Check,
@@ -12,6 +16,26 @@ import { useEffect, useRef, useState } from "react";
 import { keys, logsQuery, type LogEntry } from "../api/client";
 import { Button, ErrorNotice, Loading } from "./ui";
 
+/** One log line: the time in a fixed column, then the phase and the message. */
+export function LogLines({ entries }: { entries: LogEntry[] }) {
+  return (
+    <div className="log-lines">
+      {entries.map((entry) => (
+        <div className="log-entry" key={entry.id}>
+          <span className="log-time">
+            {new Date(entry.timestamp * 1000).toLocaleTimeString("en-GB", {
+              hour12: false,
+            })}
+          </span>
+          <span className="log-message">
+            {entry.phase && <span className="log-phase">[{entry.phase}] </span>}
+            {entry.message}
+          </span>
+        </div>
+      ))}
+    </div>
+  );
+}
 export function mergeLogs(
   existing: LogEntry[],
   incoming: LogEntry[],
@@ -20,13 +44,90 @@ export function mergeLogs(
   for (const entry of incoming) merged.set(entry.id, entry);
   return [...merged.values()].sort((a, b) => a.id - b.id).slice(-1000);
 }
-export function LogViewer({ id }: { id: string }) {
+
+type StreamConnection = "connecting" | "live" | "reconnecting";
+type LogStreamState = { connection: StreamConnection; gap: boolean };
+
+/** The panels showing one farm's logs share its one EventSource, so a tab switch never doubles it. */
+interface LogStream {
+  source: EventSource;
+  state: LogStreamState;
+  listeners: Set<(state: LogStreamState) => void>;
+}
+const logStreams = new Map<string, LogStream>();
+
+function setStreamState(stream: LogStream, patch: Partial<LogStreamState>) {
+  stream.state = { ...stream.state, ...patch };
+  for (const listener of stream.listeners) listener(stream.state);
+}
+
+function openLogStream(id: string, client: QueryClient): LogStream {
+  const tail = client.getQueryData<LogEntry[]>(keys.logs(id)) ?? [];
+  const lastId = tail.at(-1)?.id ?? 0;
+  const source = new EventSource(
+    `/api/v1/farms/${encodeURIComponent(id)}/logs/stream?after=${lastId}`,
+  );
+  const stream: LogStream = {
+    source,
+    state: { connection: "connecting", gap: false },
+    listeners: new Set(),
+  };
+  logStreams.set(id, stream);
+  source.onopen = () => setStreamState(stream, { connection: "live" });
+  source.onerror = () => setStreamState(stream, { connection: "reconnecting" });
+  source.addEventListener("gap", () => setStreamState(stream, { gap: true }));
+  source.addEventListener("log", (event) => {
+    try {
+      const entry = JSON.parse(
+        (event as MessageEvent<string>).data,
+      ) as LogEntry;
+      if (typeof entry.id !== "number" || typeof entry.message !== "string")
+        return;
+      client.setQueryData<LogEntry[]>(keys.logs(id), (previous = []) =>
+        mergeLogs(previous, [entry]),
+      );
+    } catch {
+      setStreamState(stream, { connection: "reconnecting" });
+    }
+  });
+  return stream;
+}
+
+function subscribeLogStream(
+  id: string,
+  client: QueryClient,
+  listener: (state: LogStreamState) => void,
+): () => void {
+  const stream = logStreams.get(id) ?? openLogStream(id, client);
+  stream.listeners.add(listener);
+  listener(stream.state);
+  return () => {
+    stream.listeners.delete(listener);
+    if (stream.listeners.size === 0) {
+      stream.source.close();
+      logStreams.delete(id);
+    }
+  };
+}
+
+/** Follows a farm's log stream, opening the one shared connection when `enabled`.
+ * The overview tail enables it only while a job runs; the logs tab always does. */
+export function useLogStream(id: string, enabled = true): LogStreamState {
   const client = useQueryClient();
+  const [state, setState] = useState<LogStreamState>({
+    connection: "connecting",
+    gap: false,
+  });
+  useEffect(() => {
+    if (!enabled) return;
+    return subscribeLogStream(id, client, setState);
+  }, [id, enabled, client]);
+  return state;
+}
+
+export function LogViewer({ id }: { id: string }) {
   const logs = useQuery(logsQuery(id));
-  const [connection, setConnection] = useState<
-    "connecting" | "live" | "reconnecting"
-  >("connecting");
-  const [gap, setGap] = useState(false);
+  const { connection, gap } = useLogStream(id, logs.isSuccess);
   const [follow, setFollow] = useState(true);
   const [copied, setCopied] = useState(false);
   const [copyError, setCopyError] = useState("");
@@ -36,32 +137,6 @@ export function LogViewer({ id }: { id: string }) {
     undefined,
   );
   useEffect(() => () => clearTimeout(copyTimeout.current), []);
-  useEffect(() => {
-    if (!logs.isSuccess) return;
-    const tail = client.getQueryData<LogEntry[]>(keys.logs(id)) ?? [];
-    const lastId = tail.at(-1)?.id ?? 0;
-    const source = new EventSource(
-      `/api/v1/farms/${encodeURIComponent(id)}/logs/stream?after=${lastId}`,
-    );
-    source.onopen = () => setConnection("live");
-    source.onerror = () => setConnection("reconnecting");
-    source.addEventListener("gap", () => setGap(true));
-    source.addEventListener("log", (event) => {
-      try {
-        const entry = JSON.parse(
-          (event as MessageEvent<string>).data,
-        ) as LogEntry;
-        if (typeof entry.id !== "number" || typeof entry.message !== "string")
-          return;
-        client.setQueryData<LogEntry[]>(keys.logs(id), (previous = []) =>
-          mergeLogs(previous, [entry]),
-        );
-      } catch {
-        setConnection("reconnecting");
-      }
-    });
-    return () => source.close();
-  }, [id, logs.isSuccess, client]);
   useEffect(() => {
     if (follow && viewer.current)
       viewer.current.scrollTop = viewer.current.scrollHeight;
@@ -157,24 +232,7 @@ export function LogViewer({ id }: { id: string }) {
             <span>작업을 시작하면 출력이 여기에 표시됩니다.</span>
           </div>
         ) : (
-          <div className="log-lines">
-            {logs.data.map((entry) => (
-              <div className="log-entry" key={entry.id}>
-                <span className="log-time">
-                  {new Date(entry.timestamp * 1000).toLocaleTimeString(
-                    "en-GB",
-                    { hour12: false },
-                  )}
-                </span>
-                <span className="log-message">
-                  {entry.phase && (
-                    <span className="log-phase">[{entry.phase}] </span>
-                  )}
-                  {entry.message}
-                </span>
-              </div>
-            ))}
-          </div>
+          <LogLines entries={logs.data} />
         )}
         <div ref={end} />
       </div>

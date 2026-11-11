@@ -415,306 +415,344 @@ export function CreateFarmForm({
           });
         }}
       >
-        <div className="modal-body space-y-6">
-          <div>
-            <span className="field-label">실행 호스트</span>
-            {noHosts ? (
-              <div className="warning-notice">
-                등록된 호스트가 없습니다.{" "}
-                <Link to="/hosts" className="text-link" onClick={close}>
-                  Hosts
-                </Link>
-                에서 로컬 호스트나 원격 서버를 등록하고 환경 준비를 마치세요.
-              </div>
-            ) : (
-              <>
-                <SelectInput
-                  value={hostId ?? ""}
-                  onChange={(value) => {
-                    setPicked(value);
-                    setHostName(undefined);
-                  }}
-                  disabled={mutation.isPending || !hosts.data}
-                  label="실행 호스트"
-                  items={(hosts.data ?? []).map((h) => {
-                    const ready = hostReady(h, buildId);
-                    return {
-                      value: h.id,
-                      label: `${hostLabel(h)}${ready ? "" : remoteAgentNeedsUpdate(h) ? " · 실행기 업데이트 필요" : " · 준비 필요"}`,
-                      // Keep the current choice selectable so a preselected host that went stale still renders.
-                      disabled: !ready && h.id !== hostId,
-                    };
-                  })}
-                />
-                <p className="field-hint mt-2">
-                  {target?.kind === "local"
-                    ? "coordinator(farmd)가 실행 중인 머신의 microsandbox에서 farm의 VM을 실행합니다."
-                    : "farm의 VM이 선택한 서버에서 실행됩니다. 서비스 포트는 해당 서버의 모든 IPv4 인터페이스에 바인딩됩니다."}
-                  {remaining !== null &&
-                    ` · 추가 예약 가능 ${memory(Math.max(0, remaining))}`}
-                </p>
-              </>
-            )}
-          </div>
-          <div className="grid gap-4 sm:grid-cols-2">
-            <label className="field">
-              <span>
-                Farm ID <span className="text-emerald-600">*</span>
-              </span>
-              <Input
-                value={name}
-                onValueChange={setName}
-                className="input font-mono"
-                placeholder="dev-openstack"
-                required
-                minLength={1}
-                maxLength={48}
-                pattern={"[a-z0-9]([a-z0-9\\-]{0,46}[a-z0-9])?"}
-                disabled={mutation.isPending}
-              />
-              <small className={duplicate ? "text-red-600" : undefined}>
-                {duplicate
-                  ? "이미 사용 중인 Farm ID입니다."
-                  : "소문자, 숫자, 하이픈 · 최대 48자"}
-              </small>
-            </label>
-            <label className="field">
-              <span>
-                담당자 <span className="optional">선택</span>
-              </span>
-              <Input
-                value={owner}
-                onValueChange={setOwner}
-                className="input"
-                placeholder="이름 또는 팀"
-                maxLength={256}
-                disabled={mutation.isPending}
-              />
-              <small>환경을 관리하는 담당자를 표시합니다.</small>
-            </label>
-          </div>
-          <div>
-            <span className="field-label">VM 구성</span>
-            <SelectInput
-              value={setup}
-              onChange={setSetup}
-              disabled={mutation.isPending}
-              label="VM 구성"
-              items={[1, 2, 3].map((n) => ({
-                value: String(n),
-                label: `Control + Compute ${n}대`,
-              }))}
-            />
-            <p className="field-hint mt-2">
-              control VM이 API·DB·MQ·네트워크 노드와 Kolla를 맡고, compute
-              VM에서 Nova 인스턴스가 실행됩니다. VM끼리는 호스트의 링크 스위치로
-              연결되며, 상세 화면에서 compute VM을 고립시켜 evacuate를 시험할 수
-              있습니다. compute는 스냅샷(compute 템플릿)으로 붙일 수 있고,
-              템플릿이 없으면 클린 설치합니다.
-            </p>
-          </div>
-          <div>
-            <span className="field-label">Compute VM 사양</span>
-            <SelectInput
-              value={String(sizeIndex)}
-              onChange={(value) => setSizeIndex(Number(value))}
-              disabled={mutation.isPending}
-              label="Compute VM 사양"
-              items={computeSizes.map(({ name, size }, index) => ({
-                value: String(index),
-                label: `${name} · ${size.cpus} vCPU · 메모리 ${memory(size.memory_mib)} · 디스크 ${memory(size.disk_mib)}`,
-              }))}
-            />
-            <p className="field-hint mt-2">
-              compute VM마다 같은 사양입니다. nova-compute·libvirt·OVS가 약 0.8
-              GiB를 쓰고 나머지가 인스턴스 몫입니다. 인스턴스 디스크는 디스크
-              크기 안에 만들어지며, 처음 쓰는 디스크 크기는 호스트에서 golden
-              image를 한 번 더 만듭니다(약 35초).
-            </p>
-          </div>
-          {canSpan && (
+        <div className="modal-body">
+          <div className="modal-form">
             <div>
-              <span className="field-label">VM 배치</span>
-              <div className="grid gap-3 sm:grid-cols-2">
-                {/* The control VM's host is the farm's host, the same choice as 실행 호스트. */}
-                <SelectInput
-                  value={hostId ?? ""}
-                  onChange={(value) => {
-                    setPicked(value);
-                    setHostName(undefined);
-                  }}
-                  disabled={mutation.isPending}
-                  label="control 호스트"
-                  items={readyHosts.map((h) => ({
-                    value: h.id,
-                    label: `control · ${hostLabel(h)}`,
-                  }))}
-                />
-                {Array.from({ length: computes }, (_, i) => {
-                  const node = `compute-${i + 1}`;
-                  return (
-                    <SelectInput
-                      key={node}
-                      value={placement[node] ?? hostId ?? ""}
-                      onChange={(value) =>
-                        setPlaced((current) => ({ ...current, [node]: value }))
-                      }
-                      disabled={mutation.isPending}
-                      label={`${node} 호스트`}
-                      items={readyHosts.map((h) => ({
+              <span className="field-label">실행 호스트</span>
+              {noHosts ? (
+                <div className="warning-notice">
+                  등록된 호스트가 없습니다.{" "}
+                  <Link to="/hosts" className="text-link" onClick={close}>
+                    Hosts
+                  </Link>
+                  에서 로컬 호스트나 원격 서버를 등록하고 환경 준비를 마치세요.
+                </div>
+              ) : (
+                <>
+                  <SelectInput
+                    value={hostId ?? ""}
+                    onChange={(value) => {
+                      setPicked(value);
+                      setHostName(undefined);
+                    }}
+                    disabled={mutation.isPending || !hosts.data}
+                    label="실행 호스트"
+                    items={(hosts.data ?? []).map((h) => {
+                      const ready = hostReady(h, buildId);
+                      return {
                         value: h.id,
-                        label: `${node} · ${hostLabel(h)}${h.id === hostId ? " (control과 같은 호스트)" : ""}`,
-                      }))}
-                    />
+                        label: `${hostLabel(h)}${ready ? "" : remoteAgentNeedsUpdate(h) ? " · 실행기 업데이트 필요" : " · 준비 필요"}`,
+                        // Keep the current choice selectable so a preselected host that went stale still renders.
+                        disabled: !ready && h.id !== hostId,
+                      };
+                    })}
+                  />
+                  <p className="field-hint mt-2">
+                    {target?.kind === "local"
+                      ? "coordinator(farmd)가 실행 중인 머신의 microsandbox에서 farm의 VM을 실행합니다."
+                      : "farm의 VM이 선택한 서버에서 실행됩니다. 서비스 포트는 해당 서버의 모든 IPv4 인터페이스에 바인딩됩니다."}
+                    {remaining !== null &&
+                      ` · 추가 예약 가능 ${memory(Math.max(0, remaining))}`}
+                  </p>
+                </>
+              )}
+            </div>
+            <div className="grid gap-4 sm:grid-cols-2">
+              <label className="field">
+                <span>
+                  Farm ID <span className="field-required">*</span>
+                </span>
+                <Input
+                  value={name}
+                  onValueChange={setName}
+                  className="input font-mono"
+                  placeholder="dev-openstack"
+                  required
+                  minLength={1}
+                  maxLength={48}
+                  pattern={"[a-z0-9]([a-z0-9\\-]{0,46}[a-z0-9])?"}
+                  disabled={mutation.isPending}
+                />
+                <small className={duplicate ? "field-error" : undefined}>
+                  {duplicate
+                    ? "이미 사용 중인 Farm ID입니다."
+                    : "소문자, 숫자, 하이픈 · 최대 48자"}
+                </small>
+              </label>
+              <label className="field">
+                <span>
+                  담당자 <span className="optional">선택</span>
+                </span>
+                <Input
+                  value={owner}
+                  onValueChange={setOwner}
+                  className="input"
+                  placeholder="이름 또는 팀"
+                  maxLength={256}
+                  disabled={mutation.isPending}
+                />
+                <small>환경을 관리하는 담당자를 표시합니다.</small>
+              </label>
+            </div>
+            <div>
+              <span className="field-label">VM 구성</span>
+              <SelectInput
+                value={setup}
+                onChange={setSetup}
+                disabled={mutation.isPending}
+                label="VM 구성"
+                items={[1, 2, 3].map((n) => ({
+                  value: String(n),
+                  label: `Control + Compute ${n}대`,
+                }))}
+              />
+              <p className="field-hint mt-2">
+                control VM이 API·DB·MQ·네트워크 노드와 Kolla를 맡고, compute
+                VM에서 Nova 인스턴스가 실행됩니다. VM끼리는 호스트의 링크
+                스위치로 연결되며, 상세 화면에서 compute VM을 고립시켜
+                evacuate를 시험할 수 있습니다. compute는 스냅샷(compute
+                템플릿)으로 붙일 수 있고, 템플릿이 없으면 클린 설치합니다.
+              </p>
+            </div>
+            <div>
+              <span className="field-label">Compute VM 사양</span>
+              <SelectInput
+                value={String(sizeIndex)}
+                onChange={(value) => setSizeIndex(Number(value))}
+                disabled={mutation.isPending}
+                label="Compute VM 사양"
+                items={computeSizes.map(({ name, size }, index) => ({
+                  value: String(index),
+                  label: `${name} · ${size.cpus} vCPU · 메모리 ${memory(size.memory_mib)} · 디스크 ${memory(size.disk_mib)}`,
+                }))}
+              />
+              <p className="field-hint mt-2">
+                compute VM마다 같은 사양입니다. nova-compute·libvirt·OVS가 약
+                0.8 GiB를 쓰고 나머지가 인스턴스 몫입니다. 인스턴스 디스크는
+                디스크 크기 안에 만들어지며, 처음 쓰는 디스크 크기는 호스트에서
+                golden image를 한 번 더 만듭니다(약 35초).
+              </p>
+            </div>
+            {canSpan && (
+              <div>
+                <span className="field-label">VM 배치</span>
+                <div className="grid gap-3 sm:grid-cols-2">
+                  {/* The control VM's host is the farm's host, the same choice as 실행 호스트. */}
+                  <SelectInput
+                    value={hostId ?? ""}
+                    onChange={(value) => {
+                      setPicked(value);
+                      setHostName(undefined);
+                    }}
+                    disabled={mutation.isPending}
+                    label="control 호스트"
+                    items={readyHosts.map((h) => ({
+                      value: h.id,
+                      label: `control · ${hostLabel(h)}`,
+                    }))}
+                  />
+                  {Array.from({ length: computes }, (_, i) => {
+                    const node = `compute-${i + 1}`;
+                    return (
+                      <SelectInput
+                        key={node}
+                        value={placement[node] ?? hostId ?? ""}
+                        onChange={(value) =>
+                          setPlaced((current) => ({
+                            ...current,
+                            [node]: value,
+                          }))
+                        }
+                        disabled={mutation.isPending}
+                        label={`${node} 호스트`}
+                        items={readyHosts.map((h) => ({
+                          value: h.id,
+                          label: `${node} · ${hostLabel(h)}${h.id === hostId ? " (control과 같은 호스트)" : ""}`,
+                        }))}
+                      />
+                    );
+                  })}
+                </div>
+                <p className="field-hint mt-2">
+                  control VM의 호스트는 위의 실행 호스트와 같습니다. 다른
+                  호스트에 둔 compute VM은 coordinator의 relay(
+                  {coordinator.data?.relay_url})를 거쳐 control VM과 같은 망에
+                  연결되며, 링크는 종단 간 암호화됩니다.
+                </p>
+              </div>
+            )}
+            <div>
+              <span className="field-label">OpenStack 릴리스</span>
+              {releases.isPending ? (
+                <Loading compact label="릴리스를 불러오는 중" />
+              ) : releases.error ? (
+                <ErrorNotice
+                  error={releases.error}
+                  retry={() => void releases.refetch()}
+                />
+              ) : (
+                <>
+                  <SelectInput
+                    value={release ?? ""}
+                    onChange={setPickedRelease}
+                    disabled={mutation.isPending}
+                    label="OpenStack 릴리스"
+                    items={offered.map((r) => ({
+                      value: r.release,
+                      label: releaseLabel(r, hostArch),
+                      // A selected release that the new host cannot run stays in the list so
+                      // the warning below can name it; it is still not choosable here.
+                      disabled: !runsOn(r, hostArch),
+                    }))}
+                  />
+                  {releaseInfo &&
+                    hostArch &&
+                    !runsOn(releaseInfo, hostArch) && (
+                      <div className="warning-notice mt-2">
+                        OpenStack {releaseInfo.release}의 이미지는{" "}
+                        {(releaseInfo.arches ?? []).map(archName).join("/")}용만
+                        있어 {archName(hostArch)} 호스트({hostId})에서 만들 수
+                        없습니다. 다른 릴리스나 호스트를 고르세요.
+                      </div>
+                    )}
+                  <p className="field-hint mt-2">
+                    고른 릴리스의 템플릿이 구성과 맞으면 그 템플릿으로 VM을
+                    만들고, 없으면 그 릴리스의 kolla-ansible 브랜치로 클린
+                    설치합니다.
+                  </p>
+                </>
+              )}
+              <BucketNotice errors={bucketErrors} />
+            </div>
+            <div>
+              <span className="field-label">OpenStack 서비스</span>
+              <div className="component-options">
+                {catalog.data?.components.map((c) => {
+                  const included = components.includes(c.id);
+                  // A dependency of another selection stays on until that selection is removed.
+                  const neededBy = catalog.data.components
+                    .filter(
+                      (other) =>
+                        other.id !== c.id &&
+                        requested.includes(other.id) &&
+                        resolveComponents(catalog.data.components, [
+                          other.id,
+                        ]).includes(c.id),
+                    )
+                    .map((other) => componentLabel(other.id));
+                  const forCompute = c.id === "nova";
+                  const locked =
+                    c.required ||
+                    !c.available ||
+                    forCompute ||
+                    neededBy.length > 0;
+                  return (
+                    <label
+                      className={`component-option ${included ? "selected" : ""} ${!c.available ? "unavailable" : ""}`}
+                      key={c.id}
+                    >
+                      <Checkbox.Root
+                        checked={included}
+                        disabled={locked || mutation.isPending}
+                        onCheckedChange={(checked) =>
+                          setSelected((current) =>
+                            checked
+                              ? [...current, c.id]
+                              : current.filter((id) => id !== c.id),
+                          )
+                        }
+                        className="checkbox"
+                      >
+                        <Checkbox.Indicator>
+                          <Check size={12} strokeWidth={3} />
+                        </Checkbox.Indicator>
+                      </Checkbox.Root>
+                      <span className="component-text">
+                        <span className="component-head">
+                          <strong>{componentLabel(c.id)}</strong>
+                          <span className="component-badge">
+                            {c.required
+                              ? "필수"
+                              : !c.available
+                                ? "준비 중"
+                                : forCompute
+                                  ? "Compute VM에 필요"
+                                  : neededBy.length
+                                    ? `${neededBy.join("·")}에 필요`
+                                    : "선택"}
+                          </span>
+                        </span>
+                        <small>{componentInfo[c.id]?.description}</small>
+                      </span>
+                    </label>
                   );
                 })}
               </div>
               <p className="field-hint mt-2">
-                control VM의 호스트는 위의 실행 호스트와 같습니다. 다른 호스트에
-                둔 compute VM은 coordinator의 relay(
-                {coordinator.data?.relay_url})를 거쳐 control VM과 같은 망에
-                연결되며, 링크는 종단 간 암호화됩니다.
+                의존성은 자동으로 포함됩니다. Nova를 뺀 서비스와 DB·메시지 큐는
+                control VM의 컨테이너로 실행됩니다.
               </p>
             </div>
-          )}
-          <div>
-            <span className="field-label">OpenStack 릴리스</span>
-            {releases.isPending ? (
-              <Loading compact label="릴리스를 불러오는 중" />
-            ) : releases.error ? (
-              <ErrorNotice
-                error={releases.error}
-                retry={() => void releases.refetch()}
+            <label className="field">
+              <span>외부 접속 호스트</span>
+              <Input
+                value={hostName}
+                onValueChange={setHostName}
+                className="input font-mono"
+                required
+                maxLength={253}
+                placeholder="localhost"
+                disabled={mutation.isPending}
               />
-            ) : (
-              <>
-                <SelectInput
-                  value={release ?? ""}
-                  onChange={setPickedRelease}
-                  disabled={mutation.isPending}
-                  label="OpenStack 릴리스"
-                  items={offered.map((r) => ({
-                    value: r.release,
-                    label: releaseLabel(r, hostArch),
-                    // A selected release that the new host cannot run stays in the list so
-                    // the warning below can name it; it is still not choosable here.
-                    disabled: !runsOn(r, hostArch),
-                  }))}
-                />
-                {releaseInfo && hostArch && !runsOn(releaseInfo, hostArch) && (
-                  <div className="warning-notice mt-2">
-                    OpenStack {releaseInfo.release}의 이미지는{" "}
-                    {(releaseInfo.arches ?? []).map(archName).join("/")}용만
-                    있어 {archName(hostArch)} 호스트({hostId})에서 만들 수
-                    없습니다. 다른 릴리스나 호스트를 고르세요.
-                  </div>
-                )}
-                <p className="field-hint mt-2">
-                  고른 릴리스의 템플릿이 구성과 맞으면 그 템플릿으로 VM을
-                  만들고, 없으면 그 릴리스의 kolla-ansible 브랜치로 클린
-                  설치합니다.
-                </p>
-              </>
+              <small>
+                OpenStack public URL에 사용할 VM 호스트의 DNS 이름 또는 IPv4
+                주소
+              </small>
+            </label>
+            {(catalog.isPending || plan.isPending) && !plan.data && (
+              <Loading compact label="리소스 계획 계산 중" />
             )}
-            <BucketNotice errors={bucketErrors} />
+            {(catalog.error || plan.error || targetError) && (
+              <ErrorNotice
+                error={catalog.error || plan.error || targetError}
+                retry={() => {
+                  void catalog.refetch();
+                  void plan.refetch();
+                  void coordinator.refetch();
+                  void hosts.refetch();
+                }}
+              />
+            )}
+            {overBudget && (
+              <div className="warning-notice">
+                예약 가능한 메모리가 부족합니다. 현재 여유:{" "}
+                {memory(Math.max(0, remaining ?? 0))}. 다른 farm을 삭제하거나
+                호스트의 예약 한도를 조절하세요.
+              </div>
+            )}
+            {target && hostUnavailable && (
+              <div className="warning-notice">
+                {hostNotice(target, buildId)}
+              </div>
+            )}
+            {mutation.error && <ErrorNotice error={mutation.error} />}
           </div>
-          <div>
-            <span className="field-label">OpenStack 서비스</span>
-            <div className="component-options">
-              {catalog.data?.components.map((c) => {
-                const included = components.includes(c.id);
-                // A dependency of another selection stays on until that selection is removed.
-                const neededBy = catalog.data.components
-                  .filter(
-                    (other) =>
-                      other.id !== c.id &&
-                      requested.includes(other.id) &&
-                      resolveComponents(catalog.data.components, [
-                        other.id,
-                      ]).includes(c.id),
-                  )
-                  .map((other) => componentLabel(other.id));
-                const forCompute = c.id === "nova";
-                const locked =
-                  c.required ||
-                  !c.available ||
-                  forCompute ||
-                  neededBy.length > 0;
-                return (
-                  <label
-                    className={`component-option ${included ? "selected" : ""} ${!c.available ? "unavailable" : ""}`}
-                    key={c.id}
-                  >
-                    <Checkbox.Root
-                      checked={included}
-                      disabled={locked || mutation.isPending}
-                      onCheckedChange={(checked) =>
-                        setSelected((current) =>
-                          checked
-                            ? [...current, c.id]
-                            : current.filter((id) => id !== c.id),
-                        )
-                      }
-                      className="checkbox"
-                    >
-                      <Checkbox.Indicator>
-                        <Check size={12} strokeWidth={3} />
-                      </Checkbox.Indicator>
-                    </Checkbox.Root>
-                    <span className="component-text">
-                      <span className="component-head">
-                        <strong>{componentLabel(c.id)}</strong>
-                        <span className="component-badge">
-                          {c.required
-                            ? "필수"
-                            : !c.available
-                              ? "준비 중"
-                              : forCompute
-                                ? "Compute VM에 필요"
-                                : neededBy.length
-                                  ? `${neededBy.join("·")}에 필요`
-                                  : "선택"}
-                        </span>
-                      </span>
-                      <small>{componentInfo[c.id]?.description}</small>
-                    </span>
-                  </label>
-                );
-              })}
-            </div>
-            <p className="field-hint mt-2">
-              의존성은 자동으로 포함됩니다. Nova를 뺀 서비스와 DB·메시지 큐는
-              control VM의 컨테이너로 실행됩니다.
-            </p>
-          </div>
-          <label className="field">
-            <span>외부 접속 호스트</span>
-            <Input
-              value={hostName}
-              onValueChange={setHostName}
-              className="input font-mono"
-              required
-              maxLength={253}
-              placeholder="localhost"
-              disabled={mutation.isPending}
-            />
-            <small>
-              OpenStack public URL에 사용할 VM 호스트의 DNS 이름 또는 IPv4 주소
-            </small>
-          </label>
-          <section className="plan-summary" aria-label="생성 계획">
-            <span className="eyebrow">ENVIRONMENT PLAN</span>
-            {!previewBody ? (
-              <p>Farm ID를 입력하면 VM마다 어떻게 만들지 미리 보여 줍니다.</p>
-            ) : releasePlan.isPending ? (
-              <Loading compact label="계획을 확인하는 중" />
-            ) : releasePlan.error ? (
-              <p className="text-red-600">{releasePlan.error.message}</p>
-            ) : releasePlan.data ? (
-              <>
-                <ul className="space-y-2">
-                  {[releasePlan.data.control, ...releasePlan.data.computes].map(
-                    (node) => (
+          <aside className="modal-aside" aria-label="생성 계획">
+            <section className="plan-summary">
+              <span className="eyebrow">ENVIRONMENT PLAN</span>
+              {!previewBody ? (
+                <p>Farm ID를 입력하면 VM마다 어떻게 만들지 미리 보여 줍니다.</p>
+              ) : releasePlan.isPending ? (
+                <Loading compact label="계획을 확인하는 중" />
+              ) : releasePlan.error ? (
+                <p className="field-error">{releasePlan.error.message}</p>
+              ) : releasePlan.data ? (
+                <>
+                  <ul>
+                    {[
+                      releasePlan.data.control,
+                      ...releasePlan.data.computes,
+                    ].map((node) => (
                       <li key={node.node}>
                         {node.source === "clean" ? (
                           <Sparkles size={15} />
@@ -729,67 +767,42 @@ export function CreateFarmForm({
                         <br />
                         <small className="muted">{node.reason}</small>
                       </li>
-                    ),
-                  )}
-                </ul>
-                <p>
-                  OpenStack {releasePlan.data.release} ·{" "}
-                  {releasePlan.data.components.join(", ")}
-                </p>
-                {releasePlan.data.notes
-                  ?.filter((note) => !note.startsWith(bucketNote))
-                  .map((note) => (
-                    <p key={note} className="muted">
-                      {note}
-                    </p>
-                  ))}
-              </>
-            ) : null}
-            {plan.data && (
-              <div>
-                <span>
-                  <Boxes size={17} />
-                  <strong>{plan.data.nodes.length}</strong> VM
-                </span>
-                <span>
-                  <Cpu size={17} />
-                  <strong>{memory(plan.data.memory_mib)}</strong> 메모리
-                </span>
-                <span>
-                  <HardDrive size={17} />
-                  <strong>{memory(plan.data.disk_mib)}</strong> 디스크
-                </span>
-              </div>
-            )}
-          </section>
-          {(catalog.isPending || plan.isPending) && !plan.data && (
-            <Loading compact label="리소스 계획 계산 중" />
-          )}
-          {(catalog.error || plan.error || targetError) && (
-            <ErrorNotice
-              error={catalog.error || plan.error || targetError}
-              retry={() => {
-                void catalog.refetch();
-                void plan.refetch();
-                void coordinator.refetch();
-                void hosts.refetch();
-              }}
-            />
-          )}
-          {overBudget && (
-            <div className="warning-notice">
-              예약 가능한 메모리가 부족합니다. 현재 여유:{" "}
-              {memory(Math.max(0, remaining ?? 0))}. 다른 farm을 삭제하거나
-              호스트의 예약 한도를 조절하세요.
-            </div>
-          )}
-          {target && hostUnavailable && (
-            <div className="warning-notice">{hostNotice(target, buildId)}</div>
-          )}
-          {mutation.error && <ErrorNotice error={mutation.error} />}
+                    ))}
+                  </ul>
+                  <p>
+                    OpenStack {releasePlan.data.release} ·{" "}
+                    {releasePlan.data.components.join(", ")}
+                  </p>
+                  {releasePlan.data.notes
+                    ?.filter((note) => !note.startsWith(bucketNote))
+                    .map((note) => (
+                      <p key={note} className="muted">
+                        {note}
+                      </p>
+                    ))}
+                </>
+              ) : null}
+              {plan.data && (
+                <div>
+                  <span>
+                    <Boxes size={17} />
+                    <strong>{plan.data.nodes.length}</strong> VM
+                  </span>
+                  <span>
+                    <Cpu size={17} />
+                    <strong>{memory(plan.data.memory_mib)}</strong> 메모리
+                  </span>
+                  <span>
+                    <HardDrive size={17} />
+                    <strong>{memory(plan.data.disk_mib)}</strong> 디스크
+                  </span>
+                </div>
+              )}
+            </section>
+          </aside>
         </div>
         <div className="modal-footer">
-          <span className="flex items-center gap-1.5 text-xs text-stone-500">
+          <span className="modal-footer-note flex items-center gap-1.5">
             <ShieldCheck size={14} />
             {`Farm 전용 VM ${computes + 1}대와 내부망`}
           </span>
@@ -1260,6 +1273,7 @@ export function DeleteFarmDialog({ farm }: { farm: Farm }) {
         aria-label="Farm 삭제"
       >
         <Trash2 size={16} />
+        Farm 삭제
       </Dialog.Trigger>
       <Modal
         title="Farm을 삭제할까요?"

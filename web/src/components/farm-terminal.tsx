@@ -122,19 +122,24 @@ function NodeShell({
   useEffect(() => {
     const element = container.current;
     if (!element) return;
+    // xterm paints on a canvas, so it needs the theme's colors as values, not variables.
+    // The values are read again whenever the page theme swaps them.
+    const token = (name: string, fallback: string) =>
+      getComputedStyle(element).getPropertyValue(name).trim() || fallback;
+    const terminalTheme = () => ({
+      background: token("--code-bg", "#f3f5f0"),
+      foreground: token("--ink-2", "#454e49"),
+      cursor: token("--accent", "#0f7a53"),
+      cursorAccent: token("--code-bg", "#f3f5f0"),
+      selectionBackground: token("--selection", "#d6ebdf"),
+    });
     const terminal = new Terminal({
       cursorBlink: true,
       fontFamily: getComputedStyle(element).fontFamily,
       fontSize: 13,
       lineHeight: 1.2,
       scrollback: 5000,
-      theme: {
-        background: "#17291f",
-        foreground: "#c9dccf",
-        cursor: "#6caf85",
-        cursorAccent: "#17291f",
-        selectionBackground: "#3e5945",
-      },
+      theme: terminalTheme(),
     });
     const fitAddon = new FitAddon();
     terminal.loadAddon(fitAddon);
@@ -196,9 +201,18 @@ function NodeShell({
     ];
     const observer = new ResizeObserver(refit);
     observer.observe(element);
+    // A theme switch only rewrites <html data-theme>; repaint the colors without a new session.
+    const themeObserver = new MutationObserver(() => {
+      terminal.options.theme = terminalTheme();
+    });
+    themeObserver.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ["data-theme"],
+    });
     return () => {
       disposed = true;
       observer.disconnect();
+      themeObserver.disconnect();
       subscriptions.forEach((subscription) => subscription.dispose());
       socket.close();
       terminal.dispose();

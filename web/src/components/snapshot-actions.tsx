@@ -234,7 +234,7 @@ export function FreezeFarmDialog({ farm }: { farm: Farm }) {
               />
               <small>소문자, 숫자, 하이픈 · 최대 48자</small>
               {duplicate && (
-                <small className="text-red-600">
+                <small className="field-error">
                   이미 사용 중인 스냅샷 ID입니다.
                 </small>
               )}
@@ -411,7 +411,7 @@ export function RestoreSnapshotDialog({
             <div className="grid gap-4 sm:grid-cols-2">
               <label className="field">
                 <span>
-                  Farm ID <span className="text-emerald-600">*</span>
+                  Farm ID <span className="field-required">*</span>
                 </span>
                 <Input
                   autoFocus
@@ -425,7 +425,7 @@ export function RestoreSnapshotDialog({
                   disabled={mutation.isPending}
                 />
                 {duplicate && (
-                  <small className="text-red-600">
+                  <small className="field-error">
                     이미 사용 중인 Farm ID입니다.
                   </small>
                 )}
@@ -865,7 +865,7 @@ export function ImportSnapshotDialog() {
             ) : (
               <label className="field">
                 <span>
-                  파일 경로 <span className="text-emerald-600">*</span>
+                  파일 경로 <span className="field-required">*</span>
                 </span>
                 <Input
                   autoFocus

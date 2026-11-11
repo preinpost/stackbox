@@ -121,46 +121,40 @@ function BucketRow({ bucket }: { bucket: Bucket }) {
   const check = useMutation({ mutationFn: () => api.checkBucket(bucket.id) });
   const service = services.find((s) => s.value === serviceOf(bucket))!;
   return (
-    <div className="job-row">
-      <span className="job-kind-icon">
-        <Cloud size={16} />
+    <div className="bucket">
+      <span className="bucket-name">
+        <Cloud size={13} />
+        {bucket.id}
       </span>
-      <div className="job-row-main">
-        <div className="flex flex-wrap items-center gap-2.5">
-          <strong className="font-mono text-stone-800">{bucket.id}</strong>
-          <span className="snapshot-host">{service.label}</span>
-          {bucket.ca_pem && (
-            <span
-              className="snapshot-host"
-              title="등록한 CA 인증서도 신뢰합니다"
-            >
-              <ShieldCheck size={12} />
-              사설 CA
-            </span>
-          )}
+      <span className="bucket-kind">
+        {service.label}
+        {bucket.ca_pem && (
+          <span className="chip" title="등록한 CA 인증서도 신뢰합니다">
+            <ShieldCheck size={11} />
+            사설 CA
+          </span>
+        )}
+      </span>
+      <div className="bucket-target">
+        <div className="bucket-location">
+          <code>{bucketLocation(bucket)}</code>
+          <CopyText value={bucketLocation(bucket)} hideValue name="버킷 경로" />
         </div>
-        <div className="job-meta flex-wrap">
-          <CopyText value={bucketLocation(bucket)} />
-          <span>·</span>
+        <span className="bucket-endpoint">
           <span className="font-mono">
             {bucket.endpoint ?? `s3.${bucket.region}.amazonaws.com`}
           </span>
-          <span>·</span>
-          <span>{bucket.region}</span>
-          {bucket.path_style && (
-            <>
-              <span>·</span>
-              <span>path-style</span>
-            </>
-          )}
-          <span>·</span>
+          {" · "}
+          {bucket.region}
+          {bucket.path_style ? " · path-style" : ""}
+          {" · "}
           <span className="font-mono">{bucket.access_key_id}</span>
-        </div>
+        </span>
         {check.isSuccess && (
-          <p className="mt-2 flex items-center gap-1.5 text-xs text-emerald-700">
-            <CircleCheck size={13} />
+          <span className="bucket-note">
+            <CircleCheck size={12} />
             목록 조회, 쓰기, 삭제를 확인했습니다.
-          </p>
+          </span>
         )}
         {check.error && (
           <p className="job-error">
@@ -170,8 +164,12 @@ function BucketRow({ bucket }: { bucket: Bucket }) {
           </p>
         )}
       </div>
-      <div className="flex shrink-0 flex-wrap items-center gap-2">
-        <Button disabled={check.isPending} onClick={() => check.mutate()}>
+      <div className="bucket-actions">
+        <Button
+          variant="ghost"
+          disabled={check.isPending}
+          onClick={() => check.mutate()}
+        >
           {check.isPending ? (
             <LoaderCircle size={14} className="animate-spin" />
           ) : (

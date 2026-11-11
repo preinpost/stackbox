@@ -21,8 +21,19 @@ import {
   ChevronRight,
   CircleAlert,
   Clock3,
+  CopyPlus,
+  Cpu,
+  Layers,
+  LoaderCircle,
+  Play,
+  Plus,
+  RefreshCw,
   Search,
   Server,
+  ShieldCheck,
+  Snowflake,
+  Terminal,
+  Trash2,
   X,
 } from "lucide-react";
 import { Fragment, useEffect, useMemo, useState } from "react";
@@ -121,6 +132,32 @@ export function JobsMonitor() {
   );
 }
 
+/** The same glyph the job list uses for a kind, so a card, a row and a tab agree. */
+function JobGlyph({ activity }: { activity: Activity }) {
+  if (activity.scope === "host") {
+    const Icon =
+      activity.job.kind === "check"
+        ? RefreshCw
+        : activity.job.kind === "install_agent"
+          ? Terminal
+          : activity.job.kind === "purge"
+            ? Trash2
+            : ShieldCheck;
+    return <Icon size={13} />;
+  }
+  const Icon = {
+    create: Plus,
+    deploy: Play,
+    expand: Cpu,
+    delete: Trash2,
+    snapshot: Snowflake,
+    restore: CopyPlus,
+    settle: ShieldCheck,
+    assemble: Layers,
+  }[activity.job.kind];
+  return <Icon size={13} />;
+}
+
 const defaultFilters: HistoryFilters = {
   search: "",
   status: "all",
@@ -191,43 +228,56 @@ function JobWorkspace({
                 aria-label={`${subject(a)} 진행 중 작업 상세`}
               >
                 <div className="jobs-live-title">
+                  <span className="jobs-live-glyph">
+                    <JobGlyph activity={a} />
+                  </span>
                   <strong>{subject(a)}</strong>
                   <StatusBadge status={a.job.status} />
                 </div>
-                <span>
+                <div className="jobs-live-kind">
                   {activityLabel(a)}
-                  <span className="muted">
-                    {" "}
-                    ·{" "}
-                    {a.job.status === "queued"
-                      ? "실행 대기"
-                      : `${elapsed(a, now)} 경과`}
-                  </span>
-                </span>
+                  <span className="sep">·</span>
+                  {a.job.status === "queued"
+                    ? "실행 대기"
+                    : `${elapsed(a, now)} 경과`}
+                </div>
                 <div className="jobs-current-step">
-                  <Clock3 size={14} />
-                  <span>{activityStep(a)}</span>
-                  <ArrowRight size={15} />
+                  {a.job.status === "queued" ? (
+                    <Clock3 size={12} />
+                  ) : (
+                    <LoaderCircle size={12} className="animate-spin" />
+                  )}
+                  <code>{activityStep(a)}</code>
+                  <ArrowRight size={13} />
                 </div>
                 {a.scope === "farm" &&
                   a.job.kind === "deploy" &&
                   a.job.phase && (
-                    <div
-                      className="jobs-phase-track"
-                      aria-label={`배포 ${phases.findIndex((p) => p.id === a.job.phase) + 1} / ${phases.length}단계`}
-                    >
-                      {phases.map((p, index) => (
-                        <i
-                          key={p.id}
-                          className={
-                            index <=
-                            phases.findIndex((p) => p.id === a.job.phase)
-                              ? "reached"
-                              : ""
-                          }
-                        />
-                      ))}
-                    </div>
+                    <>
+                      <div
+                        className="jobs-phase-track"
+                        aria-label={`배포 ${phases.findIndex((p) => p.id === a.job.phase) + 1} / ${phases.length}단계`}
+                      >
+                        {phases.map((p, index) => (
+                          <i
+                            key={p.id}
+                            className={
+                              index <=
+                              phases.findIndex((p) => p.id === a.job.phase)
+                                ? "reached"
+                                : ""
+                            }
+                          />
+                        ))}
+                      </div>
+                      <div className="jobs-phase-labels" aria-hidden>
+                        <span>{phases[0].label}</span>
+                        <span>
+                          {phases[Math.floor(phases.length / 2)].label}
+                        </span>
+                        <span>{phases.at(-1)?.label}</span>
+                      </div>
+                    </>
                   )}
                 {a.scope === "farm" &&
                   (() => {
@@ -248,6 +298,13 @@ function JobWorkspace({
                       )
                     );
                   })()}
+                <div className="jobs-live-foot">
+                  <code>#{a.job.id.slice(0, 8)}</code>
+                  <span className="right">
+                    상세 보기
+                    <ArrowRight size={10} />
+                  </span>
+                </div>
               </button>
             ))}
           </div>
@@ -264,6 +321,7 @@ function JobWorkspace({
         <div className="jobs-history-heading">
           <div>
             <h2>
+              <Clock3 size={14} />
               최근 이력{" "}
               <span className="count-pill">
                 {activities.filter((a) => !activeJob(a.job)).length}
@@ -277,6 +335,7 @@ function JobWorkspace({
               checked={grouped}
               onChange={(e) => setGrouped(e.target.checked)}
             />
+            <Layers size={12} />
             {scope === "farm" ? "Farm" : "호스트"}별로 묶기
           </label>
         </div>
@@ -429,7 +488,12 @@ function HistoryTable({
       {
         id: "kind",
         header: "작업",
-        cell: ({ row }) => activityLabel(row.original.activity),
+        cell: ({ row }) => (
+          <span className="job-kind">
+            <JobGlyph activity={row.original.activity} />
+            {activityLabel(row.original.activity)}
+          </span>
+        ),
       },
       {
         id: "status",
@@ -441,18 +505,20 @@ function HistoryTable({
       {
         id: "phase",
         header: "단계 / 결과",
-        cell: ({ row }) => (
-          <span
-            className={
-              failureSummary(row.original.activity)
-                ? "jobs-failure-summary"
-                : "muted"
-            }
-          >
-            {failureSummary(row.original.activity) ??
-              activityStep(row.original.activity)}
-          </span>
-        ),
+        cell: ({ row }) => {
+          const failure = failureSummary(row.original.activity);
+          const text = failure ?? activityStep(row.original.activity);
+          return (
+            <span
+              className={
+                failure ? "jobs-result jobs-failure-summary" : "jobs-result"
+              }
+              title={text}
+            >
+              {text}
+            </span>
+          );
+        },
       },
       {
         id: "created",

@@ -1,5 +1,5 @@
 import { Tabs } from "@base-ui/react/tabs";
-import { lazy, Suspense, useState } from "react";
+import { lazy, Suspense, useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useParams } from "@tanstack/react-router";
 import {
@@ -16,6 +16,7 @@ import {
   EyeOff,
   Globe,
   LoaderCircle,
+  MoreHorizontal,
   RefreshCw,
   KeyRound,
   MessageSquare,
@@ -26,6 +27,7 @@ import {
   ShieldCheck,
   Snowflake,
   SquareTerminal,
+  Terminal,
 } from "lucide-react";
 import {
   api,
@@ -33,6 +35,7 @@ import {
   hostsQuery,
   jobsQuery,
   keys,
+  logsQuery,
   type Datastore,
   type Farm,
   type Impair,
@@ -47,7 +50,7 @@ import {
 } from "../components/farm-actions";
 import { FreezeFarmDialog } from "../components/snapshot-actions";
 import { FarmRelease, farmReleaseLabel } from "../components/farm-release";
-import { LogViewer } from "../components/log-viewer";
+import { LogLines, LogViewer, useLogStream } from "../components/log-viewer";
 import {
   Button,
   CopyText,
@@ -102,7 +105,7 @@ export function FarmDetailPage({ id }: { id: string }) {
     return (
       <>
         <Link to="/" className="back-link">
-          <ArrowLeft size={15} />
+          <ArrowLeft size={12} />
           Farms
         </Link>
         <ErrorNotice
@@ -144,39 +147,35 @@ export function FarmDetailPage({ id }: { id: string }) {
   return (
     <>
       <Link to="/" className="back-link">
-        <ArrowLeft size={15} />
+        <ArrowLeft size={12} />
         모든 farm
       </Link>
       <div className="detail-heading">
         <div className="detail-title">
           <span className="detail-avatar">
-            <Boxes size={27} strokeWidth={1.6} />
+            <Boxes size={20} strokeWidth={1.6} />
           </span>
           <div>
-            <div className="flex flex-wrap items-center gap-3">
-              <h1>{farm.id}</h1>
+            <h1>
+              {farm.id}
               <StatusBadge status={farmState(farm, activeJob)} />
-            </div>
+            </h1>
             <FarmMeta farm={farm} host={host} />
           </div>
         </div>
-        <div className="flex gap-2">
-          {farm.status !== "deleted" && (
-            <>
-              <DeployFarmDialog farm={farm} lastJob={latestDeployment} />
-              <AddComputeDialog
-                farm={farm}
-                lastJob={history.find((j) => j.kind === "expand")}
-              />
-              <CheckServicesButton farm={farm} deployed={deployed} />
-              <FreezeFarmDialog farm={farm} />
-              <DeleteFarmDialog farm={farm} />
-            </>
-          )}
-        </div>
+        {farm.status !== "deleted" && (
+          <div className="detail-actions">
+            <DeployFarmDialog farm={farm} lastJob={latestDeployment} />
+            <FarmActionsMenu
+              farm={farm}
+              deployed={deployed}
+              lastExpansion={history.find((j) => j.kind === "expand")}
+            />
+          </div>
+        )}
       </div>
       {!isDeployableFarm(farm) && farm.status !== "deleted" && (
-        <div className="warning-notice mb-5">
+        <div className="warning-notice">
           기존 다중 VM 구성입니다. 이 Farm의 상태 조회와 삭제는 계속 사용할 수
           있습니다. 배포하려면 Farm을 새로 만드세요.
         </div>
@@ -192,7 +191,7 @@ export function FarmDetailPage({ id }: { id: string }) {
         </div>
       )}
       {farm.observation_error && (
-        <div role="alert" className="warning-notice mb-5">
+        <div role="alert" className="warning-notice">
           {farm.observation_error}
           <p className="mt-1 text-xs">
             마지막으로 확인한 VM 상태를 표시합니다. 메모리와 포트 예약은
@@ -285,22 +284,22 @@ export function FarmDetailPage({ id }: { id: string }) {
           </span>
         </div>
       )}
-      <div className="detail-facts">
+      <div className="detail-facts" role="group" aria-label="Farm 주요 정보">
         <div>
-          <Cpu size={17} />
+          <Cpu size={15} />
           <span>
             메모리<strong>{memory(farmMemory(farm))}</strong>
           </span>
         </div>
         <div>
-          <Server size={17} />
+          <Server size={15} />
           <span>
             가상 머신
             <strong>{runningVms(farm, activeJob)}</strong>
           </span>
         </div>
         <div>
-          <HardDrive size={17} />
+          <HardDrive size={15} />
           <span>
             할당 디스크
             <strong>
@@ -309,9 +308,12 @@ export function FarmDetailPage({ id }: { id: string }) {
           </span>
         </div>
         <div>
-          <Globe size={17} />
+          <Globe size={15} />
           <span>
-            Public host<strong>{farm.exposure?.host ?? "내부 접속"}</strong>
+            Public host
+            <strong className="font-mono">
+              {farm.exposure?.host ?? "내부 접속"}
+            </strong>
           </span>
         </div>
       </div>
@@ -328,7 +330,7 @@ export function FarmDetailPage({ id }: { id: string }) {
             Overview
           </Tabs.Tab>
           <Tabs.Tab value="logs" className="tab">
-            Logs{farm.active_job && <span className="online-dot" />}
+            Logs{farm.active_job && <span className="status-dot" />}
           </Tabs.Tab>
           <Tabs.Tab value="jobs" className="tab">
             Jobs<span className="count-pill">{history.length}</span>
@@ -343,6 +345,11 @@ export function FarmDetailPage({ id }: { id: string }) {
             <DeploymentPhases farm={farm} />
             <Endpoints farm={farm} />
           </div>
+          <RecentLogs
+            id={id}
+            live={Boolean(farm.active_job)}
+            onOpenLogs={() => setTab("logs")}
+          />
           <Datastores farm={farm} />
         </Tabs.Panel>
         <Tabs.Panel value="logs" className="tab-panel">
@@ -399,6 +406,128 @@ export function FarmDetailPage({ id }: { id: string }) {
     </>
   );
 }
+
+/** One farm detail page renders one overflow menu, so a fixed id links trigger and menu. */
+const MENU_ID = "farm-actions-menu";
+
+/** The actions that are not the farm's one primary button, behind an overflow menu.
+ * The menu stays mounted and only hides, so a dialog it opens outlives the menu closing. */
+function FarmActionsMenu({
+  farm,
+  deployed,
+  lastExpansion,
+}: {
+  farm: Farm;
+  deployed: boolean;
+  lastExpansion?: Job;
+}) {
+  const [open, setOpen] = useState(false);
+  const wrap = useRef<HTMLDivElement>(null);
+  const trigger = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const dismiss = (event: PointerEvent) => {
+      if (!wrap.current?.contains(event.target as Node)) setOpen(false);
+    };
+    const escape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      setOpen(false);
+      // Closing hides the menu under the focused item, so hand focus back to the trigger.
+      trigger.current?.focus();
+    };
+    document.addEventListener("pointerdown", dismiss);
+    document.addEventListener("keydown", escape);
+    return () => {
+      document.removeEventListener("pointerdown", dismiss);
+      document.removeEventListener("keydown", escape);
+    };
+  }, [open]);
+  return (
+    <div className="action-menu-wrap" ref={wrap}>
+      <button
+        ref={trigger}
+        type="button"
+        className="icon-button line"
+        aria-label="더 많은 작업"
+        aria-expanded={open}
+        aria-controls={MENU_ID}
+        title="배포 재개 · compute 추가 · 얼리기 · 삭제"
+        onClick={() => setOpen((shown) => !shown)}
+      >
+        <MoreHorizontal size={16} />
+      </button>
+      <div
+        id={MENU_ID}
+        className="action-menu"
+        role="group"
+        aria-label="Farm 작업"
+        hidden={!open}
+        // A dialog opens from one of these buttons, so the menu steps aside.
+        onClick={(event) => {
+          if ((event.target as HTMLElement).closest("button")) setOpen(false);
+        }}
+      >
+        <AddComputeDialog farm={farm} lastJob={lastExpansion} />
+        <CheckServicesButton farm={farm} deployed={deployed} />
+        <FreezeFarmDialog farm={farm} />
+        <DeleteFarmDialog farm={farm} />
+      </div>
+    </div>
+  );
+}
+
+/** The tail of the deploy log, so the overview answers "what is it doing" without a tab. */
+export function RecentLogs({
+  id,
+  live,
+  onOpenLogs,
+}: {
+  id: string;
+  live: boolean;
+  onOpenLogs: () => void;
+}) {
+  const logs = useQuery(logsQuery(id));
+  // While a job runs, follow the same stream the logs tab uses; otherwise the tail is a snapshot.
+  useLogStream(id, live && logs.isSuccess);
+  const entries = (logs.data ?? []).slice(-6);
+  return (
+    <section className="panel recent-logs-panel" aria-label="최근 로그">
+      <div className="panel-toolbar">
+        <h2 className="flex items-center gap-2">
+          <Terminal size={14} />
+          최근 로그
+          {entries.length > 0 && (
+            <span className="count-pill">{entries.length}</span>
+          )}
+        </h2>
+        <button type="button" className="text-link" onClick={onOpenLogs}>
+          전체 로그
+        </button>
+      </div>
+      {logs.isPending ? (
+        <Loading compact label="로그를 불러오는 중" />
+      ) : logs.error ? (
+        <ErrorNotice
+          error={logs.error}
+          retry={() => {
+            void logs.refetch();
+          }}
+        />
+      ) : !entries.length ? (
+        <p className="log-empty-inline">아직 기록된 로그가 없습니다.</p>
+      ) : (
+        <div
+          className="log-body compact"
+          role="log"
+          aria-label="최근 배포 로그"
+        >
+          <LogLines entries={entries} />
+        </div>
+      )}
+    </section>
+  );
+}
+
 /** The facts under a farm's name: its owner, where its VMs run, the OpenStack release it
  * installs and when it was made. */
 export function FarmMeta({ farm, host }: { farm: Farm; host?: RemoteHost }) {
@@ -493,6 +622,114 @@ function NodeFaults({ farm, node }: { farm: Farm; node: string }) {
     </div>
   );
 }
+
+/** One VM of the topology: its name, size, services, addresses and link faults. */
+type VmCard = {
+  key: string;
+  hostname: string;
+  role: string;
+  memory: string;
+  running: boolean;
+  statusTitle: string;
+  tags: string[];
+  address: string;
+  name: string;
+  pending?: { host?: string };
+  faults?: string;
+};
+function VmCardView({ farm, card }: { farm: Farm; card: VmCard }) {
+  return (
+    <article
+      className={`topology-node ${card.running ? "node-running" : ""} ${card.pending ? "pending" : ""}`}
+    >
+      <div className="node-top">
+        <Server size={14} strokeWidth={1.7} />
+        <strong>{card.hostname}</strong>
+        {card.role && <span className="node-role">{card.role}</span>}
+        <span className="node-memory">{card.memory}</span>
+        <span
+          className={`node-status ${card.pending || card.running ? "running" : ""}`}
+          title={card.pending ? "생성 중" : card.statusTitle}
+          aria-hidden={card.pending ? true : undefined}
+        />
+      </div>
+      {card.tags.length > 0 && (
+        <div className="node-tags">
+          {card.tags.map((tag) => (
+            <span className="tag" key={tag}>
+              {tag}
+            </span>
+          ))}
+        </div>
+      )}
+      <div className="node-meta">
+        <code>{card.address}</code>
+        <span className="sep" aria-hidden="true">
+          ·
+        </span>
+        <span className="node-name">{card.name}</span>
+      </div>
+      {card.pending ? (
+        <div className="node-pending">
+          <LoaderCircle size={13} className="animate-spin" />
+          생성 중{card.pending.host && <span>· {card.pending.host}</span>}
+        </div>
+      ) : (
+        card.faults && <NodeFaults farm={farm} node={card.faults} />
+      )}
+    </article>
+  );
+}
+
+/** The host side of the topology: where the farm's public ports land. */
+function TopologyHost({
+  exposure,
+  portRange,
+  tenant,
+}: {
+  exposure: Farm["exposure"] | null;
+  portRange: string;
+  tenant: string;
+}) {
+  return (
+    <div className="topology-host">
+      <div className="topology-host-top">
+        <Globe size={13} strokeWidth={1.7} />
+        Host · link switch
+      </div>
+      <code>{exposure?.host ?? "public 포트 없음"}</code>
+      <div className="topology-host-foot">
+        <span className="status-dot" />
+        {exposure ? "up · DNAT" : "노출 안 함"}
+      </div>
+      <div className="topology-net">
+        <span>
+          public <code>{portRange}</code>
+        </span>
+        <span>
+          mgmt <code>10.254.0.0/24</code>
+        </span>
+        <span>
+          tenant <code>{tenant}</code>
+        </span>
+      </div>
+    </div>
+  );
+}
+
+/** The public port block a farm's services answer on, as `:25000–25005`. */
+function publicPortRange(farm: Farm) {
+  const exposure = farm.status !== "deleted" ? farm.exposure : null;
+  if (!exposure) return "—";
+  const ports = farmComponents(farm)
+    .filter((id) => publicServices[id])
+    .map((id) => exposure.port_base + publicServices[id].offset);
+  if (!ports.length) return "—";
+  return ports.length === 1
+    ? `:${ports[0]}`
+    : `:${Math.min(...ports)}–${Math.max(...ports)}`;
+}
+
 /** A control VM and its computes on the farm's management and tenant links. */
 function MultiNodeTopology({ farm, job }: { farm: Farm; job?: Job }) {
   const components = farmComponents(farm);
@@ -500,106 +737,68 @@ function MultiNodeTopology({ farm, job }: { farm: Farm; job?: Job }) {
   // A compute being added joins the drawing before Kolla lets the farm keep it.
   const pending = pendingCompute(farm, job);
   const exposure = farm.status !== "deleted" ? farm.exposure : null;
+  const cards: VmCard[] = specs.map((spec) => {
+    const node = farm.nodes.find(
+      (n) => n.role === spec.role && (n.index ?? null) === (spec.index ?? null),
+    );
+    const suffix = nodeSuffix(spec);
+    const control = spec.role === "control";
+    return {
+      key: suffix,
+      hostname: nodeHostname(spec),
+      role: control ? "control" : "compute",
+      memory: memory(spec.memory_mib),
+      running: node?.status === "running",
+      statusTitle: node?.status ?? "준비되지 않음",
+      tags: control
+        ? [
+            ...components.filter((c) => c !== "nova").map(componentLabel),
+            "Nova API",
+            "L3·DHCP",
+            "Kolla",
+          ]
+        : ["nova-compute", "libvirt", "OVS agent"],
+      address: nodeAddress(spec),
+      name: node?.name ?? `${farm.id}-${suffix}`,
+      faults: suffix,
+    };
+  });
+  if (pending) {
+    cards.push({
+      key: nodeSuffix(pending),
+      hostname: nodeHostname(pending),
+      role: "compute",
+      memory: memory(pending.memory_mib),
+      running: false,
+      statusTitle: "생성 중",
+      tags: ["nova-compute", "libvirt", "OVS agent"],
+      address: nodeAddress(pending),
+      name: `${farm.id}-${nodeSuffix(pending)}`,
+      pending: { host: pending.host },
+    });
+  }
   return (
     <section className="panel topology">
       <div className="panel-toolbar">
         <h2 className="flex items-center gap-2">
-          <Network size={17} />
+          <Network size={14} />
           VM topology
         </h2>
         <span className="topology-network">
           {`mgmt 10.254.0.0/24 · tenant VLAN · VM ${specs.length + (pending ? 1 : 0)}대`}
           {pending && " · 1대 생성 중"}
-          <span className="status-dot" />
         </span>
       </div>
       <div className="topology-graph">
-        <div className="topology-box topology-host">
-          <Globe size={16} strokeWidth={1.6} />
-          <div>
-            <small>Host · link switch</small>
-            <code>{exposure?.host ?? "public 포트 없음"}</code>
-          </div>
-        </div>
-        <div className="topology-edge edge-active">
-          <code>farm0 · farm1</code>
-          <span className="edge-line" aria-hidden />
-          <small>WebSocket 링크</small>
-        </div>
-        <div className="topology-tree">
-          {specs.map((spec) => {
-            const node = farm.nodes.find(
-              (n) =>
-                n.role === spec.role &&
-                (n.index ?? null) === (spec.index ?? null),
-            );
-            const suffix = nodeSuffix(spec);
-            const control = spec.role === "control";
-            return (
-              <div className="topology-leaf" key={suffix}>
-                <div
-                  className={`topology-node ${node?.status === "running" ? "node-running" : ""}`}
-                >
-                  <div className="node-top">
-                    <Server size={15} strokeWidth={1.6} />
-                    <strong className="font-mono">{nodeHostname(spec)}</strong>
-                    <span className="node-memory">
-                      {memory(spec.memory_mib)}
-                    </span>
-                    <span
-                      className={`node-status ${node?.status === "running" ? "running" : ""}`}
-                      title={node?.status ?? "준비되지 않음"}
-                    />
-                  </div>
-                  <p>
-                    {control
-                      ? components
-                          .filter((c) => c !== "nova")
-                          .map(componentLabel)
-                          .concat("Nova API", "L3·DHCP", "Kolla")
-                          .join(" · ")
-                      : "nova-compute · libvirt · OVS agent"}
-                  </p>
-                  <div className="node-meta">
-                    <code>{nodeAddress(spec)}</code>
-                    <span className="font-mono">
-                      {node?.name ?? `${farm.id}-${suffix}`}
-                    </span>
-                  </div>
-                  <NodeFaults farm={farm} node={suffix} />
-                </div>
-              </div>
-            );
-          })}
-          {pending && (
-            <div className="topology-leaf" key={nodeSuffix(pending)}>
-              <div className="topology-node pending">
-                <div className="node-top">
-                  <Server size={15} strokeWidth={1.6} />
-                  <strong className="font-mono">{nodeHostname(pending)}</strong>
-                  <span className="node-memory">
-                    {memory(pending.memory_mib)}
-                  </span>
-                  <span
-                    className="node-status running"
-                    title="생성 중"
-                    aria-hidden
-                  />
-                </div>
-                <p>nova-compute · libvirt · OVS agent</p>
-                <div className="node-meta">
-                  <code>{nodeAddress(pending)}</code>
-                  <span className="font-mono">
-                    {farm.id}-{nodeSuffix(pending)}
-                  </span>
-                </div>
-                <div className="node-pending">
-                  <LoaderCircle size={13} className="animate-spin" />
-                  생성 중{pending.host && <span>· {pending.host}</span>}
-                </div>
-              </div>
-            </div>
-          )}
+        <TopologyHost
+          exposure={exposure}
+          portRange={publicPortRange(farm)}
+          tenant="VLAN"
+        />
+        <div className="topology-vms">
+          {cards.map((card) => (
+            <VmCardView farm={farm} card={card} key={card.key} />
+          ))}
         </div>
       </div>
       <div className="topology-footer">
@@ -620,11 +819,10 @@ export function NodeTopology({ farm, job }: { farm: Farm; job?: Job }) {
         node: farm.nodes.find((node) => node.role === spec.role),
       }))
     : farm.nodes.map((node) => ({ role: node.role ?? "unknown", node }));
-  const roles = sources.map(({ role, node }) => ({
-    role,
-    node,
-    label: roleInfo[role]?.label ?? role,
-    service:
+  const exposure = farm.status !== "deleted" ? farm.exposure : null;
+  const cards: VmCard[] = sources.map(({ role, node }, index) => {
+    const label = roleInfo[String(role)]?.label ?? String(role ?? "");
+    const service =
       role === "control"
         ? components
             .filter((c) => controlServices.includes(c))
@@ -637,136 +835,53 @@ export function NodeTopology({ farm, job }: { farm: Farm; job?: Job }) {
             ]
               .filter(Boolean)
               .join(" · ")
-          : (roleInfo[role]?.service ?? ""),
-  }));
-  const exposure = farm.status !== "deleted" ? farm.exposure : null;
-  const publicPort = (id: string) =>
-    exposure && publicServices[id]
-      ? exposure.port_base + publicServices[id].offset
-      : null;
-  const ports = components
-    .map(publicPort)
-    .filter((port): port is number => port !== null);
-  const portRange = !ports.length
-    ? "—"
-    : ports.length === 1
-      ? `:${ports[0]}`
-      : `:${Math.min(...ports)}–${Math.max(...ports)}`;
-  const running = farm.nodes.some((node) => node.status === "running");
-  const nodeMemory = (node: Farm["nodes"][number] | undefined) =>
-    node
-      ? memory(node.memory_mib)
-      : farm.status === "deleted"
-        ? "삭제됨"
-        : "생성 대기";
+          : (roleInfo[String(role)]?.service ?? "");
+    // A single VM runs every chosen service inside itself; a legacy farm lists the roles it kept.
+    const tags = single
+      ? components.map(componentLabel)
+      : service
+        ? service.split(" · ").filter(Boolean)
+        : [];
+    return {
+      key: node?.name ?? `${role}-${index}`,
+      // A single VM keeps the fixed hostname every farm gives it; a legacy layout has none,
+      // so its card is headed by the role it kept and named by the VM below.
+      hostname: single ? nodeHostname({ role }) : label || "VM",
+      role: single ? label : "",
+      memory: node
+        ? memory(node.memory_mib)
+        : farm.status === "deleted"
+          ? "삭제됨"
+          : "생성 대기",
+      running: node?.status === "running",
+      statusTitle: node?.status ?? "준비되지 않음",
+      tags,
+      address: single ? "10.254.0.2" : (node?.ip ?? "—"),
+      name: node?.name ?? `${farm.id}-${role}`,
+    };
+  });
   return (
     <section className="panel topology">
       <div className="panel-toolbar">
         <h2 className="flex items-center gap-2">
-          <Network size={17} />
+          <Network size={14} />
           VM topology
         </h2>
         <span className="topology-network">
           {single ? "farm0 10.254.0.2 · 단일 VM" : "기존 다중 VM 구성"}
-          <span className="status-dot" />
         </span>
       </div>
       <div className="topology-graph">
-        <div className="topology-box topology-host">
-          <Globe size={16} strokeWidth={1.6} />
-          <div>
-            <small>Host</small>
-            <code>{exposure?.host ?? "public 포트 없음"}</code>
-          </div>
+        <TopologyHost
+          exposure={exposure}
+          portRange={publicPortRange(farm)}
+          tenant={single ? "farm0" : "—"}
+        />
+        <div className="topology-vms">
+          {cards.map((card) => (
+            <VmCardView farm={farm} card={card} key={card.key} />
+          ))}
         </div>
-        <div
-          className={`topology-edge ${running && exposure ? "edge-active" : ""}`}
-        >
-          <code>{portRange}</code>
-          <span className="edge-line" aria-hidden />
-          <small>{exposure ? "port bind · DNAT" : "노출 안 함"}</small>
-        </div>
-        {single ? (
-          roles.map(({ role, node, service }) => (
-            <div
-              key={node?.name ?? role}
-              className={`topology-node topology-vm ${node?.status === "running" ? "node-running" : ""}`}
-            >
-              <div className="topology-vm-header">
-                <Server size={16} strokeWidth={1.6} />
-                <strong className="font-mono">
-                  {node?.name ?? `${farm.id}-${role}`}
-                </strong>
-                <span className="node-memory">{nodeMemory(node)}</span>
-                <span
-                  className={`node-status ${node?.status === "running" ? "running" : ""}`}
-                  title={node?.status ?? "준비되지 않음"}
-                />
-              </div>
-              <div className="topology-vm-body">
-                <div
-                  className="topology-box topology-iface"
-                  title="고정 서비스 주소"
-                >
-                  <Network size={15} strokeWidth={1.6} />
-                  <div>
-                    <small>farm0</small>
-                    <code>10.254.0.2</code>
-                  </div>
-                </div>
-                <div
-                  className="topology-tree"
-                  aria-label="같은 VM에서 실행할 서비스"
-                >
-                  {components.map((id) => (
-                    <div className="topology-leaf" key={id}>
-                      <span className="topology-box topology-service">
-                        <span>{componentLabel(id)}</span>
-                        {publicPort(id) !== null && (
-                          <code>:{publicPort(id)}</code>
-                        )}
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-              <div className="topology-vm-footer">
-                <span>기반 서비스</span>
-                {service}
-              </div>
-            </div>
-          ))
-        ) : (
-          <div className="topology-tree">
-            {roles.map(({ role, node, label, service }, index) => (
-              <div
-                className="topology-leaf"
-                key={node?.name ?? `${role}-${index}`}
-              >
-                <div
-                  className={`topology-node ${node?.status === "running" ? "node-running" : ""}`}
-                >
-                  <div className="node-top">
-                    <Server size={15} strokeWidth={1.6} />
-                    <strong>{label}</strong>
-                    <span
-                      className={`node-status ${node?.status === "running" ? "running" : ""}`}
-                      title={node?.status ?? "준비되지 않음"}
-                    />
-                  </div>
-                  {service && <p>{service}</p>}
-                  <div className="node-name">
-                    {node?.name ?? `${farm.id}-${role}`}
-                  </div>
-                  <div className="node-meta">
-                    <code>{node?.ip ?? "—"}</code>
-                    <span>{nodeMemory(node)}</span>
-                  </div>
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
       </div>
       <div className="topology-footer">
         <ShieldCheck size={13} />
@@ -780,12 +895,12 @@ export function NodeTopology({ farm, job }: { farm: Farm; job?: Job }) {
 export function DeploymentPhases({ farm }: { farm: Farm }) {
   return (
     <section className="panel phase-panel">
-      <div className="section-label">
-        <span className="small-icon">
-          <CheckCheck size={17} />
-        </span>
-        <h2>배포 단계</h2>
-        {farm.phase && <span className="count-pill ml-auto">{farm.phase}</span>}
+      <div className="panel-toolbar">
+        <h2 className="flex items-center gap-2">
+          <CheckCheck size={14} />
+          배포 단계
+        </h2>
+        {farm.phase && <span className="chip mono">{farm.phase}</span>}
       </div>
       <ol className="phase-list">
         {phases.map((phase) => {
@@ -799,7 +914,7 @@ export function DeploymentPhases({ farm }: { farm: Farm }) {
               className={ready ? "phase-done" : current ? "phase-current" : ""}
             >
               <span className="phase-marker">
-                {ready ? <Check size={12} /> : current ? <span /> : null}
+                {ready ? <Check size={11} /> : current ? <span /> : null}
               </span>
               <div className="phase-text">
                 <div className="phase-heading">
@@ -807,10 +922,7 @@ export function DeploymentPhases({ farm }: { farm: Farm }) {
                   <span>{phase.description}</span>
                 </div>
                 {running && farm.step && (
-                  <span
-                    className="phase-step phase-step-live"
-                    title={farm.step}
-                  >
+                  <span className="phase-step" title={farm.step}>
                     <LoaderCircle size={11} className="animate-spin" />
                     <span className="phase-step-text">{farm.step}</span>
                   </span>
@@ -846,11 +958,12 @@ function Endpoints({ farm }: { farm: Farm }) {
     : [];
   return (
     <section className="panel endpoints-panel">
-      <div className="section-label">
-        <span className="small-icon">
-          <Globe size={17} />
-        </span>
-        <h2>Service endpoints</h2>
+      <div className="panel-toolbar">
+        <h2 className="flex items-center gap-2">
+          <Globe size={14} />
+          Service endpoints
+        </h2>
+        {exposure && <span className="chip mono">{publicPortRange(farm)}</span>}
       </div>
       {!services.length ? (
         <div className="endpoint-note">
@@ -860,7 +973,7 @@ function Endpoints({ farm }: { farm: Farm }) {
         </div>
       ) : (
         <>
-          <p className="field-hint mb-4">
+          <p className="field-hint ep-hint">
             {deployed
               ? "마지막 배포가 완료된 서비스 주소입니다."
               : "배포 완료 후 사용할 public 서비스 주소입니다."}
@@ -871,7 +984,7 @@ function Endpoints({ farm }: { farm: Farm }) {
                 <div>
                   <span className="endpoint-icon">
                     {s.name === "Keystone" ? (
-                      <ShieldCheck size={17} />
+                      <ShieldCheck size={14} />
                     ) : (
                       <LayersIcon />
                     )}
@@ -888,7 +1001,7 @@ function Endpoints({ farm }: { farm: Farm }) {
                       className="icon-button ml-auto"
                       aria-label={`${s.name} API 열기`}
                     >
-                      <ArrowUpRight size={16} />
+                      <ArrowUpRight size={14} />
                     </a>
                   ) : (
                     <span className="endpoint-pending">배포 대기</span>
@@ -913,7 +1026,7 @@ function Endpoints({ farm }: { farm: Farm }) {
       )}
       {showLogin && (
         <div className="credential-note">
-          <ShieldCheck size={16} />
+          <ShieldCheck size={14} />
           <p>Horizon 로그인에 위 admin 계정을 사용합니다.</p>
         </div>
       )}
@@ -951,50 +1064,52 @@ function Datastores({ farm }: { farm: Farm }) {
   const stores = query.data?.datastores ?? [];
   return (
     <section className="panel datastore-panel">
-      <div className="section-label">
-        <span className="small-icon">
-          <Database size={17} />
-        </span>
-        <h2>Data stores</h2>
+      <div className="panel-toolbar">
+        <h2 className="flex items-center gap-2">
+          <Database size={14} />
+          Data stores
+        </h2>
         {deployed && stores.length > 0 && (
-          <span className="count-pill ml-auto">{stores.length}</span>
+          <span className="chip mono">{stores.length}</span>
         )}
       </div>
-      {!deployed ? (
-        <div className="endpoint-note">
-          배포가 끝나면 MariaDB와 RabbitMQ 접속 정보가 여기에 표시됩니다.
-        </div>
-      ) : query.isPending ? (
-        <Loading label="데이터 스토어 정보를 불러오는 중" />
-      ) : query.error ? (
-        <ErrorNotice error={query.error} />
-      ) : !stores.length ? (
-        <div className="endpoint-note">
-          이 farm은 데이터 스토어 포트를 공개하지 않았습니다. 새로 만든 farm부터
-          MariaDB·RabbitMQ 포트가 함께 열립니다.
-        </div>
-      ) : (
-        <>
-          <p className="field-hint">
-            farm마다 같은 VM 안에서 실행되는 데이터베이스와 메시지 큐입니다.
-            포트는 {farm.exposure?.port_base ?? "—"}번대 블록의 해당 offset을
-            씁니다.
-          </p>
-          <div className="datastore-list">
-            {stores.map((store) => (
-              <DatastoreCard store={store} key={store.id} />
-            ))}
+      <div className="panel-body">
+        {!deployed ? (
+          <div className="endpoint-note">
+            배포가 끝나면 MariaDB와 RabbitMQ 접속 정보가 여기에 표시됩니다.
           </div>
-          <div className="credential-note">
-            <ShieldCheck size={16} />
-            <p>
-              이 포트는 farm VM의 고정 주소로 DNAT됩니다. 외부에 공개한
-              포털이라면 인증정보 표시를 끄고 방화벽으로 3306·5672·15672를
-              제한하세요.
+        ) : query.isPending ? (
+          <Loading label="데이터 스토어 정보를 불러오는 중" />
+        ) : query.error ? (
+          <ErrorNotice error={query.error} />
+        ) : !stores.length ? (
+          <div className="endpoint-note">
+            이 farm은 데이터 스토어 포트를 공개하지 않았습니다. 새로 만든
+            farm부터 MariaDB·RabbitMQ 포트가 함께 열립니다.
+          </div>
+        ) : (
+          <>
+            <p className="field-hint">
+              farm마다 같은 VM 안에서 실행되는 데이터베이스와 메시지 큐입니다.
+              포트는 {farm.exposure?.port_base ?? "—"}번대 블록의 해당 offset을
+              씁니다.
             </p>
-          </div>
-        </>
-      )}
+            <div className="datastore-list">
+              {stores.map((store) => (
+                <DatastoreCard store={store} key={store.id} />
+              ))}
+            </div>
+            <div className="credential-note">
+              <ShieldCheck size={14} />
+              <p>
+                이 포트는 farm VM의 고정 주소로 DNAT됩니다. 외부에 공개한
+                포털이라면 인증정보 표시를 끄고 방화벽으로 3306·5672·15672를
+                제한하세요.
+              </p>
+            </div>
+          </>
+        )}
+      </div>
     </section>
   );
 }
@@ -1192,5 +1307,5 @@ function LoginRow({
 }
 
 function LayersIcon() {
-  return <Boxes size={17} />;
+  return <Boxes size={14} />;
 }

@@ -17,7 +17,6 @@ import {
   RefreshCw,
   Upload,
   Server,
-  ShieldCheck,
   Terminal,
   Trash2,
 } from "lucide-react";
@@ -122,6 +121,16 @@ export function RemoteHostsPage() {
       .sort(
         (a, b) => b.created_at - a.created_at || b.id.localeCompare(a.id),
       ) ?? [];
+  // The strip shows how far the hosts on this page have come, not a fixed script.
+  const hostCount = hosts.data?.length ?? 0;
+  const checked = hosts.data?.filter((h) => h.inspection).length ?? 0;
+  const ready = hosts.data?.filter((h) => hostReady(h, buildId)).length ?? 0;
+  const workflow = [
+    { label: "등록", done: hostCount > 0 },
+    { label: "SSH 점검", done: checked > 0 },
+    { label: "환경 준비", done: ready > 0 },
+    { label: "Farm 만들기", done: false },
+  ];
   return (
     <>
       <PageHeading
@@ -188,17 +197,22 @@ export function RemoteHostsPage() {
           </>
         }
       />
-      <div className="remote-workflow">
-        <ShieldCheck size={19} />
-        <p>
-          <strong>호스트 등록 → 점검 → 환경 준비 → Farm 만들기</strong>
-          <span>
-            Farm은 등록하고 준비를 마친 호스트에서만 실행됩니다. 로컬 호스트는
-            등록 후 바로 점검하고, 원격 서버는 SSH 점검과 환경 준비, Farm 실행기
-            설치를 거칩니다. Farm마다 control VM과 compute VM을 선택한
-            호스트에서 실행합니다.
+      <div className="remote-workflow" aria-label="호스트 준비 과정">
+        {workflow.map((step, index) => (
+          <span
+            key={step.label}
+            className={`remote-workflow-step${step.done ? " done" : ""}${
+              index === workflow.length - 1 ? " now" : ""
+            }`}
+          >
+            <span className="n">{String(index + 1).padStart(2, "0")}</span>
+            <span className="t">{step.label}</span>
           </span>
-        </p>
+        ))}
+        <span className="remote-workflow-note">
+          {ready} / {hostCount} 호스트 준비
+          {hostCount > ready && " · 준비가 필요한 호스트가 있습니다"}
+        </span>
       </div>
       {(hosts.error ||
         jobs.error ||
@@ -238,14 +252,14 @@ export function RemoteHostsPage() {
               >
                 <span className="remote-server-icon">
                   {host.kind === "local" ? (
-                    <Monitor size={20} strokeWidth={1.5} />
+                    <Monitor size={15} strokeWidth={1.7} />
                   ) : host.kind === "agent" ? (
-                    <RadioTower size={20} strokeWidth={1.5} />
+                    <RadioTower size={15} strokeWidth={1.7} />
                   ) : (
-                    <Server size={20} strokeWidth={1.5} />
+                    <Server size={15} strokeWidth={1.7} />
                   )}
                 </span>
-                <span className="min-w-0 flex-1">
+                <span className="remote-host-row-text">
                   <strong>{host.id}</strong>
                   <code>
                     {host.kind === "local"
@@ -259,10 +273,27 @@ export function RemoteHostsPage() {
                       ` · ${platform(host.inspection.os, host.inspection.arch)}`}
                     {` · Farm ${farmCount(host.id)}개`}
                   </code>
-                  {remoteAgentNeedsUpdate(host) ? (
-                    <span className="field-hint">실행기 업데이트 필요</span>
-                  ) : (
+                  {remoteAgentNeedsUpdate(host) && (
+                    <span className="cellnote">실행기 업데이트 필요</span>
+                  )}
+                  {host.capacity && (
+                    <span className="remote-host-row-meter" aria-hidden>
+                      <i
+                        style={{ width: `${capacityPercent(host.capacity)}%` }}
+                      />
+                    </span>
+                  )}
+                </span>
+                <span className="remote-host-row-side">
+                  {/* A runner that needs an update is the row's state, so it stands in for the badge. */}
+                  {!remoteAgentNeedsUpdate(host) && (
                     <StatusBadge status={host.status} />
+                  )}
+                  {host.capacity && (
+                    <small>
+                      {memory(host.capacity.memory_reserved_mib)} /{" "}
+                      {memory(host.capacity.memory_budget_mib)}
+                    </small>
                   )}
                 </span>
               </button>
@@ -293,12 +324,21 @@ export function RemoteHostsPage() {
             aria-label={`${selected.id} 호스트 상세`}
           >
             <div className="remote-detail-heading">
-              <div>
+              <span className="remote-detail-glyph" aria-hidden>
+                {local ? (
+                  <Monitor size={16} strokeWidth={1.7} />
+                ) : ssh ? (
+                  <Server size={16} strokeWidth={1.7} />
+                ) : (
+                  <RadioTower size={16} strokeWidth={1.7} />
+                )}
+              </span>
+              <div className="remote-detail-title">
                 <p className="eyebrow">
                   {local ? "LOCAL HOST" : ssh ? "REMOTE HOST" : "AGENT HOST"}
                 </p>
                 <h2>{selected.id}</h2>
-                <p className="muted text-xs mt-1 break-all">
+                <code>
                   {local
                     ? "localhost · coordinator(farmd)가 실행 중인 머신"
                     : ssh
@@ -306,7 +346,7 @@ export function RemoteHostsPage() {
                       : selected.connected
                         ? "에이전트 연결됨 · 호스트가 coordinator로 접속해 있습니다"
                         : "에이전트 연결 끊김 · 호스트에서 farm agent connect를 실행하세요"}
-                </p>
+                </code>
               </div>
               <StatusBadge status={selected.status} />
             </div>
@@ -586,6 +626,18 @@ export function RegisterAgentHostDialog({
   );
 }
 
+/** How much of a host's memory budget its farms have reserved, as a percentage. */
+function capacityPercent(capacity: HostCapacity) {
+  return capacity.memory_budget_mib
+    ? Math.min(
+        100,
+        Math.round(
+          (capacity.memory_reserved_mib / capacity.memory_budget_mib) * 100,
+        ),
+      )
+    : 0;
+}
+
 /** Whether the coordinator has (or can download) an agent for the host's OS and CPU. */
 function hasAgent(
   artifacts: { os?: string; arch: string }[] | undefined,
@@ -600,10 +652,12 @@ function hasAgent(
 
 /** Shared by local and remote hosts so both show the same resource facts. */
 function HostResources({
+  hostId,
   resources: r,
   capacity,
   farms,
 }: {
+  hostId: string;
   resources: {
     os: string;
     arch: string;
@@ -614,31 +668,64 @@ function HostResources({
   capacity?: HostCapacity | null;
   farms: number;
 }) {
+  const percent = capacity ? capacityPercent(capacity) : 0;
   return (
     <>
       <div className="remote-resources">
-        <div>
+        <div className="resource">
           <span>Platform</span>
           <strong>{platform(r.os, r.arch)}</strong>
         </div>
-        <div>
+        <div className="resource">
           <span>Memory · 여유 / 전체</span>
           <strong>
             {memory(r.memory_available_mib)} / {memory(r.memory_total_mib)}
           </strong>
         </div>
-        <div>
+        <div className="resource">
           <span>Disk · 여유 공간</span>
           <strong>
             {r.disk_available_mib == null ? "—" : memory(r.disk_available_mib)}
           </strong>
         </div>
       </div>
-      <p className="field-hint mb-3">
-        Farm {farms}개
-        {capacity &&
-          ` · 메모리 예약 ${memory(capacity.memory_reserved_mib)} / ${memory(capacity.memory_budget_mib)} · 추가 예약 가능 ${memory(Math.max(0, capacity.memory_budget_mib - capacity.memory_reserved_mib))}`}
-      </p>
+      {capacity ? (
+        <div className="remote-capacity">
+          <div className="remote-capacity-top">
+            <span>Farm 예약 메모리</span>
+            <strong>
+              {memory(capacity.memory_reserved_mib)} /{" "}
+              {memory(capacity.memory_budget_mib)} · {percent}%
+            </strong>
+          </div>
+          <div
+            className="remote-capacity-bar"
+            role="img"
+            aria-label={`${hostId} 메모리 예약 ${percent}%`}
+          >
+            <i style={{ width: `${percent}%` }} />
+          </div>
+          <div className="remote-capacity-legend">
+            <span>
+              <i />
+              Farm 예약 {memory(capacity.memory_reserved_mib)}
+            </span>
+            <span>
+              <i className="ghost" />
+              추가 예약 가능{" "}
+              {memory(
+                Math.max(
+                  0,
+                  capacity.memory_budget_mib - capacity.memory_reserved_mib,
+                ),
+              )}
+            </span>
+            <span className="right">Farm {farms}개</span>
+          </div>
+        </div>
+      ) : (
+        <p className="field-hint">Farm {farms}개</p>
+      )}
     </>
   );
 }
@@ -697,7 +784,12 @@ function HostInspection({
     : [...runtime, ...agent];
   return (
     <>
-      <HostResources resources={i} capacity={host.capacity} farms={farms} />
+      <HostResources
+        hostId={host.id}
+        resources={i}
+        capacity={host.capacity}
+        farms={farms}
+      />
       <ul className="remote-checks">
         {checks.map((check) => (
           <li
@@ -771,12 +863,16 @@ export function HostJobHistory({ job }: { job: HostJob }) {
     >
       <summary>
         <strong>{job.host_id}</strong>
-        <span>
+        <span className="job-kind">
           {job.kind === "check"
             ? "점검"
             : job.kind === "install_agent"
               ? "Farm 실행기 설치"
               : "환경 준비"}
+        </span>
+        <span className="hostjob-msg">
+          {job.events.at(-1)?.message ??
+            (job.error ? "작업이 실패했습니다" : "기록된 이벤트가 없습니다")}
         </span>
         <StatusBadge status={job.status} />
         <time>{dateTime(job.created_at)}</time>

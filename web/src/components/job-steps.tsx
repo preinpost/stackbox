@@ -34,7 +34,7 @@ export function StepProgress({ job }: { job: Job | undefined }) {
   if (!step) return null;
   return (
     <span
-      className="phase-step phase-step-live"
+      className="phase-step"
       title={stepLabel(step)}
       aria-label={`${step.total}단계 중 ${step.index}단계: ${step.step}`}
     >
