@@ -1,13 +1,13 @@
 import type { Farm } from "../api/client";
 
-/** `OpenStack 2022.2 (zed)`, or nothing for a farm recorded before plans kept a release. The
- * code name says which series a release is; the `year.release` names carry it already, so it is
- * added only when it differs. */
+/** `OpenStack 2022.2 (Zed)`, or nothing for a farm recorded before plans kept a release. The
+ * code name says which series a release is; one without a published name is shown by its
+ * number alone. */
 export const farmReleaseLabel = (farm: Farm) => {
   const release = farm.openstack?.release ?? farm.plan?.release;
   if (!release) return undefined;
-  const series = farm.openstack?.series;
-  return `OpenStack ${release}${series && series !== release ? ` (${series})` : ""}`;
+  const codename = farm.openstack?.codename;
+  return `OpenStack ${release}${codename ? ` (${codename})` : ""}`;
 };
 
 /** Why a farm's release is outside the supported range: `EOL` for a series whose kolla-ansible

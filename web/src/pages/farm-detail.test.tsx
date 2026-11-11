@@ -47,6 +47,7 @@ test("names the farm's OpenStack release under its name, with a flag outside sup
         openstack: {
           release: "2024.1",
           series: "2024.1",
+          codename: "Caracal",
           eol: false,
           supported: true,
         },
@@ -54,10 +55,10 @@ test("names the farm's OpenStack release under its name, with a flag outside sup
     />,
   );
   expect(container.textContent).toContain("원격 · dev-machine");
-  // The year names are the series names, so the release stands alone.
-  expect(container.textContent).toContain("OpenStack 2024.1");
+  // Every release shows its series code name beside the number.
+  expect(container.textContent).toContain("OpenStack 2024.1 (Caracal)");
   expect(container.querySelector(".release-flag")).toBeNull();
-  // zed names the images and release notes of 2022.2, which is end of life.
+  // Zed names the images and release notes of 2022.2, which is end of life.
   rerender(
     <FarmMeta
       farm={{
@@ -65,13 +66,14 @@ test("names the farm's OpenStack release under its name, with a flag outside sup
         openstack: {
           release: "2022.2",
           series: "zed",
+          codename: "Zed",
           eol: true,
           supported: false,
         },
       }}
     />,
   );
-  expect(container.textContent).toContain("OpenStack 2022.2 (zed)");
+  expect(container.textContent).toContain("OpenStack 2022.2 (Zed)");
   expect(container.querySelector(".release-flag")?.textContent).toBe("EOL");
   // A farm made before plans kept their release says so instead of guessing one.
   rerender(<FarmMeta farm={{ ...farm, plan: null }} />);

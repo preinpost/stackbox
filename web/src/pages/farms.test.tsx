@@ -30,6 +30,7 @@ const farms: Farm[] = [
     openstack: {
       release: "2024.1",
       series: "2024.1",
+      codename: "Caracal",
       eol: false,
       supported: true,
     },
@@ -44,6 +45,7 @@ const farms: Farm[] = [
     openstack: {
       release: "2022.2",
       series: "zed",
+      codename: "Zed",
       eol: true,
       supported: false,
     },
@@ -58,6 +60,7 @@ const farms: Farm[] = [
     openstack: {
       release: "2023.1",
       series: "2023.1",
+      codename: "Antelope",
       eol: false,
       supported: false,
     },
@@ -101,11 +104,11 @@ test("shows each farm's OpenStack release in its own column, flagged outside sup
     return found;
   };
   expect(screen.getByRole("columnheader", { name: "OpenStack" })).toBeTruthy();
-  // The year names are the series names, so nothing is repeated.
-  expect(row("current").textContent).toContain("OpenStack 2024.1");
+  // Every release shows the series code name beside its number.
+  expect(row("current").textContent).toContain("OpenStack 2024.1 (Caracal)");
   expect(row("current").querySelector(".release-flag")).toBeNull();
-  // zed names the images and the release notes of 2022.2, which is end of life.
-  expect(row("zed-farm").textContent).toContain("OpenStack 2022.2 (zed)");
+  // Zed names the images and the release notes of 2022.2, which is end of life.
+  expect(row("zed-farm").textContent).toContain("OpenStack 2022.2 (Zed)");
   expect(row("zed-farm").querySelector(".release-flag")?.textContent).toBe(
     "EOL",
   );

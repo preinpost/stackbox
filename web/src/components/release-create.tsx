@@ -15,8 +15,9 @@ export function releaseLabel(r: ReleaseTemplates, arch?: string | null) {
   const control = r.local_control + r.bucket_control;
   const compute = r.local_compute + r.bucket_compute;
   const buckets = r.bucket_control + r.bucket_compute;
-  // The code name says which series a release is; the year.release names carry it already.
-  const codename = r.series && r.series !== r.release ? ` (${r.series})` : "";
+  // The code name says which series a release is; a series without a published name shows
+  // its number alone.
+  const codename = r.codename ? ` (${r.codename})` : "";
   const parts = [
     ...(control + compute
       ? [`템플릿 control ${control} · compute ${compute}`]

@@ -131,17 +131,19 @@ impl FarmManager {
             if !crate::kolla::releases::supported(release) {
                 return;
             }
-            let counted = counts
-                .entry(release.into())
-                .or_insert_with(|| ReleaseTemplates {
+            let counted = counts.entry(release.into()).or_insert_with(|| {
+                let info = crate::kolla::releases::info(release);
+                ReleaseTemplates {
                     release: release.into(),
-                    series: crate::kolla::releases::info(release).series,
+                    series: info.series,
+                    codename: info.codename,
                     installable: published.contains(&release.into())
                         && crate::kolla::releases::available_on(release, &arch),
                     eol: crate::kolla::releases::legacy(release).is_some(),
                     arches: crate::kolla::releases::arches(release),
                     ..Default::default()
-                });
+                }
+            });
             match (role, local) {
                 (None, _) => {}
                 (Some(TemplateRole::Control), true) => counted.local_control += 1,

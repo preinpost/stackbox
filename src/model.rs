@@ -753,6 +753,10 @@ pub struct FarmOpenStack {
     /// Its series name, `zed`; the same as `release` from 2023.1 on, where the names became
     /// `year.release`.
     pub series: String,
+    /// The series' code name for display, `Zed` for 2022.2 and `Caracal` for 2024.1; empty
+    /// when it has no published name. Display only: `series` keeps the name the images and
+    /// the upper-constraints path use.
+    pub codename: String,
     /// kolla-ansible keeps no branch for it any more, so it installs from the series' last tag.
     pub eol: bool,
     /// False below the oldest supported release, whatever the host's
@@ -783,6 +787,7 @@ impl FarmView {
                 FarmOpenStack {
                     release: info.release,
                     series: info.series,
+                    codename: info.codename,
                     eol: info.eol,
                     supported: crate::kolla::releases::in_supported_range(release),
                 }
@@ -1066,10 +1071,14 @@ pub struct ReleasePlan {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct ReleaseTemplates {
     pub release: String,
-    /// Code name of the series (`wallaby`); the same as `release` from 2023.1 on, where the
-    /// names became `year.release`.
+    /// The series name the images and the upper-constraints path use: `wallaby`, or the same
+    /// `year.release` as `release` from 2023.1 on.
     #[serde(default)]
     pub series: String,
+    /// Code name of the series for display, `Caracal`; empty when it has no published name.
+    /// Display only: `series` keeps the name the images and constraints use.
+    #[serde(default)]
+    pub codename: String,
     pub local_control: usize,
     pub local_compute: usize,
     pub bucket_control: usize,

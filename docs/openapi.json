@@ -3171,10 +3171,15 @@
         "required": [
           "release",
           "series",
+          "codename",
           "eol",
           "supported"
         ],
         "properties": {
+          "codename": {
+            "type": "string",
+            "description": "The series' code name for display, `Zed` for 2022.2 and `Caracal` for 2024.1; empty\nwhen it has no published name. Display only: `series` keeps the name the images and\nthe upper-constraints path use."
+          },
           "eol": {
             "type": "boolean",
             "description": "kolla-ansible keeps no branch for it any more, so it installs from the series' last tag."
@@ -4702,6 +4707,10 @@
             "type": "integer",
             "minimum": 0
           },
+          "codename": {
+            "type": "string",
+            "description": "Code name of the series for display, `Caracal`; empty when it has no published name.\nDisplay only: `series` keeps the name the images and constraints use."
+          },
           "eol": {
             "type": "boolean",
             "description": "End of life: kolla-ansible keeps no branch, so the release installs from its last tag\nand only where its older images run."
@@ -4723,7 +4732,7 @@
           },
           "series": {
             "type": "string",
-            "description": "Code name of the series (`wallaby`); the same as `release` from 2023.1 on, where the\nnames became `year.release`."
+            "description": "The series name the images and the upper-constraints path use: `wallaby`, or the same\n`year.release` as `release` from 2023.1 on."
           }
         }
       },

@@ -505,29 +505,32 @@ test("labels releases by their templates and shows an assemble job's steps", () 
   expect(
     releaseLabel({
       release: "2026.2",
+      codename: "Hibiscus",
       local_control: 0,
       local_compute: 0,
       bucket_control: 0,
       bucket_compute: 0,
       installable: true,
     }),
-  ).toBe("OpenStack 2026.2 · 클린 설치");
+  ).toBe("OpenStack 2026.2 (Hibiscus) · 클린 설치");
   expect(
     releaseLabel({
       release: "2026.2",
+      codename: "Hibiscus",
       local_control: 2,
       local_compute: 1,
       bucket_control: 0,
       bucket_compute: 1,
       installable: true,
     }),
-  ).toBe("OpenStack 2026.2 · 템플릿 control 2 · compute 2 · 버킷 1");
-  // An end-of-life series shows its code name, and has no clean install where its images
-  // cannot run.
+  ).toBe("OpenStack 2026.2 (Hibiscus) · 템플릿 control 2 · compute 2 · 버킷 1");
+  // An end-of-life series shows its code name, capitalized, and has no clean install where
+  // its images cannot run.
   expect(
     releaseLabel({
       release: "2021.1",
       series: "wallaby",
+      codename: "Wallaby",
       local_control: 0,
       local_compute: 0,
       bucket_control: 0,
@@ -535,12 +538,11 @@ test("labels releases by their templates and shows an assemble job's steps", () 
       installable: false,
       eol: true,
     }),
-  ).toBe("OpenStack 2021.1 (wallaby) · EOL");
-  // From 2023.1 the series is the release name, so it is not repeated.
+  ).toBe("OpenStack 2021.1 (Wallaby) · EOL");
+  // A series with no published code name shows its number alone.
   expect(
     releaseLabel({
-      release: "2022.2",
-      series: "2022.2",
+      release: "2099.1",
       local_control: 0,
       local_compute: 0,
       bucket_control: 0,
@@ -548,13 +550,14 @@ test("labels releases by their templates and shows an assemble job's steps", () 
       installable: false,
       eol: true,
     }),
-  ).toBe("OpenStack 2022.2 · EOL");
+  ).toBe("OpenStack 2099.1 · EOL");
   // A release's images name the architectures they run on, and say when the chosen host is
   // not one of them.
   expect(
     releaseLabel(
       {
         release: "2024.1",
+        codename: "Caracal",
         local_control: 0,
         local_compute: 0,
         bucket_control: 0,
@@ -564,7 +567,7 @@ test("labels releases by their templates and shows an assemble job's steps", () 
       },
       "aarch64",
     ),
-  ).toBe("OpenStack 2024.1 · 클린 설치 · amd64 · arm64 호스트 불가");
+  ).toBe("OpenStack 2024.1 (Caracal) · 클린 설치 · amd64 · arm64 호스트 불가");
   const job = {
     id: "job",
     farm_id: "r",

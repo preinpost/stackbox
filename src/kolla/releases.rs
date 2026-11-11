@@ -266,6 +266,47 @@ pub const LEGACY: &[Legacy] = &[
     },
 ];
 
+/// Code names of the `year.release` series, oldest first. `openstack/releases` names them in
+/// `data/series_status.yaml` (https://opendev.org/openstack/releases/src/branch/master/data/series_status.yaml),
+/// and https://releases.openstack.org/ lists the same pairs; a series not named here is shown
+/// by its number alone. The name is display only: `series` keeps the `year.release` form the
+/// image tag and the upper-constraints path are named by.
+const CODENAMES: &[(&str, &str)] = &[
+    ("2023.1", "Antelope"),
+    ("2023.2", "Bobcat"),
+    ("2024.1", "Caracal"),
+    ("2024.2", "Dalmatian"),
+    ("2025.1", "Epoxy"),
+    ("2025.2", "Flamingo"),
+    ("2026.1", "Gazpacho"),
+    ("2026.2", "Hibiscus"),
+    // The next series is named before kolla-ansible branches it, so the portal can label it
+    // as soon as a fetched branch listing offers it.
+    ("2027.1", "Indri"),
+];
+
+/// The code name `release` is shown by, `Caracal` for 2024.1 and `Zed` for 2022.2, or `None`
+/// when the series has no published name here. The legacy series never got a `year.release`
+/// name, so theirs is the series name capitalized for display.
+pub fn codename(release: &str) -> Option<String> {
+    if let Some(entry) = legacy(release) {
+        return Some(capitalized(entry.series));
+    }
+    CODENAMES
+        .iter()
+        .find(|(series, _)| *series == release)
+        .map(|(_, name)| (*name).to_owned())
+}
+
+/// `zed` as the portal shows it, `Zed`; empty for an empty name.
+fn capitalized(series: &str) -> String {
+    let mut chars = series.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
+}
+
 /// A supported release whose install differs from a plain `stable/<release>` branch: the
 /// branch moved to `unmaintained/`, or was deleted and only the series' last tag remains, and
 /// quay no longer publishes its images. The ref and image source are fixed here, so an
@@ -348,6 +389,8 @@ pub struct ReleaseInfo {
     pub release: String,
     /// Series name: the image tag and the upper-constraints name.
     pub series: String,
+    /// The series' code name for display, `Caracal`; empty when it has no published name.
+    pub codename: String,
     /// kolla-ansible branch (`stable/2026.2`) or tag (`12.8.0`) to install.
     pub reference: String,
     /// The farm's own build of this series' images, when it has one. `None` installs the
@@ -410,6 +453,7 @@ pub fn info(release: &str) -> ReleaseInfo {
         Some(entry) => ReleaseInfo {
             release: entry.release.into(),
             series: entry.series.into(),
+            codename: capitalized(entry.series),
             reference: entry.kolla.into(),
             images: entry.built.map(|build| Images {
                 registry: eol_registry(),
@@ -428,6 +472,7 @@ pub fn info(release: &str) -> ReleaseInfo {
             Some(entry) => ReleaseInfo {
                 release: entry.release.into(),
                 series: entry.release.into(),
+                codename: codename(release).unwrap_or_default(),
                 // A branch listing wins while kolla-ansible still publishes the series
                 // (`unmaintained/2024.1`); 2024.2 has no branch and falls back to its tag.
                 reference: branch(release).unwrap_or_else(|| entry.reference.into()),
@@ -447,6 +492,7 @@ pub fn info(release: &str) -> ReleaseInfo {
             None => ReleaseInfo {
                 release: release.into(),
                 series: release.into(),
+                codename: codename(release).unwrap_or_default(),
                 reference: branch(release).unwrap_or_else(|| format!("stable/{release}")),
                 // A maintained branch pulls its own images from its default registry.
                 images: None,
@@ -698,6 +744,49 @@ mod tests {
         for release in ["2021.2", "2021.1", "2020.2", "2020.1", "2024.1", "2026.2"] {
             assert!(info(release).collection.is_empty(), "{release}");
         }
+    }
+
+    #[test]
+    fn the_code_names_are_the_published_series_names() {
+        // From openstack/releases `data/series_status.yaml`, which https://releases.openstack.org/
+        // renders: every `year.release` the catalog can offer, and the next one it may.
+        for (release, name) in [
+            ("2023.1", "Antelope"),
+            ("2023.2", "Bobcat"),
+            ("2024.1", "Caracal"),
+            ("2024.2", "Dalmatian"),
+            ("2025.1", "Epoxy"),
+            ("2025.2", "Flamingo"),
+            ("2026.1", "Gazpacho"),
+            ("2026.2", "Hibiscus"),
+            ("2027.1", "Indri"),
+        ] {
+            assert_eq!(codename(release).as_deref(), Some(name), "{release}");
+            let info = info(release);
+            assert_eq!(info.codename, name, "{release}");
+            // The code name is display only: the image tag and the upper-constraints path
+            // keep the `year.release` name.
+            assert_eq!(info.series, release, "{release}");
+        }
+        // The end-of-life series show their own name, capitalized, without changing the
+        // lowercase name their images and constraints carry.
+        for (release, series) in [
+            ("2022.2", "Zed"),
+            ("2022.1", "Yoga"),
+            ("2021.2", "Xena"),
+            ("2021.1", "Wallaby"),
+            ("2020.2", "Victoria"),
+            ("2020.1", "Ussuri"),
+        ] {
+            let info = info(release);
+            assert_eq!(info.codename, series, "{release}");
+            assert_eq!(info.series, series.to_ascii_lowercase(), "{release}");
+        }
+        // A series with no published name here is shown by its number alone.
+        assert_eq!(codename("2099.1"), None);
+        assert!(info("2099.1").codename.is_empty());
+        // A code name is not a release name.
+        assert_eq!(codename("zed"), None);
     }
 
     #[test]

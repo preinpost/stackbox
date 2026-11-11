@@ -1886,6 +1886,12 @@ async fn the_farms_api_names_the_release_each_farm_recorded() {
             crate::kolla::OPENSTACK_RELEASE,
             "{uri}"
         );
+        // The code name is display only, so it does not replace the series the images use.
+        assert_eq!(
+            farm["openstack"]["codename"],
+            crate::kolla::releases::info(crate::kolla::OPENSTACK_RELEASE).codename,
+            "{uri}"
+        );
         assert_eq!(farm["openstack"]["eol"], false, "{uri}");
         assert_eq!(farm["openstack"]["supported"], true, "{uri}");
     }
@@ -5358,7 +5364,7 @@ async fn a_release_plan_picks_the_newest_matching_templates_or_says_why_it_insta
     assert!(!own.eol);
     assert_eq!(own.arches, ["x86_64", "aarch64"]);
     // 2024.1 and 2024.2 are offered with the images the farm publishes for them.
-    for built in ["2024.1", "2024.2"] {
+    for (built, codename) in [("2024.1", "Caracal"), ("2024.2", "Dalmatian")] {
         let templates = catalog
             .releases
             .iter()
@@ -5366,6 +5372,7 @@ async fn a_release_plan_picks_the_newest_matching_templates_or_says_why_it_insta
             .unwrap_or_else(|| panic!("{built} is offered"));
         assert!(!templates.eol, "{built}");
         assert_eq!(templates.series, built, "{built}");
+        assert_eq!(templates.codename, codename, "{built}");
         assert_eq!(templates.arches, ["x86_64"], "{built}");
         assert_eq!(templates.installable, current_arch() == "x86_64", "{built}");
     }
@@ -5381,8 +5388,13 @@ async fn a_release_plan_picks_the_newest_matching_templates_or_says_why_it_insta
         assert!(closed.eol, "{}", closed.release);
         assert_eq!(closed.arches, ["x86_64"], "{}", closed.release);
     }
-    // A release still named year.release needs no separate code name.
+    // A release still named year.release keeps that name as its series; its code name is
+    // carried beside it for the portal to show.
     assert_eq!(own.series, release);
+    assert_eq!(
+        own.codename,
+        crate::kolla::releases::codename(release).unwrap_or_default()
+    );
     let catalog = manager
         .release_catalog(Some(foreign.into()), None)
         .await
@@ -5518,6 +5530,7 @@ async fn release_support_policy_probe() {
                 .expect("the opt-in offers the end-of-life series");
             assert!(legacy.eol);
             assert_eq!(legacy.series, "wallaby");
+            assert_eq!(legacy.codename, "Wallaby");
             assert!(legacy.installable);
             assert_eq!(legacy.arches, ["x86_64"]);
             // 2023.1/2023.2 have no images and are not part of the end-of-life opt-in.

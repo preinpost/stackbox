@@ -982,6 +982,12 @@ export interface components {
      *     name beside the number (`2022.2` is `zed`), and whether this coordinator still supports it.
      */
     FarmOpenStack: {
+      /**
+       * @description The series' code name for display, `Zed` for 2022.2 and `Caracal` for 2024.1; empty
+       *     when it has no published name. Display only: `series` keeps the name the images and
+       *     the upper-constraints path use.
+       */
+      codename: string;
       /** @description kolla-ansible keeps no branch for it any more, so it installs from the series' last tag. */
       eol: boolean;
       /** @description What the farm records, `2022.2`. */
@@ -1492,6 +1498,11 @@ export interface components {
       bucket_compute: number;
       bucket_control: number;
       /**
+       * @description Code name of the series for display, `Caracal`; empty when it has no published name.
+       *     Display only: `series` keeps the name the images and constraints use.
+       */
+      codename?: string;
+      /**
        * @description End of life: kolla-ansible keeps no branch, so the release installs from its last tag
        *     and only where its older images run.
        */
@@ -1502,8 +1513,8 @@ export interface components {
       local_control: number;
       release: string;
       /**
-       * @description Code name of the series (`wallaby`); the same as `release` from 2023.1 on, where the
-       *     names became `year.release`.
+       * @description The series name the images and the upper-constraints path use: `wallaby`, or the same
+       *     `year.release` as `release` from 2023.1 on.
        */
       series?: string;
     };
