@@ -143,7 +143,7 @@ function JobGlyph({ activity }: { activity: Activity }) {
           : activity.job.kind === "purge"
             ? Trash2
             : ShieldCheck;
-    return <Icon size={13} />;
+    return <Icon size={15} />;
   }
   const Icon = {
     create: Plus,
@@ -155,7 +155,7 @@ function JobGlyph({ activity }: { activity: Activity }) {
     settle: ShieldCheck,
     assemble: Layers,
   }[activity.job.kind];
-  return <Icon size={13} />;
+  return <Icon size={15} />;
 }
 
 const defaultFilters: HistoryFilters = {
@@ -243,12 +243,12 @@ function JobWorkspace({
                 </div>
                 <div className="jobs-current-step">
                   {a.job.status === "queued" ? (
-                    <Clock3 size={12} />
+                    <Clock3 size={14} />
                   ) : (
-                    <LoaderCircle size={12} className="animate-spin" />
+                    <LoaderCircle size={14} className="animate-spin" />
                   )}
                   <code>{activityStep(a)}</code>
-                  <ArrowRight size={13} />
+                  <ArrowRight size={15} />
                 </div>
                 {a.scope === "farm" &&
                   a.job.kind === "deploy" &&
@@ -302,7 +302,7 @@ function JobWorkspace({
                   <code>#{a.job.id.slice(0, 8)}</code>
                   <span className="right">
                     상세 보기
-                    <ArrowRight size={10} />
+                    <ArrowRight size={13} />
                   </span>
                 </div>
               </button>
@@ -321,7 +321,7 @@ function JobWorkspace({
         <div className="jobs-history-heading">
           <div>
             <h2>
-              <Clock3 size={14} />
+              <Clock3 size={16} />
               최근 이력{" "}
               <span className="count-pill">
                 {activities.filter((a) => !activeJob(a.job)).length}
@@ -335,7 +335,7 @@ function JobWorkspace({
               checked={grouped}
               onChange={(e) => setGrouped(e.target.checked)}
             />
-            <Layers size={12} />
+            <Layers size={14} />
             {scope === "farm" ? "Farm" : "호스트"}별로 묶기
           </label>
         </div>
@@ -475,7 +475,7 @@ function HistoryTable({
                 onClick={row.getToggleExpandedHandler()}
               >
                 <ChevronDown
-                  size={13}
+                  size={15}
                   className={row.getIsExpanded() ? "rotate-180" : ""}
                 />
                 이전 {row.subRows.length}개
@@ -701,7 +701,7 @@ function ActivityDetail({
             {a.job.error && (
               <section className="job-detail-error">
                 <h3>
-                  <CircleAlert size={15} />
+                  <CircleAlert size={16} />
                   {failureSummary(a) ?? "오류 상세"}
                 </h3>
                 <pre>{a.job.error}</pre>
@@ -735,7 +735,7 @@ function ActivityDetail({
             {a.scope === "host" ? (
               <Link to="/hosts" className="btn btn-default">
                 Hosts로 이동
-                <ArrowRight size={14} />
+                <ArrowRight size={16} />
               </Link>
             ) : farm && farm.status !== "deleted" ? (
               <Link
@@ -744,7 +744,7 @@ function ActivityDetail({
                 className="btn btn-default"
               >
                 Farm 상세로 이동
-                <ArrowRight size={14} />
+                <ArrowRight size={16} />
               </Link>
             ) : (
               <span className="muted">

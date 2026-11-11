@@ -31,7 +31,7 @@ export function SnapshotCopies({ snapshot }: { snapshot: Snapshot }) {
             className="snapshot-host"
             title={`${via[copy.via]} · ${dateTime(copy.copied_at)}${copy.size_bytes ? ` · ${bytes(copy.size_bytes)}` : ""}`}
           >
-            <HardDrive size={12} />
+            <HardDrive size={14} />
             {copy.host_id}
             <button
               type="button"
@@ -42,9 +42,9 @@ export function SnapshotCopies({ snapshot }: { snapshot: Snapshot }) {
               onClick={() => mutation.mutate(copy.host_id)}
             >
               {mutation.isPending && mutation.variables === copy.host_id ? (
-                <LoaderCircle size={11} className="animate-spin" />
+                <LoaderCircle size={14} className="animate-spin" />
               ) : (
-                <X size={11} />
+                <X size={14} />
               )}
             </button>
           </span>

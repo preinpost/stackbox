@@ -165,7 +165,7 @@ export function LogViewer({ id }: { id: string }) {
           <Terminal size={16} />
           <strong>작업 로그</strong>
           <span className={`stream-status ${connection}`}>
-            <Radio size={12} />
+            <Radio size={14} />
             {connection === "live"
               ? "LIVE"
               : connection === "connecting"
@@ -180,7 +180,7 @@ export function LogViewer({ id }: { id: string }) {
             onClick={() => setFollow(!follow)}
             aria-pressed={follow}
           >
-            {follow ? <Pause size={13} /> : <Play size={13} />}
+            {follow ? <Pause size={15} /> : <Play size={15} />}
             {follow ? "자동 스크롤" : "스크롤 재개"}
           </Button>
           <Button
@@ -191,7 +191,7 @@ export function LogViewer({ id }: { id: string }) {
               void copy();
             }}
           >
-            {copied ? <Check size={14} /> : <Copy size={14} />}
+            {copied ? <Check size={16} /> : <Copy size={16} />}
           </Button>
         </div>
       </div>
@@ -239,7 +239,7 @@ export function LogViewer({ id }: { id: string }) {
       <div className="log-footer">
         <span>{logs.data?.length ?? 0} events · 최근 1,000개 보관</span>
         <button onClick={() => setFollow(true)}>
-          <ArrowDownToLine size={12} />맨 아래로
+          <ArrowDownToLine size={14} />맨 아래로
         </button>
       </div>
     </section>

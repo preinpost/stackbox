@@ -132,9 +132,9 @@ export function FarmsPage() {
           return (
             <span className="hostname">
               {local ? (
-                <Monitor size={11} strokeWidth={1.9} />
+                <Monitor size={14} strokeWidth={1.9} />
               ) : (
-                <Server size={11} strokeWidth={1.9} />
+                <Server size={14} strokeWidth={1.9} />
               )}
               {host ? (local ? "로컬" : host) : "—"}
             </span>
@@ -262,7 +262,7 @@ export function FarmsPage() {
       <section className="metrics-grid" aria-label="Farm 요약">
         <Metric
           label="전체 farm"
-          icon={<Layers size={14} />}
+          icon={<Layers size={16} />}
           value={farms.data?.length}
           detail={
             <>
@@ -279,7 +279,7 @@ export function FarmsPage() {
         />
         <Metric
           label="실행 중인 VM"
-          icon={<Server size={14} />}
+          icon={<Server size={16} />}
           value={farms.data?.reduce(
             (sum, f) =>
               sum + f.nodes.filter((n) => n.status === "running").length,
@@ -290,7 +290,7 @@ export function FarmsPage() {
         <div className="metric-card">
           <div className="metric-label">
             호스트 예약 메모리
-            <Cpu size={14} />
+            <Cpu size={16} />
           </div>
           <div className="metric-value">
             {hosts.data ? memory(reserved) : "—"}
@@ -302,12 +302,12 @@ export function FarmsPage() {
         </div>
         <Metric
           label="진행 중인 작업"
-          icon={<Activity size={14} />}
+          icon={<Activity size={16} />}
           value={jobs.data?.filter(activeJob).length}
           detail={
             <Link to="/jobs" className="metric-link">
               작업 내역 보기
-              <ArrowRight size={11} />
+              <ArrowRight size={14} />
             </Link>
           }
         />
@@ -323,7 +323,7 @@ export function FarmsPage() {
       <div className="toolbar">
         <div className="toolbar-right">
           <div className="search-input">
-            <Search size={14} />
+            <Search size={16} />
             <input
               aria-label="Farm 검색"
               placeholder="이름 또는 담당자 검색…"
@@ -395,7 +395,7 @@ export function FarmsPage() {
                                 )}
                                 {h.column.getIsSorted() ? (
                                   <ArrowDown
-                                    size={12}
+                                    size={14}
                                     className={
                                       h.column.getIsSorted() === "asc"
                                         ? "rotate-180"
@@ -403,7 +403,7 @@ export function FarmsPage() {
                                     }
                                   />
                                 ) : (
-                                  <ArrowUpDown size={12} />
+                                  <ArrowUpDown size={14} />
                                 )}
                               </button>
                             ) : (
@@ -466,12 +466,12 @@ export function FarmsPage() {
         <section className="panel host-overview" aria-label="호스트 용량">
           <div className="panel-toolbar">
             <h2 className="flex items-center gap-2">
-              <Cpu size={14} />
+              <Cpu size={16} />
               호스트 용량
             </h2>
             <Link to="/hosts" className="text-link">
               Hosts
-              <ArrowRight size={11} />
+              <ArrowRight size={14} />
             </Link>
           </div>
           <div className="panel-body">
@@ -518,7 +518,7 @@ export function FarmsPage() {
         <section className="getting-started" aria-label="작업 흐름">
           <div className="panel-toolbar">
             <h2 className="flex items-center gap-2">
-              <Network size={14} />
+              <Network size={16} />
               작은 환경, 완전한 워크플로
             </h2>
           </div>
@@ -526,14 +526,14 @@ export function FarmsPage() {
             <span>
               <b>01</b>VM 생성
             </span>
-            <ArrowRight size={12} />
+            <ArrowRight size={14} />
             <span>
               <b>02</b>OpenStack 배포
             </span>
-            <ArrowRight size={12} />
+            <ArrowRight size={14} />
             <span>
               <b>03</b>API 연결
-              <Check size={12} />
+              <Check size={14} />
             </span>
           </div>
           <p>
@@ -581,7 +581,7 @@ function FarmIllustration() {
       <span className="illustration-node main-node">
         <Boxes size={29} strokeWidth={1.5} />
         <i>
-          <Check size={10} strokeWidth={3} />
+          <Check size={13} strokeWidth={3} />
         </i>
       </span>
       <span className="illustration-node side-node right-node">

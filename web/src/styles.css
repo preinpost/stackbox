@@ -7,6 +7,9 @@
   --color-farm-50: #eef7f2;
   --color-farm-600: #117653;
   --color-farm-700: #0e6547;
+  /* Tailwind's smallest step still has to clear the 13px floor. */
+  --text-xs: 0.8125rem;
+  --text-xs--line-height: calc(1.5 / 0.8125);
 }
 
 /* ============================================================
@@ -20,8 +23,8 @@
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
-  /* 14px root keeps the rem-based Tailwind utilities at their current size. */
-  font-size: 14px;
+  /* 16px root: the rem-based Tailwind utilities grow with the type tokens below. */
+  font-size: 16px;
 
   /* type */
   --font-sans:
@@ -30,36 +33,36 @@
   --font-mono:
     ui-monospace, "SF Mono", SFMono-Regular, Menlo, "JetBrains Mono", Consolas,
     monospace;
-  --fs-2xs: 10.5px;
-  --fs-xs: 11.5px;
-  --fs-sm: 12.5px;
-  --fs-md: 13.5px;
-  --fs-lg: 15px;
-  --fs-xl: 19px;
-  --fs-2xl: 25px;
-  --fs-3xl: 32px;
+  --fs-2xs: 14px;
+  --fs-xs: 14.5px;
+  --fs-sm: 15.5px;
+  --fs-md: 16.5px;
+  --fs-lg: 18.5px;
+  --fs-xl: 24px;
+  --fs-2xl: 30px;
+  --fs-3xl: 37px;
   --lh-tight: 1.25;
   --lh: 1.55;
   --track-wide: 0.07em;
 
-  /* space — 4px base */
-  --s1: 4px;
-  --s2: 6px;
-  --s3: 8px;
-  --s4: 12px;
-  --s5: 16px;
-  --s6: 20px;
-  --s7: 24px;
-  --s8: 32px;
-  --s9: 40px;
-  --s10: 48px;
+  /* space — 5px base */
+  --s1: 5px;
+  --s2: 7.5px;
+  --s3: 10px;
+  --s4: 14px;
+  --s5: 19px;
+  --s6: 24px;
+  --s7: 29px;
+  --s8: 39px;
+  --s9: 49px;
+  --s10: 58px;
 
   /* radius */
   --r-xs: 3px;
-  --r-sm: 5px;
-  --r-md: 7px;
-  --r-lg: 10px;
-  --r-xl: 14px;
+  --r-sm: 6px;
+  --r-md: 8px;
+  --r-lg: 11px;
+  --r-xl: 15px;
   --r-pill: 999px;
 
   /* surfaces & ink */
@@ -218,7 +221,7 @@ textarea {
   z-index: 200;
   top: -100px;
   left: 16px;
-  padding: 9px 14px;
+  padding: 10px 16px;
   background: var(--accent);
   color: var(--accent-on);
   border-radius: var(--r-sm);
@@ -236,8 +239,8 @@ textarea {
   align-items: center;
   justify-content: center;
   gap: var(--s2);
-  height: 29px;
-  padding: 0 10px;
+  height: 40px;
+  padding: 0 14px;
   border: 1px solid var(--line-2);
   border-radius: var(--r-sm);
   background: var(--surface);
@@ -265,8 +268,8 @@ html[data-theme="dark"] .btn {
   opacity: 0.45;
 }
 .btn svg {
-  width: 13px;
-  height: 13px;
+  width: 16px;
+  height: 16px;
   color: var(--ink-3);
 }
 .btn-default {
@@ -316,8 +319,8 @@ html[data-theme="dark"] .btn-primary svg {
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
-  width: 28px;
-  height: 28px;
+  width: 36px;
+  height: 36px;
   border: 1px solid transparent;
   border-radius: var(--r-sm);
   color: var(--ink-3);
@@ -350,12 +353,12 @@ html[data-theme="dark"] .btn-primary svg {
   position: fixed;
   inset: 0 auto 0 0;
   z-index: 60;
-  width: 232px;
-  flex: 0 0 232px;
+  width: 272px;
+  flex: 0 0 272px;
   display: flex;
   flex-direction: column;
   gap: var(--s5);
-  padding: 18px 12px 12px;
+  padding: 22px 13px 16px;
   background: var(--rail-bg);
   border-right: 1px solid var(--line);
   overflow-y: auto;
@@ -364,18 +367,18 @@ html[data-theme="dark"] .btn-primary svg {
 .brand {
   display: flex;
   align-items: center;
-  gap: 9px;
-  padding: 0 6px;
+  gap: 10px;
+  padding: 0 7px;
   border-radius: var(--r-sm);
   color: var(--ink);
 }
 .brand-mark {
   display: grid;
   place-items: center;
-  width: 28px;
-  height: 28px;
+  width: 36px;
+  height: 36px;
   flex-shrink: 0;
-  border-radius: 8px;
+  border-radius: 9px;
   color: #fff;
   background: linear-gradient(150deg, #1a8a5e, #0c6142);
   box-shadow:
@@ -396,11 +399,11 @@ html[data-theme="dark"] .brand-mark {
 }
 .version-tag {
   margin-left: auto;
-  padding: 2px 5px;
+  padding: 2px 6px;
   border: 1px solid var(--line-2);
   border-radius: var(--r-xs);
   font-family: var(--font-mono);
-  font-size: 9.5px;
+  font-size: var(--fs-2xs);
   font-weight: 600;
   line-height: 1.2;
   letter-spacing: 0.08em;
@@ -410,8 +413,8 @@ html[data-theme="dark"] .brand-mark {
 .workspace {
   display: flex;
   align-items: center;
-  gap: 9px;
-  padding: 8px 9px;
+  gap: 10px;
+  padding: 9px 10px;
   border: 1px solid var(--line);
   border-radius: var(--r-md);
   background: var(--surface);
@@ -421,8 +424,8 @@ html[data-theme="dark"] .brand-mark {
   position: relative;
   display: grid;
   place-items: center;
-  width: 26px;
-  height: 26px;
+  width: 30px;
+  height: 30px;
   flex-shrink: 0;
   border-radius: var(--r-sm);
   background: var(--surface-2);
@@ -477,8 +480,8 @@ html[data-theme="dark"] .brand-mark {
   font-size: var(--fs-2xs);
   letter-spacing: var(--track-wide);
   text-transform: uppercase;
-  padding: 0 8px;
-  margin: 2px 0 6px;
+  padding: 0 9px;
+  margin: 2px 0 7px;
 }
 .nav {
   display: grid;
@@ -488,9 +491,9 @@ html[data-theme="dark"] .brand-mark {
   position: relative;
   display: flex;
   align-items: center;
-  gap: 9px;
-  height: 32px;
-  padding: 0 9px;
+  gap: 10px;
+  height: 42px;
+  padding: 0 11px;
   color: var(--ink-2);
   font-size: var(--fs-sm);
   font-weight: 550;
@@ -501,8 +504,8 @@ html[data-theme="dark"] .brand-mark {
 }
 .nav-item svg {
   flex-shrink: 0;
-  width: 16px;
-  height: 16px;
+  width: 20px;
+  height: 20px;
   color: var(--ink-3);
   transition: color 0.12s;
 }
@@ -528,8 +531,8 @@ html[data-theme="dark"] .nav-item:hover {
   content: "";
   position: absolute;
   left: -12px;
-  top: 7px;
-  bottom: 7px;
+  top: 8px;
+  bottom: 8px;
   width: 2px;
   border-radius: 0 2px 2px 0;
   background: var(--accent);
@@ -539,9 +542,9 @@ html[data-theme="dark"] .nav-item:hover {
 }
 .nav-count {
   margin-left: auto;
-  min-width: 17px;
-  height: 16px;
-  padding: 0 5px;
+  min-width: 19px;
+  height: 18px;
+  padding: 0 6px;
   display: inline-grid;
   place-items: center;
   border-radius: var(--r-pill);
@@ -564,8 +567,8 @@ html[data-theme="dark"] .nav-item:hover {
 }
 .host-mini {
   display: grid;
-  gap: 6px;
-  padding: 10px;
+  gap: 7px;
+  padding: 11px;
   border: 1px solid var(--line);
   border-radius: var(--r-md);
   background: var(--surface);
@@ -630,9 +633,14 @@ html[data-theme="dark"] .nav-item:hover {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: var(--s2);
+  flex-wrap: wrap;
+  gap: 2px var(--s2);
   font-size: var(--fs-2xs);
   color: var(--ink-3);
+}
+.host-mini-foot > span,
+.host-mini-foot a {
+  white-space: nowrap;
 }
 .host-mini-specs {
   display: flex;
@@ -644,14 +652,14 @@ html[data-theme="dark"] .nav-item:hover {
 }
 .host-mini-specs li {
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: var(--fs-2xs);
   line-height: 1;
   white-space: nowrap;
   color: var(--ink-3);
   background: var(--surface-2);
   border: 1px solid var(--line);
   border-radius: var(--r-xs);
-  padding: 3px 5px;
+  padding: 3px 6px;
 }
 .host-mini p {
   font-size: var(--fs-2xs);
@@ -662,7 +670,8 @@ html[data-theme="dark"] .nav-item:hover {
 .host-mini a {
   display: inline-flex;
   align-items: center;
-  gap: 3px;
+  margin-left: auto;
+  gap: 4px;
   color: var(--ink-2);
   font-size: var(--fs-2xs);
   font-weight: 550;
@@ -673,8 +682,8 @@ html[data-theme="dark"] .nav-item:hover {
 .documentation-link {
   display: flex;
   align-items: center;
-  gap: 7px;
-  padding: 5px 8px;
+  gap: 8px;
+  padding: 6px 9px;
   border-radius: var(--r-sm);
   font-size: var(--fs-xs);
   color: var(--ink-3);
@@ -695,16 +704,16 @@ html[data-theme="dark"] .nav-item:hover {
 .sidebar-footer {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 9px;
   margin: 0;
-  padding: 9px 8px 2px;
+  padding: 10px 9px 2px;
   border-top: 1px solid var(--line);
 }
 .operator-avatar {
   display: grid;
   place-items: center;
-  width: 24px;
-  height: 24px;
+  width: 28px;
+  height: 28px;
   border-radius: 100%;
   background: var(--surface-3);
   color: var(--ink-2);
@@ -735,8 +744,8 @@ html[data-theme="dark"] .nav-item:hover {
 .main-layout {
   display: flex;
   flex-direction: column;
-  margin-left: 232px;
-  width: calc(100% - 232px);
+  margin-left: 272px;
+  width: calc(100% - 272px);
   min-height: 100vh;
 }
 .topbar {
@@ -746,7 +755,7 @@ html[data-theme="dark"] .nav-item:hover {
   display: flex;
   align-items: center;
   gap: var(--s4);
-  height: 52px;
+  height: 64px;
   flex-shrink: 0;
   padding: 0 var(--s7);
   background: var(--topbar-bg);
@@ -766,8 +775,8 @@ html[data-theme="dark"] .nav-item:hover {
 .build-chip {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  height: 26px;
+  gap: 7px;
+  height: 32px;
   padding: 0 9px;
   border: 1px solid var(--line);
   border-radius: var(--r-pill);
@@ -812,23 +821,33 @@ html[data-theme="dark"] .nav-item:hover {
   display: none;
 }
 .topbar .operator-avatar {
-  width: 24px;
-  height: 24px;
-  font-size: 10px;
+  width: 28px;
+  height: 28px;
+  font-size: var(--fs-2xs);
 }
 .page-container {
   flex: 1;
-  padding: 22px var(--s7) 0;
+  padding: 26px clamp(18px, 2.1vw, 40px) 0;
   width: 100%;
-  max-width: 1560px;
+  max-width: 1900px;
   margin: 0 auto;
 }
 .page-heading {
   display: flex;
   align-items: flex-end;
   justify-content: space-between;
+  flex-wrap: wrap;
   gap: var(--s5);
   margin-bottom: var(--s5);
+}
+/* A fixed basis keeps the action cluster beside the title until the row really
+   runs out of room; without it the description's max-content width forces a
+   wrap on every page. */
+.page-heading > div:first-child {
+  flex: 1 1 0;
+  /* min-width, not flex-basis: the heading stacks into a column on phones, and a
+     basis there would become a 300px-tall gap under the title. */
+  min-width: min(300px, 100%);
 }
 .eyebrow {
   color: var(--ink-4);
@@ -851,10 +870,15 @@ h1 {
   margin-top: 4px;
   line-height: var(--lh);
   max-width: 68ch;
+  /* Korean breaks between any two syllables by default, which splits words in
+     half on a wider type scale. Break at spaces instead, and let an over-long
+     token fall back to a hard break rather than overflow. */
+  word-break: keep-all;
+  overflow-wrap: anywhere;
 }
 .main-footer {
-  margin: auto var(--s7) 0;
-  padding: 14px 0 22px;
+  margin: auto clamp(18px, 2.1vw, 40px) 0;
+  padding: 16px 0 26px;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -877,7 +901,7 @@ h1 {
   overflow: hidden;
 }
 .metric-card {
-  padding: 11px 15px 10px;
+  padding: 13px 17px 12px;
   min-width: 0;
 }
 .metric-card + .metric-card {
@@ -889,13 +913,13 @@ h1 {
   justify-content: space-between;
   gap: var(--s2);
   color: var(--ink-3);
-  font-size: var(--fs-xs);
+  font-size: var(--fs-sm);
 }
 .metric-label svg {
   color: var(--ink-4);
 }
 .metric-value {
-  font-size: 23px;
+  font-size: var(--fs-2xl);
   font-weight: 600;
   letter-spacing: -0.03em;
   color: var(--ink);
@@ -915,7 +939,7 @@ h1 {
   display: flex;
   align-items: center;
   gap: 5px;
-  min-height: 14px;
+  min-height: 16px;
   font-size: var(--fs-2xs);
   color: var(--ink-3);
   margin-top: 2px;
@@ -963,9 +987,9 @@ h1 {
   align-items: center;
   justify-content: space-between;
   gap: var(--s3);
-  padding: 10px 14px;
+  padding: 12px 16px;
   border-bottom: 1px solid var(--line);
-  min-height: 42px;
+  min-height: 50px;
 }
 .panel-foot {
   display: flex;
@@ -989,10 +1013,10 @@ h2 {
   justify-content: center;
   font-family: var(--font-mono);
   font-size: var(--fs-2xs);
-  min-width: 18px;
-  height: 18px;
+  min-width: 24px;
+  height: 24px;
   border-radius: var(--r-pill);
-  padding: 0 5px;
+  padding: 0 7px;
   border: 1px solid var(--line);
   color: var(--ink-3);
   background: var(--surface-2);
@@ -1001,10 +1025,10 @@ h2 {
 .search-input {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 0 9px;
+  gap: 8px;
+  padding: 0 12px;
   border: 1px solid var(--line-2);
-  height: 30px;
+  height: 40px;
   border-radius: var(--r-sm);
   background: var(--surface);
   color: var(--ink-4);
@@ -1021,7 +1045,7 @@ h2 {
   outline: 0;
 }
 .search-input input {
-  width: 176px;
+  width: 210px;
   font-size: var(--fs-sm);
   outline: 0;
   color: var(--ink);
@@ -1038,12 +1062,15 @@ h2 {
   border: 1px solid var(--line-2);
   background: var(--surface);
   color: var(--ink-2);
-  padding: 0 9px;
-  height: 30px;
-  min-height: 30px;
+  padding: 0 12px;
+  height: 40px;
+  min-height: 40px;
   border-radius: var(--r-sm);
   font-size: var(--fs-sm);
-  min-width: 100px;
+  min-width: 120px;
+  /* A button shrink-wraps its label, so a long one would overflow a narrow
+     dialog. Cap it at the container and let the label ellipsize instead. */
+  max-width: 100%;
   transition:
     border-color 0.12s,
     box-shadow 0.12s;
@@ -1071,7 +1098,7 @@ h2 {
 .select-popup {
   min-width: var(--anchor-width);
   max-width: min(460px, 90vw);
-  max-height: min(var(--available-height), 330px);
+  max-height: min(var(--available-height), 360px);
   overflow-y: auto;
   background: var(--surface);
   border: 1px solid var(--line);
@@ -1114,8 +1141,8 @@ h2 {
 .data-table th {
   color: var(--ink-4);
   background: var(--surface-2);
-  padding: 0 12px;
-  height: 32px;
+  padding: 0 14px;
+  height: 44px;
   font-weight: 650;
   font-size: var(--fs-2xs);
   letter-spacing: 0.04em;
@@ -1126,7 +1153,7 @@ h2 {
 }
 .data-table th:first-child,
 .data-table td:first-child {
-  padding-left: 14px;
+  padding-left: 16px;
 }
 .data-table th button {
   display: flex;
@@ -1137,8 +1164,8 @@ h2 {
   color: var(--ink-4);
 }
 .data-table td {
-  padding: 6px 12px;
-  height: 46px;
+  padding: 8px 14px;
+  height: 60px;
   border-bottom: 1px solid var(--line);
   font-size: var(--fs-sm);
   vertical-align: middle;
@@ -1156,13 +1183,13 @@ h2 {
 .farm-name-cell {
   display: flex;
   align-items: center;
-  gap: 9px;
+  gap: 10px;
 }
 .farm-avatar {
   display: grid;
   place-items: center;
-  width: 28px;
-  height: 28px;
+  width: 36px;
+  height: 36px;
   border: 1px solid var(--accent-line);
   color: var(--accent);
   border-radius: var(--r-sm);
@@ -1205,16 +1232,16 @@ h2 {
   border: 1px solid var(--warn-line);
   background: var(--warn-bg);
   color: var(--warn);
-  font-size: 10.5px;
+  font-size: var(--fs-2xs);
   line-height: 1.7;
   vertical-align: 1px;
 }
 .status-badge {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  height: 20px;
-  padding: 0 7px;
+  gap: 6px;
+  height: 26px;
+  padding: 0 9px;
   border-radius: var(--r-sm);
   border: 1px solid var(--idle-line);
   background: var(--idle-bg);
@@ -1299,8 +1326,8 @@ h2 {
   font-size: var(--fs-xs);
 }
 .table-footer .btn {
-  height: 24px;
-  padding: 0 7px;
+  height: 30px;
+  padding: 0 9px;
   font-size: var(--fs-xs);
 }
 .empty-state {
@@ -1308,9 +1335,9 @@ h2 {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  min-height: 326px;
+  min-height: 360px;
   text-align: center;
-  padding: 42px 25px;
+  padding: 46px 28px;
 }
 .empty-icon {
   color: var(--ink-4);
@@ -1323,7 +1350,7 @@ h2 {
   letter-spacing: -0.01em;
 }
 .empty-state > p {
-  max-width: 340px;
+  max-width: 380px;
   font-size: var(--fs-sm);
   color: var(--ink-3);
   line-height: 1.7;
@@ -1335,8 +1362,8 @@ h2 {
 }
 .farm-illustration {
   position: relative;
-  width: 180px;
-  height: 84px;
+  width: 200px;
+  height: 94px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1352,8 +1379,8 @@ h2 {
   z-index: 1;
 }
 .main-node {
-  width: 62px;
-  height: 62px;
+  width: 68px;
+  height: 68px;
   border-radius: var(--r-xl);
   position: relative;
   background: linear-gradient(140deg, var(--surface), var(--accent-soft));
@@ -1366,8 +1393,8 @@ h2 {
 .main-node i {
   display: grid;
   place-items: center;
-  width: 19px;
-  height: 19px;
+  width: 21px;
+  height: 21px;
   border: 3px solid var(--surface);
   background: var(--accent);
   color: #fff;
@@ -1380,8 +1407,8 @@ html[data-theme="dark"] .main-node i {
   color: #071a11;
 }
 .side-node {
-  width: 36px;
-  height: 39px;
+  width: 40px;
+  height: 43px;
   border-radius: var(--r-lg);
   position: absolute;
   top: 25px;
@@ -1396,13 +1423,13 @@ html[data-theme="dark"] .main-node i {
 }
 .illustration-line.horizontal {
   position: absolute;
-  width: 140px;
+  width: 156px;
   top: 46px;
   border-top: 1px dashed var(--accent-line);
 }
 .illustration-line.vertical {
   position: absolute;
-  height: 81px;
+  height: 90px;
   left: 90px;
   border-left: 1px dashed var(--accent-line);
 }
@@ -1640,7 +1667,7 @@ html[data-theme="dark"] .main-node i {
   align-items: center;
   justify-content: center;
   gap: 10px;
-  min-height: 170px;
+  min-height: 190px;
   color: var(--ink-3);
   font-size: var(--fs-sm);
 }
@@ -1677,7 +1704,7 @@ html[data-theme="dark"] .modal-backdrop {
 .modal {
   display: flex;
   flex-direction: column;
-  width: 520px;
+  width: 560px;
   max-width: 100%;
   /* Never taller than the viewport: the body scrolls, the actions stay in view. */
   max-height: calc(
@@ -1692,20 +1719,28 @@ html[data-theme="dark"] .modal-backdrop {
 }
 /* The form on the left, the plan it produces on the right, as the mock lays it out. */
 .create-modal {
-  width: 960px;
+  width: 1000px;
 }
 .create-modal .modal-body {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 292px;
+  grid-template-columns: minmax(0, 1fr) 312px;
   gap: 0;
   padding: 0;
 }
 .create-modal .modal-form {
   display: grid;
+  /* One column that never grows past the pane: an `auto` track would size to the
+     max-content of its widest child and push the whole form out of the dialog. */
+  grid-template-columns: minmax(0, 1fr);
   gap: 15px;
   align-content: start;
   min-width: 0;
   padding: 15px 18px 18px;
+}
+/* A row like the release picker keeps its label on one line, so its min-content
+   is far wider than a phone-width dialog. Let it shrink and ellipsize instead. */
+.create-modal .modal-form > * {
+  min-width: 0;
 }
 .create-modal .modal-aside {
   display: grid;
@@ -1798,12 +1833,14 @@ html[data-theme="dark"] .modal-backdrop {
   display: inline-flex;
   align-items: center;
   gap: 4px;
+  max-width: 100%;
   padding: 1px 6px;
   border-radius: var(--r-sm);
   background: var(--accent-soft);
   color: var(--accent-ink);
   font-family: var(--font-mono);
   font-weight: 650;
+  overflow-wrap: anywhere;
   cursor: copy;
 }
 .copy-text:hover {
@@ -1836,11 +1873,11 @@ html[data-theme="dark"] .modal-backdrop {
   width: 100%;
   border: 1px solid var(--line-2);
   border-radius: var(--r-sm);
-  padding: 0 9px;
+  padding: 0 10px;
   font-size: var(--fs-sm);
   color: var(--ink);
   background: var(--surface);
-  height: 30px;
+  height: 40px;
   transition:
     border-color 0.12s,
     box-shadow 0.12s;
@@ -1878,8 +1915,8 @@ html[data-theme="dark"] .modal-backdrop {
 }
 .radio {
   border: 1px solid var(--line-strong);
-  width: 15px;
-  height: 15px;
+  width: 17px;
+  height: 17px;
   border-radius: 100%;
   display: grid;
   place-items: center;
@@ -1936,7 +1973,7 @@ html[data-theme="dark"] .modal-backdrop {
   color: var(--ink);
 }
 .component-text small {
-  font-size: 9.5px;
+  font-size: var(--fs-2xs);
   line-height: 1.35;
   color: var(--ink-4);
 }
@@ -1950,7 +1987,7 @@ html[data-theme="dark"] .modal-backdrop {
 .component-badge {
   flex-shrink: 0;
   white-space: nowrap;
-  font-size: 8.5px;
+  font-size: var(--fs-2xs);
   line-height: 1.4;
   color: var(--ink-4);
 }
@@ -1962,8 +1999,8 @@ html[data-theme="dark"] .modal-backdrop {
 }
 .checkbox {
   flex-shrink: 0;
-  width: 15px;
-  height: 15px;
+  width: 17px;
+  height: 17px;
   border-radius: var(--r-xs);
   background: var(--accent);
   color: #fff;
@@ -1987,8 +2024,8 @@ html[data-theme="dark"] .checkbox {
   display: flex;
   flex-direction: column;
   gap: 10px;
-  min-height: 132px;
-  padding: 12px;
+  min-height: 148px;
+  padding: 13px;
   border: 1px solid var(--line);
   border-radius: var(--r-md);
   background: var(--surface);
@@ -2054,11 +2091,17 @@ html[data-theme="dark"] .checkbox {
   display: flex;
   gap: var(--s4);
   align-items: center;
+  /* The text column holds long paths and IDs; let it shrink so they wrap
+     inside the dialog instead of pushing the card past its edge. */
+  min-width: 0;
   padding: 12px 14px;
   border: 1px solid var(--line);
   border-radius: var(--r-md);
   background: var(--surface-2);
   color: var(--ink-2);
+}
+.action-context > div {
+  min-width: 0;
 }
 .action-context p {
   font-size: var(--fs-xs);
@@ -2108,8 +2151,8 @@ html[data-theme="dark"] .checkbox {
 .detail-avatar {
   display: grid;
   place-items: center;
-  width: 38px;
-  height: 38px;
+  width: 42px;
+  height: 42px;
   flex-shrink: 0;
   margin-top: 1px;
   border: 1px solid var(--accent-line);
@@ -2193,8 +2236,8 @@ html[data-theme="dark"] .checkbox {
 .tab {
   display: flex;
   align-items: center;
-  gap: 5px;
-  height: 34px;
+  gap: 6px;
+  height: 46px;
   padding: 0 2px;
   border-bottom: 2px solid transparent;
   margin-bottom: -1px;
@@ -2232,20 +2275,22 @@ html[data-theme="dark"] .checkbox {
   font-family: var(--font-mono);
   font-size: var(--fs-2xs);
   color: var(--ink-3);
+  /* Keep "VM 2대" together when the panel gets narrow. */
+  word-break: keep-all;
 }
 /* Host card on the left, the farm's VMs hanging off one link on the right. */
 .topology-graph {
   display: grid;
-  grid-template-columns: 196px minmax(0, 1fr);
+  grid-template-columns: 210px minmax(0, 1fr);
   gap: var(--s5);
-  padding: 14px;
+  padding: 15px;
 }
 .topology-host {
   align-self: start;
   display: grid;
-  gap: 5px;
+  gap: 6px;
   min-width: 0;
-  padding: 11px;
+  padding: 12px;
   border: 1px solid var(--line);
   border-radius: var(--r-md);
   background: var(--surface-2);
@@ -2294,7 +2339,7 @@ html[data-theme="dark"] .checkbox {
   color: var(--ink-3);
 }
 .topology-net code {
-  font-size: 10px;
+  font-size: var(--fs-2xs);
   color: var(--ink-2);
 }
 .topology-vms {
@@ -2356,8 +2401,8 @@ html[data-theme="dark"] .checkbox {
 .node-top {
   display: flex;
   align-items: center;
-  gap: 7px;
-  padding: 8px 10px;
+  gap: 8px;
+  padding: 9px 11px;
   min-width: 0;
 }
 .node-top svg {
@@ -2376,7 +2421,7 @@ html[data-theme="dark"] .checkbox {
   color: var(--ink);
 }
 .node-role {
-  font-size: 9.5px;
+  font-size: var(--fs-2xs);
   font-weight: 650;
   letter-spacing: 0.06em;
   text-transform: uppercase;
@@ -2385,7 +2430,7 @@ html[data-theme="dark"] .checkbox {
 .node-memory {
   margin-left: auto;
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: var(--fs-2xs);
   color: var(--ink-3);
   white-space: nowrap;
 }
@@ -2405,7 +2450,7 @@ html[data-theme="dark"] .checkbox {
   flex-wrap: wrap;
   align-items: center;
   gap: 3px;
-  padding: 0 10px 8px;
+  padding: 0 11px 9px;
 }
 .node-tags .tag {
   background: var(--surface-2);
@@ -2415,14 +2460,14 @@ html[data-theme="dark"] .checkbox {
   align-items: center;
   flex-wrap: wrap;
   gap: var(--s3);
-  padding: 6px 10px;
+  padding: 7px 11px;
   border-top: 1px solid var(--line);
   font-size: var(--fs-2xs);
   color: var(--ink-3);
   min-width: 0;
 }
 .node-meta code {
-  font-size: 10px;
+  font-size: var(--fs-2xs);
   color: var(--ink-2);
 }
 .node-meta .node-name {
@@ -2438,7 +2483,7 @@ html[data-theme="dark"] .checkbox {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 6px 10px;
+  padding: 7px 11px;
   border-top: 1px dashed var(--line-2);
   background: var(--surface-2);
   color: var(--run);
@@ -2501,10 +2546,10 @@ html[data-theme="dark"] .checkbox {
 }
 .phase-list li {
   display: grid;
-  grid-template-columns: 18px minmax(0, 1fr) auto;
+  grid-template-columns: 22px minmax(0, 1fr) auto;
   align-items: center;
   gap: var(--s3);
-  padding: 5px 7px;
+  padding: 6px 8px;
   border-radius: var(--r-sm);
 }
 .phase-list li:not(:last-child)::before {
@@ -2513,15 +2558,15 @@ html[data-theme="dark"] .checkbox {
 .phase-marker {
   display: grid;
   place-items: center;
-  width: 16px;
-  height: 16px;
+  width: 20px;
+  height: 20px;
   margin: 0;
   border: 1px solid var(--line-2);
   border-radius: 50%;
   background: var(--surface);
   color: var(--ink-4);
   font-family: var(--font-mono);
-  font-size: 8px;
+  font-size: var(--fs-2xs);
   flex-shrink: 0;
 }
 .phase-marker > span {
@@ -2569,7 +2614,7 @@ html[data-theme="dark"] .phase-current .phase-marker {
   font-weight: 650;
 }
 .phase-list li > div > span {
-  font-size: 10px;
+  font-size: var(--fs-2xs);
   line-height: 1.5;
   color: var(--ink-4);
   overflow: hidden;
@@ -2606,8 +2651,8 @@ html[data-theme="dark"] .phase-current .phase-marker {
 .endpoint-icon {
   display: grid;
   place-items: center;
-  width: 24px;
-  height: 24px;
+  width: 28px;
+  height: 28px;
   flex-shrink: 0;
   border: 0;
   border-radius: var(--r-xs);
@@ -2623,15 +2668,15 @@ html[data-theme="dark"] .phase-current .phase-marker {
 .endpoint small {
   display: block;
   margin-top: 1px;
-  font-size: 9.5px;
+  font-size: var(--fs-2xs);
   color: var(--ink-4);
 }
 .endpoint-url {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 7px;
   margin: 0;
-  padding-left: 32px;
+  padding-left: 36px;
   min-width: 0;
 }
 .endpoint-url code {
@@ -2641,7 +2686,7 @@ html[data-theme="dark"] .phase-current .phase-marker {
   border-radius: 0;
   background: none;
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: var(--fs-2xs);
   color: var(--ink-3);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -2649,19 +2694,19 @@ html[data-theme="dark"] .phase-current .phase-marker {
 }
 .endpoint-pending {
   margin-left: auto;
-  font-size: 9.5px;
+  font-size: var(--fs-2xs);
   color: var(--warn);
   white-space: nowrap;
 }
 .horizon-login {
   display: grid;
-  gap: 6px;
+  gap: 7px;
   margin: 0;
-  padding-left: 32px;
+  padding-left: 36px;
 }
 .horizon-login div {
   display: grid;
-  grid-template-columns: 72px minmax(0, 1fr);
+  grid-template-columns: 80px minmax(0, 1fr);
   gap: var(--s3);
   align-items: center;
 }
@@ -2676,8 +2721,8 @@ html[data-theme="dark"] .phase-current .phase-marker {
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
-  width: 22px;
-  height: 22px;
+  width: 26px;
+  height: 26px;
   border-radius: var(--r-xs);
   color: var(--ink-4);
   text-decoration: none;
@@ -2779,7 +2824,7 @@ html[data-theme="dark"] .phase-current .phase-marker {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  height: 25px;
+  height: 28px;
   padding: 0 9px;
   border-radius: var(--r-sm);
   font-size: var(--fs-xs);
@@ -2806,8 +2851,8 @@ html[data-theme="dark"] .phase-current .phase-marker {
 .job-kind-icon {
   display: grid;
   place-items: center;
-  width: 28px;
-  height: 28px;
+  width: 32px;
+  height: 32px;
   border-radius: var(--r-sm);
   background: var(--surface-2);
   border: 1px solid var(--line);
@@ -2852,8 +2897,8 @@ html[data-theme="dark"] .phase-current .phase-marker {
   padding: 27px;
 }
 .host-banner-icon {
-  width: 66px;
-  height: 66px;
+  width: 72px;
+  height: 72px;
   background: var(--accent-soft);
   color: var(--accent);
   border: 1px solid var(--accent-line);
@@ -3054,7 +3099,7 @@ html[data-theme="dark"] .phase-current .phase-marker {
   gap: 4px;
   margin-left: 4px;
   font-family: var(--font-mono);
-  font-size: 9.5px;
+  font-size: var(--fs-2xs);
   letter-spacing: 0.06em;
   color: var(--ink-4);
 }
@@ -3065,8 +3110,8 @@ html[data-theme="dark"] .phase-current .phase-marker {
   color: var(--warn);
 }
 .log-button {
-  height: 24px;
-  padding: 0 8px;
+  height: 28px;
+  padding: 0 9px;
   font-size: var(--fs-xs);
   color: var(--ink-3);
 }
@@ -3075,13 +3120,13 @@ html[data-theme="dark"] .phase-current .phase-marker {
   color: var(--ink);
 }
 .log-body {
-  height: 430px;
+  height: 470px;
   overflow: auto;
   padding: 8px 0;
   background: var(--code-bg);
   scrollbar-color: var(--line-2) transparent;
   font-family: var(--font-mono);
-  font-size: 10.5px;
+  font-size: var(--fs-2xs);
   line-height: 1.7;
 }
 .log-lines {
@@ -3089,8 +3134,8 @@ html[data-theme="dark"] .phase-current .phase-marker {
 }
 .log-entry {
   display: grid;
-  grid-template-columns: 58px minmax(0, 1fr);
-  gap: 9px;
+  grid-template-columns: 68px minmax(0, 1fr);
+  gap: 10px;
   padding: 0 12px;
   font-family: inherit;
   font-size: inherit;
@@ -3103,7 +3148,7 @@ html[data-theme="dark"] .phase-current .phase-marker {
   flex-shrink: 0;
   padding-top: 0;
   color: var(--ink-4);
-  font-size: 9.5px;
+  font-size: var(--fs-2xs);
   user-select: none;
 }
 .log-message {
@@ -3153,7 +3198,7 @@ html[data-theme="dark"] .phase-current .phase-marker {
 /* The overview's tail of the same log: a short panel instead of the full-height tab. */
 .log-body.compact {
   height: auto;
-  max-height: 196px;
+  max-height: 216px;
 }
 .log-empty-inline {
   padding: 18px 14px;
@@ -3161,7 +3206,7 @@ html[data-theme="dark"] .phase-current .phase-marker {
   font-size: var(--fs-xs);
 }
 .terminal-body {
-  height: 480px;
+  height: 520px;
   padding: 10px 6px 10px 14px;
   background: var(--code-bg);
   font-family: var(--font-mono);
@@ -3240,10 +3285,10 @@ html[data-theme="dark"] .phase-current .phase-marker {
     padding: 16px 14px;
   }
   .metric-value {
-    font-size: 23px;
+    font-size: var(--fs-2xl);
   }
   .metric-value small {
-    font-size: 12px;
+    font-size: var(--fs-sm);
     margin-left: 5px;
   }
   .below-grid {
@@ -3329,7 +3374,7 @@ html[data-theme="dark"] .phase-current .phase-marker {
 }
 @media (max-width: 760px) {
   .topbar {
-    height: 48px;
+    height: 56px;
     padding: 0 12px;
     gap: var(--s3);
   }
@@ -3338,7 +3383,7 @@ html[data-theme="dark"] .phase-current .phase-marker {
   }
   .main-footer {
     margin: 0 14px;
-    font-size: 12px;
+    font-size: var(--fs-sm);
   }
   .breadcrumb .crumb-workspace,
   .breadcrumb .crumb-workspace + .crumb-sep {
@@ -3369,10 +3414,10 @@ html[data-theme="dark"] .phase-current .phase-marker {
     padding: 14px;
   }
   .metric-label {
-    font-size: 13px;
+    font-size: var(--fs-md);
   }
   .metric-value {
-    font-size: 20px;
+    font-size: var(--fs-xl);
     margin-top: 2px;
   }
   .metric-value small {
@@ -3380,7 +3425,7 @@ html[data-theme="dark"] .phase-current .phase-marker {
     margin-left: 5px;
   }
   .metric-detail {
-    font-size: 12px;
+    font-size: var(--fs-sm);
   }
   .panel-toolbar {
     padding: 15px;
@@ -3405,7 +3450,7 @@ html[data-theme="dark"] .phase-current .phase-marker {
     gap: 5px;
   }
   .workflow-steps > span {
-    font-size: 13px;
+    font-size: var(--fs-md);
     gap: 4px;
   }
   .getting-started,
@@ -3416,7 +3461,7 @@ html[data-theme="dark"] .phase-current .phase-marker {
     display: none;
   }
   .empty-state {
-    min-height: 330px;
+    min-height: 360px;
   }
   .modal-viewport {
     --modal-gutter-top: 16px;
@@ -3440,37 +3485,37 @@ html[data-theme="dark"] .phase-current .phase-marker {
     gap: 14px;
   }
   .plan-summary > div span {
-    font-size: 13px;
+    font-size: var(--fs-md);
   }
   .plan-summary strong {
-    font-size: 14px;
+    font-size: var(--fs-md);
   }
   .detail-title h1 {
-    font-size: 20px;
+    font-size: var(--fs-xl);
   }
   .detail-title {
     gap: 10px;
   }
   .detail-avatar {
-    width: 44px;
-    height: 44px;
+    width: 48px;
+    height: 48px;
   }
   .detail-facts > div {
     padding: 16px 13px;
     gap: 8px;
   }
   .detail-facts strong {
-    font-size: 13px;
+    font-size: var(--fs-md);
   }
   .job-summary {
     gap: 20px;
   }
   .job-summary > span {
-    font-size: 13px;
+    font-size: var(--fs-md);
     gap: 5px;
   }
   .job-summary strong {
-    font-size: 18px;
+    font-size: var(--fs-xl);
   }
   .job-row {
     padding: 16px;
@@ -3481,14 +3526,14 @@ html[data-theme="dark"] .phase-current .phase-marker {
     gap: 14px;
   }
   .host-banner-icon {
-    width: 50px;
-    height: 50px;
+    width: 56px;
+    height: 56px;
   }
   .host-banner h2 {
-    font-size: 18px;
+    font-size: var(--fs-xl);
   }
   .host-banner div > p:last-child {
-    font-size: 13px;
+    font-size: var(--fs-md);
   }
   .host-help {
     flex-wrap: wrap;
@@ -3546,12 +3591,12 @@ html[data-theme="dark"] .phase-current .phase-marker {
 .remote-workflow-step .n {
   display: grid;
   place-items: center;
-  width: 16px;
-  height: 16px;
+  width: 20px;
+  height: 20px;
   border-radius: var(--r-pill);
   background: var(--surface-2);
   font-family: var(--font-mono);
-  font-size: 8.5px;
+  font-size: var(--fs-2xs);
   color: var(--ink-3);
 }
 .remote-workflow-step.done {
@@ -3606,8 +3651,8 @@ html[data-theme="dark"] .phase-current .phase-marker {
 .remote-server-icon {
   display: grid;
   place-items: center;
-  width: 28px;
-  height: 28px;
+  width: 32px;
+  height: 32px;
   flex-shrink: 0;
   border: 1px solid var(--line);
   border-radius: var(--r-sm);
@@ -3627,14 +3672,14 @@ html[data-theme="dark"] .phase-current .phase-marker {
   letter-spacing: -0.01em;
 }
 .remote-host-row-text code {
-  font-size: 9.5px;
+  font-size: var(--fs-2xs);
   color: var(--ink-3);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .remote-host-row-meter {
-  height: 2px;
+  height: 3px;
   margin-top: 4px;
   border-radius: 2px;
   background: var(--surface-3);
@@ -3652,17 +3697,17 @@ html[data-theme="dark"] .phase-current .phase-marker {
   flex-shrink: 0;
 }
 .remote-host-row-side .status-badge {
-  height: 17px;
-  padding: 0 5px;
-  font-size: 9px;
+  height: 20px;
+  padding: 0 6px;
+  font-size: var(--fs-2xs);
 }
 .remote-host-row-side small {
-  font-size: 9px;
+  font-size: var(--fs-2xs);
   color: var(--ink-4);
   font-variant-numeric: tabular-nums;
 }
 .remote-host-detail {
-  padding: 14px 15px 12px;
+  padding: 15px 16px 13px;
 }
 .remote-detail-heading {
   display: flex;
@@ -3673,8 +3718,8 @@ html[data-theme="dark"] .phase-current .phase-marker {
 .remote-detail-glyph {
   display: grid;
   place-items: center;
-  width: 32px;
-  height: 32px;
+  width: 36px;
+  height: 36px;
   flex-shrink: 0;
   border: 1px solid var(--line);
   border-radius: var(--r-sm);
@@ -3730,7 +3775,7 @@ html[data-theme="dark"] .phase-current .phase-marker {
 .remote-key-confirm code {
   display: block;
   overflow-wrap: anywhere;
-  font-size: 10px;
+  font-size: var(--fs-2xs);
   color: var(--ink-2);
 }
 .agent-command {
@@ -3760,7 +3805,7 @@ html[data-theme="dark"] .phase-current .phase-marker {
   border-left: 1px solid var(--line);
 }
 .remote-resources span {
-  font-size: 9.5px;
+  font-size: var(--fs-2xs);
   color: var(--ink-4);
 }
 .remote-resources strong {
@@ -3788,7 +3833,7 @@ html[data-theme="dark"] .phase-current .phase-marker {
   font-variant-numeric: tabular-nums;
 }
 .remote-capacity-bar {
-  height: 5px;
+  height: 6px;
   border-radius: 3px;
   background: var(--surface-3);
   overflow: hidden;
@@ -3803,7 +3848,7 @@ html[data-theme="dark"] .phase-current .phase-marker {
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
-  font-size: 9.5px;
+  font-size: var(--fs-2xs);
   color: var(--ink-4);
 }
 .remote-capacity-legend span {
@@ -3843,7 +3888,7 @@ html[data-theme="dark"] .phase-current .phase-marker {
 }
 .remote-checks li > span:last-child {
   margin-left: auto;
-  font-size: 9.5px;
+  font-size: var(--fs-2xs);
   color: var(--ink-4);
   white-space: nowrap;
 }
@@ -3911,8 +3956,8 @@ html[data-theme="dark"] .phase-current .phase-marker {
 .host-job-history summary {
   cursor: pointer;
   display: grid;
-  grid-template-columns: 12px 82px 96px minmax(0, 1fr) auto auto;
-  gap: 10px;
+  grid-template-columns: 14px 94px 112px minmax(0, 1fr) auto auto;
+  gap: 12px;
   align-items: center;
   padding: 7px 14px;
 }
@@ -3949,7 +3994,7 @@ html[data-theme="dark"] .phase-current .phase-marker {
 }
 .host-job-history summary > time {
   color: var(--ink-4);
-  font-size: 10px;
+  font-size: var(--fs-2xs);
   white-space: nowrap;
 }
 .host-job-history ol {
@@ -3967,7 +4012,7 @@ html[data-theme="dark"] .phase-current .phase-marker {
 .host-job-history li time {
   color: var(--ink-4);
   flex-shrink: 0;
-  font-size: 10px;
+  font-size: var(--fs-2xs);
 }
 .host-job-history > .job-error {
   margin: 0 14px 12px;
@@ -3978,10 +4023,6 @@ html[data-theme="dark"] .phase-current .phase-marker {
   padding-left: 18px;
   line-height: 2;
   font-size: var(--fs-sm);
-}
-.remote-register-modal {
-  max-height: calc(100dvh - 40px);
-  overflow-y: auto;
 }
 .remote-key-confirm {
   display: grid;
@@ -3995,9 +4036,9 @@ html[data-theme="dark"] .phase-current .phase-marker {
   margin: 0;
 }
 .remote-key-input {
-  height: 100px;
-  min-height: 90px;
-  max-height: 180px;
+  height: 112px;
+  min-height: 100px;
+  max-height: 200px;
   resize: vertical;
   font-family: var(--font-mono, monospace);
   font-size: var(--fs-xs);
@@ -4017,7 +4058,7 @@ html[data-theme="dark"] .phase-current .phase-marker {
     grid-template-columns: 1fr;
   }
   .remote-host-list {
-    max-height: 340px;
+    max-height: 380px;
     overflow: auto;
   }
 }
@@ -4081,7 +4122,7 @@ html[data-theme="dark"] .phase-current .phase-marker {
   overflow-x: auto;
 }
 .jobs-scope .tab {
-  height: 26px;
+  height: 30px;
   padding: 0 9px;
   border: 0;
   border-radius: var(--r-sm);
@@ -4103,13 +4144,13 @@ html[data-theme="dark"] .phase-current .phase-marker {
     inset 0 0 0 1px var(--line);
 }
 .jobs-scope .count-pill {
-  height: 16px;
-  min-width: 16px;
+  height: 18px;
+  min-width: 18px;
   padding: 0 4px;
   border: 0;
   background: transparent;
   color: var(--ink-4);
-  font-size: 9.5px;
+  font-size: var(--fs-2xs);
 }
 .jobs-scope .tab[data-active] .count-pill {
   border: 0;
@@ -4174,8 +4215,8 @@ html[data-theme="dark"] .phase-current .phase-marker {
 .jobs-live-glyph {
   display: grid;
   place-items: center;
-  width: 24px;
-  height: 24px;
+  width: 28px;
+  height: 28px;
   flex-shrink: 0;
   border: 1px solid var(--run-line);
   border-radius: var(--r-sm);
@@ -4233,7 +4274,7 @@ html[data-theme="dark"] .phase-current .phase-marker {
   gap: 2px;
 }
 .jobs-phase-track i {
-  height: 4px;
+  height: 5px;
   border-radius: 2px;
   background: var(--surface-3);
 }
@@ -4245,18 +4286,18 @@ html[data-theme="dark"] .phase-current .phase-marker {
   display: flex;
   justify-content: space-between;
   margin-top: -3px;
-  font-size: 9px;
+  font-size: var(--fs-2xs);
   color: var(--ink-4);
 }
 .jobs-live-foot {
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: 9.5px;
+  font-size: var(--fs-2xs);
   color: var(--ink-4);
 }
 .jobs-live-foot code {
-  font-size: 9.5px;
+  font-size: var(--fs-2xs);
   color: var(--ink-3);
 }
 .jobs-live-foot .right {
@@ -4287,9 +4328,9 @@ html[data-theme="dark"] .phase-current .phase-marker {
   justify-content: space-between;
   gap: var(--s3);
   flex-wrap: wrap;
-  padding: 10px 14px;
+  padding: 11px 15px;
   border-bottom: 1px solid var(--line);
-  min-height: 42px;
+  min-height: 46px;
 }
 .jobs-history-heading h2 svg {
   color: var(--ink-3);
@@ -4303,8 +4344,8 @@ html[data-theme="dark"] .phase-current .phase-marker {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  height: 26px;
-  padding: 0 9px;
+  height: 30px;
+  padding: 0 10px;
   border: 1px solid var(--line-2);
   border-radius: var(--r-sm);
   background: var(--surface);
@@ -4322,8 +4363,8 @@ html[data-theme="dark"] .phase-current .phase-marker {
   background: var(--surface-2);
 }
 .jobs-group-toggle input {
-  width: 13px;
-  height: 13px;
+  width: 15px;
+  height: 15px;
   margin: 0;
   accent-color: var(--accent);
 }
@@ -4341,8 +4382,8 @@ html[data-theme="dark"] .phase-current .phase-marker {
 }
 .jobs-filters .search-input {
   flex: 1;
-  min-width: 200px;
-  height: 27px;
+  min-width: 220px;
+  height: 32px;
 }
 .jobs-filters .search-input input {
   width: 100%;
@@ -4350,9 +4391,9 @@ html[data-theme="dark"] .phase-current .phase-marker {
   font-size: var(--fs-xs);
 }
 .jobs-filters .select-trigger {
-  min-width: 104px;
-  height: 27px;
-  min-height: 27px;
+  min-width: 116px;
+  height: 32px;
+  min-height: 32px;
   padding: 0 8px;
   font-size: var(--fs-xs);
 }
@@ -4387,13 +4428,13 @@ html[data-theme="dark"] .phase-current .phase-marker {
   display: inline-flex;
   align-items: center;
   gap: 3px;
-  height: 17px;
-  padding: 0 5px;
+  height: 20px;
+  padding: 0 6px;
   border: 1px solid var(--line);
   border-radius: var(--r-xs);
   background: var(--surface-2);
   color: var(--ink-3);
-  font-size: 9.5px;
+  font-size: var(--fs-2xs);
   white-space: nowrap;
 }
 .jobs-expand:hover {
@@ -4401,10 +4442,10 @@ html[data-theme="dark"] .phase-current .phase-marker {
 }
 .jobs-previous small {
   color: var(--ink-4);
-  font-size: 9.5px;
+  font-size: var(--fs-2xs);
 }
 .jobs-previous-row td {
-  height: 38px;
+  height: 42px;
   background: var(--surface-2);
   color: var(--ink-3);
 }
@@ -4445,7 +4486,7 @@ html[data-theme="dark"] .phase-current .phase-marker {
 }
 .jobs-result {
   display: block;
-  max-width: 300px;
+  max-width: 330px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -4453,14 +4494,14 @@ html[data-theme="dark"] .phase-current .phase-marker {
   color: var(--ink-3);
 }
 .jobs-result code {
-  font-size: 10px;
+  font-size: var(--fs-2xs);
 }
 .jobs-failure-summary {
   color: var(--bad);
 }
 .jobs-duration {
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: var(--fs-2xs);
   color: var(--ink-3);
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
@@ -4475,7 +4516,7 @@ html[data-theme="dark"] .phase-current .phase-marker {
 .job-drawer {
   display: flex;
   flex-direction: column;
-  width: min(560px, 100%);
+  width: min(600px, 100%);
   height: 100%;
   background: var(--surface);
   border-left: 1px solid var(--line);
@@ -4528,7 +4569,7 @@ html[data-theme="dark"] .phase-current .phase-marker {
   font-variant-numeric: tabular-nums;
 }
 .job-detail-facts .font-mono {
-  font-size: 10px;
+  font-size: var(--fs-2xs);
 }
 .job-detail-error {
   background: var(--bad-bg);
@@ -4567,8 +4608,9 @@ html[data-theme="dark"] .phase-current .phase-marker {
   line-height: 1.7;
 }
 .job-log-output {
-  font-size: 10px;
+  font-size: var(--fs-2xs);
   line-height: 1.7;
+  max-height: 290px;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
   background: var(--code-bg);
@@ -4576,7 +4618,7 @@ html[data-theme="dark"] .phase-current .phase-marker {
   border-radius: var(--r-sm);
   padding: 10px;
   margin-top: 6px;
-  max-height: 260px;
+  max-height: 290px;
   overflow: auto;
 }
 .job-drawer-footer {
@@ -4594,7 +4636,7 @@ html[data-theme="dark"] .phase-current .phase-marker {
   padding: 0 0 12px 12px;
 }
 .job-events time {
-  font-size: 10px;
+  font-size: var(--fs-2xs);
   color: var(--ink-4);
 }
 .job-events p {
@@ -4635,7 +4677,7 @@ html[data-theme="dark"] .phase-current .phase-marker {
     padding: 10px 12px;
   }
   .jobs-table {
-    min-width: 720px;
+    min-width: 780px;
   }
   .jobs-history .table-footer {
     padding: 8px 12px;
@@ -4656,15 +4698,15 @@ html[data-theme="dark"] .phase-current .phase-marker {
 }
 /* text-xs is 0.75rem of the 14px root, about 10.5px. Keep secondary text readable. */
 .text-xs {
-  font-size: 13px;
+  font-size: var(--fs-xs);
   line-height: 1.5;
 }
 /* A snapshot is one dense row: glyph, facts, actions. */
 .snap {
   display: grid;
-  grid-template-columns: 30px minmax(0, 1fr) auto;
-  gap: 11px;
-  padding: 12px 14px;
+  grid-template-columns: 34px minmax(0, 1fr) auto;
+  gap: 12px;
+  padding: 13px 15px;
   border-top: 1px solid var(--line);
 }
 .snap:first-of-type {
@@ -4676,8 +4718,8 @@ html[data-theme="dark"] .phase-current .phase-marker {
 .snap-glyph {
   display: grid;
   place-items: center;
-  width: 28px;
-  height: 28px;
+  width: 32px;
+  height: 32px;
   border: 1px solid var(--run-line);
   border-radius: var(--r-sm);
   background: var(--run-bg);
@@ -4714,7 +4756,7 @@ html[data-theme="dark"] .phase-current .phase-marker {
   color: var(--ink-4);
 }
 .snap-meta code {
-  font-size: 10px;
+  font-size: var(--fs-2xs);
   color: var(--ink-2);
 }
 .snap-meta a {
@@ -4740,7 +4782,7 @@ html[data-theme="dark"] .phase-current .phase-marker {
 .snap-progress {
   display: grid;
   gap: 4px;
-  max-width: 460px;
+  max-width: 500px;
   margin-top: 2px;
 }
 .snap-progress .cap {
@@ -4752,11 +4794,11 @@ html[data-theme="dark"] .phase-current .phase-marker {
   color: var(--run);
 }
 .snap-progress .cap code {
-  font-size: 10px;
+  font-size: var(--fs-2xs);
   color: var(--ink-3);
 }
 .snap-progress .bar {
-  height: 4px;
+  height: 5px;
   border-radius: 2px;
   background: var(--surface-3);
   overflow: hidden;
@@ -4785,7 +4827,7 @@ html[data-theme="dark"] .phase-current .phase-marker {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 10px;
+  font-size: var(--fs-2xs);
   color: var(--ink-2);
 }
 .snap-actions {
@@ -4795,7 +4837,7 @@ html[data-theme="dark"] .phase-current .phase-marker {
   padding-top: 2px;
 }
 .snap-actions .btn {
-  height: 25px;
+  height: 32px;
   padding: 0 8px;
   font-size: var(--fs-2xs);
 }
@@ -4843,8 +4885,8 @@ html[data-theme="dark"] .phase-current .phase-marker {
 .datastore-icon {
   display: grid;
   place-items: center;
-  width: 26px;
-  height: 26px;
+  width: 30px;
+  height: 30px;
   flex-shrink: 0;
   border-radius: var(--r-xs);
   border: 1px solid var(--line);
@@ -4874,7 +4916,7 @@ html[data-theme="dark"] .phase-current .phase-marker {
   border-radius: var(--r-xs);
   background: var(--surface);
   color: var(--ink-4);
-  font-size: 9.5px;
+  font-size: var(--fs-2xs);
   font-weight: 600;
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -5031,9 +5073,7 @@ html[data-theme="dark"] .phase-current .phase-marker {
   background: var(--bad-bg);
 }
 .bucket-modal {
-  width: 580px;
-  max-height: calc(100dvh - 40px);
-  overflow-y: auto;
+  width: 620px;
 }
 .service-picker button {
   flex: 1;
@@ -5127,7 +5167,7 @@ html[data-theme="dark"] .phase-current .phase-marker {
 .bucket-objects {
   display: flex;
   flex-direction: column;
-  max-height: 220px;
+  max-height: 240px;
   overflow-y: auto;
   border: 1px solid var(--line);
   border-radius: var(--r-sm);
@@ -5213,14 +5253,14 @@ html[data-theme="dark"] .phase-current .phase-marker {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 10px;
+  font-size: var(--fs-2xs);
   color: var(--ink-2);
 }
 .bucket-endpoint {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 10px;
+  font-size: var(--fs-2xs);
   color: var(--ink-4);
 }
 .bucket-note {
@@ -5237,7 +5277,7 @@ html[data-theme="dark"] .phase-current .phase-marker {
   flex-shrink: 0;
 }
 .bucket-actions .btn {
-  height: 25px;
+  height: 32px;
   padding: 0 8px;
   font-size: var(--fs-2xs);
 }
@@ -5276,7 +5316,7 @@ html[data-theme="dark"] .phase-current .phase-marker {
 }
 .phase-text .phase-step {
   color: var(--run);
-  font-size: 10px;
+  font-size: var(--fs-2xs);
   white-space: normal;
 }
 .phase-step svg {
@@ -5391,7 +5431,7 @@ html[data-theme="dark"] .phase-current .phase-marker {
   border-radius: 0;
   background: none;
   color: var(--ok);
-  font-size: 10px;
+  font-size: var(--fs-2xs);
   font-weight: 600;
   white-space: nowrap;
 }
@@ -5413,16 +5453,16 @@ html[data-theme="dark"] .phase-current .phase-marker {
   margin-left: auto;
 }
 .node-fault-actions .btn {
-  height: 21px;
+  height: 28px;
   padding: 0 6px;
-  font-size: 10px;
+  font-size: var(--fs-2xs);
   background: var(--surface);
 }
 
 /* The relay button's state: off, up, connecting or failing. */
 .relay-dot {
-  width: 7px;
-  height: 7px;
+  width: 8px;
+  height: 8px;
   border-radius: var(--r-pill);
   background: var(--line-strong);
 }
@@ -5536,8 +5576,8 @@ html[data-theme="dark"] .phase-current .phase-marker {
   color: var(--ok);
 }
 .tunnel-progress-dot {
-  width: 14px;
-  height: 14px;
+  width: 16px;
+  height: 16px;
   display: grid;
   place-items: center;
 }
@@ -5592,13 +5632,20 @@ html[data-theme="dark"] .phase-current .phase-marker {
   display: flex;
   flex-wrap: wrap;
   gap: 3px;
-  max-width: 260px;
+  max-width: 290px;
+}
+/* A table row sizes to its cell, not to a fixed 260px: capping the tags there
+   wrapped the service list onto two lines and pushed the row past 50px. Let the
+   chips wrap inside the cell instead, so no column is pushed off the table. */
+.data-table .tags {
+  max-width: 100%;
+  gap: 4px;
 }
 .tag {
   display: inline-flex;
   align-items: center;
-  gap: 3px;
-  padding: 1px 5px;
+  gap: 4px;
+  padding: 2px 6px;
   border: 1px solid var(--line);
   border-radius: var(--r-xs);
   background: var(--surface-2);
@@ -5612,9 +5659,9 @@ html[data-theme="dark"] .phase-current .phase-marker {
 .chip {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  height: 20px;
-  padding: 0 7px;
+  gap: 6px;
+  height: 26px;
+  padding: 0 9px;
   border: 1px solid var(--line);
   border-radius: var(--r-pill);
   background: var(--surface-2);
@@ -5625,7 +5672,7 @@ html[data-theme="dark"] .phase-current .phase-marker {
 }
 .chip.mono {
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: var(--fs-2xs);
 }
 .chip.accent {
   color: var(--accent-ink);
@@ -5643,7 +5690,7 @@ html[data-theme="dark"] .phase-current .phase-marker {
   z-index: 40;
   display: grid;
   gap: 2px;
-  min-width: 208px;
+  min-width: 228px;
   padding: 4px;
   border: 1px solid var(--line);
   border-radius: var(--r-md);
@@ -5721,7 +5768,7 @@ html[data-theme="dark"] .phase-current .phase-marker {
     font-size: var(--fs-xs);
   }
   .data-table td {
-    height: 42px;
+    height: 46px;
     padding: 5px 8px;
   }
   .data-table th {

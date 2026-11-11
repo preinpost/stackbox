@@ -232,7 +232,7 @@ function NodeShell({
           <span
             className={`stream-status ${connection === "open" ? "live" : connection === "connecting" ? "" : "reconnecting"}`}
           >
-            <Radio size={12} />
+            <Radio size={14} />
             {connection === "open"
               ? "CONNECTED"
               : connection === "connecting"
@@ -246,7 +246,7 @@ function NodeShell({
             className="log-button"
             onClick={() => setAttempt((n) => n + 1)}
           >
-            <RotateCcw size={13} />
+            <RotateCcw size={15} />
             다시 연결
           </Button>
         )}

@@ -167,7 +167,7 @@ export function FreezeFarmDialog({ farm }: { farm: Farm }) {
               : `VM을 스냅샷으로 얼려 ${farmHost.id}에 둡니다.`
         }
       >
-        <Snowflake size={14} />
+        <Snowflake size={16} />
         얼리기
       </Dialog.Trigger>
       <Modal
@@ -302,9 +302,9 @@ export function FreezeFarmDialog({ farm }: { farm: Farm }) {
               disabled={mutation.isPending || duplicate}
             >
               {mutation.isPending ? (
-                <LoaderCircle size={15} className="animate-spin" />
+                <LoaderCircle size={16} className="animate-spin" />
               ) : (
-                <Snowflake size={15} />
+                <Snowflake size={16} />
               )}
               얼리기 시작
             </Button>
@@ -366,7 +366,7 @@ export function RestoreSnapshotDialog({
   return (
     <Dialog.Root open={dialog.open} onOpenChange={dialog.onOpenChange}>
       <Dialog.Trigger render={<Button variant="primary" disabled={!ready} />}>
-        <CopyPlus size={14} />
+        <CopyPlus size={16} />
         Farm 만들기
       </Dialog.Trigger>
       <Modal
@@ -494,9 +494,9 @@ export function RestoreSnapshotDialog({
               }
             >
               {mutation.isPending ? (
-                <LoaderCircle size={15} className="animate-spin" />
+                <LoaderCircle size={16} className="animate-spin" />
               ) : (
-                <CopyPlus size={15} />
+                <CopyPlus size={16} />
               )}
               Farm 만들기
             </Button>
@@ -525,8 +525,8 @@ function TransferMode({
     <div className="segmented-control" role="radiogroup">
       {(
         [
-          { value: "bucket", label: "S3 버킷", icon: <Cloud size={14} /> },
-          { value: "file", label: fileLabel, icon: <HardDrive size={14} /> },
+          { value: "bucket", label: "S3 버킷", icon: <Cloud size={16} /> },
+          { value: "file", label: fileLabel, icon: <HardDrive size={16} /> },
         ] as const
       ).map((item) => (
         <button
@@ -603,7 +603,7 @@ export function ExportSnapshotDialog({ snapshot }: { snapshot: Snapshot }) {
             : undefined
         }
       >
-        <Download size={14} />
+        <Download size={16} />
         내보내기
       </Dialog.Trigger>
       <Modal
@@ -700,11 +700,11 @@ export function ExportSnapshotDialog({ snapshot }: { snapshot: Snapshot }) {
               disabled={mutation.isPending || (mode === "bucket" && !bucket)}
             >
               {mutation.isPending ? (
-                <LoaderCircle size={15} className="animate-spin" />
+                <LoaderCircle size={16} className="animate-spin" />
               ) : mode === "bucket" ? (
-                <CloudUpload size={15} />
+                <CloudUpload size={16} />
               ) : (
-                <Download size={15} />
+                <Download size={16} />
               )}
               내보내기 시작
             </Button>
@@ -754,7 +754,7 @@ export function ImportSnapshotDialog() {
   return (
     <Dialog.Root open={dialog.open} onOpenChange={dialog.onOpenChange}>
       <Dialog.Trigger render={<Button />}>
-        <Upload size={14} />
+        <Upload size={16} />
         가져오기
       </Dialog.Trigger>
       <Modal
@@ -806,7 +806,7 @@ export function ImportSnapshotDialog() {
                       disabled={objects.isFetching}
                       onClick={() => void objects.refetch()}
                     >
-                      <RefreshCw size={13} />
+                      <RefreshCw size={15} />
                       새로 고침
                     </button>
                   </span>
@@ -911,11 +911,11 @@ export function ImportSnapshotDialog() {
               disabled={mutation.isPending || !source.trim()}
             >
               {mutation.isPending ? (
-                <LoaderCircle size={15} className="animate-spin" />
+                <LoaderCircle size={16} className="animate-spin" />
               ) : mode === "bucket" ? (
-                <CloudDownload size={15} />
+                <CloudDownload size={16} />
               ) : (
-                <Upload size={15} />
+                <Upload size={16} />
               )}
               가져오기 시작
             </Button>
@@ -1015,9 +1015,9 @@ export function DeleteSnapshotDialog({ snapshot }: { snapshot: Snapshot }) {
             onClick={() => mutation.mutate()}
           >
             {mutation.isPending ? (
-              <LoaderCircle size={15} className="animate-spin" />
+              <LoaderCircle size={16} className="animate-spin" />
             ) : (
-              <Trash2 size={15} />
+              <Trash2 size={16} />
             )}
             {forget ? "기록만 삭제" : "스냅샷 삭제"}
           </Button>

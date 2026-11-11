@@ -123,14 +123,14 @@ function BucketRow({ bucket }: { bucket: Bucket }) {
   return (
     <div className="bucket">
       <span className="bucket-name">
-        <Cloud size={13} />
+        <Cloud size={15} />
         {bucket.id}
       </span>
       <span className="bucket-kind">
         {service.label}
         {bucket.ca_pem && (
           <span className="chip" title="등록한 CA 인증서도 신뢰합니다">
-            <ShieldCheck size={11} />
+            <ShieldCheck size={14} />
             사설 CA
           </span>
         )}
@@ -152,7 +152,7 @@ function BucketRow({ bucket }: { bucket: Bucket }) {
         </span>
         {check.isSuccess && (
           <span className="bucket-note">
-            <CircleCheck size={12} />
+            <CircleCheck size={14} />
             목록 조회, 쓰기, 삭제를 확인했습니다.
           </span>
         )}
@@ -171,9 +171,9 @@ function BucketRow({ bucket }: { bucket: Bucket }) {
           onClick={() => check.mutate()}
         >
           {check.isPending ? (
-            <LoaderCircle size={14} className="animate-spin" />
+            <LoaderCircle size={16} className="animate-spin" />
           ) : (
-            <CircleCheck size={14} />
+            <CircleCheck size={16} />
           )}
           연결 확인
         </Button>
@@ -275,10 +275,10 @@ export function BucketDialog({ bucket }: { bucket?: Bucket }) {
         }
       >
         {editing ? (
-          <Pencil size={15} />
+          <Pencil size={16} />
         ) : (
           <>
-            <Plus size={14} />
+            <Plus size={16} />
             버킷 등록
           </>
         )}
@@ -431,7 +431,7 @@ export function BucketDialog({ bucket }: { bucket?: Bucket }) {
                 onToggle={(event) => setAdvanced(event.currentTarget.open)}
               >
                 <summary>
-                  <ChevronRight size={15} className="form-advanced-chevron" />
+                  <ChevronRight size={16} className="form-advanced-chevron" />
                   고급 설정
                   <span>
                     {[
@@ -451,7 +451,7 @@ export function BucketDialog({ bucket }: { bucket?: Bucket }) {
                       className="checkbox"
                     >
                       <Checkbox.Indicator>
-                        <Check size={12} strokeWidth={3} />
+                        <Check size={14} strokeWidth={3} />
                       </Checkbox.Indicator>
                     </Checkbox.Root>
                     <span>
@@ -473,7 +473,7 @@ export function BucketDialog({ bucket }: { bucket?: Bucket }) {
                         disabled={pending}
                         onClick={() => caInput.current?.click()}
                       >
-                        <Upload size={13} />
+                        <Upload size={15} />
                         파일 선택
                       </button>
                     </span>
@@ -564,9 +564,9 @@ export function BucketDialog({ bucket }: { bucket?: Bucket }) {
               }}
             >
               {test.isPending ? (
-                <LoaderCircle size={15} className="animate-spin" />
+                <LoaderCircle size={16} className="animate-spin" />
               ) : (
-                <CircleCheck size={15} />
+                <CircleCheck size={16} />
               )}
               연결 확인
             </Button>
@@ -576,9 +576,9 @@ export function BucketDialog({ bucket }: { bucket?: Bucket }) {
               </Dialog.Close>
               <Button type="submit" variant="primary" disabled={pending}>
                 {save.isPending ? (
-                  <LoaderCircle size={15} className="animate-spin" />
+                  <LoaderCircle size={16} className="animate-spin" />
                 ) : (
-                  <Cloud size={15} />
+                  <Cloud size={16} />
                 )}
                 {editing ? "저장" : "등록"}
               </Button>
@@ -644,9 +644,9 @@ function DeleteBucketDialog({ bucket }: { bucket: Bucket }) {
             onClick={() => mutation.mutate()}
           >
             {mutation.isPending ? (
-              <LoaderCircle size={15} className="animate-spin" />
+              <LoaderCircle size={16} className="animate-spin" />
             ) : (
-              <Trash2 size={15} />
+              <Trash2 size={16} />
             )}
             등록 해제
           </Button>

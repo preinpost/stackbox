@@ -124,7 +124,7 @@ export function Shell() {
         </Link>
         <div className="workspace">
           <span className="workspace-avatar">
-            <Terminal size={14} />
+            <Terminal size={16} />
             <span className="online-dot" />
           </span>
           <div className="workspace-text">
@@ -199,7 +199,7 @@ export function Shell() {
                   </span>
                   <Link to="/hosts" onClick={() => setMenuOpen(false)}>
                     <span>호스트 관리</span>
-                    <ArrowRight size={10} />
+                    <ArrowRight size={13} />
                   </Link>
                 </div>
                 <ul className="host-mini-specs">
@@ -218,7 +218,7 @@ export function Shell() {
             {!hosts.data?.length && (
               <Link to="/hosts" onClick={() => setMenuOpen(false)}>
                 <span>호스트 관리</span>
-                <ArrowRight size={10} />
+                <ArrowRight size={13} />
               </Link>
             )}
           </div>
@@ -228,9 +228,9 @@ export function Shell() {
             target="_blank"
             rel="noreferrer"
           >
-            <ExternalLink size={13} />
+            <ExternalLink size={15} />
             <span>API specification</span>
-            <ArrowUpRight size={12} />
+            <ArrowUpRight size={14} />
           </a>
           <div className="sidebar-footer">
             <span className="operator-avatar">L</span>

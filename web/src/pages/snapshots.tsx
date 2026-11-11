@@ -66,7 +66,7 @@ export function SnapshotsPage() {
         <div className="panel-toolbar">
           <div className="flex items-center gap-2.5">
             <h2>
-              <Snowflake size={14} />
+              <Snowflake size={16} />
               모든 스냅샷
             </h2>
             <span className="count-pill">{sorted.length}</span>
@@ -128,9 +128,9 @@ function TransferProgress({ snapshot }: { snapshot: Snapshot }) {
     <div className="snap-progress">
       <span className="cap">
         {waiting ? (
-          <LoaderCircle size={11} className="animate-spin" />
+          <LoaderCircle size={14} className="animate-spin" />
         ) : (
-          <Cloud size={11} />
+          <Cloud size={14} />
         )}
         {label}
         <code>
@@ -187,7 +187,7 @@ function SnapshotRow({
   return (
     <article className="snap">
       <span className="snap-glyph" aria-hidden>
-        <Snowflake size={14} />
+        <Snowflake size={16} />
       </span>
       <div className="snap-body">
         <div className="snap-title">
@@ -278,7 +278,7 @@ function SnapshotRow({
         <SnapshotCopies snapshot={snapshot} />
         {snapshot.archive && (
           <div className="snap-archive">
-            <HardDrive size={11} />
+            <HardDrive size={14} />
             <code>{snapshot.archive.path}</code>
             <span>· {bytes(snapshot.archive.size_bytes)}</span>
             <span>

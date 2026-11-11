@@ -140,7 +140,7 @@ export function RemoteHostsPage() {
         actions={
           <>
             <Button onClick={() => void refresh()} disabled={hosts.isFetching}>
-              <RefreshCw size={15} />
+              <RefreshCw size={16} />
               새로고침
             </Button>
             <RelaySettingsDialog />
@@ -150,9 +150,9 @@ export function RemoteHostsPage() {
                 onClick={() => registerLocal.mutate()}
               >
                 {registerLocal.isPending ? (
-                  <LoaderCircle size={15} className="animate-spin" />
+                  <LoaderCircle size={16} className="animate-spin" />
                 ) : (
-                  <Monitor size={15} />
+                  <Monitor size={16} />
                 )}
                 로컬 호스트 등록
               </Button>
@@ -252,11 +252,11 @@ export function RemoteHostsPage() {
               >
                 <span className="remote-server-icon">
                   {host.kind === "local" ? (
-                    <Monitor size={15} strokeWidth={1.7} />
+                    <Monitor size={16} strokeWidth={1.7} />
                   ) : host.kind === "agent" ? (
-                    <RadioTower size={15} strokeWidth={1.7} />
+                    <RadioTower size={16} strokeWidth={1.7} />
                   ) : (
-                    <Server size={15} strokeWidth={1.7} />
+                    <Server size={16} strokeWidth={1.7} />
                   )}
                 </span>
                 <span className="remote-host-row-text">
@@ -398,7 +398,7 @@ export function RemoteHostsPage() {
                     setOpen(true);
                   }}
                 >
-                  <KeyRound size={14} />
+                  <KeyRound size={16} />
                   인증 변경
                 </Button>
               )}
@@ -419,7 +419,7 @@ export function RemoteHostsPage() {
                       : undefined
                   }
                 >
-                  <Terminal size={14} />
+                  <Terminal size={16} />
                   {agentMismatch
                     ? "Farm 실행기 재설치"
                     : remoteAgentNeedsUpdate(selected)
@@ -433,7 +433,7 @@ export function RemoteHostsPage() {
                   action.mutate({ id: selected.id, kind: "check" })
                 }
               >
-                <RefreshCw size={14} />
+                <RefreshCw size={16} />
                 {ssh ? "SSH 점검" : "점검"}
               </Button>
               <HostActionDialog
@@ -481,7 +481,7 @@ export function RemoteHostsPage() {
               )}
             {selected.active_job && (
               <div role="status" className="remote-progress">
-                <LoaderCircle size={15} className="animate-spin" />
+                <LoaderCircle size={16} className="animate-spin" />
                 {hostJobs
                   .find((j) => j.id === selected.active_job)
                   ?.events.at(-1)?.message ?? "작업 대기 중"}
@@ -546,7 +546,7 @@ export function RegisterAgentHostDialog({
       }}
     >
       <Dialog.Trigger render={<Button />}>
-        <RadioTower size={15} />
+        <RadioTower size={16} />
         에이전트 호스트 등록
       </Dialog.Trigger>
       {open && (
@@ -613,7 +613,7 @@ export function RegisterAgentHostDialog({
                   disabled={register.isPending || !id}
                 >
                   {register.isPending && (
-                    <LoaderCircle size={14} className="animate-spin" />
+                    <LoaderCircle size={16} className="animate-spin" />
                   )}
                   등록하고 토큰 받기
                 </Button>
@@ -803,11 +803,11 @@ function HostInspection({
             }
           >
             {check.ready ? (
-              <Check size={15} />
+              <Check size={16} />
             ) : check.pending ? (
-              <CircleDashed size={15} />
+              <CircleDashed size={16} />
             ) : (
-              <CircleAlert size={15} />
+              <CircleAlert size={16} />
             )}
             <span>{check.label}</span>
             <span>
@@ -940,7 +940,7 @@ function HostActionDialog({
           <Button variant={prepare ? "primary" : "ghost"} disabled={disabled} />
         }
       >
-        {prepare ? <Terminal size={14} /> : <Trash2 size={14} />}
+        {prepare ? <Terminal size={16} /> : <Trash2 size={16} />}
         {prepare ? "환경 준비" : "등록 해제"}
       </Dialog.Trigger>
       {open && (
@@ -1004,7 +1004,7 @@ function HostActionDialog({
                     className="checkbox"
                   >
                     <Checkbox.Indicator>
-                      <Check size={12} strokeWidth={3} />
+                      <Check size={14} strokeWidth={3} />
                     </Checkbox.Indicator>
                   </Checkbox.Root>
                   <span>
@@ -1027,7 +1027,7 @@ function HostActionDialog({
                       className="checkbox"
                     >
                       <Checkbox.Indicator>
-                        <Check size={12} strokeWidth={3} />
+                        <Check size={14} strokeWidth={3} />
                       </Checkbox.Indicator>
                     </Checkbox.Root>
                     <span>
@@ -1078,7 +1078,7 @@ function HostActionDialog({
                 }
               }}
             >
-              {pending && <LoaderCircle size={14} className="animate-spin" />}
+              {pending && <LoaderCircle size={16} className="animate-spin" />}
               {prepare ? "준비 작업 시작" : "등록 해제"}
             </Button>
           </div>
@@ -1181,7 +1181,6 @@ export function RegisterHostForm({
     <Modal
       title={host ? `${host.id} 인증 정보 변경` : "원격 호스트 등록"}
       description="먼저 서버 지문을 확인한 뒤 SSH 인증 정보를 입력하세요."
-      className="create-modal remote-register-modal"
       closeDisabled={pending || testing || fingerprint.isPending}
     >
       <form onSubmit={(event) => void submit(event)} autoComplete="off">
@@ -1234,7 +1233,7 @@ export function RegisterHostForm({
               fingerprint.mutate();
             }}
           >
-            <Fingerprint size={15} />
+            <Fingerprint size={16} />
             {fingerprint.isPending ? "지문 조회 중…" : "서버 지문 조회"}
           </Button>
           {fingerprint.error && <ErrorNotice error={fingerprint.error} />}
@@ -1256,7 +1255,7 @@ export function RegisterHostForm({
                   onCheckedChange={(value) => setVerified(value)}
                 >
                   <Checkbox.Indicator>
-                    <Check size={12} />
+                    <Check size={14} />
                   </Checkbox.Indicator>
                 </Checkbox.Root>
                 <span>신뢰할 수 있는 서버 지문과 일치함을 확인했습니다.</span>
@@ -1336,7 +1335,7 @@ export function RegisterHostForm({
                     disabled={pending || testing}
                     onClick={() => keyInput.current?.click()}
                   >
-                    <Upload size={13} />
+                    <Upload size={15} />
                     파일 선택
                   </button>
                 </span>
@@ -1419,7 +1418,7 @@ export function RegisterHostForm({
             </label>
           )}
           <p className="field-hint flex items-start gap-2">
-            <KeyRound size={15} className="shrink-0 mt-0.5" />
+            <KeyRound size={16} className="shrink-0 mt-0.5" />
             인증 정보는 Coordinator에서 암호화해 보관합니다. 브라우저 저장소에
             저장하거나 조회 응답으로 반환하지 않습니다.
           </p>
@@ -1464,9 +1463,9 @@ export function RegisterHostForm({
               }}
             >
               {testing ? (
-                <LoaderCircle size={14} className="animate-spin" />
+                <LoaderCircle size={16} className="animate-spin" />
               ) : (
-                <RefreshCw size={14} />
+                <RefreshCw size={16} />
               )}
               {testing ? "접속 확인 중" : "접속 테스트"}
             </Button>
@@ -1476,9 +1475,9 @@ export function RegisterHostForm({
               disabled={!canRegister || testing}
             >
               {pending ? (
-                <LoaderCircle size={14} className="animate-spin" />
+                <LoaderCircle size={16} className="animate-spin" />
               ) : (
-                <Plus size={14} />
+                <Plus size={16} />
               )}
               {host ? "인증 정보 저장" : "호스트 등록"}
             </Button>

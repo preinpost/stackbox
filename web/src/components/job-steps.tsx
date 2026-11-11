@@ -38,7 +38,7 @@ export function StepProgress({ job }: { job: Job | undefined }) {
       title={stepLabel(step)}
       aria-label={`${step.total}단계 중 ${step.index}단계: ${step.step}`}
     >
-      <LoaderCircle size={11} className="animate-spin" />
+      <LoaderCircle size={14} className="animate-spin" />
       <span className="phase-step-text">
         {stepLabel(step)} · {duration(now - step.started_at)}
       </span>
@@ -59,11 +59,11 @@ export function StepList({ job, now }: { job: Job; now: number }) {
             className={step.failed ? "failed" : running ? "running" : "done"}
           >
             {step.failed ? (
-              <CircleAlert size={13} />
+              <CircleAlert size={15} />
             ) : running ? (
-              <LoaderCircle size={13} className="animate-spin" />
+              <LoaderCircle size={15} className="animate-spin" />
             ) : (
-              <Check size={13} />
+              <Check size={15} />
             )}
             <span className="font-mono">
               {step.index}/{step.total}

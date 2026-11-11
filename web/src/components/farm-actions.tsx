@@ -163,7 +163,7 @@ function BucketNotice({ errors }: { errors: string[] }) {
   return (
     <div className="bucket-notice">
       <div className="bucket-notice-head">
-        <TriangleAlert size={15} className="shrink-0" />
+        <TriangleAlert size={16} className="shrink-0" />
         <span>
           버킷 {issues.length}개를 조회하지 못했습니다. 그 버킷의 템플릿은
           후보에서 빠지고, 찾은 템플릿이나 클린 설치로 계획합니다.
@@ -664,7 +664,7 @@ export function CreateFarmForm({
                         className="checkbox"
                       >
                         <Checkbox.Indicator>
-                          <Check size={12} strokeWidth={3} />
+                          <Check size={14} strokeWidth={3} />
                         </Checkbox.Indicator>
                       </Checkbox.Root>
                       <span className="component-text">
@@ -755,11 +755,11 @@ export function CreateFarmForm({
                     ].map((node) => (
                       <li key={node.node}>
                         {node.source === "clean" ? (
-                          <Sparkles size={15} />
+                          <Sparkles size={16} />
                         ) : node.source === "bucket" ? (
-                          <Download size={15} />
+                          <Download size={16} />
                         ) : (
-                          <CopyPlus size={15} />
+                          <CopyPlus size={16} />
                         )}{" "}
                         <strong>{node.node}</strong>
                         <span className="muted"> · {node.host_id}</span>:{" "}
@@ -803,7 +803,7 @@ export function CreateFarmForm({
         </div>
         <div className="modal-footer">
           <span className="modal-footer-note flex items-center gap-1.5">
-            <ShieldCheck size={14} />
+            <ShieldCheck size={16} />
             {`Farm 전용 VM ${computes + 1}대와 내부망`}
           </span>
           <div className="flex gap-2">
@@ -826,9 +826,9 @@ export function CreateFarmForm({
               }
             >
               {mutation.isPending ? (
-                <LoaderCircle size={15} className="animate-spin" />
+                <LoaderCircle size={16} className="animate-spin" />
               ) : (
-                <Plus size={15} />
+                <Plus size={16} />
               )}
               {mutation.isPending ? "생성 요청 중" : "Farm 만들기"}
             </Button>
@@ -891,7 +891,7 @@ export function DeployFarmDialog({
               : undefined
         }
       >
-        <Play size={14} />
+        <Play size={16} />
         {farm.status === "creating"
           ? "VM 생성 중..."
           : farm.active_job
@@ -953,9 +953,9 @@ export function DeployFarmDialog({
               disabled={mutation.isPending}
             >
               {mutation.isPending ? (
-                <LoaderCircle size={15} className="animate-spin" />
+                <LoaderCircle size={16} className="animate-spin" />
               ) : (
-                <ArrowRight size={15} />
+                <ArrowRight size={16} />
               )}
               배포 시작
             </Button>
@@ -1065,7 +1065,7 @@ export function AddComputeDialog({
                 : "배포가 끝난 farm에 다음 compute VM을 추가합니다."
         }
       >
-        <Cpu size={15} />
+        <Cpu size={16} />
         Compute 추가
       </Dialog.Trigger>
       <Modal
@@ -1098,7 +1098,7 @@ export function AddComputeDialog({
             <div className="field">
               <span>OpenStack 릴리스</span>
               <span className="fixed-release">
-                <Lock size={13} />
+                <Lock size={15} />
                 OpenStack {release ?? "기록 없음"}
               </span>
               <small>
@@ -1224,9 +1224,9 @@ export function AddComputeDialog({
               disabled={!canSubmit || mutation.isPending}
             >
               {mutation.isPending ? (
-                <LoaderCircle size={15} className="animate-spin" />
+                <LoaderCircle size={16} className="animate-spin" />
               ) : (
-                <Plus size={15} />
+                <Plus size={16} />
               )}
               추가
             </Button>
@@ -1327,9 +1327,9 @@ export function DeleteFarmDialog({ farm }: { farm: Farm }) {
               disabled={confirm !== farm.id || mutation.isPending}
             >
               {mutation.isPending ? (
-                <LoaderCircle size={15} className="animate-spin" />
+                <LoaderCircle size={16} className="animate-spin" />
               ) : (
-                <Trash2 size={15} />
+                <Trash2 size={16} />
               )}
               {forget ? "기록만 삭제" : "Farm 삭제"}
             </Button>
@@ -1370,9 +1370,9 @@ export function CheckServicesButton({
       }
     >
       {mutation.isPending ? (
-        <LoaderCircle size={14} className="animate-spin" />
+        <LoaderCircle size={16} className="animate-spin" />
       ) : (
-        <RefreshCw size={14} />
+        <RefreshCw size={16} />
       )}
       서비스 확인
     </Button>

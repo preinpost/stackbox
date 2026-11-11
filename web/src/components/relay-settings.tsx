@@ -60,7 +60,7 @@ export function RelaySettingsDialog() {
   return (
     <Dialog.Root open={open} onOpenChange={setOpen}>
       <Dialog.Trigger render={<Button />}>
-        <Network size={15} />
+        <Network size={16} />
         릴레이 설정
         <span
           className={`relay-dot relay-dot-${state}`}
@@ -288,7 +288,7 @@ function RelaySettingsForm() {
             >
               {mutation.isPending ? (
                 <>
-                  <LoaderCircle size={15} className="animate-spin" />
+                  <LoaderCircle size={16} className="animate-spin" />
                   저장 중…
                 </>
               ) : (
@@ -329,9 +329,9 @@ function TunnelProgress({
             }
           >
             {index < current ? (
-              <Check size={14} />
+              <Check size={16} />
             ) : index === current ? (
-              <LoaderCircle size={14} className="animate-spin" />
+              <LoaderCircle size={16} className="animate-spin" />
             ) : (
               <span className="tunnel-progress-dot" />
             )}

@@ -79,7 +79,7 @@ export function ErrorNotice({
       </div>
       {retry && (
         <Button onClick={retry} variant="ghost">
-          <RefreshCw size={14} />
+          <RefreshCw size={16} />
           다시 시도
         </Button>
       )}
@@ -200,7 +200,7 @@ export function SelectInput<T extends string>({
       >
         <Select.Value />
         <Select.Icon>
-          <ChevronDown size={15} />
+          <ChevronDown size={16} />
         </Select.Icon>
       </Select.Trigger>
       <Select.Portal>
@@ -216,7 +216,7 @@ export function SelectInput<T extends string>({
                 >
                   <Select.ItemText>{item.label}</Select.ItemText>
                   <Select.ItemIndicator>
-                    <Check size={15} />
+                    <Check size={16} />
                   </Select.ItemIndicator>
                 </Select.Item>
               ))}
@@ -284,7 +284,7 @@ export function CopyText({
       }}
     >
       {!hideValue && <span>{label ?? value}</span>}
-      {copied ? <Check size={12} /> : <Copy size={12} />}
+      {copied ? <Check size={14} /> : <Copy size={14} />}
     </button>
   );
 }
@@ -311,7 +311,7 @@ export function ForgetOption({
         className="checkbox"
       >
         <Checkbox.Indicator>
-          <Check size={12} strokeWidth={3} />
+          <Check size={14} strokeWidth={3} />
         </Checkbox.Indicator>
       </Checkbox.Root>
       <span>

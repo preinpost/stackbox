@@ -105,7 +105,7 @@ export function FarmDetailPage({ id }: { id: string }) {
     return (
       <>
         <Link to="/" className="back-link">
-          <ArrowLeft size={12} />
+          <ArrowLeft size={14} />
           Farms
         </Link>
         <ErrorNotice
@@ -147,7 +147,7 @@ export function FarmDetailPage({ id }: { id: string }) {
   return (
     <>
       <Link to="/" className="back-link">
-        <ArrowLeft size={12} />
+        <ArrowLeft size={14} />
         모든 farm
       </Link>
       <div className="detail-heading">
@@ -286,20 +286,20 @@ export function FarmDetailPage({ id }: { id: string }) {
       )}
       <div className="detail-facts" role="group" aria-label="Farm 주요 정보">
         <div>
-          <Cpu size={15} />
+          <Cpu size={16} />
           <span>
             메모리<strong>{memory(farmMemory(farm))}</strong>
           </span>
         </div>
         <div>
-          <Server size={15} />
+          <Server size={16} />
           <span>
             가상 머신
             <strong>{runningVms(farm, activeJob)}</strong>
           </span>
         </div>
         <div>
-          <HardDrive size={15} />
+          <HardDrive size={16} />
           <span>
             할당 디스크
             <strong>
@@ -308,7 +308,7 @@ export function FarmDetailPage({ id }: { id: string }) {
           </span>
         </div>
         <div>
-          <Globe size={15} />
+          <Globe size={16} />
           <span>
             Public host
             <strong className="font-mono">
@@ -494,7 +494,7 @@ export function RecentLogs({
     <section className="panel recent-logs-panel" aria-label="최근 로그">
       <div className="panel-toolbar">
         <h2 className="flex items-center gap-2">
-          <Terminal size={14} />
+          <Terminal size={16} />
           최근 로그
           {entries.length > 0 && (
             <span className="count-pill">{entries.length}</span>
@@ -643,7 +643,7 @@ function VmCardView({ farm, card }: { farm: Farm; card: VmCard }) {
       className={`topology-node ${card.running ? "node-running" : ""} ${card.pending ? "pending" : ""}`}
     >
       <div className="node-top">
-        <Server size={14} strokeWidth={1.7} />
+        <Server size={16} strokeWidth={1.7} />
         <strong>{card.hostname}</strong>
         {card.role && <span className="node-role">{card.role}</span>}
         <span className="node-memory">{card.memory}</span>
@@ -671,7 +671,7 @@ function VmCardView({ farm, card }: { farm: Farm; card: VmCard }) {
       </div>
       {card.pending ? (
         <div className="node-pending">
-          <LoaderCircle size={13} className="animate-spin" />
+          <LoaderCircle size={15} className="animate-spin" />
           생성 중{card.pending.host && <span>· {card.pending.host}</span>}
         </div>
       ) : (
@@ -694,7 +694,7 @@ function TopologyHost({
   return (
     <div className="topology-host">
       <div className="topology-host-top">
-        <Globe size={13} strokeWidth={1.7} />
+        <Globe size={15} strokeWidth={1.7} />
         Host · link switch
       </div>
       <code>{exposure?.host ?? "public 포트 없음"}</code>
@@ -781,7 +781,7 @@ function MultiNodeTopology({ farm, job }: { farm: Farm; job?: Job }) {
     <section className="panel topology">
       <div className="panel-toolbar">
         <h2 className="flex items-center gap-2">
-          <Network size={14} />
+          <Network size={16} />
           VM topology
         </h2>
         <span className="topology-network">
@@ -802,7 +802,7 @@ function MultiNodeTopology({ farm, job }: { farm: Farm; job?: Job }) {
         </div>
       </div>
       <div className="topology-footer">
-        <ShieldCheck size={13} />
+        <ShieldCheck size={15} />
         고립은 VM의 두 링크에서 모든 프레임을 버립니다. compute VM을 고립시키면
         Nova가 약 1분 뒤 down으로 표시하고, 그 뒤 evacuate를 시험할 수 있습니다.
       </div>
@@ -864,7 +864,7 @@ export function NodeTopology({ farm, job }: { farm: Farm; job?: Job }) {
     <section className="panel topology">
       <div className="panel-toolbar">
         <h2 className="flex items-center gap-2">
-          <Network size={14} />
+          <Network size={16} />
           VM topology
         </h2>
         <span className="topology-network">
@@ -884,7 +884,7 @@ export function NodeTopology({ farm, job }: { farm: Farm; job?: Job }) {
         </div>
       </div>
       <div className="topology-footer">
-        <ShieldCheck size={13} />
+        <ShieldCheck size={15} />
         {single
           ? "선택한 OpenStack 서비스와 기반 서비스를 이 VM 안에 설치합니다."
           : "기존 VM 구성을 표시합니다. 단일 VM 구성으로 자동 변환하지 않습니다."}
@@ -897,7 +897,7 @@ export function DeploymentPhases({ farm }: { farm: Farm }) {
     <section className="panel phase-panel">
       <div className="panel-toolbar">
         <h2 className="flex items-center gap-2">
-          <CheckCheck size={14} />
+          <CheckCheck size={16} />
           배포 단계
         </h2>
         {farm.phase && <span className="chip mono">{farm.phase}</span>}
@@ -914,7 +914,7 @@ export function DeploymentPhases({ farm }: { farm: Farm }) {
               className={ready ? "phase-done" : current ? "phase-current" : ""}
             >
               <span className="phase-marker">
-                {ready ? <Check size={11} /> : current ? <span /> : null}
+                {ready ? <Check size={14} /> : current ? <span /> : null}
               </span>
               <div className="phase-text">
                 <div className="phase-heading">
@@ -923,7 +923,7 @@ export function DeploymentPhases({ farm }: { farm: Farm }) {
                 </div>
                 {running && farm.step && (
                   <span className="phase-step" title={farm.step}>
-                    <LoaderCircle size={11} className="animate-spin" />
+                    <LoaderCircle size={14} className="animate-spin" />
                     <span className="phase-step-text">{farm.step}</span>
                   </span>
                 )}
@@ -960,7 +960,7 @@ function Endpoints({ farm }: { farm: Farm }) {
     <section className="panel endpoints-panel">
       <div className="panel-toolbar">
         <h2 className="flex items-center gap-2">
-          <Globe size={14} />
+          <Globe size={16} />
           Service endpoints
         </h2>
         {exposure && <span className="chip mono">{publicPortRange(farm)}</span>}
@@ -984,7 +984,7 @@ function Endpoints({ farm }: { farm: Farm }) {
                 <div>
                   <span className="endpoint-icon">
                     {s.name === "Keystone" ? (
-                      <ShieldCheck size={14} />
+                      <ShieldCheck size={16} />
                     ) : (
                       <LayersIcon />
                     )}
@@ -1001,7 +1001,7 @@ function Endpoints({ farm }: { farm: Farm }) {
                       className="icon-button ml-auto"
                       aria-label={`${s.name} API 열기`}
                     >
-                      <ArrowUpRight size={14} />
+                      <ArrowUpRight size={16} />
                     </a>
                   ) : (
                     <span className="endpoint-pending">배포 대기</span>
@@ -1026,7 +1026,7 @@ function Endpoints({ farm }: { farm: Farm }) {
       )}
       {showLogin && (
         <div className="credential-note">
-          <ShieldCheck size={14} />
+          <ShieldCheck size={16} />
           <p>Horizon 로그인에 위 admin 계정을 사용합니다.</p>
         </div>
       )}
@@ -1066,7 +1066,7 @@ function Datastores({ farm }: { farm: Farm }) {
     <section className="panel datastore-panel">
       <div className="panel-toolbar">
         <h2 className="flex items-center gap-2">
-          <Database size={14} />
+          <Database size={16} />
           Data stores
         </h2>
         {deployed && stores.length > 0 && (
@@ -1100,7 +1100,7 @@ function Datastores({ farm }: { farm: Farm }) {
               ))}
             </div>
             <div className="credential-note">
-              <ShieldCheck size={14} />
+              <ShieldCheck size={16} />
               <p>
                 이 포트는 farm VM의 고정 주소로 DNAT됩니다. 외부에 공개한
                 포털이라면 인증정보 표시를 끄고 방화벽으로 3306·5672·15672를
@@ -1142,7 +1142,7 @@ export function DatastoreCard({ store }: { store: Datastore }) {
       </header>
       <div className="datastore-body">
         <div className="datastore-conn">
-          <KeyRound size={14} />
+          <KeyRound size={16} />
           <code>
             {store.host}:{store.port}
           </code>
@@ -1297,7 +1297,7 @@ function LoginRow({
             aria-pressed={shown}
             onClick={onToggle}
           >
-            {shown ? <EyeOff size={14} /> : <Eye size={14} />}
+            {shown ? <EyeOff size={16} /> : <Eye size={16} />}
           </button>
         )}
         <CopyText value={value} hideValue label={label} />
@@ -1307,5 +1307,5 @@ function LoginRow({
 }
 
 function LayersIcon() {
-  return <Boxes size={14} />;
+  return <Boxes size={16} />;
 }
