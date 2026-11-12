@@ -1,4 +1,4 @@
-use super::{Credentials, HostInspection, HostKey, RemoteHost, SshTarget};
+use super::{Credentials, GpuKernel, HostInspection, HostKey, RemoteHost, SshTarget};
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use russh::{
@@ -15,21 +15,24 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_OUTPUT: usize = 128 * 1024;
 pub const COMMON: &str = "set -eu\nexport PATH=\"$HOME/.microsandbox/bin:$HOME/.local/bin:$PATH\"\nexport MSB_BACKEND=local\n";
 
-fn upload_command(digest: &str) -> String {
+fn upload_command(digest: &str, dir: &str, name: &str, seconds: u64, mode: &str) -> String {
     let script = format!(
         r#"set -eu
 umask 077
-dir="$HOME/.local/share/farm/agents/{digest}"
+dir="$HOME/{dir}"
 mkdir -p "$dir"
 tmp=$(mktemp "$dir/upload.XXXXXX")
 trap 'rm -f "$tmp"' EXIT HUP INT TERM
 cat > "$tmp"
 printf '%s  %s\n' '{digest}' "$tmp" | sha256sum -c - > /dev/null
-chmod 700 "$tmp"
-mv -f "$tmp" "$dir/farm-agent"
+chmod {mode} "$tmp"
+mv -f "$tmp" "$dir/{name}"
 "#
     );
-    format!("timeout 180 bash -c '{}'", script.replace('\'', "'\\''"))
+    format!(
+        "timeout {seconds} bash -c '{}'",
+        script.replace('\'', "'\\''")
+    )
 }
 
 struct Verify {
@@ -102,6 +105,41 @@ pub struct Session {
     handle: client::Handle<Verify>,
 }
 impl Session {
+    /// Write `bytes` to the remote path the command prepares, failing on a checksum
+    /// mismatch; stdin carries the bytes, so nothing is echoed or logged.
+    async fn upload(&self, command: String, bytes: &[u8], timeout: Duration) -> Result<()> {
+        let upload = async {
+            let channel = self.handle.channel_open_session().await?;
+            channel.exec(true, command).await?;
+            let (mut reader, writer) = channel.split();
+            let send = async {
+                writer.data(bytes).await?;
+                writer.eof().await?;
+                Ok::<_, anyhow::Error>(())
+            };
+            let receive = async {
+                let mut code = None;
+                while let Some(event) = reader.wait().await {
+                    if let ChannelMsg::ExitStatus { exit_status } = event {
+                        code = Some(exit_status);
+                    }
+                }
+                ensure!(
+                    code == Some(0),
+                    "remote upload checksum verification failed"
+                );
+                Ok::<_, anyhow::Error>(())
+            };
+            tokio::try_join!(send, receive)?;
+            Ok::<_, anyhow::Error>(())
+        };
+        tokio::time::timeout(timeout, upload)
+            .await
+            .map_err(|_| anyhow!("remote upload timed out"))?
+            .map_err(|_| anyhow!("remote upload / checksum verification failed"))?;
+        Ok(())
+    }
+
     pub async fn install_agent(
         &self,
         artifact: &super::artifact::Artifact,
@@ -113,33 +151,15 @@ impl Session {
             "{COMMON}path=\"$HOME/.local/share/farm/agents/{digest}/farm-agent\"\nif [ -f \"$path\" ] && printf '%s  %s\\n' '{digest}' \"$path\" | sha256sum -c --status; then printf cached; else printf missing; fi\n"
         );
         if self.run(&script, 15, "Agent checksum check").await?.trim() != "cached" {
-            let command = upload_command(digest);
-            let upload = async {
-                let channel = self.handle.channel_open_session().await?;
-                channel.exec(true, command).await?;
-                let (mut reader, writer) = channel.split();
-                let send = async {
-                    writer.data(&artifact.bytes[..]).await?;
-                    writer.eof().await?;
-                    Ok::<_, anyhow::Error>(())
-                };
-                let receive = async {
-                    let mut code = None;
-                    while let Some(event) = reader.wait().await {
-                        if let ChannelMsg::ExitStatus { exit_status } = event {
-                            code = Some(exit_status);
-                        }
-                    }
-                    ensure!(code == Some(0), "agent upload failed");
-                    Ok::<_, anyhow::Error>(())
-                };
-                tokio::try_join!(send, receive)?;
-                Ok::<_, anyhow::Error>(())
-            };
-            tokio::time::timeout(Duration::from_secs(190), upload)
-                .await
-                .map_err(|_| anyhow!("agent upload timed out"))?
-                .map_err(|_| anyhow!("agent upload / checksum verification failed"))?;
+            let command = upload_command(
+                digest,
+                &format!(".local/share/farm/agents/{digest}"),
+                "farm-agent",
+                180,
+                "700",
+            );
+            self.upload(command, &artifact.bytes[..], Duration::from_secs(190))
+                .await?;
         }
         let request = super::protocol::Request {
             version: super::protocol::VERSION,
@@ -309,6 +329,7 @@ impl Session {
                             rows: size.rows,
                             cols: size.cols,
                         },
+                        Some(TerminalInput::Close) => TerminalFrame::Eof,
                         None => {
                             client_open = false;
                             writer.eof().await.ok();
@@ -463,6 +484,41 @@ impl Session {
     pub async fn inspect(&self) -> Result<HostInspection> {
         parse_inspection(&self.run(&inspect_script(), 45, "Host inspection").await?)
     }
+    /// Install this build's farm kernel on the host, under `~/.local/share/farm/libkrunfw`.
+    /// The library is verified before it is published and the manifest goes last, so an
+    /// interrupted upload leaves the stock kernel in place rather than a half kernel.
+    pub async fn install_kernel(&self, artifact: &crate::kernel::Artifact) -> Result<()> {
+        crate::kernel::validate_id(&artifact.id)?;
+        crate::kernel::validate_filename(&artifact.filename)?;
+        super::artifact::validate_digest(&artifact.sha256)?;
+        let dir = format!(".local/share/farm/libkrunfw/{}", artifact.id);
+        let script = format!(
+            "{COMMON}path=\"$HOME/{dir}/{name}\"\nif [ -f \"$path\" ] && printf '%s  %s\\n' '{sha256}' \"$path\" | sha256sum -c --status; then printf cached; else printf missing; fi\n",
+            name = artifact.filename,
+            sha256 = artifact.sha256
+        );
+        if self
+            .run(&script, 15, "Farm kernel checksum check")
+            .await?
+            .trim()
+            != "cached"
+        {
+            let command = upload_command(&artifact.sha256, &dir, &artifact.filename, 300, "644");
+            self.upload(
+                command,
+                &std::fs::read(&artifact.library)?,
+                Duration::from_secs(310),
+            )
+            .await?;
+        }
+        use base64::{Engine, engine::general_purpose::STANDARD};
+        let manifest = STANDARD.encode(artifact.manifest.as_bytes());
+        let script = format!(
+            "set -eu\numask 022\ndir=\"$HOME/{dir}\"\nmkdir -p \"$dir\"\nprintf '%s' '{manifest}' | base64 -d > \"$dir/manifest.txt.tmp\"\nmv -f \"$dir/manifest.txt.tmp\" \"$dir/manifest.txt\"\n"
+        );
+        self.run(&script, 30, "Farm kernel manifest").await?;
+        Ok(())
+    }
     pub async fn install(&self) -> Result<()> {
         self.run(
             &install_script(),
@@ -475,15 +531,38 @@ impl Session {
         .await?;
         Ok(())
     }
-    pub async fn smoke(&self, token: &str) -> Result<()> {
+    /// Boot the verification VM and read what its kernel reports about the GPU stack.
+    /// `reason` explains a stock boot when a kernel was installed but not used.
+    pub async fn smoke(
+        &self,
+        token: &str,
+        kernel: Option<&str>,
+        reason: Option<&str>,
+    ) -> Result<GpuKernel> {
         // Token comes exclusively from a locally generated UUID, never an API field.
-        self.run(
-            &smoke_script(token)?,
-            180,
-            "VM boot / exec / cleanup verification",
-        )
-        .await?;
-        Ok(())
+        let output = self
+            .run(
+                &smoke_script(token, kernel)?,
+                180,
+                "VM boot / exec / cleanup verification",
+            )
+            .await?;
+        let gpu = parse_gpu_kernel(&output)?;
+        // Both markers describe the same kernel; a disagreement means the probe ran wrong.
+        ensure!(
+            parse_mdev(&output)? == gpu.mtty_available(),
+            "the verification VM's mtty markers disagree: {}",
+            output.trim()
+        );
+        Ok(gpu.for_kernel(
+            kernel.is_some(),
+            kernel.and_then(|path| crate::kernel::installed_id(std::path::Path::new(path))),
+            if kernel.is_some() {
+                None
+            } else {
+                reason.map(str::to_owned)
+            },
+        ))
     }
 }
 
@@ -494,18 +573,116 @@ pub(crate) fn install_script() -> String {
 
 /// Report the host's facts; `golden` says whether this build's golden image is built yet.
 fn inspect_script() -> String {
-    include_str!("inspect.sh").replace("@GOLDEN@", &crate::farm::golden::current())
+    include_str!("inspect.sh")
+        .replace("@GOLDEN@", &crate::farm::golden::current())
+        .replace("@MSB_VERSION@", super::MSB_VERSION)
 }
 
+/// Quote one shell word, so a path from an inspection reaches the script as data.
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+/// The guest-side probe: one process reads the kernel's GPU stack. farm's kernel carries
+/// VFIO, mdev and the `mtty` driver built in, so an absent path means the feature did not
+/// come up, not that a module is unloaded. The last line is the marker earlier coordinators
+/// read. No single quotes: this runs inside a single-quoted `sh -c` word.
+const GPU_PROBE: &str = "vfio=0; [ -e /dev/vfio/vfio ] && vfio=1; echo \"FARM-GPU vfio $vfio\"; \
+bus=0; [ -d /sys/class/mdev_bus ] && bus=1; echo \"FARM-GPU mdev $bus\"; \
+mtty=0; [ -d /sys/class/mdev_bus/mtty ] && mtty=1; echo \"FARM-GPU mtty $mtty\"; \
+printf \"FARM-GPU release %s\\n\" \"$(uname -r 2>/dev/null || true)\"; \
+for t in /sys/class/mdev_bus/*/mdev_supported_types/*; do \
+  [ -d \"$t\" ] || continue; \
+  n=${t##*/}; c=0; \
+  [ -r \"$t/available_instances\" ] && c=$(cat \"$t/available_instances\"); \
+  printf \"FARM-GPU type %s %s\\n\" \"$n\" \"$c\"; \
+done; \
+if [ -e /sys/class/mdev_bus/mtty/mdev_supported_types/mtty-1 ]; then echo FARM-MDEV 1; else echo FARM-MDEV 0; fi; \
+exit 0";
+
 /// Boot a small VM from the base image the golden image is built from, run a command in it
-/// and remove it.
-pub(crate) fn smoke_script(token: &str) -> Result<String> {
+/// and remove it. `kernel` is the host's installed farm kernel: without it the CLI boots
+/// the stock microsandbox kernel, and the boot cannot report an mtty device.
+pub(crate) fn smoke_script(token: &str, kernel: Option<&str>) -> Result<String> {
     // Token comes exclusively from a locally generated UUID, never an API field.
     ensure!(uuid::Uuid::parse_str(token).is_ok(), "invalid smoke token");
+    let kernel = kernel
+        .map(|path| {
+            format!(
+                "export MSB_PATH=\"$HOME/.microsandbox/bin/msb\"\nexport MSB_LIBKRUNFW_PATH={}\n",
+                shell_quote(path)
+            )
+        })
+        .unwrap_or_default();
+    // Every msb command reads stdin from /dev/null. `bash -s` feeds this script on
+    // stdin over SSH, so an msb that attached to the terminal would swallow the commands
+    // after it; that once hid the mdev probe and the cleanup.
     Ok(format!(
-        "{COMMON}\nname=farm-check-{token}\ntrap 'msb remove --force \"$name\" >/dev/null 2>&1' EXIT\nmsb create --name \"$name\" --cpus 1 --memory 512M --root-disk 2G --max-duration 120s --no-net {image}\nmsb exec \"$name\" -- /bin/true\nmsb remove --force \"$name\"\ntrap - EXIT\n",
+        "{COMMON}\n{kernel}name=farm-check-{token}\ntrap 'msb remove --force \"$name\" < /dev/null >/dev/null 2>&1' EXIT\nmsb create --name \"$name\" --cpus 1 --memory 512M --root-disk 2G --max-duration 120s --no-net {image} < /dev/null\nmsb exec \"$name\" -- /bin/true < /dev/null\n# The farm kernel exposes the kernel's sample mtty mediated device; the stock one has none.\nmsb exec \"$name\" -- /bin/sh -c '{GPU_PROBE}' < /dev/null\nmsb remove --force \"$name\" < /dev/null\ntrap - EXIT\n",
         image = crate::farm::golden::DEFAULT_OS.base_image
     ))
+}
+
+/// What the verification VM reported about the GPU stack; [`GpuKernel::for_kernel`] names
+/// the kernel afterwards. A probe that printed nothing is an error, not a stock kernel: a
+/// boot whose kernel has no mtty device still prints its zero markers.
+pub(crate) fn parse_gpu_kernel(output: &str) -> Result<GpuKernel> {
+    let flag = |value: Option<&str>, what: &str| -> Result<bool> {
+        match value {
+            Some("1") => Ok(true),
+            Some("0") => Ok(false),
+            other => anyhow::bail!("invalid GPU probe value for {what}: {other:?}"),
+        }
+    };
+    let mut gpu = GpuKernel::default();
+    let mut probed = false;
+    for line in output.lines() {
+        let Some(fields) = line.strip_prefix("FARM-GPU ") else {
+            continue;
+        };
+        let mut parts = fields.split_whitespace();
+        match parts.next() {
+            Some("vfio") => {
+                gpu.vfio = flag(parts.next(), "vfio")?;
+                probed = true;
+            }
+            Some("mdev") => gpu.vfio_mdev = flag(parts.next(), "mdev")?,
+            Some("mtty") => gpu.mtty_registered = flag(parts.next(), "mtty")?,
+            Some("release") => gpu.kernel_release = parts.next().unwrap_or_default().to_string(),
+            Some("type") => {
+                let name = parts
+                    .next()
+                    .context("a GPU probe type line without a name")?;
+                let available_instances = parts
+                    .next()
+                    .unwrap_or("0")
+                    .parse()
+                    .context("a GPU probe type line with an invalid instance count")?;
+                gpu.mdev_types.push(super::MdevType {
+                    name: name.to_string(),
+                    available_instances,
+                });
+            }
+            other => anyhow::bail!("unknown GPU probe line for {other:?}: {line}"),
+        }
+    }
+    ensure!(
+        probed,
+        "the verification VM booted but its GPU probe did not run: {}",
+        output.trim()
+    );
+    Ok(gpu)
+}
+
+/// Whether a verification boot saw the mtty device type. A missing marker means the probe
+/// never ran, which is different from a boot whose kernel has no such device.
+pub(crate) fn parse_mdev(output: &str) -> Result<bool> {
+    ensure!(
+        output.contains("FARM-MDEV 0") || output.contains("FARM-MDEV 1"),
+        "the verification VM booted but its mdev probe did not run: {}",
+        output.trim()
+    );
+    Ok(output.contains("FARM-MDEV 1"))
 }
 
 const TERMINAL_ATTACH_TIMEOUT: Duration = Duration::from_secs(30);
@@ -585,6 +762,21 @@ fn parse_inspection(output: &str) -> Result<HostInspection> {
         msb_version: version,
         docker_available: field("docker")? == "1",
         golden_image_available: field("golden")? == "1",
+        // A kernel the host's agent boots from, installed by preparation or named by
+        // FARM_LIBKRUNFW_PATH; absent when the stock one boots.
+        custom_kernel: values
+            .get("libkrunfw")
+            .copied()
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned),
+        // An installed kernel the host cannot use, such as one built for another msb.
+        custom_kernel_reason: values
+            .get("libkrunfw_note")
+            .copied()
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned),
+        mtty_available: false,
+        gpu_kernel: None,
         vm_boot_verified: false,
         checked_at: crate::model::now(),
     })
@@ -608,13 +800,19 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let payload = b"binary fixture for SSH upload";
         let digest = format!("{:x}", Sha256::digest(payload));
-        let command = upload_command(&digest)
-            .strip_prefix("timeout 180 ")
-            .unwrap()
-            .replace(
-                "$HOME/.local/share/farm/agents",
-                dir.path().to_str().unwrap(),
-            );
+        let command = upload_command(
+            &digest,
+            ".local/share/farm/agents/test",
+            "farm-agent",
+            180,
+            "700",
+        )
+        .strip_prefix("timeout 180 ")
+        .unwrap()
+        .replace(
+            "$HOME/.local/share/farm/agents/test",
+            dir.path().to_str().unwrap(),
+        );
         let run = |bytes: &[u8]| {
             let mut child = Command::new("bash")
                 .args(["-c", &command])
@@ -627,14 +825,147 @@ mod tests {
             child.wait().unwrap()
         };
         assert!(run(payload).success());
-        let installed = dir.path().join(&digest).join("farm-agent");
+        let installed = dir.path().join("farm-agent");
         assert_eq!(std::fs::read(&installed).unwrap(), payload);
         assert!(!run(b"corrupted bytes").success());
         assert_eq!(std::fs::read(&installed).unwrap(), payload);
-        assert_eq!(
-            std::fs::read_dir(dir.path().join(digest)).unwrap().count(),
-            1
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn the_verification_script_keeps_stdin_away_from_msb() {
+        // The script arrives on stdin over SSH (`bash -s`); an msb that consumed it would
+        // silently drop the mdev probe and the cleanup.
+        let script = smoke_script(
+            &uuid::Uuid::new_v4().to_string(),
+            Some("/k/libkrunfw.so.5.6.1"),
+        )
+        .unwrap();
+        for line in script
+            .lines()
+            .filter(|line| line.trim_start().starts_with("msb ") || line.contains("msb remove"))
+        {
+            assert!(line.contains("< /dev/null"), "{line}");
+        }
+        assert!(script.contains("export MSB_LIBKRUNFW_PATH='/k/libkrunfw.so.5.6.1'"));
+        assert!(script.contains("FARM-MDEV 1") && script.contains("FARM-MDEV 0"));
+        // One probe process reads the GPU stack; it is a single-quoted `sh -c` word, so a
+        // quote inside would end that word early.
+        assert!(!GPU_PROBE.contains('\''), "{GPU_PROBE}");
+        // Under pipefail a reader that stops early fails the pipeline (AGENTS.md).
+        for command in ["grep -q", "| head", "grep -m"] {
+            assert!(!GPU_PROBE.contains(command), "{GPU_PROBE}");
+        }
+        for path in [
+            "/dev/vfio/vfio",
+            "/sys/class/mdev_bus",
+            "/sys/class/mdev_bus/mtty",
+            "/mdev_supported_types/",
+            "available_instances",
+            "uname -r",
+        ] {
+            assert!(GPU_PROBE.contains(path), "{path} missing from the probe");
+        }
+        assert!(
+            script.contains(&format!("-- /bin/sh -c '{GPU_PROBE}'")),
+            "{script}"
         );
+        // Without a kernel the stock one boots: no pair is exported.
+        let stock = smoke_script(&uuid::Uuid::new_v4().to_string(), None).unwrap();
+        assert!(!stock.contains("MSB_LIBKRUNFW_PATH"));
+    }
+
+    #[test]
+    fn the_gpu_probe_reports_types_counts_release_and_kernel() {
+        use crate::remote::{GpuKernelKind, MdevType};
+        let output = "FARM-MDEV 1\nFARM-GPU vfio 1\nFARM-GPU mdev 1\nFARM-GPU mtty 1\nFARM-GPU release 6.12.113\nFARM-GPU type mtty-1 24\nFARM-GPU type mtty-0 7\n";
+        assert!(parse_mdev(output).unwrap());
+        let gpu = parse_gpu_kernel(output).unwrap().for_kernel(
+            true,
+            Some("0123456789abcdef".into()),
+            None,
+        );
+        assert_eq!(gpu.kernel, GpuKernelKind::Custom);
+        assert_eq!(gpu.kernel_id.as_deref(), Some("0123456789abcdef"));
+        assert!(gpu.vfio && gpu.vfio_mdev && gpu.mtty_registered);
+        assert_eq!(
+            gpu.mdev_types,
+            [
+                MdevType {
+                    name: "mtty-1".into(),
+                    available_instances: 24
+                },
+                MdevType {
+                    name: "mtty-0".into(),
+                    available_instances: 7
+                }
+            ]
+        );
+        assert_eq!(gpu.kernel_release, "6.12.113");
+        assert!(gpu.mtty_available());
+
+        // The stock kernel boots without any of it; the zero markers are still printed.
+        let stock = parse_gpu_kernel(
+            "FARM-MDEV 0\nFARM-GPU vfio 0\nFARM-GPU mdev 0\nFARM-GPU mtty 0\nFARM-GPU release 6.1.0\n",
+        )
+        .unwrap()
+        .for_kernel(false, None, Some("the kernel was built for msb 0.7.12".into()));
+        assert_eq!(stock.kernel, GpuKernelKind::Stock);
+        assert!(!stock.mtty_available());
+        assert_eq!(
+            stock.reason.as_deref(),
+            Some("the kernel was built for msb 0.7.12")
+        );
+        assert!(stock.mdev_types.is_empty());
+    }
+
+    #[test]
+    fn a_boot_without_the_gpu_probe_is_an_error_not_a_stock_kernel() {
+        let error = parse_gpu_kernel("FARM-MDEV 0\n").unwrap_err().to_string();
+        assert!(error.contains("GPU probe did not run"), "{error}");
+        let error = parse_gpu_kernel("FARM-GPU vfio maybe")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("invalid GPU probe value"), "{error}");
+    }
+
+    #[test]
+    fn the_kernel_upload_script_targets_the_installed_kernel_directory() {
+        let artifact = crate::kernel::Artifact {
+            id: "0123456789abcdef".into(),
+            manifest: "msb 0.7.13\narch x86_64\n".into(),
+            library: std::path::PathBuf::from("/build/libkrunfw.so.5.6.1"),
+            filename: "libkrunfw.so.5.6.1".into(),
+            sha256: "b".repeat(64),
+            msb: "0.7.13".into(),
+            arch: "x86_64".into(),
+        };
+        let script = upload_command(
+            &artifact.sha256,
+            &format!(".local/share/farm/libkrunfw/{}", artifact.id),
+            &artifact.filename,
+            300,
+            "644",
+        );
+        assert!(script.starts_with("timeout 300 bash -c '"), "{script}");
+        assert!(
+            script.contains("$HOME/.local/share/farm/libkrunfw/0123456789abcdef"),
+            "{script}"
+        );
+        assert!(script.contains("chmod 644"), "{script}");
+        assert!(script.contains("sha256sum -c - > /dev/null"), "{script}");
+        assert!(
+            script.contains("mv -f \"$tmp\" \"$dir/libkrunfw.so.5.6.1\""),
+            "{script}"
+        );
+        // The script the kernel check and the manifest write run are plain shell, not a
+        // REPL; they must not hide a failure behind a pipe that ends early.
+        let check = format!(
+            "{COMMON}path=\"$HOME/.local/share/farm/libkrunfw/{0}/{1}\"\nif [ -f \"$path\" ] && printf '%s  %s\\n' '{2}' \"$path\" | sha256sum -c --status; then printf cached; else printf missing; fi\n",
+            artifact.id, artifact.filename, artifact.sha256
+        );
+        assert!(!check.contains("grep -q"), "{check}");
+        assert!(!check.contains("| head"), "{check}");
     }
     #[tokio::test]
     async fn handshake_errors_name_the_local_cause_but_not_server_text() {

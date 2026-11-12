@@ -679,6 +679,9 @@ impl FarmManager {
         inspection.vm_boot_verified = inspection.runtime_ready()
             && previous.vm_boot_verified
             && previous.msb_version == inspection.msb_version;
+        let same_kernel = previous.msb_version == inspection.msb_version
+            && previous.custom_kernel == inspection.custom_kernel;
+        inspection.keep_verification(previous, same_kernel);
         let ready = inspection.vm_boot_verified;
         self.host_inspection(host_id, inspection)?;
         anyhow::ensure!(
@@ -718,6 +721,13 @@ impl FarmManager {
                 .inspection
                 .as_ref()
                 .is_some_and(|i| i.vm_boot_verified && i.msb_version == inspection.msb_version);
+        // The mtty device and the GPU probe are the kernel's, so they stand while the host
+        // boots the same one.
+        if let Some(previous) = stored.host.inspection.as_ref() {
+            let same_kernel = previous.msb_version == inspection.msb_version
+                && previous.custom_kernel == inspection.custom_kernel;
+            inspection.keep_verification(previous, same_kernel);
+        }
         if matches!(job.kind, HostJobKind::Prepare) {
             inspection.vm_boot_verified = false;
         }
@@ -790,13 +800,27 @@ impl FarmManager {
         self.host_event(id, &msb_install_step(inspection.msb_version.as_deref())?)?;
         ssh.install().await?;
         inspection = ssh.inspect().await?;
+        // msb is now the one this build pairs with, so the kernel built for it can be used.
+        self.install_ssh_kernel(&ssh, id, &inspection).await?;
+        inspection = ssh.inspect().await?;
         self.host_inspection(&job.host_id, inspection.clone())?;
         self.host_event(
             id,
             "Booting a 512 MiB verification VM, executing a command and removing it",
         )?;
-        ssh.smoke(id).await?;
+        let gpu = ssh
+            .smoke(
+                id,
+                inspection.custom_kernel.as_deref(),
+                inspection.custom_kernel_reason.as_deref(),
+            )
+            .await?;
         inspection = ssh.inspect().await?;
+        // The verification boot is the only evidence of the kernel's GPU features: the shell
+        // inspection reads the installation, not a booted kernel.
+        inspection.mtty_available = gpu.mtty_available();
+        inspection.gpu_kernel = Some(gpu);
+        self.host_inspection(&job.host_id, inspection.clone())?;
         anyhow::ensure!(
             inspection.runtime_ready(),
             "host prerequisites changed during preparation; inspect the host and retry"
@@ -851,11 +875,17 @@ impl FarmManager {
         )?;
         let inspect = || async {
             match call(Operation::Inspect).await? {
-                Reply::Inspection { inspection } => Ok::<_, anyhow::Error>(inspection),
+                Reply::Inspection { inspection } => Ok::<_, anyhow::Error>(*inspection),
                 _ => anyhow::bail!("unexpected farm-agent inspection response"),
             }
         };
         let mut inspection = inspect().await?;
+        // A process restart forgets the last verification VM; the evidence stands while the
+        // kernel it verified has not changed.
+        if let Some(previous) = stored.host.inspection.as_ref() {
+            inspection
+                .keep_verification(previous, inspection.custom_kernel == previous.custom_kernel);
+        }
         inspection.vm_boot_verified = !matches!(job.kind, HostJobKind::Prepare)
             && inspection.runtime_ready()
             && stored
@@ -876,22 +906,58 @@ impl FarmManager {
             "the host has no usable hypervisor (/dev/kvm on Linux)"
         );
         if !inspection.msb_compatible {
-            self.host_event(id, &msb_install_step(inspection.msb_version.as_deref())?)?;
-            call(Operation::InstallMsb).await?;
-            inspection = inspect().await?;
-            self.host_inspection(&job.host_id, inspection.clone())?;
+            // The installer rewrites ~/.microsandbox/lib on the host. The host's own
+            // inspection says which kernel it boots, which is what decides whether the
+            // installer would replace it: a coordinator started without a custom kernel
+            // must still leave an agent host that has one alone.
+            let replaced = inspection.custom_kernel.as_deref().is_some_and(|path| {
+                crate::kernel::install_would_replace(std::path::Path::new(path))
+            });
+            if replaced {
+                self.host_event(
+                    id,
+                    &format!(
+                        "Skipping the msb install: it would replace the custom kernel this host boots at {} (keep FARM_LIBKRUNFW_PATH outside ~/.microsandbox/lib on the host)",
+                        inspection.custom_kernel.as_deref().unwrap_or_default()
+                    ),
+                )?;
+            } else {
+                self.host_event(id, &msb_install_step(inspection.msb_version.as_deref())?)?;
+                call(Operation::InstallMsb).await?;
+                inspection = inspect().await?;
+                self.host_inspection(&job.host_id, inspection.clone())?;
+            }
             anyhow::ensure!(
                 inspection.msb_compatible,
-                "msb {MSB_VERSION} was installed, but the host still runs {}",
-                inspection.msb_version.as_deref().unwrap_or("no msb")
+                "{}",
+                match inspection.custom_kernel.as_deref() {
+                    Some(path) if replaced => format!(
+                        "msb {MSB_VERSION} is not installed on the host, but installing it would replace the custom kernel at {path}; install msb {MSB_VERSION} by hand on the host first"
+                    ),
+                    _ => format!(
+                        "msb {MSB_VERSION} is still not installed on the host after the install step (it reports {}); install it there, then check and prepare the host again",
+                        inspection.msb_version.as_deref().unwrap_or("no msb")
+                    ),
+                }
             );
         }
+        self.install_agent_kernel(job, stored, &inspection).await?;
+        inspection = inspect().await?;
+        self.host_inspection(&job.host_id, inspection.clone())?;
         self.host_event(
             id,
             "Booting a 512 MiB verification VM, executing a command and removing it",
         )?;
-        call(Operation::VerifyVm).await?;
-        inspection = inspect().await?;
+        // The verification boot reports where it left the host, including whether that boot's
+        // kernel exposed the mtty device. Asking the agent again instead would lose it: the
+        // local agent is a new process per request (`farm host local`, docs/gpu.md).
+        let verified = match call(Operation::VerifyVm).await? {
+            Reply::Inspection { inspection } => *inspection,
+            // An agent built before its verification reply carried the inspection.
+            Reply::Done => inspect().await?,
+            _ => anyhow::bail!("unexpected farm-agent response"),
+        };
+        inspection = verified;
         anyhow::ensure!(
             inspection.runtime_ready(),
             "the host's prerequisites changed during preparation; check it and retry"
@@ -900,6 +966,123 @@ impl FarmManager {
         self.host_event(id, "VM boot, command execution and cleanup verified")?;
         self.golden_event(id, &inspection)?;
         Ok(inspection)
+    }
+    /// Install the built farm kernel on an SSH host before its verification boot, under
+    /// `~/.local/share/farm/libkrunfw`. A missing artifact is not a failure: the host then
+    /// boots the stock microsandbox kernel, and preparation records no mtty device.
+    async fn install_ssh_kernel(
+        &self,
+        ssh: &Session,
+        job: &str,
+        inspection: &HostInspection,
+    ) -> Result<()> {
+        let Some(dir) = self.0.options.libkrunfw_dir.as_deref() else {
+            self.host_event(
+                job,
+                "No built farm kernel is configured; this host boots the stock microsandbox kernel (mtty GPUs are unavailable)",
+            )?;
+            return Ok(());
+        };
+        match crate::kernel::artifact_for(dir, &inspection.os, &inspection.arch) {
+            Ok(Some(artifact)) => {
+                self.host_event(
+                    job,
+                    &format!(
+                        "Installing the farm kernel {} for {}-{} (built for msb {})",
+                        artifact.id, inspection.os, inspection.arch, artifact.msb
+                    ),
+                )?;
+                ssh.install_kernel(&artifact).await?;
+            }
+            Ok(None) => {
+                self.host_event(
+                    job,
+                    &format!(
+                        "No farm kernel for {}-{} in {}; this host boots the stock microsandbox kernel (mtty GPUs are unavailable)",
+                        inspection.os, inspection.arch, dir.display()
+                    ),
+                )?;
+            }
+            Err(error) => {
+                self.host_event(
+                    job,
+                    &format!(
+                        "The farm kernel was not installed: {error:#}; this host boots the stock microsandbox kernel"
+                    ),
+                )?;
+            }
+        }
+        Ok(())
+    }
+    /// Install the built farm kernel on this machine before its verification boot. Only the
+    /// local host shares this process's home; a dial-in host's agent boots a kernel installed
+    /// there or named by `FARM_LIBKRUNFW_PATH`.
+    async fn install_agent_kernel(
+        &self,
+        job: &HostJob,
+        stored: &StoredHost,
+        inspection: &HostInspection,
+    ) -> Result<()> {
+        if stored.host.kind != HostKind::Local {
+            if inspection.custom_kernel.is_none() {
+                let note = inspection
+                    .custom_kernel_reason
+                    .as_deref()
+                    .map(|reason| format!(" ({reason})"))
+                    .unwrap_or_default();
+                self.host_event(
+                    &job.id,
+                    &format!(
+                        "The host's agent boots the stock microsandbox kernel{note}; install farm's kernel on it, or set FARM_LIBKRUNFW_PATH there, for mtty GPUs"
+                    ),
+                )?;
+            }
+            return Ok(());
+        }
+        let Some(dir) = self.0.options.libkrunfw_dir.clone() else {
+            self.host_event(
+                &job.id,
+                "No built farm kernel is configured; this host boots the stock microsandbox kernel (mtty GPUs are unavailable)",
+            )?;
+            return Ok(());
+        };
+        let artifact = match crate::kernel::artifact_for(&dir, &inspection.os, &inspection.arch) {
+            Ok(Some(artifact)) => artifact,
+            Ok(None) => {
+                self.host_event(
+                    &job.id,
+                    &format!(
+                        "No farm kernel for {}-{} in {}; this host boots the stock microsandbox kernel (mtty GPUs are unavailable)",
+                        inspection.os, inspection.arch, dir.display()
+                    ),
+                )?;
+                return Ok(());
+            }
+            Err(error) => {
+                self.host_event(
+                    &job.id,
+                    &format!(
+                        "The farm kernel was not installed: {error:#}; this host boots the stock microsandbox kernel"
+                    ),
+                )?;
+                return Ok(());
+            }
+        };
+        let home = crate::kernel::home().context("the local host has no home directory")?;
+        let id = artifact.id.clone();
+        let msb = artifact.msb.clone();
+        let installed =
+            tokio::task::spawn_blocking(move || crate::kernel::install(&artifact, &home))
+                .await
+                .context("the farm kernel installation task failed")??;
+        self.host_event(
+            &job.id,
+            &format!(
+                "Installed the farm kernel {id} at {} (built for msb {msb})",
+                installed.display()
+            ),
+        )?;
+        Ok(())
     }
     async fn install_host_agent(&self, ssh: &Session, job: &HostJob) -> Result<()> {
         let platform = self
@@ -1034,14 +1217,12 @@ fn token_digest(token: &str) -> String {
 /// needs msb's own state downgrade.
 fn msb_install_step(found: Option<&str>) -> Result<String> {
     Ok(match found {
-        Some(version) if msb_outdated(version) => format!(
-            "Upgrading msb {version} to {MSB_VERSION} and libkrunfw (release checksum verified)"
-        ),
+        Some(version) if msb_outdated(version) => {
+            format!("Upgrading msb {version} to {MSB_VERSION} (release checksum verified)")
+        }
         Some(version) if version != MSB_VERSION => anyhow::bail!(
             "msb {version} is newer than {MSB_VERSION}, which this coordinator runs; Farm does not downgrade msb"
         ),
-        _ => format!(
-            "Installing or verifying msb {MSB_VERSION} and libkrunfw (release checksum verified)"
-        ),
+        _ => format!("Installing or verifying msb {MSB_VERSION} (release checksum verified)"),
     })
 }

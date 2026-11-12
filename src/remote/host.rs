@@ -1,8 +1,23 @@
 //! This machine as a farm host: what the coordinator's own agent runs on.
 
-use super::HostInspection;
+use super::{GpuKernel, HostInspection};
 use anyhow::{Context, Result, ensure};
-use std::{ffi::OsString, path::Path, time::Duration};
+use std::{ffi::OsString, path::Path, sync::Mutex, time::Duration};
+
+/// Set by the last verification boot: what its kernel reported about the GPU stack. A local
+/// agent is a new process per request, so the `VerifyVm` reply must carry this; a later
+/// `Inspect` in another process cannot remember it.
+static GPU_KERNEL: Mutex<Option<GpuKernel>> = Mutex::new(None);
+
+/// What this host's last verification VM read about the booted kernel's GPU features.
+pub fn gpu_kernel() -> Option<GpuKernel> {
+    GPU_KERNEL.lock().ok().and_then(|gpu| gpu.clone())
+}
+
+/// Whether this host's last verification VM saw the custom kernel's `mtty` mdev type.
+pub fn mtty_available() -> bool {
+    gpu_kernel().is_some_and(|gpu| gpu.mtty_available())
+}
 
 pub fn hypervisor() -> &'static str {
     if cfg!(target_os = "macos") {
@@ -93,6 +108,7 @@ pub async fn inspect() -> HostInspection {
         "x86_64" => "x86_64",
         _ => "unsupported",
     };
+    let kernel = crate::kernel::select_in_process();
     HostInspection {
         compatible: os != "unsupported" && arch != "unsupported",
         os: os.into(),
@@ -106,6 +122,10 @@ pub async fn inspect() -> HostInspection {
         msb_version: version,
         docker_available: docker,
         golden_image_available: golden,
+        custom_kernel: kernel.path.as_ref().map(|path| path.display().to_string()),
+        custom_kernel_reason: kernel.reason,
+        mtty_available: mtty_available(),
+        gpu_kernel: gpu_kernel(),
         vm_boot_verified: false,
         checked_at: crate::model::now(),
     }
@@ -141,22 +161,66 @@ pub async fn install_msb() -> Result<()> {
 }
 
 /// Boot, use and remove a small VM on this machine, as a remote host's preparation does.
-pub async fn smoke(token: &str) -> Result<()> {
-    let script = super::ssh::smoke_script(token)?;
+/// Returns what the guest kernel reported about its GPU stack; the reply to the coordinator
+/// carries it, as a process started for one request forgets it afterwards.
+pub async fn smoke(token: &str) -> Result<GpuKernel> {
+    let selection = crate::kernel::select_in_process();
+    let kernel = selection
+        .path
+        .as_ref()
+        .map(|path| path.display().to_string());
+    let script = super::ssh::smoke_script(token, kernel.as_deref())?;
     let mut command = tokio::process::Command::new("bash");
     command
         .args(["-c", &script])
         .env("PATH", search_path())
         .stdin(std::process::Stdio::null())
         .kill_on_drop(true);
+    // The CLI boots the verification VM, so it needs the same kernel pair the SDK uses:
+    // otherwise this host would verify the stock kernel and report no mtty device.
+    if let Some(library) = &kernel {
+        command
+            .env("MSB_PATH", crate::kernel::msb_path())
+            .env("MSB_LIBKRUNFW_PATH", library);
+    }
     let output = tokio::time::timeout(Duration::from_secs(180), command.output())
         .await
         .context("VM boot verification timed out")?
         .context("cannot run bash")?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    // Two failures are different: an msb that could not boot or run in the VM leaves a broken
+    // host, while a boot whose kernel has no mtty leaves a host that is usable but cannot run
+    // an mtty GPU farm. The script prints FARM-MDEV 0 for the second, so a non-zero exit is
+    // the first and a missing marker is a probe that did not run.
     ensure!(
         output.status.success(),
-        "VM boot verification failed: {}",
-        String::from_utf8_lossy(&output.stderr).trim()
+        "VM boot verification failed: msb create/exec/remove on this host did not succeed: {}{}",
+        String::from_utf8_lossy(&output.stderr).trim(),
+        if stdout.trim().is_empty() {
+            String::new()
+        } else {
+            format!(" (stdout: {})", stdout.trim())
+        }
     );
-    Ok(())
+    let gpu = super::ssh::parse_gpu_kernel(&stdout)?;
+    // Both markers describe the same kernel; a disagreement means the probe ran wrong.
+    ensure!(
+        super::ssh::parse_mdev(&stdout)? == gpu.mtty_available(),
+        "this host's verification VM reported disagreeing mtty markers: {}",
+        stdout.trim()
+    );
+    let gpu = gpu.for_kernel(
+        selection.path.is_some(),
+        selection.id.clone(),
+        if selection.path.is_some() {
+            None
+        } else {
+            selection.reason.clone()
+        },
+    );
+    // Kept for this process's later `Inspect`, which a dial-in agent answers from the same one.
+    if let Ok(mut stored) = GPU_KERNEL.lock() {
+        *stored = Some(gpu.clone());
+    }
+    Ok(gpu)
 }

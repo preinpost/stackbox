@@ -7,8 +7,11 @@ set -eu
 # systemd boots the guest. Kolla's bootstrap-servers installs Docker; the Kolla controller
 # runs in the guest and builds its Python dependencies with gcc and the -devel headers.
 # python3-dbus serves Kolla tasks delegated to this guest under the system python.
+# systemd-udev is separate from systemd: libvirt's virNodeDeviceCreateXML runs `mdevctl
+# start` and waits for udev to register the new mediated device, so a compute without udev
+# never sees an mdev and a vGPU instance fails to build.
 dnf install -y -q \
-  systemd dbus-broker \
+  systemd systemd-udev dbus-broker \
   openssh-server openssh-clients sudo \
   python3 python3-pip python3-libselinux python3-dbus git \
   iproute iputils procps-ng hostname which chrony tar nftables \

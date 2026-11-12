@@ -23,6 +23,18 @@ tasks:
     desc: Build this machine's golden image with msb now rather than with the first farm
     cmds:
       - cargo run --release -- golden
+  libkrunfw:
+    desc: Build this machine's guest kernel with the fragments in scripts/libkrunfw/fragments (pass flags after --)
+    cmds:
+      - sh scripts/build-libkrunfw.sh {{.CLI_ARGS}}
+  libkrunfw:all:
+    desc: Build the guest kernels with the same fragments for both aarch64 and x86_64 (pass flags after --)
+    cmds:
+      - sh scripts/build-libkrunfw.sh --arch all {{.CLI_ARGS}}
+  libkrunfw:path:
+    desc: Print the kernel this machine built (diagnostics; farm installs it on hosts during preparation)
+    cmds:
+      - sh scripts/libkrunfw-path.sh {{.CLI_ARGS}}
   build:
     desc: Build the farm release binary
     cmds:
@@ -36,8 +48,16 @@ tasks:
     # The coordinator only installs agents built from its own sources, so build them together.
     deps: [build]
     cmds:
+      - task: dev-kernel
       - task: dev-agents
       - task: dev-run
+  dev-kernel:
+    internal: true
+    # farm installs this kernel on hosts as it prepares them; mtty farms need it. Without
+    # Docker the build is skipped and every host keeps the stock kernel (no mtty device).
+    cmds:
+      - task: libkrunfw:all
+        ignore_error: true
   dev-agents:
     internal: true
     # A released build's coordinator downloads its agents from the release bucket instead.

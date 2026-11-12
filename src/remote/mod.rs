@@ -241,8 +241,93 @@ pub struct HostInspection {
     pub docker_available: bool,
     /// This build's golden image is built; otherwise the first farm on the host builds it.
     pub golden_image_available: bool,
+    /// `FARM_LIBKRUNFW_PATH` the host's agent boots farm VMs from, or the kernel host
+    /// preparation installed under `~/.local/share/farm/libkrunfw`; absent for the stock kernel.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_kernel: Option<String>,
+    /// Why an installed kernel was found but is not used, such as one built for another msb.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom_kernel_reason: Option<String>,
+    /// The farm kernel ran the host's verification VM and exposed the `mtty` mediated
+    /// device type, which an OpenStack 2025.1 or newer `mtty` GPU farm binds as a vGPU.
+    #[serde(default)]
+    pub mtty_available: bool,
+    /// What the verification VM read from its own kernel about the GPU stack. Our kernel
+    /// carries VFIO, mdev and the `mtty` sample driver built in, so there are no modules to
+    /// load; these fields say whether those built-in features came up in the booted guest.
+    /// Absent until a preparation from a coordinator that probes them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gpu_kernel: Option<GpuKernel>,
     pub vm_boot_verified: bool,
     pub checked_at: u64,
+}
+/// The kernel a verification VM booted: farm's installed kernel, or microsandbox's stock one.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum GpuKernelKind {
+    Custom,
+    #[default]
+    Stock,
+}
+/// What the guest kernel of a verification VM reported about the GPU stack. Every flag is
+/// read inside that VM, so it says the kernel came up with the feature, not that the host
+/// has a module for it: farm's kernel is built with VFIO and mdev included.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct GpuKernel {
+    #[serde(default)]
+    pub kernel: GpuKernelKind,
+    /// Installed kernel's id: the directory name under `~/.local/share/farm/libkrunfw`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kernel_id: Option<String>,
+    /// Why the stock kernel booted although a kernel is installed, such as one built for
+    /// another msb.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// `/dev/vfio/vfio` exists in the guest.
+    #[serde(default)]
+    pub vfio: bool,
+    /// `/sys/class/mdev_bus` exists in the guest, so the mdev bus registered.
+    #[serde(default)]
+    pub vfio_mdev: bool,
+    /// `/sys/class/mdev_bus/mtty` exists in the guest: the sample parent device registered.
+    #[serde(default)]
+    pub mtty_registered: bool,
+    /// Every mediated device type the guest kernel offers, as in
+    /// `/sys/class/mdev_bus/*/mdev_supported_types/*`.
+    #[serde(default)]
+    pub mdev_types: Vec<MdevType>,
+    /// `uname -r` in the guest.
+    #[serde(default)]
+    pub kernel_release: String,
+}
+impl GpuKernel {
+    /// Name the kernel the probe booted: farm's installed one, or the stock kernel. `reason`
+    /// explains a stock boot although an installation exists.
+    pub fn for_kernel(
+        mut self,
+        custom: bool,
+        kernel_id: Option<String>,
+        reason: Option<String>,
+    ) -> Self {
+        self.kernel = if custom {
+            GpuKernelKind::Custom
+        } else {
+            GpuKernelKind::Stock
+        };
+        self.kernel_id = kernel_id;
+        self.reason = reason;
+        self
+    }
+    /// Whether the guest can bind an `mtty-1` vGPU: the parent device and that type exist.
+    /// The instance count is reported separately, as an exhausted device is still present.
+    pub fn mtty_available(&self) -> bool {
+        self.mtty_registered && self.mdev_types.iter().any(|t| t.name == "mtty-1")
+    }
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct MdevType {
+    pub name: String,
+    pub available_instances: u64,
 }
 impl HostInspection {
     /// The farm-agent platform this host needs, as in [`AgentArtifactInfo::platform`].
@@ -251,6 +336,18 @@ impl HostInspection {
     }
     pub fn runtime_ready(&self) -> bool {
         self.compatible && self.kvm_available && self.msb_compatible
+    }
+    /// Carry what the last verification boot learned about the booted kernel into an
+    /// inspection that only read the host: a plain check cannot boot a guest. `same_kernel`
+    /// says that boot's kernel and msb are still the host's.
+    pub fn keep_verification(&mut self, previous: &Self, same_kernel: bool) {
+        if !same_kernel {
+            return;
+        }
+        self.mtty_available |= previous.mtty_available;
+        if self.gpu_kernel.is_none() {
+            self.gpu_kernel.clone_from(&previous.gpu_kernel);
+        }
     }
     pub fn status(&self) -> HostStatus {
         if self.runtime_ready() && self.vm_boot_verified {
@@ -419,6 +516,106 @@ mod msb_version_tests {
         assert!(!msb_outdated("0.7.14"));
         assert!(!msb_outdated("1.0.0"));
         assert!(!msb_outdated("0.7.x"));
+    }
+
+    #[test]
+    fn an_inspection_from_before_the_custom_kernel_still_reads() {
+        // A state file written before farm knew about custom kernels has neither field.
+        let older = serde_json::json!({
+            "os": "linux",
+            "arch": "aarch64",
+            "compatible": true,
+            "kvm_available": true,
+            "sudo_available": false,
+            "memory_total_mib": 65536,
+            "memory_available_mib": 32768,
+            "disk_available_mib": 500000,
+            "msb_version": "0.7.13",
+            "msb_compatible": true,
+            "docker_available": true,
+            "golden_image_available": true,
+            "vm_boot_verified": true,
+            "checked_at": 1,
+        });
+        let inspection: HostInspection = serde_json::from_value(older).unwrap();
+        assert!(inspection.runtime_ready() && inspection.vm_boot_verified);
+        assert_eq!(inspection.custom_kernel, None);
+        assert!(!inspection.mtty_available);
+        assert!(inspection.gpu_kernel.is_none());
+        // An unknown field from a newer coordinator does not sink the whole inspection.
+        let newer = serde_json::json!({
+            "os": "linux", "arch": "aarch64", "compatible": true, "kvm_available": true,
+            "sudo_available": false, "memory_total_mib": 1, "memory_available_mib": 1,
+            "disk_available_mib": 1, "msb_version": null, "msb_compatible": false,
+            "docker_available": false, "golden_image_available": false,
+            "custom_kernel": "/srv/kernels/libkrunfw.so.5.6.1",
+            "mtty_available": true, "vm_boot_verified": false, "checked_at": 2,
+            "gpu_kernel": {
+                "kernel": "custom", "kernel_id": "0123456789abcdef",
+                "vfio": true, "vfio_mdev": true, "mtty_registered": true,
+                "mdev_types": [{"name": "mtty-1", "available_instances": 24}],
+                "kernel_release": "6.12.113"
+            },
+            "a_field_from_later": 1,
+        });
+        let inspection: HostInspection = serde_json::from_value(newer).unwrap();
+        assert_eq!(
+            inspection.custom_kernel.as_deref(),
+            Some("/srv/kernels/libkrunfw.so.5.6.1")
+        );
+        assert!(inspection.mtty_available);
+        let gpu = inspection.gpu_kernel.unwrap();
+        assert_eq!(gpu.kernel, GpuKernelKind::Custom);
+        assert_eq!(gpu.kernel_id.as_deref(), Some("0123456789abcdef"));
+        assert!(gpu.mtty_available());
+        assert_eq!(gpu.mdev_types[0].available_instances, 24);
+        assert_eq!(gpu.kernel_release, "6.12.113");
+    }
+
+    #[test]
+    fn a_check_keeps_the_gpu_probe_only_for_the_kernel_it_read() {
+        let probed = GpuKernel {
+            kernel: GpuKernelKind::Custom,
+            kernel_id: Some("0123456789abcdef".into()),
+            vfio: true,
+            vfio_mdev: true,
+            mtty_registered: true,
+            mdev_types: vec![MdevType {
+                name: "mtty-1".into(),
+                available_instances: 24,
+            }],
+            kernel_release: "6.12.113".into(),
+            ..Default::default()
+        };
+        let mut previous = HostInspection {
+            custom_kernel: Some("/k/0123456789abcdef/libkrunfw.so.5.6.1".into()),
+            mtty_available: true,
+            gpu_kernel: Some(probed.clone()),
+            ..serde_json::from_value(serde_json::json!({
+                "os": "linux", "arch": "x86_64", "compatible": true,
+                "kvm_available": true, "sudo_available": false,
+                "memory_total_mib": 1, "memory_available_mib": 1,
+                "disk_available_mib": 1, "msb_version": "0.7.13",
+                "msb_compatible": true, "docker_available": false,
+                "golden_image_available": false, "vm_boot_verified": true,
+                "checked_at": 1
+            }))
+            .unwrap()
+        };
+        let mut checked = previous.clone();
+        checked.mtty_available = false;
+        checked.gpu_kernel = None;
+        checked.keep_verification(&previous, true);
+        assert!(checked.mtty_available);
+        assert_eq!(checked.gpu_kernel.as_ref(), Some(&probed));
+        // Another kernel was never booted here, so its GPU state is unknown.
+        previous.custom_kernel = Some("/k/fedcba9876543210/libkrunfw.so.5.6.1".into());
+        let mut checked = previous.clone();
+        checked.mtty_available = false;
+        checked.gpu_kernel = None;
+        checked.keep_verification(&previous, false);
+        assert!(!checked.mtty_available);
+        assert!(checked.gpu_kernel.is_none());
     }
 
     #[test]
