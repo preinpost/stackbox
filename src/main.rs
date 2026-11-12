@@ -7,7 +7,7 @@ use farm::{
     manager::{self, FarmManager, ManagerOptions, default_state_dir},
     model::{
         self, AddComputeRequest, ComputeSize, CreateRequest, DeployRequest, ExportRequest,
-        ImportRequest, Job, JobStatus, PlanRequest, SnapshotRecord, SnapshotRequest,
+        GpuConfig, ImportRequest, Job, JobStatus, PlanRequest, SnapshotRecord, SnapshotRequest,
         SnapshotStatus,
     },
 };
@@ -57,6 +57,53 @@ impl ComputeArgs {
     }
 }
 
+/// A virtual GPU on each compute VM: no hardware GPU is involved.
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum GpuModeArg {
+    /// Advertise the standard VGPU inventory on a child provider per fake GPU (OpenStack
+    /// 2025.1 and newer); the guest gets no device
+    Simulated,
+    /// Nova binds farm kernel's mtty mediated device (2025.1 and newer; farm patches
+    /// Nova's driver itself before 2026.2)
+    Mtty,
+}
+
+#[derive(Args)]
+struct GpuArgs {
+    /// Virtual GPU on every compute VM: 'simulated' (OpenStack 2025.1 and newer) or 'mtty'
+    /// (2025.1 and newer, on hosts prepared with farm's kernel); not real hardware
+    #[arg(long, value_enum)]
+    gpu: Option<GpuModeArg>,
+    /// Virtual GPUs per compute VM (1-24)
+    #[arg(long, requires = "gpu", default_value_t = 1)]
+    gpu_count: u32,
+    /// Fake GPU devices each compute splits its virtual GPUs over (simulated only, 1-24);
+    /// one resource provider each, as a vGPU host has one per card
+    #[arg(long = "gpu-devices", requires = "gpu")]
+    gpu_devices: Option<u32>,
+    /// Trait the flavor requires besides the resource class (simulated only, repeatable;
+    /// 'CUSTOM_*'; default CUSTOM_FARM_VGPU)
+    #[arg(long = "gpu-trait", requires = "gpu")]
+    gpu_traits: Vec<String>,
+    /// Resource class the flavor asks for (simulated only): VGPU, PGPU or CUSTOM_*
+    #[arg(long = "gpu-resource-class", requires = "gpu")]
+    gpu_resource_class: Option<String>,
+}
+impl GpuArgs {
+    fn config(&self) -> Option<GpuConfig> {
+        self.gpu.map(|mode| GpuConfig {
+            mode: match mode {
+                GpuModeArg::Simulated => model::GpuMode::Simulated,
+                GpuModeArg::Mtty => model::GpuMode::Mtty,
+            },
+            count: self.gpu_count,
+            traits: (!self.gpu_traits.is_empty()).then(|| self.gpu_traits.clone()),
+            devices: self.gpu_devices,
+            resource_class: self.gpu_resource_class.clone(),
+        })
+    }
+}
+
 /// Options of `create --release`.
 #[derive(Args)]
 struct ReleaseArgs {
@@ -82,6 +129,11 @@ struct ReleaseArgs {
     /// With --release, print which template or clean install makes each VM and stop
     #[arg(long, requires = "release")]
     dry_run: bool,
+    /// These GPU flags are shared, not release-only: `plan` takes them, and so does a plain
+    /// `create`, which passes them to the farm it makes. A GPU farm ignores templates and
+    /// installs clean, so with --release they mean a clean install of every VM.
+    #[command(flatten)]
+    gpu: GpuArgs,
 }
 
 #[derive(Subcommand)]
@@ -106,6 +158,8 @@ enum Command {
         computes: u8,
         #[command(flatten)]
         compute: ComputeArgs,
+        #[command(flatten)]
+        gpu: GpuArgs,
         #[arg(long)]
         json: bool,
     },
@@ -339,6 +393,40 @@ fn print_json(value: &impl serde::Serialize) -> Result<()> {
     println!("{}", serde_json::to_string_pretty(value)?);
     Ok(())
 }
+/// The kernel and GPU facts a host's last verification VM reported, for `farm host list`.
+fn kernel_note(inspection: &farm::remote::HostInspection) -> String {
+    let mut parts = Vec::new();
+    if let Some(path) = &inspection.custom_kernel {
+        parts.push(format!("custom kernel {path}"));
+    } else if let Some(reason) = &inspection.custom_kernel_reason {
+        parts.push(format!("stock kernel: {reason}"));
+    }
+    if let Some(gpu) = &inspection.gpu_kernel {
+        if !gpu.kernel_release.is_empty() {
+            parts.push(format!("kernel {}", gpu.kernel_release));
+        }
+        if gpu.vfio {
+            parts.push("VFIO".into());
+        }
+        if gpu.vfio_mdev {
+            parts.push("mdev".into());
+        }
+        for mdev_type in &gpu.mdev_types {
+            parts.push(format!(
+                "{}×{}",
+                mdev_type.name, mdev_type.available_instances
+            ));
+        }
+    } else if inspection.mtty_available {
+        // A preparation from before the structured probe recorded only this.
+        parts.push("mtty".into());
+    }
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!(" · {}", parts.join(" · "))
+    }
+}
 async fn wait_snapshot(manager: &FarmManager, id: &str) -> Result<SnapshotRecord> {
     let snapshot = manager.wait_snapshot(id).await?;
     if snapshot.status == SnapshotStatus::Failed {
@@ -400,7 +488,9 @@ async fn wait(manager: &FarmManager, job: Job) -> Result<()> {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    // Planning and schema commands need neither msb nor the daemon's writer lock.
+    // Planning and schema commands need neither msb nor the daemon's writer lock, nor a
+    // usable farm kernel: computing a plan never boots a VM, and whether a host can bind the
+    // `mtty` device is decided by that host's inspection when the farm is created.
     match &cli.command {
         Command::Catalog { json } => {
             let c = model::catalog();
@@ -431,6 +521,7 @@ async fn main() -> Result<()> {
             components,
             computes,
             compute,
+            gpu,
             json,
         } => {
             model::require_multi_node(*computes, None)?;
@@ -440,6 +531,7 @@ async fn main() -> Result<()> {
                 compute: compute.size(),
                 release: None,
                 layout: None,
+                gpu: gpu.config(),
             })?;
             if *json {
                 return print_json(&p);
@@ -465,6 +557,9 @@ async fn main() -> Result<()> {
         }
         Command::Openapi => return print_json(&api::openapi_document()),
         Command::Golden { check } => {
+            // Building a golden image boots a VM, so this is where the custom kernel of this
+            // process has to reach the SDK first.
+            farm::kernel::configure_sdk()?;
             let golden = farm::farm::golden::current();
             if *check {
                 let built = farm::farm::golden::available(&golden).await?;
@@ -479,6 +574,7 @@ async fn main() -> Result<()> {
         Command::Agent {
             mode: Some(AgentMode::Connect { coordinator, token }),
         } => {
+            farm::kernel::configure_sdk()?;
             let token = token
                 .clone()
                 .or_else(|| std::env::var("FARM_AGENT_TOKEN").ok())
@@ -490,6 +586,7 @@ async fn main() -> Result<()> {
         Command::Agent {
             mode: Some(AgentMode::Worker { job }),
         } => {
+            farm::kernel::configure_sdk()?;
             if let Err(error) = farm::remote::agent::serve_worker(job).await {
                 eprintln!("farm agent worker: {error:#}");
                 std::process::exit(1);
@@ -509,6 +606,7 @@ async fn main() -> Result<()> {
             };
         }
         Command::Agent { mode: None } => {
+            farm::kernel::configure_sdk()?;
             if let Err(error) = farm::remote::agent::serve_stdio().await {
                 eprintln!("farm agent: {error}");
                 std::process::exit(1);
@@ -518,6 +616,10 @@ async fn main() -> Result<()> {
         }
         _ => {}
     }
+    // Every command below reaches microsandbox: it creates, boots or deletes VMs on this
+    // machine or on a host whose agent it starts. Point the SDK at the custom kernel of
+    // this process once, before the runtime is resolved.
+    farm::kernel::configure_sdk()?;
     let mut options = ManagerOptions::local(cli.state_dir.unwrap_or_else(default_state_dir));
     if let Some(limit) = cli.memory_budget_mib {
         options.memory_budget_mib = limit;
@@ -566,6 +668,7 @@ async fn main() -> Result<()> {
                 compute_template,
                 bucket,
                 dry_run,
+                gpu,
             } = *by_release;
             let request = model::ReleaseCreateRequest {
                 id: id.clone(),
@@ -582,6 +685,7 @@ async fn main() -> Result<()> {
                 external_host,
                 owner,
                 expires_at,
+                gpu: gpu.config(),
             };
             if compute.size().is_some() {
                 bail!("a farm made by release takes its compute size from its templates");
@@ -610,6 +714,7 @@ async fn main() -> Result<()> {
             expires_at,
             snapshot,
             placement,
+            by_release,
             ..
         } => {
             // A snapshot brings its own services and layout; a new farm has its computes.
@@ -630,6 +735,8 @@ async fn main() -> Result<()> {
                 expires_at,
                 snapshot_id: snapshot,
                 placement: placement.into_iter().collect(),
+                // The GPU flags ride in the release options, which plain creates share.
+                gpu: by_release.gpu.config(),
             })?;
             wait(&manager, job).await?;
             print_json(&manager.get(&id)?)?;
@@ -754,7 +861,12 @@ async fn main() -> Result<()> {
                     print_json(&hosts)?;
                 } else {
                     for host in hosts {
-                        println!("{:<24} {:?} {:?}", host.id, host.kind, host.status);
+                        let note = host
+                            .inspection
+                            .as_ref()
+                            .map(kernel_note)
+                            .unwrap_or_default();
+                        println!("{:<24} {:?} {:?}{note}", host.id, host.kind, host.status);
                     }
                 }
             }

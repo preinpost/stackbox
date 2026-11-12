@@ -35,6 +35,9 @@ pub struct PlanRequest {
     /// every farm gained computes. New farms leave it out; [`require_multi_node`] refuses it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub layout: Option<FarmLayout>,
+    /// A virtual GPU on every compute VM; omitted for none. Not hardware: see [`GpuConfig`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gpu: Option<GpuConfig>,
 }
 
 /// The layout of a farm without computes, kept readable for farms and snapshots made
@@ -84,6 +87,427 @@ impl Default for ComputeSize {
         }
     }
 }
+/// How a farm gets a GPU when the host has none. Both modes are virtual devices: no guest
+/// sees a real GPU, and nothing computes on one.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum GpuMode {
+    /// farm advertises the standard `VGPU` inventory on a child resource provider of every
+    /// compute, under the name a vGPU deployment's Nova gives one: `<host>_pci_<address>`.
+    /// The flavor asks for that class plus the traits the request names, so Placement
+    /// schedules and allocates a virtual GPU, and the instance boots without one: Nova's
+    /// libvirt driver has no mediated-device type configured, so it neither creates nor
+    /// consumes one (OpenStack 2025.1 and newer).
+    #[default]
+    Simulated,
+    /// Nova binds the guest kernel's `mtty` mediated device as a `VGPU` (OpenStack 2025.1 and
+    /// newer, on a compute VM booted with a VFIO/mdev libkrunfw). Releases before 2026.2 get
+    /// Nova's own `mtty` support from farm's backport, which the container applies at start
+    /// (see [`crate::kolla::config::nova_mtty_patch`]). The guest sees a `4348:3253` serial
+    /// controller through VFIO.
+    Mtty,
+}
+
+/// Virtual GPUs a compute VM offers at most.
+pub const MAX_GPU_COUNT: u32 = 24;
+/// Fake physical GPUs a compute VM splits its virtual GPUs over at most.
+pub const MAX_GPU_DEVICES: u32 = 24;
+/// The trait `simulated` requires when the request names none.
+pub const DEFAULT_VGPU_TRAIT: &str = "CUSTOM_FARM_VGPU";
+/// The resource class both modes advertise unless the request picks another one: the standard
+/// class Nova inventories a mediated device's virtual GPU under.
+pub const DEFAULT_RESOURCE_CLASS: &str = "VGPU";
+/// The PCI bus number of the first fake GPU on a compute. Any bus would do: the address is
+/// farm's, not read from a device, and exists to give the provider a vGPU host's name.
+const VGPU_BUS_FIRST: u32 = 0x84;
+
+/// A farm's GPU: `count` virtual devices on every compute VM.
+///
+/// The `simulated` mode's provider layout is farm's own, so a request can describe the
+/// contract another deployment's flavor expects: the resource class, the traits it requires
+/// and how many cards the host has. `mtty` advertises what Nova finds and takes none of them.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct GpuConfig {
+    #[serde(default)]
+    pub mode: GpuMode,
+    /// Devices per compute VM, 1-[`MAX_GPU_COUNT`].
+    #[serde(default = "one_virtual_gpu")]
+    #[schema(minimum = 1, maximum = 24)]
+    pub count: u32,
+    /// Traits the flavor requires besides the resource class. Omitted, `simulated` requires
+    /// [`DEFAULT_VGPU_TRAIT`]; `mtty` requires none, because Nova builds that provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub traits: Option<Vec<String>>,
+    /// Fake physical GPUs each compute advertises its virtual GPUs on, one child resource
+    /// provider each, as a vGPU host has one per card. Two devices make a flavor's request
+    /// land on a card rather than on a host. Omitted: one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(minimum = 1, maximum = 24)]
+    pub devices: Option<u32>,
+    /// The resource class the flavor asks for. Omitted: [`DEFAULT_RESOURCE_CLASS`]. `PGPU`
+    /// and `CUSTOM_*` build another deployment's contract; the inventory is farm's either
+    /// way, so no driver checks it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schema(value_type = Option<String>, example = "VGPU")]
+    pub resource_class: Option<String>,
+}
+
+/// The serde default of [`GpuConfig::count`]: a body that names only a mode.
+fn one_virtual_gpu() -> u32 {
+    1
+}
+impl Default for GpuConfig {
+    fn default() -> Self {
+        Self {
+            mode: GpuMode::Simulated,
+            count: 1,
+            traits: None,
+            devices: None,
+            resource_class: None,
+        }
+    }
+}
+impl GpuConfig {
+    /// The fake GPU `device` of `host`, named as Nova names the provider of a card at a PCI
+    /// address: `<hypervisor_hostname>_pci_<domain>_<bus>_<slot>_<func>`.
+    pub fn provider_name(host: &str, device: u32) -> String {
+        format!("{host}_pci_0000_{:02x}_00_0", VGPU_BUS_FIRST + device)
+    }
+    /// The `count` virtual GPUs split over the fake GPUs, so every card offers at least one
+    /// and the first ones take the remainder.
+    pub fn device_totals(&self) -> Vec<u32> {
+        let devices = self.device_count().min(self.count.max(1));
+        (0..devices)
+            .map(|device| self.count / devices + u32::from(device < self.count % devices))
+            .collect()
+    }
+    /// The fake GPUs each compute advertises the virtual GPUs on.
+    pub fn device_count(&self) -> u32 {
+        self.devices.unwrap_or(1)
+    }
+    /// The resource class each compute inventories and the flavor asks for.
+    pub fn resource_class(&self) -> &str {
+        match self.mode {
+            GpuMode::Simulated => self
+                .resource_class
+                .as_deref()
+                .unwrap_or(DEFAULT_RESOURCE_CLASS),
+            GpuMode::Mtty => DEFAULT_RESOURCE_CLASS,
+        }
+    }
+    /// The traits the flavor requires. The kernel's mediated device carries none of farm's:
+    /// Nova sets that provider's traits itself.
+    pub fn traits(&self) -> Vec<String> {
+        match (self.mode, &self.traits) {
+            (GpuMode::Mtty, _) => Vec::new(),
+            (GpuMode::Simulated, Some(traits)) => traits.clone(),
+            (GpuMode::Simulated, None) => vec![DEFAULT_VGPU_TRAIT.to_owned()],
+        }
+    }
+    /// The flavor farm creates for both modes: one virtual GPU, whatever class it is.
+    pub fn flavor(&self) -> &'static str {
+        "farm.vgpu"
+    }
+    /// The oldest OpenStack release that can offer this mode.
+    pub fn min_release(&self) -> &'static str {
+        match self.mode {
+            // `simulated` needs the Placement microversion that gives a provider a parent
+            // (1.14), and `mtty` needs Nova's mediated-device support, which 2025.1's Nova
+            // gains from the backport farm installs at container start.
+            GpuMode::Simulated | GpuMode::Mtty => "2025.1",
+        }
+    }
+    /// The mode as the API and the portal name it.
+    pub fn mode_name(&self) -> &'static str {
+        match self.mode {
+            GpuMode::Simulated => "simulated",
+            GpuMode::Mtty => "mtty",
+        }
+    }
+    /// Refuses a release that cannot express this mode. `release` may be a series name; it is
+    /// compared after [`crate::kolla::releases::info`] resolves it.
+    pub fn check_release(&self, release: &str) -> Result<()> {
+        let release = crate::kolla::releases::info(release).release;
+        if release.as_str() < self.min_release() {
+            bail!(
+                "OpenStack {release} cannot offer a '{}' GPU; it needs {} or newer",
+                self.mode_name(),
+                self.min_release()
+            );
+        }
+        Ok(())
+    }
+    /// Refuses a plan whose release, services or count cannot express the mode. `release` may
+    /// be a series name; it is compared after [`crate::kolla::releases::info`] resolves it.
+    ///
+    /// What the device binds is the *VM host's* kernel, which a plan does not know: every
+    /// `mtty` farm is judged by each compute host's inspection when it is created or expanded
+    /// (see `ensure_mtty_host` in `src/manager/mod.rs`). This coordinator's own kernel says
+    /// nothing about a remote host, so it is deliberately not consulted here.
+    pub fn validate(&self, release: &str, components: &[String]) -> Result<()> {
+        if !(1..=MAX_GPU_COUNT).contains(&self.count) {
+            bail!("a compute VM can offer 1-{MAX_GPU_COUNT} virtual GPUs");
+        }
+        if !components.iter().any(|c| c == "nova") {
+            bail!("the GPU option needs Nova in the farm's components");
+        }
+        self.check_release(release)?;
+        if self.mode == GpuMode::Mtty {
+            // Nova owns that provider, so its inventory, traits and class are not farm's to
+            // shape: nothing would carry them.
+            if self.traits.is_some()
+                || self.devices.is_some()
+                || self
+                    .resource_class
+                    .as_deref()
+                    .is_some_and(|rc| rc != DEFAULT_RESOURCE_CLASS)
+            {
+                bail!(
+                    "'gpu.traits', 'gpu.devices' and 'gpu.resource_class' describe the 'simulated' mode's own provider; 'mtty' advertises the VGPU inventory Nova builds"
+                );
+            }
+            return Ok(());
+        }
+        let devices = self.device_count();
+        if !(1..=MAX_GPU_DEVICES).contains(&devices) {
+            bail!("a compute VM can advertise its virtual GPUs on 1-{MAX_GPU_DEVICES} devices");
+        }
+        if devices > self.count {
+            bail!(
+                "{} virtual GPU(s) cannot fill {devices} devices; every device offers at least one",
+                self.count
+            );
+        }
+        for trait_name in self.traits() {
+            custom_placement_name("trait", &trait_name)?;
+        }
+        if let Some(class) = &self.resource_class
+            && !matches!(class.as_str(), "VGPU" | "PGPU")
+        {
+            custom_placement_name("resource class", class)?;
+        }
+        Ok(())
+    }
+}
+
+/// The memory, power and clock envelope a virtual GPU reports. The guest derives
+/// utilization, temperature, fan speed and the remaining clocks from its load sample
+/// with integer arithmetic, so one profile name is all the metadata carries.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub enum GpuProfile {
+    /// 8 GiB, 150 W.
+    #[default]
+    #[serde(rename = "sim-8g")]
+    Sim8g,
+    /// 16 GiB, 250 W.
+    #[serde(rename = "sim-16g")]
+    Sim16g,
+    /// 40 GiB, 350 W.
+    #[serde(rename = "sim-40g")]
+    Sim40g,
+    /// 80 GiB, 400 W.
+    #[serde(rename = "sim-80g")]
+    Sim80g,
+}
+impl GpuProfile {
+    /// The API and metadata name, `sim-8g`.
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Sim8g => "sim-8g",
+            Self::Sim16g => "sim-16g",
+            Self::Sim40g => "sim-40g",
+            Self::Sim80g => "sim-80g",
+        }
+    }
+    pub fn from_id(id: &str) -> Option<Self> {
+        Some(match id {
+            "sim-8g" => Self::Sim8g,
+            "sim-16g" => Self::Sim16g,
+            "sim-40g" => Self::Sim40g,
+            "sim-80g" => Self::Sim80g,
+            _ => return None,
+        })
+    }
+    /// Framebuffer memory the guest reports, in MiB.
+    pub fn memory_mib(self) -> u32 {
+        match self {
+            Self::Sim8g => 8192,
+            Self::Sim16g => 16384,
+            Self::Sim40g => 40960,
+            Self::Sim80g => 81920,
+        }
+    }
+    /// Board power limit the guest reports, in whole watts.
+    pub fn power_limit_w(self) -> u32 {
+        match self {
+            Self::Sim8g => 150,
+            Self::Sim16g => 250,
+            Self::Sim40g => 350,
+            Self::Sim80g => 400,
+        }
+    }
+    /// Idle and boost SM clock, in MHz.
+    pub fn clocks_mhz(self) -> (u32, u32) {
+        match self {
+            Self::Sim8g => (300, 1500),
+            Self::Sim16g => (300, 1800),
+            Self::Sim40g => (300, 1950),
+            Self::Sim80g => (300, 2000),
+        }
+    }
+    /// Memory clock the guest reports, in MHz.
+    pub fn memory_clock_mhz(self) -> u32 {
+        match self {
+            Self::Sim8g => 7000,
+            Self::Sim16g => 8000,
+            Self::Sim40g => 9000,
+            Self::Sim80g => 10000,
+        }
+    }
+    pub const ALL: [Self; 4] = [Self::Sim8g, Self::Sim16g, Self::Sim40g, Self::Sim80g];
+}
+
+/// How a virtual GPU's utilization moves through one period. farm samples the
+/// pattern into a small table; the guest picks a sample from the current second, so
+/// the guest needs no trigonometry and the portal's preview draws the same table.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum GpuPattern {
+    /// The middle of `min` and `max`.
+    #[default]
+    Constant,
+    Sine,
+    Triangle,
+    /// `max` for the first half of the period, `min` for the second.
+    Square,
+    /// Rises from `min` to `max`, then starts over.
+    Sawtooth,
+    /// Deterministic pseudo-random samples, so the same load draws the same table.
+    Random,
+    /// `min` except for one sample at `max` in the middle of the period.
+    Spike,
+}
+impl GpuPattern {
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Constant => "constant",
+            Self::Sine => "sine",
+            Self::Triangle => "triangle",
+            Self::Square => "square",
+            Self::Sawtooth => "sawtooth",
+            Self::Random => "random",
+            Self::Spike => "spike",
+        }
+    }
+    pub fn from_id(id: &str) -> Option<Self> {
+        Some(match id {
+            "constant" => Self::Constant,
+            "sine" => Self::Sine,
+            "triangle" => Self::Triangle,
+            "square" => Self::Square,
+            "sawtooth" => Self::Sawtooth,
+            "random" => Self::Random,
+            "spike" => Self::Spike,
+            _ => return None,
+        })
+    }
+    pub const ALL: [Self; 7] = [
+        Self::Constant,
+        Self::Sine,
+        Self::Triangle,
+        Self::Square,
+        Self::Sawtooth,
+        Self::Random,
+        Self::Spike,
+    ];
+}
+
+/// The load a portal sets on one instance. farm turns it into a sample table and
+/// writes it to the instance's Nova metadata; the guest script reads that table.
+/// Nothing computes on the values: this exists to exercise monitoring paths.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct GpuLoad {
+    pub profile: GpuProfile,
+    pub pattern: GpuPattern,
+    /// Lowest utilization, percent.
+    #[schema(minimum = 0, maximum = 100)]
+    pub min: u8,
+    /// Highest utilization, percent.
+    #[schema(minimum = 0, maximum = 100)]
+    pub max: u8,
+    /// Seconds in one full pattern.
+    #[schema(minimum = 1, maximum = 3600)]
+    pub period_s: u32,
+    /// Share of framebuffer memory reported as used, percent.
+    #[schema(minimum = 0, maximum = 100)]
+    pub memory_ratio: u8,
+}
+impl Default for GpuLoad {
+    fn default() -> Self {
+        Self {
+            profile: GpuProfile::Sim8g,
+            pattern: GpuPattern::Sine,
+            min: 10,
+            max: 90,
+            period_s: 60,
+            memory_ratio: 30,
+        }
+    }
+}
+
+/// A virtual GPU instance as the portal's load editor lists it. `gpu_count` comes
+/// from the flavor's resource class (or 1 when it asks for none, because the guest
+/// script defaults to one virtual GPU).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct FarmInstance {
+    pub id: String,
+    pub name: String,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub project: String,
+    pub flavor: String,
+    /// Virtual GPUs the flavor asks for, 0 when it asks for no GPU resource.
+    pub gpu_count: u32,
+    /// Resource classes the flavor requires, `VGPU: 1`.
+    pub resources: BTreeMap<String, u32>,
+    /// The load farm applied, or one decoded from the instance's metadata after a
+    /// coordinator lost its state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub load: Option<GpuLoad>,
+    /// Whether the instance's metadata currently carries `farm_gpu_*`.
+    pub applied: bool,
+    /// The `farm_gpu_*` keys currently set on the instance.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub properties: Vec<String>,
+}
+
+/// One instance's load plus the metadata keys farm found on it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
+pub struct GpuLoadView {
+    pub server: String,
+    pub load: GpuLoad,
+    pub applied: bool,
+    /// `farm_gpu_*` keys currently set on the instance.
+    pub properties: Vec<String>,
+}
+
+/// Refuses a name Placement would not take as a custom trait or resource class:
+/// `CUSTOM_` and upper-case letters, digits or `_`.
+fn custom_placement_name(kind: &str, name: &str) -> Result<()> {
+    let valid = name.strip_prefix("CUSTOM_").is_some_and(|rest| {
+        !rest.is_empty()
+            && rest
+                .chars()
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+    }) && name.len() <= 255;
+    if !valid {
+        bail!("a {kind} is 'CUSTOM_' and upper-case letters, digits or '_' (got '{name}')");
+    }
+    Ok(())
+}
+
 impl ComputeSize {
     fn validate(self) -> Result<Self> {
         if !(1..=16).contains(&self.cpus) {
@@ -112,6 +536,10 @@ pub struct Plan {
     /// The compute VMs' size when it is not the default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compute: Option<ComputeSize>,
+    /// The virtual GPU every compute VM offers; absent on farms without one, and on plans
+    /// recorded before the option existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gpu: Option<GpuConfig>,
     pub nodes: Vec<NodeSpec>,
     pub memory_mib: u64,
     /// Includes both container disks for each container host. Sparse disks consume less initially.
@@ -301,6 +729,8 @@ pub fn catalog() -> Catalog {
             "Each farm runs all selected OpenStack services in one all-in-one VM.".into(),
             "Open vSwitch uses the userspace datapath, so tenant traffic is slower than on a kernel datapath.".into(),
             "Nova uses KVM when microsandbox exposes nested /dev/kvm in the guest, otherwise qemu TCG with slow instance boots.".into(),
+            "A GPU farm gets a virtual device, not a real GPU. Both modes advertise the standard VGPU scheduling contract: 'simulated' puts a VGPU inventory and the requested traits on one child resource provider per fake GPU of each compute (OpenStack 2025.1 and newer), 'mtty' binds the guest kernel's mtty mediated device (2025.1 and newer, on a host prepared with farm's kernel; farm patches Nova's driver itself up to 2026.1).".into(),
+            "Guest software in a GPU instance sees a device it cannot compute on: the device is a contract for scheduling tests, not hardware.".into(),
         ],
     }
 }
@@ -385,6 +815,7 @@ pub fn control_layout(
         compute,
         release: release.map(str::to_owned),
         layout: Some(FarmLayout::Control),
+        gpu: None,
     })
 }
 
@@ -422,6 +853,26 @@ pub fn layout(request: &PlanRequest) -> Result<Plan> {
         Some(size) => Some(size.validate()?).filter(|size| *size != ComputeSize::default()),
         None => None,
     };
+    // Every device is offered by a compute VM, so a GPU needs one to advertise it.
+    let gpu = match &request.gpu {
+        Some(gpu) => {
+            if computes == 0 {
+                bail!("a GPU is offered by compute VMs; add one or leave gpu out");
+            }
+            gpu.validate(
+                request
+                    .release
+                    .as_deref()
+                    .unwrap_or(crate::kolla::OPENSTACK_RELEASE),
+                &components
+                    .iter()
+                    .map(|c| c.id.to_owned())
+                    .collect::<Vec<_>>(),
+            )?;
+            Some(gpu.clone())
+        }
+        None => None,
+    };
     let size = compute.unwrap_or_default();
     let footprint = components.iter().map(|c| c.footprint_mib).sum::<u32>();
     let nodes = if computes > 0 {
@@ -455,11 +906,38 @@ pub fn layout(request: &PlanRequest) -> Result<Plan> {
     } else if control_only {
         warnings[0] = "The farm runs its control plane, network node and Kolla on one control VM; Nova instances need a compute VM added to it.".into();
     }
+    if let Some(gpu) = &gpu {
+        let what = match gpu.mode {
+            GpuMode::Simulated => {
+                let traits = gpu.traits();
+                format!(
+                    "each compute VM advertises {} virtual GPU(s) over {} fake GPU device(s) through resource class {} and trait(s) {}",
+                    gpu.count,
+                    gpu.device_count(),
+                    gpu.resource_class(),
+                    if traits.is_empty() {
+                        "none".to_owned()
+                    } else {
+                        traits.join(", ")
+                    }
+                )
+            }
+            GpuMode::Mtty => format!(
+                "each compute VM binds {} mediated device(s) as virtual GPUs",
+                gpu.count
+            ),
+        };
+        warnings.push(format!(
+            "GPU '{}': {what}; this is a simulated device, not a real GPU, and guest software cannot compute on it.",
+            gpu.mode_name()
+        ));
+    }
     Ok(Plan {
         components: components.iter().map(|c| c.id.to_owned()).collect(),
         release: request.release.clone(),
         computes,
         compute,
+        gpu,
         memory_mib: nodes.iter().map(|n| u64::from(n.memory_mib)).sum(),
         disk_mib: nodes
             .iter()
@@ -492,6 +970,9 @@ pub struct CreateRequest {
     /// VMs of a farm without computes (see [`PlanRequest::layout`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub layout: Option<FarmLayout>,
+    /// A virtual GPU on every compute VM (see [`GpuConfig`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gpu: Option<GpuConfig>,
     #[serde(default = "default_host")]
     pub external_host: String,
     #[serde(default)]
@@ -554,9 +1035,10 @@ impl CreateRequest {
                 || self.computes > 0
                 || self.compute.is_some()
                 || self.layout.is_some()
+                || self.gpu.is_some()
             {
                 bail!(
-                    "a farm restored from a snapshot runs the snapshot's services and layout; omit components, computes, compute and layout"
+                    "a farm restored from a snapshot runs the snapshot's services and layout; omit components, computes, compute, layout and gpu"
                 );
             }
         }
@@ -578,6 +1060,7 @@ impl CreateRequest {
             compute: self.compute,
             release: self.release.clone(),
             layout: self.layout,
+            gpu: self.gpu.clone(),
         };
         request.check_release()?;
         plan(&request)
@@ -736,6 +1219,12 @@ pub struct FarmRecord {
     /// Faults set on a multi-node farm's links, by VM (`control`, `compute-1`, ...).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub faults: BTreeMap<String, crate::link::Impair>,
+    /// Virtual GPU loads the portal applied, by Nova server UUID. The guest reads the
+    /// same values from instance metadata; this copy keeps the pattern the portal shows
+    /// after a coordinator restart. A farm restored from a snapshot recovers the load
+    /// from the instance's metadata instead.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub gpu_loads: BTreeMap<String, GpuLoad>,
     /// Other hosts that run some of a multi-node farm's compute VMs. `host_id` runs the rest.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub shares: Vec<HostShare>,
@@ -996,6 +1485,10 @@ pub struct ReleaseCreateRequest {
     /// A compute that boots from a compute template keeps the template's size.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compute: Option<ComputeSize>,
+    /// A virtual GPU on every compute VM (see [`GpuConfig`]); only a clean install can take
+    /// one, because a template's VMs boot with the plan they were frozen with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gpu: Option<GpuConfig>,
     /// Control template to use instead of the newest matching one.
     #[serde(default)]
     pub control_template: Option<String>,
@@ -1396,6 +1889,7 @@ mod tests {
             expires_at: None,
             snapshot_id: None,
             placement: Default::default(),
+            gpu: None,
         };
         assert!(legacy.validate().is_err());
         for unsupported in ["swift", "cinder"] {
@@ -1406,6 +1900,7 @@ mod tests {
                     compute: None,
                     layout: None,
                     release: None,
+                    gpu: None,
                 })
                 .is_err()
             );
@@ -1425,6 +1920,7 @@ mod tests {
             compute: None,
             layout: None,
             release: None,
+            gpu: None,
         };
         let both = plan(&request(&["placement", "horizon", "keystone"])).unwrap();
         assert_eq!(
@@ -1476,6 +1972,7 @@ mod tests {
             compute: None,
             layout: None,
             release: None,
+            gpu: None,
         };
         // Compute VMs bring Nova, and Nova its dependencies.
         let two = plan(&request(&[], 2)).unwrap();
@@ -1519,6 +2016,7 @@ mod tests {
             expires_at: None,
             snapshot_id: Some("snap".into()),
             placement: Default::default(),
+            gpu: None,
         };
         assert!(restore.validate().is_err());
     }
@@ -1536,6 +2034,7 @@ mod tests {
             compute: Some(size),
             layout: None,
             release: None,
+            gpu: None,
         })
         .unwrap();
         let alone = control_layout(&farm.components, farm.compute, None).unwrap();
@@ -1556,6 +2055,7 @@ mod tests {
             compute: alone.compute,
             layout: None,
             release: None,
+            gpu: None,
         })
         .unwrap();
         assert_eq!(
@@ -1604,6 +2104,7 @@ mod tests {
                 compute: None,
                 layout: Some(form),
                 release: None,
+                gpu: None,
             })
             .unwrap()
         };
@@ -1627,6 +2128,7 @@ mod tests {
             compute: None,
             layout: None,
             release: None,
+            gpu: None,
         })
         .unwrap();
         assert_eq!(
@@ -1640,6 +2142,7 @@ mod tests {
             compute: None,
             layout: None,
             release: None,
+            gpu: None,
         })
         .unwrap();
         assert_eq!(
@@ -1654,6 +2157,7 @@ mod tests {
                 compute: None,
                 layout: Some(FarmLayout::Control),
                 release: None,
+                gpu: None,
             })
             .is_err()
         );
@@ -1665,6 +2169,7 @@ mod tests {
                 compute: None,
                 layout: Some(FarmLayout::AllInOne),
                 release: None,
+                gpu: None,
             })
             .is_err()
         );
@@ -1679,6 +2184,7 @@ mod tests {
                 compute,
                 layout: None,
                 release: None,
+                gpu: None,
             })
         };
         let size = ComputeSize {
@@ -1728,6 +2234,7 @@ mod tests {
                 compute: Some(size),
                 layout: None,
                 release: None,
+                gpu: None,
             })
             .is_err()
         );
@@ -1788,6 +2295,7 @@ mod tests {
                 release: release.map(str::to_owned),
                 computes: 0,
                 compute: None,
+                gpu: None,
                 nodes: vec![],
                 memory_mib: 3072,
                 disk_mib: 20480,
@@ -1806,6 +2314,7 @@ mod tests {
             snapshot_id: None,
             resume: None,
             faults: Default::default(),
+            gpu_loads: Default::default(),
             shares: vec![],
             uplink_sha256: None,
         };
@@ -1832,5 +2341,366 @@ mod tests {
         assert_eq!(value["plan"]["release"], "2024.1");
         assert_eq!(value["openstack"]["release"], "2024.1");
         assert_eq!(value["openstack"]["supported"], true);
+    }
+    fn gpu(mode: GpuMode, count: u32) -> GpuConfig {
+        GpuConfig {
+            mode,
+            count,
+            ..GpuConfig::default()
+        }
+    }
+    fn traits(list: &[&str]) -> Option<Vec<String>> {
+        Some(list.iter().map(|t| (*t).to_owned()).collect())
+    }
+    fn nova_components() -> Vec<String> {
+        ["keystone", "glance", "placement", "nova"]
+            .map(String::from)
+            .to_vec()
+    }
+
+    #[test]
+    fn a_gpu_mode_is_offered_only_by_the_releases_that_can_express_it() {
+        let with_nova = nova_components();
+        // simulated writes the placement providers itself, so it needs the microversion
+        // that gives a provider a parent (1.14, well before 2025.1) and nothing else.
+        for release in ["2025.1", "2026.1", "2026.2"] {
+            assert!(
+                gpu(GpuMode::Simulated, 1)
+                    .validate(release, &with_nova)
+                    .is_ok(),
+                "{release}"
+            );
+        }
+        let why = gpu(GpuMode::Simulated, 1)
+            .validate("2024.2", &with_nova)
+            .unwrap_err()
+            .to_string();
+        assert!(why.contains("2025.1"), "{why}");
+        // mtty's Nova support comes from farm's backport on 2025.1–2026.1 and from Nova itself
+        // on 2026.2; a series name resolves to its release number.
+        for release in ["2025.1", "2025.2", "2026.1", "2026.2"] {
+            assert!(
+                gpu(GpuMode::Mtty, 1).validate(release, &with_nova).is_ok(),
+                "{release}"
+            );
+        }
+        let why = gpu(GpuMode::Mtty, 1)
+            .validate("2024.2", &with_nova)
+            .unwrap_err()
+            .to_string();
+        assert!(why.contains("2025.1"), "{why}");
+    }
+
+    #[test]
+    fn a_gpu_needs_nova_a_compute_and_at_most_the_kernel_s_devices() {
+        let with_nova = nova_components();
+        let no_nova = ["keystone", "glance"].map(String::from).to_vec();
+        let why = gpu(GpuMode::Simulated, 1)
+            .validate("2026.2", &no_nova)
+            .unwrap_err()
+            .to_string();
+        assert!(why.contains("Nova"), "{why}");
+        for count in [0, MAX_GPU_COUNT + 1] {
+            let why = gpu(GpuMode::Simulated, count)
+                .validate("2026.2", &with_nova)
+                .unwrap_err()
+                .to_string();
+            assert!(why.contains("1-24"), "{why}");
+        }
+        assert!(
+            gpu(GpuMode::Mtty, MAX_GPU_COUNT)
+                .validate("2026.2", &with_nova)
+                .is_ok()
+        );
+
+        // A plan without a compute VM has no resource provider to hold the device.
+        let why = plan(&PlanRequest {
+            components: vec![],
+            computes: 0,
+            compute: None,
+            release: None,
+            layout: Some(FarmLayout::Control),
+            gpu: Some(gpu(GpuMode::Simulated, 1)),
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(why.contains("compute VMs"), "{why}");
+    }
+
+    #[test]
+    fn the_simulated_modes_traits_devices_and_class_are_placement_names() {
+        let with_nova = nova_components();
+        let check = |gpu: GpuConfig| gpu.validate("2026.2", &with_nova).map(|_| ());
+
+        // Every placement name farm writes is one Placement accepts: CUSTOM_ and capitals.
+        for name in ["CUSTOM_FARM_VGPU", "CUSTOM_A", "CUSTOM_A1_B2", "CUSTOM__"] {
+            assert!(
+                check(GpuConfig {
+                    traits: traits(&[name]),
+                    ..gpu(GpuMode::Simulated, 2)
+                })
+                .is_ok(),
+                "{name}"
+            );
+        }
+        for name in ["CUSTOM_", "farm_vgpu", "CUSTOM-lower", "CUSTOM_bad", ""] {
+            let why = check(GpuConfig {
+                traits: traits(&[name]),
+                ..gpu(GpuMode::Simulated, 2)
+            })
+            .unwrap_err()
+            .to_string();
+            assert!(why.contains("CUSTOM_"), "{name}: {why}");
+        }
+        // The class is VGPU or PGPU, or a custom one of the same shape.
+        for class in ["VGPU", "PGPU", "CUSTOM_VGPU"] {
+            assert!(
+                check(GpuConfig {
+                    resource_class: Some(class.into()),
+                    ..gpu(GpuMode::Simulated, 1)
+                })
+                .is_ok(),
+                "{class}"
+            );
+        }
+        let why = check(GpuConfig {
+            resource_class: Some("GPU".into()),
+            ..gpu(GpuMode::Simulated, 1)
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(why.contains("resource class"), "{why}");
+
+        // Devices are fake cards: each must be fillable, and there are at most 24.
+        assert!(
+            check(GpuConfig {
+                devices: Some(4),
+                ..gpu(GpuMode::Simulated, 4)
+            })
+            .is_ok()
+        );
+        let why = check(GpuConfig {
+            devices: Some(3),
+            ..gpu(GpuMode::Simulated, 2)
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(why.contains("cannot fill"), "{why}");
+        let why = check(GpuConfig {
+            devices: Some(0),
+            ..gpu(GpuMode::Simulated, 2)
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(why.contains("1-24"), "{why}");
+
+        // mtty's provider is Nova's, so none of the three can shape it.
+        for gpu in [
+            GpuConfig {
+                traits: traits(&["CUSTOM_X"]),
+                ..gpu(GpuMode::Mtty, 1)
+            },
+            GpuConfig {
+                devices: Some(2),
+                ..gpu(GpuMode::Mtty, 1)
+            },
+            GpuConfig {
+                resource_class: Some("CUSTOM_X".into()),
+                ..gpu(GpuMode::Mtty, 1)
+            },
+        ] {
+            let why = gpu.validate("2026.2", &with_nova).unwrap_err().to_string();
+            assert!(why.contains("simulated"), "{why}");
+        }
+        // Naming VGPU outright is not a change.
+        assert!(
+            check(GpuConfig {
+                resource_class: Some("VGPU".into()),
+                ..gpu(GpuMode::Mtty, 1)
+            })
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn a_simulated_gpu_is_advertised_on_one_provider_per_fake_card() {
+        // Nova names a card's provider <host>_pci_<domain>_<bus>_<slot>_<func>.
+        assert_eq!(
+            GpuConfig::provider_name("farm-compute-1", 0),
+            "farm-compute-1_pci_0000_84_00_0"
+        );
+        assert_eq!(
+            GpuConfig::provider_name("farm-compute-2", 1),
+            "farm-compute-2_pci_0000_85_00_0"
+        );
+        // The count is split over the cards, the first ones taking the remainder.
+        let totals = |count, devices| {
+            GpuConfig {
+                devices,
+                count,
+                ..gpu(GpuMode::Simulated, count)
+            }
+            .device_totals()
+        };
+        assert_eq!(totals(1, None), [1]);
+        assert_eq!(totals(4, Some(1)), [4]);
+        assert_eq!(totals(4, Some(2)), [2, 2]);
+        assert_eq!(totals(5, Some(2)), [3, 2]);
+        assert_eq!(totals(7, Some(3)), [3, 2, 2]);
+        assert_eq!(totals(2, Some(2)), [1, 1]);
+    }
+
+    #[test]
+    fn a_simulated_gpu_flavor_takes_the_class_and_the_traits() {
+        let plain = gpu(GpuMode::Simulated, 2);
+        assert_eq!(plain.resource_class(), "VGPU");
+        assert_eq!(plain.traits(), [DEFAULT_VGPU_TRAIT]);
+        assert_eq!(plain.flavor(), "farm.vgpu");
+        assert_eq!(plain.device_count(), 1);
+        let shaped = GpuConfig {
+            traits: traits(&["CUSTOM_A", "CUSTOM_B"]),
+            devices: Some(2),
+            resource_class: Some("PGPU".into()),
+            ..gpu(GpuMode::Simulated, 2)
+        };
+        assert_eq!(shaped.resource_class(), "PGPU");
+        assert_eq!(shaped.traits(), ["CUSTOM_A", "CUSTOM_B"]);
+        assert_eq!(shaped.device_count(), 2);
+        // An empty list is how a request asks for no trait at all.
+        assert!(
+            GpuConfig {
+                traits: traits(&[]),
+                ..gpu(GpuMode::Simulated, 1)
+            }
+            .traits()
+            .is_empty()
+        );
+        // The mediated device carries no farm trait and always advertises VGPU.
+        let mtty = gpu(GpuMode::Mtty, 24);
+        assert_eq!(mtty.resource_class(), "VGPU");
+        assert!(mtty.traits().is_empty());
+        assert_eq!(mtty.flavor(), "farm.vgpu");
+    }
+
+    #[test]
+    fn a_plan_offers_mtty_without_asking_the_coordinators_kernel() {
+        // The device is the VM host's kernel's, and planning does not know the host. Each
+        // target host's inspection decides when the farm is created or expanded
+        // (`ensure_mtty_host` in src/manager/mod.rs); this process's kernel never does.
+        let planned = plan(&PlanRequest {
+            components: vec!["nova".into()],
+            computes: 1,
+            compute: None,
+            release: Some("2026.2".into()),
+            layout: None,
+            gpu: Some(gpu(GpuMode::Mtty, 2)),
+        })
+        .unwrap();
+        assert_eq!(planned.gpu, Some(gpu(GpuMode::Mtty, 2)));
+        assert!(
+            gpu(GpuMode::Simulated, 2)
+                .validate("2026.2", &nova_components())
+                .is_ok()
+        );
+        // The release window is still a plan-level refusal; the kernel is not.
+        let why = gpu(GpuMode::Mtty, 1)
+            .validate("2024.2", &nova_components())
+            .unwrap_err()
+            .to_string();
+        assert!(why.contains("2025.1"), "{why}");
+    }
+
+    #[test]
+    fn a_plan_keeps_the_gpu_it_validated() {
+        let planned = plan(&PlanRequest {
+            components: vec!["nova".into()],
+            computes: 1,
+            compute: None,
+            release: Some("2026.2".into()),
+            layout: None,
+            gpu: Some(gpu(GpuMode::Simulated, 4)),
+        })
+        .unwrap();
+        assert_eq!(planned.gpu, Some(gpu(GpuMode::Simulated, 4)));
+        assert_eq!(planned.computes, 1);
+        let warnings = planned.warnings.join("\n");
+        assert!(warnings.contains(DEFAULT_VGPU_TRAIT), "{warnings}");
+        assert!(warnings.contains("not a real GPU"), "{warnings}");
+        assert!(warnings.contains("fake GPU device"), "{warnings}");
+        // The count is part of the request; a farm without one keeps no field at all.
+        assert_eq!(
+            serde_json::to_value(planned.gpu).unwrap(),
+            serde_json::json!({"mode": "simulated", "count": 4})
+        );
+        let plain = plan(&PlanRequest {
+            components: vec!["nova".into()],
+            computes: 1,
+            compute: None,
+            release: None,
+            layout: None,
+            gpu: None,
+        })
+        .unwrap();
+        assert!(plain.gpu.is_none());
+        assert!(
+            !serde_json::to_value(&plain)
+                .unwrap()
+                .as_object()
+                .unwrap()
+                .contains_key("gpu")
+        );
+    }
+
+    #[test]
+    fn a_gpu_reads_with_a_default_count_and_old_state_reads_without_one() {
+        // `gpu: {mode: simulated}` takes the default count of one and farm's own contract.
+        let parsed: GpuConfig = serde_json::from_str(r#"{"mode":"simulated"}"#).unwrap();
+        assert_eq!(parsed, gpu(GpuMode::Simulated, 1));
+        assert_eq!(parsed.resource_class(), "VGPU");
+        assert_eq!(parsed.traits(), [DEFAULT_VGPU_TRAIT]);
+        assert_eq!(parsed.device_count(), 1);
+        let parsed: GpuConfig = serde_json::from_str(r#"{"count":3}"#).unwrap();
+        assert_eq!(parsed, gpu(GpuMode::Simulated, 3));
+        // A farm recorded before the knobs existed keeps the defaults.
+        let parsed: GpuConfig = serde_json::from_str(r#"{"mode":"simulated","count":2}"#).unwrap();
+        assert_eq!(
+            (parsed.traits, parsed.devices, parsed.resource_class),
+            (None, None, None)
+        );
+        // The knobs round-trip, and the mode without them serializes as it always did.
+        let shaped = GpuConfig {
+            traits: traits(&["CUSTOM_A"]),
+            devices: Some(2),
+            resource_class: Some("PGPU".into()),
+            ..gpu(GpuMode::Simulated, 4)
+        };
+        let value = serde_json::to_value(&shaped).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "mode": "simulated",
+                "count": 4,
+                "traits": ["CUSTOM_A"],
+                "devices": 2,
+                "resource_class": "PGPU",
+            })
+        );
+        assert_eq!(serde_json::from_value::<GpuConfig>(value).unwrap(), shaped);
+        assert_eq!(
+            serde_json::to_value(gpu(GpuMode::Mtty, 1)).unwrap(),
+            serde_json::json!({"mode": "mtty", "count": 1})
+        );
+
+        // A plan and a farm written before the option existed deserialize with no GPU.
+        let plan: Plan = serde_json::from_str(
+            r#"{"components":["keystone"],"computes":0,"nodes":[],"memory_mib":0,"disk_mib":0,"warnings":[]}"#,
+        )
+        .unwrap();
+        assert!(plan.gpu.is_none());
+        let farm: FarmRecord = serde_json::from_str(
+            r#"{"id":"old","status":"created","plan":{"components":["keystone"],"computes":1,"nodes":[],"memory_mib":0,"disk_mib":0,"warnings":[]},"exposure":null,"owner":null,"expires_at":null,"nodes":[],"phase":null,"error":null,"active_job":null,"created_at":0,"updated_at":0}"#,
+        )
+        .unwrap();
+        assert!(farm.plan.unwrap().gpu.is_none());
     }
 }

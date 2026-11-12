@@ -351,6 +351,7 @@ impl FarmManager {
                     compute: None,
                     layout: None,
                     release: None,
+                    gpu: None,
                 })
                 .map_err(|e| bad_request(e.to_string()))?
                 .components,
@@ -524,6 +525,28 @@ impl FarmManager {
             if !host.trim().is_empty() && !state.hosts.contains_key(host) {
                 return Err(NotFound(format!("host '{host}'")).into());
             }
+        }
+        // A GPU farm's settings go into the compute configuration Kolla writes at deploy
+        // time; a template's VMs boot with the plan they were frozen with, so it installs
+        // clean.
+        if let Some(gpu) = &request.gpu {
+            // The GPU's release window is about the release itself, so name it before this
+            // coordinator's images: a 2025.1 farm with a GPU is refused for the GPU, not for
+            // an install this coordinator happens to lack.
+            gpu.check_release(release)
+                .map_err(|e| bad_request(e.to_string()))?;
+            if !installable {
+                return Err(conflict(format!(
+                    "a GPU farm installs OpenStack {} clean, and this coordinator cannot install that release clean",
+                    request.release.trim()
+                )));
+            }
+            return self.clean_plan(
+                arch,
+                request,
+                "a GPU farm is installed clean so its GPU settings reach every compute".into(),
+                notes,
+            );
         }
         let mut taken = BTreeSet::new();
         let bucket_pick = |bucket: &String, metadata: &ArchiveMetadata, taken: &mut _| {
@@ -714,6 +737,7 @@ impl FarmManager {
             components: request.components.clone(),
             computes: request.computes,
             compute: request.compute,
+            gpu: request.gpu.clone(),
             ..self.clean_request(request)
         };
         let planned = farm.validate().map_err(|e| bad_request(e.to_string()))?;
@@ -799,6 +823,7 @@ impl FarmManager {
             expires_at: request.expires_at,
             snapshot_id: None,
             placement,
+            gpu: None,
         }
     }
 
@@ -806,6 +831,20 @@ impl FarmManager {
     /// as jobs of their own: imports, the control VM, then each compute in order.
     pub async fn create_release(&self, request: ReleaseCreateRequest) -> Result<Job> {
         let plan = self.preview_release(&request).await?;
+        // A GPU farm always installs clean, so the plan's compute hosts are the ones that
+        // will boot the mtty device. Refuse here, naming the host, rather than in step 1.
+        if request
+            .gpu
+            .as_ref()
+            .is_some_and(|gpu| gpu.mode == GpuMode::Mtty)
+        {
+            self.read(|state| -> Result<()> {
+                for node in &plan.computes {
+                    super::ensure_mtty_host(state, &node.host_id)?;
+                }
+                Ok(())
+            })??;
+        }
         let steps = steps(&plan);
         let job = self.update(|state| {
             self.ensure_accepting()?;
@@ -945,6 +984,7 @@ impl FarmManager {
             "create" => self.create(CreateRequest {
                 components: plan.components.clone(),
                 computes: plan.computes.len() as u8,
+                gpu: request.gpu.clone(),
                 ..self.clean_request(request)
             })?,
             "deploy" => self.deploy(farm, DeployRequest::default())?,

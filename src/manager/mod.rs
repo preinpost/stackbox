@@ -1,5 +1,6 @@
 mod backend;
 mod buckets;
+mod gpu;
 pub(crate) mod hosts;
 mod logs;
 mod releases;
@@ -39,6 +40,10 @@ pub struct ManagerOptions {
     /// Relay settings to start with when none are stored yet, from `FARM_RELAY_URL`,
     /// `FARM_RELAY_TLS` (`private` or `proxy`) and `FARM_RELAY_BIND`. The portal changes them.
     pub relay: Option<crate::link::relay::RelaySettings>,
+    /// Built farm kernels (`<dir>/<arch>/manifest.txt`), installed on hosts during
+    /// preparation. `None` leaves every host on the stock microsandbox kernel, which cannot
+    /// run an `mtty` GPU farm.
+    pub libkrunfw_dir: Option<PathBuf>,
 }
 impl ManagerOptions {
     pub fn local(state_dir: PathBuf) -> Self {
@@ -72,6 +77,7 @@ impl ManagerOptions {
                         .ok()
                         .and_then(|bind| bind.parse().ok()),
                 }),
+            libkrunfw_dir: crate::kernel::artifacts_dir(),
         }
     }
 }
@@ -153,6 +159,64 @@ impl std::fmt::Display for BadRequest {
 impl std::error::Error for BadRequest {}
 fn bad_request(message: impl Into<String>) -> anyhow::Error {
     BadRequest(message.into()).into()
+}
+/// Refuses an `mtty` farm whose VM runs on a host that has not verified farm's kernel.
+///
+/// The mediated device is the guest kernel's, so the kernel that matters is the one the
+/// target host's agent boots its VMs from — local, SSH or dial-in. Preparation installs it
+/// and boots the verification VM there; the reply leaves `mtty_available`, `custom_kernel`
+/// and `gpu_kernel` in the host's inspection, which is all this reads. The coordinator's own
+/// kernel is deliberately not consulted: this machine may never have been prepared, and its
+/// VMs may never be the ones that carry the device.
+fn ensure_mtty_host(state: &State, host_id: &str) -> Result<()> {
+    let stored = state
+        .hosts
+        .get(host_id)
+        .ok_or_else(|| NotFound(format!("host '{host_id}'")))?;
+    let Some(inspection) = stored.host.inspection.as_ref() else {
+        return Err(mtty_host_error(
+            host_id,
+            "it has not been inspected yet".into(),
+        ));
+    };
+    if inspection.mtty_available {
+        return Ok(());
+    }
+    let why = match inspection.custom_kernel.as_deref() {
+        Some(kernel) => {
+            let types = inspection.gpu_kernel.as_ref().map(|gpu| {
+                gpu.mdev_types
+                    .iter()
+                    .map(|mdev| mdev.name.as_str())
+                    .collect::<Vec<_>>()
+            });
+            match types {
+                Some(types) if !types.is_empty() => format!(
+                    "its verification VM booted farm's kernel {kernel} but offered no mtty-1 mediated device type (it offered {})",
+                    types.join(", ")
+                ),
+                Some(_) => format!(
+                    "its verification VM booted farm's kernel {kernel} but offered no mtty-1 mediated device type"
+                ),
+                None => format!(
+                    "its verification VM booted farm's kernel {kernel}, but no GPU probe was recorded for it"
+                ),
+            }
+        }
+        None => match inspection.custom_kernel_reason.as_deref() {
+            Some(reason) => format!("it boots the stock microsandbox kernel ({reason})"),
+            None => {
+                "it boots the stock microsandbox kernel, which has no mtty mediated device".into()
+            }
+        },
+    };
+    Err(mtty_host_error(host_id, why))
+}
+/// Why `host_id` cannot take an `mtty` farm yet, and what fixes it on that host.
+fn mtty_host_error(host_id: &str, why: String) -> anyhow::Error {
+    bad_request(format!(
+        "host '{host_id}' cannot run an mtty GPU farm yet: {why}; prepare that host so farm installs its kernel and boots the verification VM with it (`farm host prepare {host_id}`, or prepare it under Hosts in the portal), then create the farm again (docs/gpu.md)"
+    ))
 }
 /// A deploy whose host-side job this coordinator lost; it may still be running there.
 #[derive(Debug)]
@@ -911,6 +975,7 @@ impl FarmManager {
             // The computes join the farm's own release.
             release: plan.release.clone(),
             layout: None,
+            gpu: plan.gpu.clone(),
         })?;
         if serde_json::to_value(&expanded.nodes[..plan.nodes.len()])?
             != serde_json::to_value(&plan.nodes)?
@@ -1372,6 +1437,23 @@ impl FarmManager {
             }
             let (budget, agent_sha256, bind, local) = self.admit_host(state, &host_id, plan.multinode())?;
             let mut hosts = vec![(host_id.clone(), budget, agent_sha256.clone())];
+            // The mtty device is the guest kernel's, so every host that runs a compute must
+            // have booted farm's kernel in its verification VM. Preparation installs that
+            // kernel on local, SSH and dial-in hosts alike; each host's stored inspection is
+            // the evidence, and no host is judged by this coordinator's own kernel.
+            if plan
+                .gpu
+                .as_ref()
+                .is_some_and(|gpu| gpu.mode == GpuMode::Mtty)
+            {
+                let mut compute_hosts: Vec<&str> = placed.keys().map(String::as_str).collect();
+                if placed.values().map(Vec::len).sum::<usize>() < usize::from(plan.computes) {
+                    compute_hosts.push(host_id.as_str());
+                }
+                for host in compute_hosts {
+                    ensure_mtty_host(state, host)?;
+                }
+            }
             let mut relay_url = None;
             if !placed.is_empty() {
                 let relay = state.relay.as_ref().ok_or_else(|| {
@@ -1454,6 +1536,7 @@ impl FarmManager {
                     snapshot_id: request.snapshot_id,
                     resume: None,
                     faults: Default::default(),
+                    gpu_loads: Default::default(),
                     shares,
                     uplink_sha256,
                 },
@@ -1663,6 +1746,15 @@ impl FarmManager {
                 return Err(conflict(format!(
                     "the next compute is {expected}, not {target_node}; delete the farm or finish its deployment first"
                 )));
+            }
+            // The new compute boots its own host's kernel, so that host's inspection decides
+            // whether it can bind the farm plan's mtty device.
+            if plan
+                .gpu
+                .as_ref()
+                .is_some_and(|gpu| gpu.mode == GpuMode::Mtty)
+            {
+                ensure_mtty_host(state, &target_host)?;
             }
             let new_plan = self
                 .expand_plan(&plan)
@@ -2082,6 +2174,15 @@ impl FarmManager {
             .context("farm has no generation")?;
         let exposure = farm.exposure.clone().context("farm has no exposure")?;
         let components = farm_components(farm);
+        // The host checked when the expansion was accepted may have been prepared again
+        // since; the new compute still boots that host's own kernel, not this coordinator's.
+        if old_plan
+            .gpu
+            .as_ref()
+            .is_some_and(|gpu| gpu.mode == GpuMode::Mtty)
+        {
+            self.read(|state| ensure_mtty_host(state, &target_host))??;
+        }
         // A compute template is checked again: it may have changed since the job was accepted.
         let source = match &job.snapshot_id {
             Some(snapshot) => {
@@ -2416,6 +2517,15 @@ impl FarmManager {
         use crate::remote::protocol::AgentError;
         let backend = self.agent_for(farm)?;
         let mut attach = job.remote_job_id.is_some();
+        // The host's agent never reads the release catalog, so the coordinator resolves the
+        // kolla-ansible ref here and sends it with the deploy (2025.1 lives on
+        // `unmaintained/`, not `stable/`). A job followed from its recorded id keeps the ref
+        // it was created with.
+        let reference = if attach {
+            None
+        } else {
+            Some(crate::kolla::releases::reference(&farm_release(farm)).await?)
+        };
         let remote = match &job.remote_job_id {
             Some(remote) => remote.clone(),
             None => {
@@ -2443,7 +2553,13 @@ impl FarmManager {
                 backend.attach(remote.clone(), before, sink.clone()).await
             } else {
                 backend
-                    .deploy_job(farm.id.clone(), from, remote.clone(), sink.clone())
+                    .deploy_job(
+                        farm.id.clone(),
+                        from,
+                        remote.clone(),
+                        reference.clone(),
+                        sink.clone(),
+                    )
                     .await
             };
             let error = match outcome {

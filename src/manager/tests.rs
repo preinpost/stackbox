@@ -41,6 +41,14 @@ pub(crate) struct Fake {
     shares: Mutex<Vec<crate::remote::protocol::Share>>,
     relinked: Mutex<Vec<(String, String)>>,
     spanning: Mutex<Vec<Vec<u8>>>,
+    /// Run terminal sessions as a real `bash -s`, for tests that execute a script.
+    pub(crate) run_scripts: AtomicBool,
+    /// Environment of that shell, for a fake admin-openrc and OpenStack CLI.
+    pub(crate) script_env: Mutex<BTreeMap<String, String>>,
+    /// Scripts run in a farm VM through the control-script channel.
+    pub(crate) scripts: Mutex<Vec<String>>,
+    /// JSON the fake control VM returns for the instance-list script.
+    pub(crate) instances: Mutex<String>,
     /// `(farm, nodes on this host, added suffixes)` of each expansion.
     expanded: Mutex<Vec<Expansion>>,
     /// `(farm, index)` of each Kolla compute deployment.
@@ -49,6 +57,13 @@ pub(crate) struct Fake {
     reconfigured: Mutex<Vec<(String, u8)>>,
     /// The compute template each expansion that created a VM booted it from.
     expanded_from: Mutex<Vec<Option<String>>>,
+    /// The GPU setting of each deploy this backend was asked to run. The coordinator
+    /// passes the farm's GPU to its host's agent only through the plan, so a test reads it
+    /// back here as the agent's deploy sees it.
+    gpus: Mutex<Vec<Option<crate::model::GpuConfig>>>,
+    /// The kolla-ansible ref each deploy carried. The coordinator resolves it from the
+    /// release catalog and the host's agent has no cache of its own.
+    pub(crate) references: Mutex<Vec<Option<String>>>,
     pub(crate) fail_expand: AtomicBool,
     /// Fail the expansion that would create this many VMs (1 is the first), and every
     /// later one; 0 never fails.
@@ -183,6 +198,7 @@ impl Backend for Fake {
             Ok(())
         })
     }
+    #[allow(clippy::too_many_arguments)]
     fn deploy_spanning(
         &self,
         id: String,
@@ -190,6 +206,8 @@ impl Backend for Fake {
         exposure: Option<Exposure>,
         components: Vec<String>,
         release: String,
+        reference: Option<String>,
+        gpu: Option<crate::model::GpuConfig>,
         remote: Vec<u8>,
         key: String,
         sink: EventSink,
@@ -197,8 +215,10 @@ impl Backend for Fake {
         Box::pin(async move {
             assert!(key.starts_with("-----BEGIN OPENSSH PRIVATE KEY-----"));
             self.spanning.lock().unwrap().push(remote);
-            self.deploy(id, from, exposure, components, release, sink)
-                .await
+            self.deploy(
+                id, from, exposure, components, release, reference, gpu, sink,
+            )
+            .await
         })
     }
     fn impair(
@@ -244,6 +264,7 @@ impl Backend for Fake {
             Ok(nodes)
         })
     }
+    #[allow(clippy::too_many_arguments)]
     fn deploy(
         &self,
         _: String,
@@ -251,9 +272,13 @@ impl Backend for Fake {
         _: Option<Exposure>,
         _: Vec<String>,
         _: String,
+        reference: Option<String>,
+        gpu: Option<crate::model::GpuConfig>,
         sink: EventSink,
     ) -> BoxFuture<'_, Result<()>> {
         Box::pin(async move {
+            self.gpus.lock().unwrap().push(gpu);
+            self.references.lock().unwrap().push(reference);
             self.deployed.fetch_add(1, Ordering::SeqCst);
             let active = self.deploys.fetch_add(1, Ordering::SeqCst) + 1;
             self.max_deploys.fetch_max(active, Ordering::SeqCst);
@@ -299,6 +324,17 @@ impl Backend for Fake {
                     databases: vec!["keystone".into()],
                 }],
             })
+        })
+    }
+    fn control_script(&self, _: String, script: String) -> BoxFuture<'_, Result<String>> {
+        Box::pin(async move {
+            let output = if script.contains("server list") {
+                self.instances.lock().unwrap().clone()
+            } else {
+                String::new()
+            };
+            self.scripts.lock().unwrap().push(script);
+            Ok(output)
         })
     }
     fn freeze(
@@ -489,20 +525,25 @@ impl Backend for Fake {
         size: crate::farm::TerminalSize,
         io: crate::farm::TerminalIo,
     ) -> BoxFuture<'_, Result<()>> {
+        if self.run_scripts.load(Ordering::SeqCst) {
+            let env = self.script_env.lock().unwrap().clone();
+            return Box::pin(run_test_shell(io, env));
+        }
         Box::pin(async move {
             let crate::farm::TerminalIo { mut input, output } = io;
             output
                 .send(format!("{}x{}", size.rows, size.cols).into_bytes())
                 .await?;
             while let Some(message) = input.recv().await {
-                output
-                    .send(match message {
-                        crate::farm::TerminalInput::Data(data) => data,
-                        crate::farm::TerminalInput::Resize(size) => {
-                            format!("{}x{}", size.rows, size.cols).into_bytes()
-                        }
-                    })
-                    .await?;
+                let echo = match message {
+                    crate::farm::TerminalInput::Data(data) => data,
+                    crate::farm::TerminalInput::Resize(size) => {
+                        format!("{}x{}", size.rows, size.cols).into_bytes()
+                    }
+                    // EOF for a script's stdin has nothing to echo; the session stays open.
+                    crate::farm::TerminalInput::Close => continue,
+                };
+                output.send(echo).await?;
             }
             Ok(())
         })
@@ -516,6 +557,8 @@ fn options(dir: &Path) -> ManagerOptions {
         agent_url: None,
         public_bind: "127.0.0.1".parse().unwrap(),
         relay: None,
+        // Unit tests must not install a developer's kernel into the real home.
+        libkrunfw_dir: None,
     }
 }
 /// Registers this machine as a prepared host, as its check and preparation leave it.
@@ -543,6 +586,10 @@ fn local_host(manager: &FarmManager) {
                 msb_compatible: true,
                 docker_available: true,
                 golden_image_available: true,
+                custom_kernel: None,
+                custom_kernel_reason: None,
+                mtty_available: false,
+                gpu_kernel: None,
                 vm_boot_verified: true,
                 checked_at: now(),
             });
@@ -581,6 +628,7 @@ fn request(id: &str) -> CreateRequest {
         expires_at: None,
         snapshot_id: None,
         placement: Default::default(),
+        gpu: None,
     }
 }
 async fn done(manager: &FarmManager, job: &Job) -> Job {
@@ -591,6 +639,179 @@ async fn done(manager: &FarmManager, job: &Job) -> Job {
 }
 async fn settle(manager: &FarmManager) {
     manager.shutdown().await.unwrap();
+}
+
+/// A terminal session backed by a real `bash -s`, so a test can follow a script the
+/// coordinator sends to the control VM. The script's stderr is captured by the wrapper
+/// farm writes; the shell's own stderr is discarded.
+pub(crate) async fn run_test_shell(
+    io: crate::farm::TerminalIo,
+    env: BTreeMap<String, String>,
+) -> Result<()> {
+    run_test_shell_with(io, env, true).await
+}
+
+/// `honor_eof` models the two stdin backends the real session can drive: a pipe, where EOF
+/// ends `bash -s`, and the PTY farm actually opens, where the microsandbox agent keeps the
+/// master open and an EOF is a no-op. Only the wrapper itself can end that shell.
+async fn run_test_shell_with(
+    io: crate::farm::TerminalIo,
+    env: BTreeMap<String, String>,
+    honor_eof: bool,
+) -> Result<()> {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    let mut command = tokio::process::Command::new("bash");
+    command
+        .arg("-s")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true);
+    // A terminal's hangup reaches every job the shell started, so the stand-in shell gets
+    // its own process group too.
+    command.process_group(0);
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    let mut child = command.spawn()?;
+    let mut stdin = Some(child.stdin.take().expect("shell has stdin"));
+    let mut stdout = BufReader::new(child.stdout.take().expect("shell has stdout"));
+    let crate::farm::TerminalIo { mut input, output } = io;
+    let mut line = String::new();
+    loop {
+        tokio::select! {
+            read = stdout.read_line(&mut line) => {
+                if read? == 0 {
+                    break;
+                }
+                // A PTY's ONLCR turns newlines into CRLF; the script session must
+                // still find its markers.
+                output
+                    .send(std::mem::take(&mut line).replace('\n', "\r\n").into_bytes())
+                    .await?;
+            }
+            message = input.recv(), if stdin.is_some() => match message {
+                Some(crate::farm::TerminalInput::Data(data)) => {
+                    stdin.as_mut().expect("guarded").write_all(&data).await?;
+                }
+                Some(crate::farm::TerminalInput::Resize(_)) => {}
+                // The script is complete; a pipe's EOF ends `bash -s` and the session stays up.
+                Some(crate::farm::TerminalInput::Close) if honor_eof => {
+                    stdin.take();
+                }
+                Some(crate::farm::TerminalInput::Close) => {}
+                None => {
+                    // The client left. The real session hangs the shell up; a stand-in that
+                    // only closed stdin would hide a script session that drops its input
+                    // instead of closing it.
+                    stdin.take();
+                    if let Some(pid) = child.id() {
+                        // SAFETY: kill(2) on the process group this test spawned.
+                        unsafe { libc::kill(-(pid as i32), libc::SIGHUP) };
+                    }
+                }
+            },
+        }
+    }
+    child.wait().await?;
+    Ok(())
+}
+
+/// A terminal session backed by a real PTY login shell, like the one the microsandbox agent
+/// opens (`tests/fixtures/pty-login-shell.py`). The shell is interactive there: its prompt
+/// and its echo of what it reads reach the session's output, and closing the writer is not
+/// an EOF for the shell.
+#[cfg(unix)]
+async fn run_pty_login_shell(io: crate::farm::TerminalIo) -> Result<()> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut child = tokio::process::Command::new("python3")
+        .args([
+            "-u",
+            "-c",
+            include_str!("../../tests/fixtures/pty-login-shell.py"),
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .spawn()?;
+    let mut stdin = Some(child.stdin.take().expect("shell has stdin"));
+    let mut stdout = child.stdout.take().expect("shell has stdout");
+    let crate::farm::TerminalIo { mut input, output } = io;
+    let mut buffer = vec![0_u8; 4096];
+    loop {
+        tokio::select! {
+            read = stdout.read(&mut buffer) => {
+                let read = read?;
+                if read == 0 {
+                    break;
+                }
+                output.send(buffer[..read].to_vec()).await?;
+            }
+            message = input.recv(), if stdin.is_some() => match message {
+                Some(crate::farm::TerminalInput::Data(data)) => {
+                    stdin.as_mut().expect("guarded").write_all(&data).await?;
+                    stdin.as_mut().expect("guarded").flush().await?;
+                }
+                Some(crate::farm::TerminalInput::Resize(_)) => {}
+                // The agent keeps the master open, so the shell sees no EOF from this.
+                Some(crate::farm::TerminalInput::Close) => {}
+                None => {
+                    // A departed client kills the session; only the wrapper ends the shell.
+                    let _ = child.start_kill();
+                }
+            },
+        }
+    }
+    child.wait().await?;
+    Ok(())
+}
+
+/// The GPU API parses the control VM's stdout as JSON, so the script session must capture
+/// only what the script wrote, not the login shell's prompt or its echo of the wrapper.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_control_script_captures_only_its_own_output_from_a_login_shell() {
+    let available = std::process::Command::new("python3")
+        .args(["-c", "import pty"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success());
+    if !available {
+        eprintln!("python3 without pty, skipping the login-shell script test");
+        return;
+    }
+    // Real output, a pause and two lines: a session that hangs up early or clips the
+    // stream loses one of them, and an interactive shell would put its prompt in front.
+    let script = "printf 'one\\n'; sleep 0.2\nprintf 'two\\n'\nprintf 'VGPU=2\\n'";
+    for _ in 0..3 {
+        let out = crate::farm::ScriptSession::new(|io| Box::pin(run_pty_login_shell(io)))
+            .run(script)
+            .await
+            .unwrap();
+        assert_eq!(out, "one\ntwo\nVGPU=2");
+    }
+}
+
+/// A control script ends its input when its text is complete, not by leaving: the session
+/// hangs up on a departed client, and a script that still has work to do was cut short.
+#[tokio::test]
+async fn a_control_script_finishes_after_its_input_closes() {
+    // The GPU load's instance list and the other control scripts all take this path, and
+    // the session's `select!` decides at random; repeat so a race shows.
+    let script = "printf 'one\\n'; sleep 0.3\nprintf 'two\\n'\nfor i in 3 4; do printf '%s\\n' \"line-$i\"; done\nprintf 'done\\n'";
+    for honor_eof in [true, false] {
+        for _ in 0..5 {
+            let out = crate::farm::ScriptSession::new(|io| {
+                Box::pin(run_test_shell_with(io, BTreeMap::new(), honor_eof))
+            })
+            .run(script)
+            .await
+            .unwrap();
+            assert_eq!(out, "one\ntwo\nline-3\nline-4\ndone");
+        }
+    }
 }
 
 #[tokio::test]
@@ -1169,7 +1390,43 @@ async fn preparation_upgrades_an_older_msb_and_refuses_a_newer_one() {
 #[derive(Default)]
 struct MsbLink {
     msb: std::sync::Mutex<Option<String>>,
+    /// The farm kernel path the host says it boots VMs from.
+    custom_kernel: std::sync::Mutex<Option<String>>,
     calls: std::sync::Mutex<Vec<&'static str>>,
+    /// Whether this fake's verification VM saw the custom kernel's mtty device. Only the
+    /// `VerifyVm` reply carries it, as the local agent is a new process per request: its
+    /// `Inspect` cannot remember a boot another process made.
+    verify_mtty: std::sync::atomic::AtomicBool,
+    /// Answer `VerifyVm` with a plain `Done`, as an agent built before its reply carried the
+    /// inspection does.
+    legacy_verify: std::sync::atomic::AtomicBool,
+}
+impl MsbLink {
+    /// A reply from this fake: `gpu` is what its verification VM read, and `None` for a
+    /// plain inspection, which cannot boot a guest.
+    fn inspection(&self, gpu: Option<crate::remote::GpuKernel>) -> crate::remote::HostInspection {
+        let msb_version = self.msb.lock().unwrap().clone();
+        crate::remote::HostInspection {
+            os: "macos".into(),
+            arch: "aarch64".into(),
+            compatible: true,
+            kvm_available: true,
+            sudo_available: false,
+            memory_total_mib: 65536,
+            memory_available_mib: 65536,
+            disk_available_mib: 500_000,
+            msb_compatible: msb_version.as_deref() == Some(crate::remote::MSB_VERSION),
+            msb_version,
+            docker_available: true,
+            golden_image_available: true,
+            custom_kernel: self.custom_kernel.lock().unwrap().clone(),
+            custom_kernel_reason: None,
+            mtty_available: gpu.as_ref().is_some_and(|gpu| gpu.mtty_available()),
+            gpu_kernel: gpu,
+            vm_boot_verified: false,
+            checked_at: now(),
+        }
+    }
 }
 impl crate::remote::link::AgentLink for MsbLink {
     fn call(
@@ -1187,28 +1444,9 @@ impl crate::remote::link::AgentLink for MsbLink {
                     build_id: crate::BUILD_ID.into(),
                     supports_template_transfer: true,
                 },
-                Operation::Inspect => {
-                    let msb_version = self.msb.lock().unwrap().clone();
-                    Reply::Inspection {
-                        inspection: crate::remote::HostInspection {
-                            os: "macos".into(),
-                            arch: "aarch64".into(),
-                            compatible: true,
-                            kvm_available: true,
-                            sudo_available: false,
-                            memory_total_mib: 65536,
-                            memory_available_mib: 65536,
-                            disk_available_mib: 500_000,
-                            msb_compatible: msb_version.as_deref()
-                                == Some(crate::remote::MSB_VERSION),
-                            msb_version,
-                            docker_available: true,
-                            golden_image_available: true,
-                            vm_boot_verified: false,
-                            checked_at: now(),
-                        },
-                    }
-                }
+                Operation::Inspect => Reply::Inspection {
+                    inspection: Box::new(self.inspection(None)),
+                },
                 Operation::InstallMsb => {
                     self.calls.lock().unwrap().push("install");
                     *self.msb.lock().unwrap() = Some(crate::remote::MSB_VERSION.into());
@@ -1216,7 +1454,39 @@ impl crate::remote::link::AgentLink for MsbLink {
                 }
                 Operation::VerifyVm => {
                     self.calls.lock().unwrap().push("verify");
-                    Reply::Done
+                    if self.legacy_verify.load(std::sync::atomic::Ordering::SeqCst) {
+                        Reply::Done
+                    } else {
+                        // What this fake's verification VM read from the booted kernel.
+                        let mtty = self.verify_mtty.load(std::sync::atomic::Ordering::SeqCst);
+                        let custom = self.custom_kernel.lock().unwrap().clone();
+                        let gpu = crate::remote::GpuKernel {
+                            kernel: if custom.is_some() {
+                                crate::remote::GpuKernelKind::Custom
+                            } else {
+                                crate::remote::GpuKernelKind::Stock
+                            },
+                            kernel_id: custom.as_deref().and_then(|path| {
+                                crate::kernel::installed_id(std::path::Path::new(path))
+                            }),
+                            vfio: mtty,
+                            vfio_mdev: mtty,
+                            mtty_registered: mtty,
+                            mdev_types: if mtty {
+                                vec![crate::remote::MdevType {
+                                    name: "mtty-1".into(),
+                                    available_instances: 24,
+                                }]
+                            } else {
+                                Vec::new()
+                            },
+                            kernel_release: "6.12.113".into(),
+                            reason: None,
+                        };
+                        Reply::Inspection {
+                            inspection: Box::new(self.inspection(Some(gpu))),
+                        }
+                    }
                 }
                 operation => anyhow::bail!("unexpected {operation:?}"),
             })
@@ -1282,6 +1552,286 @@ async fn agent_host_preparation_upgrades_an_older_msb_and_refuses_a_newer_one() 
     assert_eq!(finished.status, JobStatus::Failed);
     assert!(finished.error.unwrap().contains("does not downgrade msb"));
     assert!(link.calls.lock().unwrap().is_empty());
+    settle(&manager).await;
+}
+
+#[tokio::test]
+async fn agent_host_preparation_keeps_the_verification_replys_mtty_result() {
+    use crate::remote::HostJobKind;
+    use std::sync::atomic::Ordering;
+    let dir = tempfile::tempdir().unwrap();
+    let link = Arc::new(MsbLink::default());
+    *link.msb.lock().unwrap() = Some(crate::remote::MSB_VERSION.into());
+    // The verification VM saw mtty-1; a later `Inspect` in a new process reports none.
+    link.verify_mtty.store(true, Ordering::SeqCst);
+    let manager = FarmManager::with_link(options(dir.path()), link.clone())
+        .await
+        .unwrap();
+    manager
+        .register_local_host(crate::remote::RegisterLocalHost { id: "local".into() })
+        .unwrap();
+    let job = manager
+        .start_host_job("local", HostJobKind::Prepare)
+        .unwrap();
+    let finished = host_done(&manager, &job.id).await;
+    assert_eq!(
+        finished.status,
+        JobStatus::Succeeded,
+        "{:?}",
+        finished.error
+    );
+    // The coordinator stores what the reply said, so `host list` can show `(mtty)` and the
+    // mtty gate lets a farm in.
+    let inspection = manager.host("local").unwrap().inspection.unwrap();
+    assert!(
+        inspection.mtty_available,
+        "the verification reply's mtty result was dropped"
+    );
+    // The whole probe crosses the reply: the portal reads the type count and the release.
+    let gpu = inspection
+        .gpu_kernel
+        .expect("the verification reply's GPU probe was dropped");
+    assert!(gpu.vfio && gpu.vfio_mdev && gpu.mtty_registered);
+    assert_eq!(gpu.mdev_types.len(), 1);
+    assert_eq!(gpu.mdev_types[0].available_instances, 24);
+    assert_eq!(gpu.kernel_release, "6.12.113");
+    assert!(inspection.vm_boot_verified);
+    settle(&manager).await;
+
+    // An agent built before its verification reply carried the inspection answers `Done`;
+    // that stays a successful preparation, with no mtty evidence.
+    let dir = tempfile::tempdir().unwrap();
+    let link = Arc::new(MsbLink::default());
+    *link.msb.lock().unwrap() = Some(crate::remote::MSB_VERSION.into());
+    link.legacy_verify.store(true, Ordering::SeqCst);
+    let manager = FarmManager::with_link(options(dir.path()), link.clone())
+        .await
+        .unwrap();
+    manager
+        .register_local_host(crate::remote::RegisterLocalHost { id: "local".into() })
+        .unwrap();
+    let job = manager
+        .start_host_job("local", HostJobKind::Prepare)
+        .unwrap();
+    let finished = host_done(&manager, &job.id).await;
+    assert_eq!(
+        finished.status,
+        JobStatus::Succeeded,
+        "{:?}",
+        finished.error
+    );
+    let inspection = manager.host("local").unwrap().inspection.unwrap();
+    assert!(!inspection.mtty_available);
+    assert!(inspection.gpu_kernel.is_none());
+    assert!(inspection.vm_boot_verified);
+    settle(&manager).await;
+}
+
+#[tokio::test]
+async fn agent_host_preparation_keeps_the_custom_kernel_the_host_reports() {
+    use crate::remote::HostJobKind;
+    let dir = tempfile::tempdir().unwrap();
+    let link = Arc::new(MsbLink::default());
+    *link.msb.lock().unwrap() = Some("0.7.8".into());
+    let kernel = "/home/edge/.microsandbox/lib/libkrunfw.so.5.6.1";
+    *link.custom_kernel.lock().unwrap() = Some(kernel.into());
+    let manager = FarmManager::with_link(options(dir.path()), link.clone())
+        .await
+        .unwrap();
+    manager
+        .register_local_host(crate::remote::RegisterLocalHost { id: "local".into() })
+        .unwrap();
+    // The installer writes ~/.microsandbox/lib, which would replace this host's kernel;
+    // the coordinator's own environment never enters the decision.
+    let job = manager
+        .start_host_job("local", HostJobKind::Prepare)
+        .unwrap();
+    let finished = host_done(&manager, &job.id).await;
+    assert_eq!(finished.status, JobStatus::Failed);
+    assert_eq!(*link.calls.lock().unwrap(), Vec::<&str>::new());
+    assert!(
+        finished.events.iter().any(
+            |e| e.message.starts_with("Skipping the msb install") && e.message.contains(kernel)
+        ),
+        "{:?}",
+        finished
+            .events
+            .iter()
+            .map(|e| &e.message)
+            .collect::<Vec<_>>()
+    );
+    let error = finished.error.unwrap();
+    assert!(error.contains(kernel), "{error}");
+    assert!(error.contains("by hand"), "{error}");
+
+    // A kernel kept anywhere else survives the install, so the install runs.
+    *link.custom_kernel.lock().unwrap() = Some("/srv/kernels/libkrunfw.so.5.6.1".into());
+    link.calls.lock().unwrap().clear();
+    let job = manager
+        .start_host_job("local", HostJobKind::Prepare)
+        .unwrap();
+    let finished = host_done(&manager, &job.id).await;
+    assert_eq!(
+        finished.status,
+        JobStatus::Succeeded,
+        "{:?}",
+        finished.error
+    );
+    assert_eq!(*link.calls.lock().unwrap(), ["install", "verify"]);
+    settle(&manager).await;
+}
+
+/// A build tree with one fake kernel for `arch`, as scripts/build-libkrunfw.sh leaves it.
+fn kernel_build(dir: &std::path::Path, arch: &str) {
+    use sha2::{Digest, Sha256};
+    let bytes = b"farm kernel fixture";
+    let sha = format!("{:x}", Sha256::digest(bytes));
+    let base = dir.join(arch);
+    std::fs::create_dir_all(&base).unwrap();
+    std::fs::write(base.join("libkrunfw.so.5.6.1"), bytes).unwrap();
+    std::fs::write(
+        base.join("manifest.txt"),
+        format!(
+            "revision 56bf194627a07996dc4ce21211fe86ada4c76080\nkernel linux-6.12.113\narch {arch}\nkbuild-arch {arch}\nmsb {}\nartifact {arch}/libkrunfw.so.5.6.1 sha256 {sha}\n",
+            crate::remote::MSB_VERSION
+        ),
+    )
+    .unwrap();
+}
+
+/// The kernel a host boots is the host's own installation: preparation uploads it over the
+/// same SSH connection as the agent, and the verification reply carries both the path and
+/// the mtty evidence to the coordinator, which a shell inspection cannot produce.
+#[tokio::test]
+async fn ssh_host_preparation_installs_the_farm_kernel_and_keeps_the_verification_replys_mtty() {
+    use crate::remote::{HostJobKind, test_server::Fixture};
+    let fixture = Fixture::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let kernel_dir = tempfile::tempdir().unwrap();
+    kernel_build(kernel_dir.path(), std::env::consts::ARCH);
+    let mut opts = options(dir.path());
+    opts.libkrunfw_dir = Some(kernel_dir.path().to_path_buf());
+    let manager = open_with(opts, Arc::new(Fake::default())).await;
+    manager
+        .register_host(fixture.registration("target"))
+        .unwrap();
+    let job = manager
+        .start_host_job("target", HostJobKind::Prepare)
+        .unwrap();
+    let finished = host_done(&manager, &job.id).await;
+    assert_eq!(
+        finished.status,
+        JobStatus::Succeeded,
+        "{:?}",
+        finished.error
+    );
+    assert!(
+        finished
+            .events
+            .iter()
+            .any(|event| event.message.starts_with("Installing the farm kernel")),
+        "{:?}",
+        finished
+            .events
+            .iter()
+            .map(|event| &event.message)
+            .collect::<Vec<_>>()
+    );
+    let calls = fixture.observed.calls.lock().unwrap().clone();
+    assert!(calls.iter().any(|call| call == "kernel-check"), "{calls:?}");
+    assert!(
+        calls.iter().any(|call| call == "kernel-upload"),
+        "{calls:?}"
+    );
+    assert!(
+        calls.iter().any(|call| call == "kernel-manifest"),
+        "{calls:?}"
+    );
+    // The inspection the coordinator stores is what `host list` shows and the mtty gate
+    // reads: the kernel path and the verification boot's mtty result both cross the boundary.
+    let inspection = manager.host("target").unwrap().inspection.unwrap();
+    assert_eq!(
+        inspection.custom_kernel.as_deref(),
+        Some("/home/operator/.local/share/farm/libkrunfw/0123456789abcdef/libkrunfw.so.5.6.1")
+    );
+    assert!(inspection.mtty_available);
+    assert!(inspection.vm_boot_verified);
+    // The same verification reply carries the GPU probe, so the portal can show what that
+    // booted kernel came up with; the guest read it, which the host cannot re-inspect.
+    let gpu = inspection
+        .gpu_kernel
+        .expect("the verification reply's GPU probe was dropped");
+    assert_eq!(gpu.kernel, crate::remote::GpuKernelKind::Custom);
+    assert_eq!(gpu.kernel_id.as_deref(), Some("0123456789abcdef"));
+    assert!(gpu.vfio && gpu.vfio_mdev && gpu.mtty_registered);
+    assert_eq!(
+        gpu.mdev_types,
+        [crate::remote::MdevType {
+            name: "mtty-1".into(),
+            available_instances: 24
+        }]
+    );
+    assert_eq!(gpu.kernel_release, "6.12.113");
+    assert!(gpu.mtty_available());
+    settle(&manager).await;
+}
+
+/// A read-only check keeps the verification evidence only while the host boots the same
+/// kernel and msb; another installed kernel loses it, as it was never verified here.
+#[tokio::test]
+async fn an_ssh_host_check_keeps_mtty_only_for_the_kernel_it_verified() {
+    use crate::remote::{HostJobKind, test_server::Fixture};
+    let fixture = Fixture::start().await;
+    *fixture.observed.msb.lock().unwrap() = Some(crate::remote::MSB_VERSION.into());
+    let dir = tempfile::tempdir().unwrap();
+    let manager = open_with(options(dir.path()), Arc::new(Fake::default())).await;
+    manager
+        .register_host(fixture.registration("target"))
+        .unwrap();
+    manager
+        .update(|state| {
+            let host = &mut state.hosts.get_mut("target").unwrap().host;
+            host.status = crate::remote::HostStatus::Ready;
+            host.inspection = Some(crate::remote::HostInspection {
+                custom_kernel: Some("/home/operator/.local/share/farm/libkrunfw/0123456789abcdef/libkrunfw.so.5.6.1".into()),
+                custom_kernel_reason: None,
+                mtty_available: true,
+                vm_boot_verified: true,
+                msb_version: Some(crate::remote::MSB_VERSION.into()),
+                ..prepared_inspection(true, None)
+            });
+            Ok(())
+        })
+        .unwrap();
+    *fixture.observed.kernel.lock().unwrap() = Some(
+        "/home/operator/.local/share/farm/libkrunfw/0123456789abcdef/libkrunfw.so.5.6.1".into(),
+    );
+    let job = manager
+        .start_host_job("target", HostJobKind::Check)
+        .unwrap();
+    assert_eq!(
+        host_done(&manager, &job.id).await.status,
+        JobStatus::Succeeded
+    );
+    let inspection = manager.host("target").unwrap().inspection.unwrap();
+    assert!(inspection.mtty_available);
+    assert!(inspection.vm_boot_verified);
+    assert!(inspection.gpu_kernel.is_some());
+
+    // Another installed kernel was never booted here, so its mtty state is unknown.
+    *fixture.observed.kernel.lock().unwrap() = Some(
+        "/home/operator/.local/share/farm/libkrunfw/fedcba9876543210/libkrunfw.so.5.6.1".into(),
+    );
+    let job = manager
+        .start_host_job("target", HostJobKind::Check)
+        .unwrap();
+    assert_eq!(
+        host_done(&manager, &job.id).await.status,
+        JobStatus::Succeeded
+    );
+    let inspection = manager.host("target").unwrap().inspection.unwrap();
+    assert!(!inspection.mtty_available);
+    assert!(inspection.gpu_kernel.is_none());
     settle(&manager).await;
 }
 
@@ -1967,6 +2517,7 @@ async fn unreserved_vms_are_never_adopted_and_hostless_farms_can_only_be_removed
                 snapshot_id: None,
                 resume: None,
                 faults: Default::default(),
+                gpu_loads: Default::default(),
                 shares: vec![],
                 uplink_sha256: None,
             };
@@ -3610,6 +4161,7 @@ async fn a_restarted_coordinator_reattaches_to_the_deploy_its_host_kept_running(
                 generation,
                 from: Phase::Prepare,
                 job_id: remote.clone(),
+                reference: None,
             },
         };
         async move { agent.execute(request, Arc::new(|_| Ok(()))).await }
@@ -3857,6 +4409,59 @@ async fn a_deploy_that_loses_its_connection_follows_the_host_job_again() {
     assert_eq!(count(&manager, "flaky", "step: make images"), 1);
     assert_eq!(backend.deployed.load(Ordering::SeqCst), 1);
     assert_eq!(manager.get("flaky").unwrap().status, FarmStatus::Ready);
+    settle(&manager).await;
+}
+
+/// 2025.1 moved from `stable/2025.1` to `unmaintained/2025.1`. The coordinator reads the
+/// release catalog; the host's agent process never does, so the ref has to cross the request.
+/// The test uses the build's own release with a moved branch, so it plans on either host
+/// architecture.
+#[tokio::test]
+async fn a_deploy_carries_the_kolla_ansible_ref_the_coordinator_resolved() {
+    let release = crate::kolla::OPENSTACK_RELEASE;
+    let moved = format!("unmaintained/{release}");
+    crate::kolla::releases::remember(&[(release, &moved)]);
+    let dir = tempfile::tempdir().unwrap();
+    let backend = Arc::new(Fake::default());
+    let link = Arc::new(crate::remote::link::InProcessLink {
+        agent: Arc::new(crate::remote::agent::Agent::in_process(
+            dir.path().join("agent"),
+            backend.clone(),
+        )),
+    });
+    let manager = FarmManager::with_link(options(dir.path()), link)
+        .await
+        .unwrap();
+    local_host(&manager);
+    let created = manager
+        .create(CreateRequest {
+            release: Some(release.into()),
+            ..request("epoxy")
+        })
+        .unwrap();
+    let created = done(&manager, &created).await;
+    assert_eq!(created.status, JobStatus::Succeeded, "{:?}", created.error);
+    let deployed = manager.deploy("epoxy", DeployRequest::default()).unwrap();
+    let deployed = done(&manager, &deployed).await;
+    assert_eq!(
+        deployed.status,
+        JobStatus::Succeeded,
+        "{:?}",
+        deployed.error
+    );
+    // The agent's backend saw the ref the coordinator resolved, not `None`.
+    assert_eq!(
+        backend.references.lock().unwrap().as_slice(),
+        [Some(moved.clone())]
+    );
+    // That ref is what the install script names: no `stable/` guess is left in it.
+    let info = crate::kolla::releases::info_with(release, Some(&moved));
+    let script = crate::kolla::install_script(&info);
+    assert!(
+        script.contains(&format!("kolla-ansible@{moved}")),
+        "{script}"
+    );
+    assert!(!script.contains(&format!("stable/{release}")), "{script}");
     settle(&manager).await;
 }
 
@@ -5200,6 +5805,88 @@ fn by_release(id: &str, computes: u8) -> ReleaseCreateRequest {
 }
 
 #[tokio::test]
+async fn a_gpu_release_is_refused_for_its_release_window_before_missing_images() {
+    let dir = tempfile::tempdir().unwrap();
+    let manager = open_with(options(dir.path()), Arc::new(Fake::default())).await;
+    let gpu = |mode, count| {
+        Some(crate::model::GpuConfig {
+            mode,
+            count,
+            ..Default::default()
+        })
+    };
+    // 2024.2 cannot advertise a simulated GPU; that is the reason the request gets, whether
+    // or not this coordinator can install 2024.2 clean.
+    let why = manager
+        .preview_release(&ReleaseCreateRequest {
+            release: "2024.2".into(),
+            gpu: gpu(crate::model::GpuMode::Simulated, 1),
+            ..by_release("gpu", 1)
+        })
+        .await
+        .unwrap_err();
+    assert!(why.is::<BadRequest>(), "{why:#}");
+    assert_eq!(
+        why.to_string(),
+        "OpenStack 2024.2 cannot offer a 'simulated' GPU; it needs 2025.1 or newer"
+    );
+    // 2025.1 is the window's lower end: the request passes the GPU's own check, and whatever
+    // this coordinator answers next is about its images, not about the GPU.
+    match manager
+        .preview_release(&ReleaseCreateRequest {
+            release: "2025.1".into(),
+            gpu: gpu(crate::model::GpuMode::Simulated, 1),
+            ..by_release("gpu", 1)
+        })
+        .await
+    {
+        Ok(plan) => assert_eq!(plan.release, "2025.1"),
+        Err(why) => assert!(!why.to_string().contains("cannot offer"), "{why:#}"),
+    }
+    // mtty uses the same window: 2025.1's Nova gains the device support from farm's own
+    // backport, while 2024.2 has neither the driver patch nor a supported image.
+    let why = manager
+        .preview_release(&ReleaseCreateRequest {
+            release: "2024.2".into(),
+            gpu: gpu(crate::model::GpuMode::Mtty, 1),
+            ..by_release("gpu", 1)
+        })
+        .await
+        .unwrap_err();
+    assert!(
+        why.to_string()
+            .contains("cannot offer a 'mtty' GPU; it needs 2025.1 or newer"),
+        "{why:#}"
+    );
+    match manager
+        .preview_release(&ReleaseCreateRequest {
+            release: "2025.2".into(),
+            gpu: gpu(crate::model::GpuMode::Mtty, 1),
+            ..by_release("gpu", 1)
+        })
+        .await
+    {
+        Ok(plan) => assert_eq!(plan.release, "2025.2"),
+        Err(why) => assert!(!why.to_string().contains("cannot offer"), "{why:#}"),
+    }
+    // The release that does offer it keeps the GPU in its clean install.
+    let plan = manager
+        .preview_release(&ReleaseCreateRequest {
+            gpu: gpu(crate::model::GpuMode::Simulated, 1),
+            ..by_release("gpu", 1)
+        })
+        .await
+        .unwrap();
+    assert_eq!(plan.release, crate::kolla::OPENSTACK_RELEASE);
+    assert!(
+        plan.control.reason.contains("GPU"),
+        "{}",
+        plan.control.reason
+    );
+    settle(&manager).await;
+}
+
+#[tokio::test]
 async fn a_release_plan_picks_the_newest_matching_templates_or_says_why_it_installs_clean() {
     use crate::remote::test_server::Fixture;
     let dir = tempfile::tempdir().unwrap();
@@ -6116,4 +6803,711 @@ async fn release_routes_preview_and_start_farms() {
             .is_some_and(|e| e.contains(crate::kolla::releases::MIN_SUPPORTED_RELEASE)),
         "{error}"
     );
+}
+
+/// The inspection a prepared host reports; `mtty` says its verification VM saw the custom
+/// kernel's mediated device.
+fn prepared_inspection(mtty: bool, custom_kernel: Option<&str>) -> crate::remote::HostInspection {
+    crate::remote::HostInspection {
+        os: "linux".into(),
+        arch: std::env::consts::ARCH.into(),
+        compatible: true,
+        kvm_available: true,
+        sudo_available: false,
+        memory_total_mib: 65536,
+        memory_available_mib: 65536,
+        disk_available_mib: 500_000,
+        msb_version: Some("0.7.13".into()),
+        msb_compatible: true,
+        docker_available: true,
+        golden_image_available: true,
+        custom_kernel: custom_kernel.map(str::to_owned),
+        custom_kernel_reason: None,
+        mtty_available: mtty,
+        gpu_kernel: Some(crate::remote::GpuKernel {
+            kernel: if custom_kernel.is_some() {
+                crate::remote::GpuKernelKind::Custom
+            } else {
+                crate::remote::GpuKernelKind::Stock
+            },
+            kernel_id: custom_kernel
+                .and_then(|path| crate::kernel::installed_id(std::path::Path::new(path))),
+            vfio: mtty,
+            vfio_mdev: mtty,
+            mtty_registered: mtty,
+            mdev_types: if mtty {
+                vec![crate::remote::MdevType {
+                    name: "mtty-1".into(),
+                    available_instances: 24,
+                }]
+            } else {
+                Vec::new()
+            },
+            kernel_release: "6.12.113".into(),
+            reason: None,
+        }),
+        vm_boot_verified: true,
+        checked_at: now(),
+    }
+}
+
+fn gpu_farm(id: &str, mode: crate::model::GpuMode, count: u32) -> CreateRequest {
+    CreateRequest {
+        computes: 1,
+        gpu: Some(crate::model::GpuConfig {
+            mode,
+            count,
+            ..Default::default()
+        }),
+        ..request(id)
+    }
+}
+
+#[tokio::test]
+async fn a_gpu_farm_reaches_its_hosts_agent_with_the_gpu() {
+    let dir = tempfile::tempdir().unwrap();
+    let backend = Arc::new(Fake::default());
+    let manager = open_with(options(dir.path()), backend.clone()).await;
+    if !cfg!(target_os = "linux") {
+        *manager.0.guest_agent.write().unwrap() = Some(dir.path().join("farm-agent"));
+    }
+    let gpu = crate::model::GpuConfig {
+        mode: crate::model::GpuMode::Simulated,
+        count: 2,
+        ..Default::default()
+    };
+    let created = manager
+        .create(gpu_farm("gpu", gpu.mode, gpu.count))
+        .unwrap();
+    assert_eq!(done(&manager, &created).await.status, JobStatus::Succeeded);
+    let deployed = manager.deploy("gpu", DeployRequest::default()).unwrap();
+    assert_eq!(done(&manager, &deployed).await.status, JobStatus::Succeeded);
+    // The GPU lives in the plan, which is what the host's agent reserved and deploys from.
+    assert_eq!(
+        manager.get("gpu").unwrap().plan.unwrap().gpu,
+        Some(gpu.clone())
+    );
+    assert_eq!(backend.gpus.lock().unwrap().as_slice(), [Some(gpu)]);
+    settle(&manager).await;
+}
+
+#[tokio::test]
+async fn a_gpu_farm_cannot_be_frozen_as_a_control_template() {
+    let dir = tempfile::tempdir().unwrap();
+    let manager = open_with(options(dir.path()), Arc::new(Fake::default())).await;
+    if !cfg!(target_os = "linux") {
+        *manager.0.guest_agent.write().unwrap() = Some(dir.path().join("farm-agent"));
+    }
+    let gpu = crate::model::GpuConfig {
+        mode: crate::model::GpuMode::Simulated,
+        count: 1,
+        ..Default::default()
+    };
+    let created = manager
+        .create(gpu_farm("gpu", gpu.mode, gpu.count))
+        .unwrap();
+    assert_eq!(done(&manager, &created).await.status, JobStatus::Succeeded);
+    let deployed = manager.deploy("gpu", DeployRequest::default()).unwrap();
+    assert_eq!(done(&manager, &deployed).await.status, JobStatus::Succeeded);
+    // A control template keeps no computes, and the GPU is part of them: restoring it
+    // would silently make a GPU-less farm.
+    let why = manager
+        .freeze(
+            "gpu",
+            SnapshotRequest {
+                id: "ctl".into(),
+                note: None,
+                node: Some("control".into()),
+            },
+        )
+        .unwrap_err();
+    assert!(why.is::<Conflict>(), "{why:#}");
+    assert!(why.to_string().contains("GPU"), "{why:#}");
+    // The farm still freezes whole, with the GPU in the snapshot's plan.
+    let job = manager
+        .freeze(
+            "gpu",
+            SnapshotRequest {
+                id: "whole".into(),
+                note: None,
+                node: None,
+            },
+        )
+        .unwrap();
+    assert_eq!(done(&manager, &job).await.status, JobStatus::Succeeded);
+    assert_eq!(
+        manager.snapshot("whole").unwrap().plan.gpu,
+        Some(gpu.clone())
+    );
+    settle(&manager).await;
+}
+
+#[tokio::test]
+async fn a_release_farm_with_a_gpu_installs_clean_and_keeps_the_gpu() {
+    let dir = tempfile::tempdir().unwrap();
+    let (manager, backend) = release_templates(dir.path()).await;
+    let gpu = crate::model::GpuConfig {
+        mode: crate::model::GpuMode::Simulated,
+        count: 2,
+        ..Default::default()
+    };
+    let request = ReleaseCreateRequest {
+        gpu: Some(gpu.clone()),
+        ..by_release("gpu", 1)
+    };
+    // Templates of this release exist, and are still ignored: a template's VMs boot with
+    // the plan they were frozen with, which has no GPU.
+    let plan = manager.preview_release(&request).await.unwrap();
+    assert_eq!(plan.control.source, NodeSource::Clean);
+    assert!(
+        plan.control.reason.contains("GPU"),
+        "{}",
+        plan.control.reason
+    );
+    assert!(
+        plan.computes
+            .iter()
+            .all(|node| node.source == NodeSource::Clean),
+        "{:?}",
+        plan.computes
+    );
+    let job = manager.create_release(request).await.unwrap();
+    let actions: Vec<_> = job
+        .assembly
+        .iter()
+        .map(|step| step.action.as_str())
+        .collect();
+    assert_eq!(actions, ["create", "deploy"]);
+    let finished = done_slowly(&manager, &job).await;
+    assert_eq!(
+        finished.status,
+        JobStatus::Succeeded,
+        "{:?}",
+        finished.error
+    );
+    assert_eq!(
+        manager.get("gpu").unwrap().plan.unwrap().gpu,
+        Some(gpu.clone())
+    );
+    assert_eq!(
+        backend.gpus.lock().unwrap().last().cloned(),
+        Some(Some(gpu.clone()))
+    );
+    settle(&manager).await;
+}
+
+/// The `mtty` gate reads each compute host's stored inspection, never this process's own
+/// kernel; see also [`mtty_farms_need_the_vm_hosts_kernel_not_the_coordinators`] for the
+/// coordinator that has no kernel at all.
+#[tokio::test]
+async fn gpu_mtty_farms_need_each_compute_host_verified_with_the_custom_kernel() {
+    let mtty = crate::model::GpuConfig {
+        mode: crate::model::GpuMode::Mtty,
+        count: 1,
+        ..Default::default()
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let backend = Arc::new(Fake::default());
+    let manager = open_with(options(dir.path()), backend.clone()).await;
+    if !cfg!(target_os = "linux") {
+        *manager.0.guest_agent.write().unwrap() = Some(dir.path().join("farm-agent"));
+    }
+    // The local host is ready, but its preparation never verified a custom kernel.
+    let why = manager
+        .create(gpu_farm("cold", mtty.mode, mtty.count))
+        .unwrap_err();
+    assert!(why.is::<BadRequest>(), "{why:#}");
+    assert!(why.to_string().contains("host 'local'"), "{why:#}");
+    assert!(
+        why.to_string().contains("stock microsandbox kernel"),
+        "{why:#}"
+    );
+    assert!(
+        why.to_string().contains("farm host prepare local"),
+        "{why:#}"
+    );
+    // A compute on another host is gated the same way, and the error names that host.
+    manager
+        .register_agent_host(crate::remote::RegisterAgentHost { id: "edge".into() })
+        .unwrap();
+    manager
+        .update(|state| {
+            let host = &mut state.hosts.get_mut("edge").unwrap().host;
+            host.inspection = Some(prepared_inspection(false, None));
+            Ok(())
+        })
+        .unwrap();
+    let mut spread = gpu_farm("spread", mtty.mode, mtty.count);
+    spread.computes = 2;
+    spread.placement = BTreeMap::from([("compute-2".into(), "edge".into())]);
+    let why = manager.create(spread).unwrap_err();
+    assert!(
+        why.to_string()
+            .contains("host 'edge' cannot run an mtty GPU farm"),
+        "{why:#}"
+    );
+    // The local compute verified farm's kernel, so only the SSH host is left to judge.
+    manager
+        .update(|state| {
+            state
+                .hosts
+                .get_mut("local")
+                .unwrap()
+                .host
+                .inspection
+                .as_mut()
+                .unwrap()
+                .mtty_available = true;
+            Ok(())
+        })
+        .unwrap();
+    // An SSH host that verified farm's kernel is no longer refused for its transport: the
+    // gate now reads only the kernel evidence, and the farm gets as far as its agent check.
+    manager
+        .update(|state| {
+            let host = &mut state.hosts.get_mut("edge").unwrap().host;
+            host.kind = crate::remote::HostKind::Ssh;
+            host.inspection = Some(prepared_inspection(
+                true,
+                Some("/home/user/.local/share/farm/libkrunfw/0123456789abcdef/libkrunfw.so.5.6.1"),
+            ));
+            Ok(())
+        })
+        .unwrap();
+    let mut ssh = gpu_farm("ssh", mtty.mode, mtty.count);
+    ssh.computes = 2;
+    ssh.placement = BTreeMap::from([("compute-2".into(), "edge".into())]);
+    let why = manager.create(ssh).unwrap_err();
+    assert!(!why.to_string().contains("reached over SSH"), "{why:#}");
+    assert!(
+        !why.to_string().contains("cannot run an mtty GPU farm"),
+        "{why:#}"
+    );
+    // A verified host takes the farm, and the GPU reaches its agent.
+    manager
+        .update(|state| {
+            state
+                .hosts
+                .get_mut("local")
+                .unwrap()
+                .host
+                .inspection
+                .as_mut()
+                .unwrap()
+                .mtty_available = true;
+            Ok(())
+        })
+        .unwrap();
+    let created = manager
+        .create(gpu_farm("warm", mtty.mode, mtty.count))
+        .unwrap();
+    assert_eq!(done(&manager, &created).await.status, JobStatus::Succeeded);
+    let deployed = manager.deploy("warm", DeployRequest::default()).unwrap();
+    assert_eq!(done(&manager, &deployed).await.status, JobStatus::Succeeded);
+    assert_eq!(backend.gpus.lock().unwrap().as_slice(), [Some(mtty)]);
+    println!("mtty host gate: ok");
+    settle(&manager).await;
+}
+
+/// farm's kernel belongs to the host that boots the VM. A coordinator whose own machine never
+/// installed it still creates an `mtty` farm on an SSH host whose preparation did.
+#[test]
+fn mtty_farms_need_the_vm_hosts_kernel_not_the_coordinators() {
+    // This process's kernel is an override or an installation under HOME, so the probe runs
+    // in a child with neither: a coordinator on a machine that has not been prepared.
+    let home = tempfile::tempdir().unwrap();
+    let output = std::process::Command::new(std::env::current_exe().expect("the test binary"))
+        .args([
+            "--exact",
+            "--nocapture",
+            "manager::tests::mtty_farm_probe_without_a_coordinator_kernel",
+        ])
+        .env_remove(crate::kernel::LIBKRUNFW_VAR)
+        .env("HOME", home.path())
+        .env("FARM_TEST_NO_COORDINATOR_KERNEL", "1")
+        .output()
+        .expect("run the test binary");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "mtty host kernel child failed:\n{stdout}\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        stdout.contains("mtty host kernel: ok"),
+        "mtty host kernel child did not run: {stdout}"
+    );
+}
+
+/// The child half of [`mtty_farms_need_the_vm_hosts_kernel_not_the_coordinators`].
+#[tokio::test]
+async fn mtty_farm_probe_without_a_coordinator_kernel() {
+    use crate::remote::{AgentArtifactInfo, HostJobKind, InstalledAgent, test_server::Fixture};
+    if std::env::var_os("FARM_TEST_NO_COORDINATOR_KERNEL").is_none() {
+        return;
+    }
+    // The premise: this coordinator boots the stock microsandbox kernel. Planning offers mtty
+    // anyway; only the target host's inspection decides whether its VMs can bind the device.
+    assert!(
+        crate::kernel::select_in_process().path.is_none(),
+        "this probe needs a coordinator without a farm kernel"
+    );
+    let fixture = Fixture::start().await;
+    // dev-01's preparation installed farm's kernel, and its verification VM saw mtty-1. Both
+    // reach the coordinator in the reply, which is the whole gate's evidence.
+    *fixture.observed.kernel.lock().unwrap() =
+        Some("/home/user/.local/share/farm/libkrunfw/72f012b2c2c8c33c/libkrunfw.so.5.6.1".into());
+    let dir = tempfile::tempdir().unwrap();
+    let backend = Arc::new(Fake::default());
+    let manager = open_with(options(dir.path()), backend.clone()).await;
+    // The local host is this test machine; a multi-node farm's guests need a Linux agent.
+    if !cfg!(target_os = "linux") {
+        *manager.0.guest_agent.write().unwrap() = Some(dir.path().join("farm-agent"));
+    }
+    manager
+        .register_host(fixture.registration("dev-01"))
+        .unwrap();
+    let prep = manager
+        .start_host_job("dev-01", HostJobKind::Prepare)
+        .unwrap();
+    assert_eq!(
+        host_done(&manager, &prep.id).await.status,
+        JobStatus::Succeeded
+    );
+    let inspection = manager.host("dev-01").unwrap().inspection.unwrap();
+    assert!(
+        inspection.mtty_available,
+        "the SSH reply's mtty result was dropped"
+    );
+    manager
+        .update(|state| {
+            state.hosts.get_mut("dev-01").unwrap().host.agent = Some(InstalledAgent {
+                artifact: AgentArtifactInfo {
+                    sha256: "a".repeat(64),
+                    os: "linux".into(),
+                    arch: std::env::consts::ARCH.into(),
+                    protocol: 1,
+                    supports_single_vm: true,
+                    build_id: crate::BUILD_ID.into(),
+                },
+                verified_at: now(),
+            });
+            Ok(())
+        })
+        .unwrap();
+    // Planning is host-free and takes mtty on a coordinator that has no kernel itself.
+    let gpu = crate::model::GpuConfig {
+        mode: crate::model::GpuMode::Mtty,
+        count: 1,
+        ..Default::default()
+    };
+    let planned = crate::model::plan(&crate::model::PlanRequest {
+        components: vec!["nova".into()],
+        computes: 1,
+        compute: None,
+        release: Some("2026.2".into()),
+        layout: None,
+        gpu: Some(gpu.clone()),
+    })
+    .unwrap();
+    assert_eq!(planned.gpu, Some(gpu.clone()));
+    // The farm runs on dev-01, whose kernel has the device, not on this machine.
+    let mut created = gpu_farm("remote-mtty", gpu.mode, gpu.count);
+    created.host_id = Some("dev-01".into());
+    created.release = Some("2026.2".into());
+    let created = manager.create(created).unwrap();
+    let finished = done(&manager, &created).await;
+    assert_eq!(
+        finished.status,
+        JobStatus::Succeeded,
+        "{:?}",
+        finished.error
+    );
+    assert_eq!(
+        manager.get("remote-mtty").unwrap().plan.unwrap().gpu,
+        Some(gpu.clone())
+    );
+    assert!(
+        fixture
+            .observed
+            .rpc_farms
+            .lock()
+            .unwrap()
+            .contains_key("remote-mtty")
+    );
+    // A host that boots the stock kernel is refused, and the error says which host and why:
+    // the fix belongs to that host's preparation, not to this coordinator.
+    let why = manager
+        .create(gpu_farm("local-mtty", gpu.mode, gpu.count))
+        .unwrap_err();
+    let message = why.to_string();
+    assert!(message.contains("host 'local'"), "{message}");
+    assert!(message.contains("stock microsandbox kernel"), "{message}");
+    assert!(message.contains("farm host prepare local"), "{message}");
+    println!("mtty host kernel: ok");
+    settle(&manager).await;
+}
+
+/// A farm that gains a compute, and a release that would install one, read the *new* VM's
+/// host. The error names that host and what keeps it from binding the device, before any job
+/// starts.
+#[tokio::test]
+async fn expanding_or_releasing_an_mtty_farm_gates_the_host_that_boots_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let backend = Arc::new(Fake::default());
+    let manager = open_with(options(dir.path()), backend.clone()).await;
+    if !cfg!(target_os = "linux") {
+        *manager.0.guest_agent.write().unwrap() = Some(dir.path().join("farm-agent"));
+    }
+    let gpu = crate::model::GpuConfig {
+        mode: crate::model::GpuMode::Mtty,
+        count: 1,
+        ..Default::default()
+    };
+    // The local host verified farm's kernel when the farm was accepted.
+    manager
+        .update(|state| {
+            state
+                .hosts
+                .get_mut("local")
+                .unwrap()
+                .host
+                .inspection
+                .as_mut()
+                .unwrap()
+                .mtty_available = true;
+            Ok(())
+        })
+        .unwrap();
+    let created = manager
+        .create(gpu_farm("grow-mtty", gpu.mode, gpu.count))
+        .unwrap();
+    assert_eq!(done(&manager, &created).await.status, JobStatus::Succeeded);
+    let deployed = manager
+        .deploy("grow-mtty", DeployRequest::default())
+        .unwrap();
+    assert_eq!(done(&manager, &deployed).await.status, JobStatus::Succeeded);
+
+    // Preparation ran again and left the host on the stock kernel: its kernel is no longer
+    // the one the farm's computes booted, so the next compute there cannot bind the device.
+    manager
+        .update(|state| {
+            let inspection = state
+                .hosts
+                .get_mut("local")
+                .unwrap()
+                .host
+                .inspection
+                .as_mut()
+                .unwrap();
+            inspection.mtty_available = false;
+            inspection.custom_kernel = None;
+            inspection.custom_kernel_reason =
+                Some("the farm kernel was built for msb 0.7.8".into());
+            Ok(())
+        })
+        .unwrap();
+    let why = manager
+        .add_compute("grow-mtty", AddComputeRequest::default())
+        .unwrap_err();
+    assert!(why.is::<BadRequest>(), "{why:#}");
+    let message = why.to_string();
+    assert!(message.contains("host 'local'"), "{message}");
+    assert!(message.contains("msb 0.7.8"), "{message}");
+    assert!(message.contains("farm host prepare local"), "{message}");
+    assert_eq!(
+        manager.get("grow-mtty").unwrap().plan.unwrap().computes,
+        1,
+        "the refused expansion changed the plan"
+    );
+
+    // The release path refuses the same host before it starts an assemble job.
+    let why = manager
+        .create_release(ReleaseCreateRequest {
+            gpu: Some(gpu),
+            ..by_release("release-mtty", 1)
+        })
+        .await
+        .unwrap_err();
+    assert!(why.is::<BadRequest>(), "{why:#}");
+    let message = why.to_string();
+    assert!(message.contains("host 'local'"), "{message}");
+    assert!(message.contains("msb 0.7.8"), "{message}");
+    assert!(manager.get("release-mtty").is_err());
+    assert!(
+        manager
+            .jobs()
+            .unwrap()
+            .iter()
+            .all(|job| job.farm_id != "release-mtty")
+    );
+    settle(&manager).await;
+}
+
+#[tokio::test]
+async fn a_gpu_load_reaches_the_control_vms_metadata_command_unchanged() {
+    let dir = tempfile::tempdir().unwrap();
+    let backend = Arc::new(Fake::default());
+    let manager = open_with(options(dir.path()), backend.clone()).await;
+    if !cfg!(target_os = "linux") {
+        *manager.0.guest_agent.write().unwrap() = Some(dir.path().join("farm-agent"));
+    }
+    backend.run_scripts.store(true, Ordering::SeqCst);
+    local_host(&manager);
+    let created = manager
+        .create(gpu_farm("gpu", crate::model::GpuMode::Simulated, 1))
+        .unwrap();
+    assert_eq!(done(&manager, &created).await.status, JobStatus::Succeeded);
+    let deployed = manager.deploy("gpu", DeployRequest::default()).unwrap();
+    assert_eq!(done(&manager, &deployed).await.status, JobStatus::Succeeded);
+
+    let server = "11111111-2222-3333-4444-555555555555";
+    // The control VM is a real shell in this test; a fake admin-openrc and OpenStack
+    // CLI stand in for Kolla's, and the CLI logs the arguments it receives.
+    let admin = dir.path().join("admin-openrc.sh");
+    std::fs::write(&admin, "# fake admin-openrc\n").unwrap();
+    let cli = dir.path().join("openstack");
+    let log = dir.path().join("openstack.log");
+    std::fs::write(
+        &cli,
+        format!(
+            r#"#!/bin/sh
+printf '%s\n' "$*" >> '{log}'
+case "$*" in
+  *"server list"*) printf '%s\n' '[{{"ID":"{server}","Name":"demo","Status":"ACTIVE","Flavor":"farm.vgpu"}}]' ;;
+  *"server show"*) printf '%s\n' '{{"id":"{server}","name":"demo","status":"ACTIVE","flavor":"farm.vgpu","properties":{{}}}}' ;;
+  *"flavor show"*) printf '%s\n' '{{"properties":{{"resources:VGPU":"1"}}}}' ;;
+  *) printf '{{}}\n' ;;
+esac
+"#,
+            log = log.display(),
+            server = server,
+        ),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    *backend.script_env.lock().unwrap() = BTreeMap::from([
+        ("FARM_ADMIN_OPENRC".into(), admin.display().to_string()),
+        ("FARM_OPENSTACK_CLI".into(), cli.display().to_string()),
+    ]);
+
+    let load = crate::model::GpuLoad {
+        profile: crate::model::GpuProfile::Sim16g,
+        pattern: crate::model::GpuPattern::Triangle,
+        min: 5,
+        max: 95,
+        period_s: 30,
+        memory_ratio: 40,
+    };
+    let view = manager
+        .set_gpu_load("gpu", "demo", load.clone())
+        .await
+        .unwrap();
+    assert_eq!(view.server, server);
+    assert!(view.applied);
+    assert_eq!(view.load, load);
+    assert_eq!(
+        manager.get("gpu").unwrap().gpu_loads[server],
+        load,
+        "the coordinator keeps the pattern the portal shows"
+    );
+
+    // The values the coordinator computed are the exact arguments of the metadata
+    // command the control VM ran; this is the coordinator→agent→VM boundary.
+    let properties = crate::gpu::metadata_properties(server, &load, 1).unwrap();
+    let calls = std::fs::read_to_string(&log).unwrap();
+    let set = calls
+        .lines()
+        .find(|line| line.contains("server set"))
+        .expect("the control VM ran server set");
+    assert!(set.contains(server), "{set}");
+    for (key, value) in &properties {
+        assert!(
+            set.contains(&format!("--property {key}={value}")),
+            "missing {key}={value} in:\n{set}"
+        );
+    }
+    assert!(set.contains("farm_gpu_0=v1;p:sim-16g;q:triangle;n:5;x:95;d:30;m:40;u:"));
+
+    // Clearing removes the same keys and forgets the coordinator's copy.
+    let cleared = manager.clear_gpu_load("gpu", server).await.unwrap();
+    assert!(!cleared.applied);
+    assert_eq!(cleared.load, crate::model::GpuLoad::default());
+    assert!(manager.get("gpu").unwrap().gpu_loads.is_empty());
+    let calls = std::fs::read_to_string(&log).unwrap();
+    let unset = calls
+        .lines()
+        .find(|line| line.contains("server unset"))
+        .expect("the control VM ran server unset");
+    for key in properties.keys() {
+        assert!(unset.contains(&format!("--property {key}")), "{unset}");
+    }
+    settle(&manager).await;
+}
+
+#[tokio::test]
+async fn gpu_load_control_is_refused_with_409_outside_a_deployed_gpu_farm() {
+    let dir = tempfile::tempdir().unwrap();
+    let backend = Arc::new(Fake::default());
+    let manager = open_with(options(dir.path()), backend).await;
+    if !cfg!(target_os = "linux") {
+        *manager.0.guest_agent.write().unwrap() = Some(dir.path().join("farm-agent"));
+    }
+    local_host(&manager);
+    let plain = manager.create(request("plain")).unwrap();
+    assert_eq!(done(&manager, &plain).await.status, JobStatus::Succeeded);
+    let app = api::router(manager.clone(), None);
+    let put = |farm: &str| {
+        Request::put(format!(
+            "/api/v1/farms/{farm}/instances/11111111-2222-3333-4444-555555555555/gpu-load"
+        ))
+        .header("content-type", "application/json")
+        .body(Body::from("{}"))
+        .unwrap()
+    };
+    // A farm without the gpu option has no virtual GPU to load.
+    let response = app.clone().oneshot(put("plain")).await.unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+
+    // A GPU farm that is only created has no control VM services to write metadata yet.
+    let gpu = manager
+        .create(gpu_farm("gpu", crate::model::GpuMode::Simulated, 1))
+        .unwrap();
+    assert_eq!(done(&manager, &gpu).await.status, JobStatus::Succeeded);
+    let response = app.clone().oneshot(put("gpu")).await.unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+
+    // The guest-script downloads only need the plan, so they answer before a deploy.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::get("/api/v1/farms/gpu/gpu/guest-script")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers()["content-type"],
+        "text/x-shellscript; charset=utf-8"
+    );
+    let body = to_bytes(response.into_body(), 100_000).await.unwrap();
+    assert!(String::from_utf8_lossy(&body).contains("nvsmi_device_v11.dtd"));
+
+    // A non-GPU farm cannot download it either.
+    let response = app
+        .oneshot(
+            Request::get("/api/v1/farms/plain/gpu/guest-script")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    settle(&manager).await;
 }

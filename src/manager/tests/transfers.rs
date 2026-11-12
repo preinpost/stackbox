@@ -27,6 +27,7 @@ fn keep_snapshot(manager: &FarmManager, backend: &Fake, id: &str, template: Opti
             compute: None,
             layout: None,
             release: None,
+            gpu: None,
         })
         .unwrap(),
         _ => plan(&PlanRequest::default()).unwrap(),

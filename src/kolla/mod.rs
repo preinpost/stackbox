@@ -3,7 +3,7 @@ pub mod releases;
 
 use std::fmt;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use microsandbox::Sandbox;
 
 use crate::farm;
@@ -122,18 +122,24 @@ pub async fn deploy(farm_id: &str, from: Phase, components: &[String]) -> Result
         None,
         components,
         OPENSTACK_RELEASE,
+        None,
+        None,
         Arc::new(|_| Ok(())),
     )
     .await
 }
 
-/// `components` is the farm plan's resolved service list.
+/// `components` is the farm plan's resolved service list, and `reference` the kolla-ansible
+/// ref the coordinator resolved for `release` (see [`releases::info_with`]).
+#[allow(clippy::too_many_arguments)]
 pub async fn deploy_with(
     farm_id: &str,
     from: Phase,
     exposure: Option<Exposure>,
     components: &[String],
     release: &str,
+    reference: Option<&str>,
+    gpu: Option<crate::model::GpuConfig>,
     sink: EventSink,
 ) -> Result<()> {
     deploy_on(
@@ -142,6 +148,8 @@ pub async fn deploy_with(
         exposure,
         components,
         release,
+        reference,
+        gpu,
         &[],
         None,
         sink,
@@ -152,12 +160,15 @@ pub async fn deploy_with(
 /// Deploy a farm that spans hosts from its control VM's host. The compute VMs numbered in
 /// `remote` run on other hosts, which [`prepare_share`] readied; Kolla reaches every compute
 /// with `ssh_private_key`.
+#[allow(clippy::too_many_arguments)]
 pub async fn deploy_spanning(
     farm_id: &str,
     from: Phase,
     exposure: Option<Exposure>,
     components: &[String],
     release: &str,
+    reference: Option<&str>,
+    gpu: Option<crate::model::GpuConfig>,
     remote: &[u8],
     ssh_private_key: &str,
     sink: EventSink,
@@ -168,6 +179,8 @@ pub async fn deploy_spanning(
         exposure,
         components,
         release,
+        reference,
+        gpu,
         remote,
         Some(ssh_private_key),
         sink,
@@ -175,12 +188,15 @@ pub async fn deploy_spanning(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn deploy_on(
     farm_id: &str,
     from: Phase,
     exposure: Option<Exposure>,
     components: &[String],
     release: &str,
+    reference: Option<&str>,
+    gpu: Option<crate::model::GpuConfig>,
     remote: &[u8],
     ssh_private_key: Option<&str>,
     sink: EventSink,
@@ -228,6 +244,8 @@ async fn deploy_on(
             exposure.as_ref(),
             components,
             release,
+            reference,
+            gpu.as_ref(),
             &sink,
         )
         .await
@@ -339,6 +357,16 @@ pub async fn deploy_compute(
                 sandboxes.push(sandbox.clone());
             }
         }
+        // A GPU farm's new compute must boot the same custom kernel as the others.
+        if plan
+            .gpu
+            .as_ref()
+            .is_some_and(|gpu| gpu.mode == crate::model::GpuMode::Mtty)
+        {
+            let gpu = plan.gpu.as_ref().expect("checked above");
+            step(&sink, "compute VM의 mtty mdev 장치 확인")?;
+            check_mdev(&control, &computes, gpu.count).await?;
+        }
         step(&sink, "control VM에서 새 compute로 SSH 키 배포")?;
         distribute_ssh_key(&control, &computes).await?;
         step(&sink, "Kolla multinode inventory 갱신")?;
@@ -346,6 +374,18 @@ pub async fn deploy_compute(
         let host = new_spec.hostname();
         if from_template {
             sink(DeployEvent::Phase(Phase::Deploy))?;
+            if nova_mtty_backport(plan.gpu.as_ref(), &release.release) {
+                step(
+                    &sink,
+                    format!("{host}의 nova-compute mtty 백포트 파일 준비"),
+                )?;
+                let new = computes
+                    .iter()
+                    .filter(|(compute, _)| compute.hostname == host)
+                    .cloned()
+                    .collect::<Vec<_>>();
+                install_nova_mtty_files(&control, true, &new, &release.release).await?;
+            }
             step(&sink, format!("kolla-ansible reconfigure --limit {host}"))?;
             stream(
                 &control,
@@ -368,6 +408,18 @@ pub async fn deploy_compute(
             )
             .await?;
             sink(DeployEvent::Phase(Phase::Deploy))?;
+            if nova_mtty_backport(plan.gpu.as_ref(), &release.release) {
+                step(
+                    &sink,
+                    format!("{host}의 nova-compute mtty 백포트 파일 준비"),
+                )?;
+                let new = computes
+                    .iter()
+                    .filter(|(compute, _)| compute.hostname == host)
+                    .cloned()
+                    .collect::<Vec<_>>();
+                install_nova_mtty_files(&control, true, &new, &release.release).await?;
+            }
             step(&sink, format!("kolla-ansible deploy --limit {host}"))?;
             stream(
                 &control,
@@ -398,6 +450,19 @@ pub async fn deploy_compute(
                 &control,
                 "docker exec nova_api nova-manage cell_v2 discover_hosts --verbose",
                 &format!("{LOG_DIR}/add-compute-{index}-discover.log"),
+                &sink,
+            )
+            .await?;
+        }
+        // A GPU farm's providers are farm's own, so a compute that joins later gets them
+        // here; the farm's deploy wrote the earlier computes'.
+        let advertise = gpu_advertise_script(plan.gpu.as_ref(), std::slice::from_ref(&host));
+        if !advertise.is_empty() {
+            step(&sink, format!("{host}의 GPU resource provider 광고"))?;
+            stream(
+                &control,
+                &advertise,
+                &format!("{LOG_DIR}/add-compute-{index}-gpu.log"),
                 &sink,
             )
             .await?;
@@ -486,10 +551,20 @@ done
 {OSC_VENV}/bin/python - <<'PY'
 import openstack
 conn = openstack.connect()
-for rp in list(conn.placement.resource_providers()):
-    if rp.name.startswith("farm-compute-"):
-        print(f"placement: deleting resource provider {{rp.name}} {{rp.id}}", flush=True)
-        conn.placement.delete_resource_provider(rp)
+# A GPU farm's child providers are named after their compute's provider, so deleting in
+# reverse name order takes every child before the provider it hangs from: Placement refuses
+# to delete a provider that still has children, and refuses one that still has allocations.
+for rp in sorted(
+    (
+        provider
+        for provider in conn.placement.resource_providers()
+        if provider.name.startswith("farm-compute-")
+    ),
+    key=lambda provider: provider.name,
+    reverse=True,
+):
+    print(f"placement: deleting resource provider {{rp.name}} {{rp.id}}", flush=True)
+    conn.placement.delete_resource_provider(rp)
 PY
 docker exec nova_api nova-manage cell_v2 list_hosts | awk -F'|' 'NF >= 4 {{ gsub(/ /, "", $3); gsub(/ /, "", $4); if ($4 ~ /^farm-compute-/) print $3, $4 }}' | while read -r cell host; do
   echo "cell host mapping $host: deleting"
@@ -580,7 +655,7 @@ for c in $(docker ps -a --format '{{{{.Names}}}}'); do
     docker rm -f "$c" >/dev/null
   fi
 done
-if docker ps -a --format '{{{{.Names}}}}' | grep -qx openvswitch_db; then
+if docker ps -a --format '{{{{.Names}}}}' | grep -x openvswitch_db >/dev/null; then
   for _ in $(seq 60); do docker exec openvswitch_db ovs-vsctl show >/dev/null 2>&1 && break; sleep 2; done
   docker exec openvswitch_db ovs-vsctl set Open_vSwitch . external_ids:system-id={hostname}
 fi"#
@@ -591,10 +666,10 @@ fi"#
 /// Kolla's agent container exits when it starts while the database is still coming up, and
 /// nothing restarts it afterwards; the farm would keep a network node without an agent.
 const RESTART_OVS_AGENT: &str = r#"for _ in $(seq 40); do
-  docker ps --format '{{.Names}} {{.Status}}' | grep -q '^openvswitch_db Up .* (healthy)' && break
+  docker ps --format '{{.Names}} {{.Status}}' | grep '^openvswitch_db Up .* (healthy)' >/dev/null && break
   sleep 2
 done
-if ! docker ps --format '{{.Names}} {{.Status}}' | grep -q '^neutron_openvswitch_agent Up .* (healthy)'; then
+if ! docker ps --format '{{.Names}} {{.Status}}' | grep '^neutron_openvswitch_agent Up .* (healthy)' >/dev/null; then
   docker restart neutron_openvswitch_agent >/dev/null 2>&1 || true
 fi"#;
 
@@ -710,30 +785,23 @@ async fn deploy_phases(
     exposure: Option<&Exposure>,
     components: &[String],
     release: &str,
+    reference: Option<&str>,
+    gpu: Option<&crate::model::GpuConfig>,
     sink: &EventSink,
 ) -> Result<()> {
+    // The coordinator resolved the kolla-ansible ref against the catalog; this process has
+    // none, so every step below installs and stamps the ref it sent.
+    let info = releases::info_with(release, reference);
     for phase in Phase::ALL.into_iter().filter(|p| *p >= from) {
         sink(DeployEvent::Phase(phase))?;
         eprintln!("\n==> [{farm_id}] {phase}");
         let log = format!("{LOG_DIR}/{phase}.log");
         match phase {
-            Phase::Prepare => {
-                prepare(
-                    deployer,
-                    computes,
-                    components,
-                    &releases::info(release),
-                    sink,
-                )
-                .await
-            }
-            Phase::Install => {
-                let info = releases::info(release);
-                stream(deployer, &install_script(&info), &log, sink).await
-            }
+            Phase::Prepare => prepare(deployer, computes, components, &info, sink).await,
+            Phase::Install => stream(deployer, &install_script(&info), &log, sink).await,
             Phase::Configure => {
                 configure(
-                    deployer, computes, topology, exposure, components, release, sink,
+                    deployer, computes, topology, exposure, components, release, gpu, sink,
                 )
                 .await
             }
@@ -744,7 +812,7 @@ async fn deploy_phases(
                 )?;
                 stream(
                     deployer,
-                    &kolla_ansible("bootstrap-servers", &releases::info(release)),
+                    &kolla_ansible("bootstrap-servers", &info),
                     &log,
                     sink,
                 )
@@ -752,28 +820,23 @@ async fn deploy_phases(
             }
             Phase::Prechecks => {
                 step(sink, "kolla-ansible prechecks")?;
-                stream(
-                    deployer,
-                    &kolla_ansible("prechecks", &releases::info(release)),
-                    &log,
-                    sink,
-                )
-                .await
+                stream(deployer, &kolla_ansible("prechecks", &info), &log, sink).await
             }
             Phase::Deploy => {
+                if nova_mtty_backport(gpu, release) {
+                    step(
+                        sink,
+                        format!("nova-compute의 mtty 백포트 파일 준비 ({release})"),
+                    )?;
+                    install_nova_mtty_files(deployer, topology.multinode(), computes, release)
+                        .await?;
+                }
                 step(sink, "kolla-ansible deploy")?;
-                stream(
-                    deployer,
-                    &deploy_script(&releases::info(release)),
-                    &log,
-                    sink,
-                )
-                .await
+                stream(deployer, &deploy_script(&info), &log, sink).await
             }
             Phase::PostDeploy => {
                 step(sink, "kolla-ansible post-deploy (admin-openrc.sh 생성)")?;
-                let script =
-                    post_deploy_script(components, topology.multinode(), &releases::info(release));
+                let script = post_deploy_script(components, topology.multinode(), &info);
                 stream(deployer, &script, &log, sink).await
             }
             Phase::Verify => {
@@ -784,7 +847,7 @@ async fn deploy_phases(
                 } else {
                     1
                 };
-                let script = verify_script(components, hosts);
+                let script = verify_script(components, hosts, release, gpu);
                 stream(deployer, &script, &log, sink).await
             }
         }
@@ -1135,7 +1198,7 @@ fn libcrypt_step(release: &releases::ReleaseInfo) -> String {
         return String::new();
     }
     r#"# uv's CPython builds link libcrypt.so.1, which Rocky 10 keeps in libxcrypt-compat.
-if ! ldconfig -p | grep -q 'libcrypt\.so\.1'; then
+if ! ldconfig -p | grep 'libcrypt\.so\.1' >/dev/null; then
   step "libcrypt 호환 라이브러리 설치 (libxcrypt-compat)"
   dnf install -y -q libxcrypt-compat
 fi
@@ -1471,7 +1534,7 @@ PY
     )
 }
 
-fn install_script(release: &releases::ReleaseInfo) -> String {
+pub(crate) fn install_script(release: &releases::ReleaseInfo) -> String {
     format!(
         r#"set -euo pipefail
 # Golden images install the build tools; farms made from the former Docker-built image lack them.
@@ -1528,6 +1591,7 @@ fi
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn configure(
     deployer: &Sandbox,
     computes: &[(Compute, Option<Sandbox>)],
@@ -1535,6 +1599,7 @@ async fn configure(
     exposure: Option<&Exposure>,
     components: &[String],
     release: &str,
+    gpu: Option<&crate::model::GpuConfig>,
     sink: &EventSink,
 ) -> Result<()> {
     step(sink, "passwords.yml 생성 (kolla-genpwd)")?;
@@ -1567,7 +1632,7 @@ async fn configure(
                 deployer,
                 &format!(
                     "ssh -o BatchMode=yes -o ConnectTimeout=10 {} '{probe}'",
-                    compute.hostname
+                    ssh_target(compute)?
                 ),
             )
             .await?
@@ -1626,6 +1691,15 @@ async fn configure(
     if multinode && computes.is_empty() {
         globals.push_str("farm_no_computes: true\n");
     }
+    // A release whose Nova has no `mtty` support gets it from patched files farm mounts into
+    // nova_compute (see `install_nova_mtty_files`). Kolla must mount them in the same deploy
+    // that writes `enabled_mdev_types`: an unpatched nova-compute refuses that config.
+    if let Some(volumes) = gpu
+        .filter(|gpu| gpu.mode == crate::model::GpuMode::Mtty)
+        .and_then(|_| config::nova_mtty_extra_volumes(release))
+    {
+        globals.push_str(&volumes);
+    }
     fs.write(&format!("{CONFIG_DIR}/globals.yml"), globals)
         .await?;
     // Horizon sends users to the Compute overview after login, which answers 403 without Nova.
@@ -1659,6 +1733,33 @@ async fn configure(
         }
     } else {
         run(deployer, &format!("rm -f {ovs_agent} {ml2}")).await?;
+    }
+    // The mediated device is the only GPU setting Kolla writes: Nova's own inventory comes
+    // from it. A simulated GPU's providers are farm's, written through Placement after the
+    // deploy (see `gpu_advertise_script`), because Kolla's provider-config file takes only
+    // custom classes and this contract is the standard VGPU one.
+    let nova_compute_conf = format!("{CONFIG_DIR}/config/nova/nova-compute.conf");
+    match gpu {
+        Some(gpu) if gpu.mode == crate::model::GpuMode::Mtty => {
+            step(sink, "compute VM의 mtty mdev 장치 확인")?;
+            check_mdev(deployer, computes, gpu.count).await?;
+            run(deployer, &format!("mkdir -p {CONFIG_DIR}/config/nova")).await?;
+            fs.write(&nova_compute_conf, config::MDEV_NOVA_COMPUTE_CONF)
+                .await?;
+        }
+        _ => {
+            run(deployer, &format!("rm -f {nova_compute_conf}")).await?;
+        }
+    }
+    // A GPU farm installs the fake nvidia-smi on every instance through Nova's static
+    // vendor data: cloud-init merges this cloud-config without user-data. Images that are
+    // not cloud-init (CirrOS) ignore it and use the user-data installer the API serves.
+    let vendordata = format!("{CONFIG_DIR}/config/nova/vendordata.json");
+    if gpu.is_some() {
+        run(deployer, &format!("mkdir -p {CONFIG_DIR}/config/nova")).await?;
+        fs.write(&vendordata, crate::gpu::vendordata_json()).await?;
+    } else {
+        run(deployer, &format!("rm -f {vendordata}")).await?;
     }
     fs.write(
         &format!("{CONFIG_DIR}/config/galera.cnf"),
@@ -1694,6 +1795,168 @@ async fn configure(
     Ok(())
 }
 
+/// What one compute's `mtty` probe reports, as [`mdev_probe`] asks it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MdevProbe {
+    /// No `mtty-1` mdev type: the VM booted the stock kernel.
+    Absent,
+    /// The mdev type exists; `available` devices are free and `in_use` are already taken.
+    Devices { available: u32, in_use: u32 },
+    /// Something answered, but not with what the probe prints.
+    Unreadable,
+}
+
+/// The shell side of [`MdevProbe`]. `available_instances` counts what is left, not what the
+/// type can offer: an mdev already created (an instance holding one) is gone from it. The
+/// number in `/sys/bus/mdev/devices` is what those instances hold. One command, one exit
+/// status, so a missing type and an unreachable host stay different failures. The probe has
+/// no quotes, so the compute on another host can carry it inside `ssh`'s single quotes and
+/// the command substitution still runs on that compute.
+const MDEV_PROBE: &str = concat!(
+    "if [ -f /sys/class/mdev_bus/mtty/mdev_supported_types/mtty-1/available_instances ]; then ",
+    "echo available $(cat /sys/class/mdev_bus/mtty/mdev_supported_types/mtty-1/available_instances); ",
+    "echo in-use $(ls -1 /sys/bus/mdev/devices 2>/dev/null | wc -l); ",
+    "else echo absent; fi",
+);
+
+fn mdev_probe(output: &str) -> MdevProbe {
+    let value = |prefix: &str| {
+        output
+            .lines()
+            .find_map(|line| line.trim().strip_prefix(prefix))
+            .and_then(|value| value.trim().parse::<u32>().ok())
+    };
+    if output.lines().any(|line| line.trim() == "absent") {
+        return MdevProbe::Absent;
+    }
+    match (value("available "), value("in-use ")) {
+        (Some(available), Some(in_use)) => MdevProbe::Devices { available, in_use },
+        _ => MdevProbe::Unreadable,
+    }
+}
+
+/// Refuses an `mtty` GPU farm whose compute VMs boot the stock kernel: without the custom
+/// libkrunfw there is no `/sys/class/mdev_bus/mtty`, so nova-compute would come up with an
+/// empty VGPU inventory (or fail to create the mdev when an instance is built).
+async fn check_mdev(
+    deployer: &Sandbox,
+    computes: &[(Compute, Option<Sandbox>)],
+    count: u32,
+) -> Result<()> {
+    for (compute, sandbox) in computes {
+        let output = match sandbox {
+            Some(sandbox) => run(sandbox, MDEV_PROBE).await,
+            // A compute on another host answers over the control VM's SSH key.
+            None => {
+                run(
+                    deployer,
+                    &format!(
+                        "ssh -o BatchMode=yes -o ConnectTimeout=10 {} '{MDEV_PROBE}'",
+                        ssh_target(compute)?
+                    ),
+                )
+                .await
+            }
+        }
+        .with_context(|| {
+            format!(
+                "cannot read {}'s mtty mediated device: the compute VM did not answer",
+                compute.hostname
+            )
+        })?;
+        match mdev_probe(&output) {
+            MdevProbe::Absent => bail!(
+                "{} has no mtty mediated device; the 'mtty' GPU needs compute VMs booted with farm's kernel (prepare the host so it installs one; see docs/libkrunfw.md and docs/gpu.md)",
+                compute.hostname
+            ),
+            MdevProbe::Unreadable => bail!(
+                "cannot read {}'s mtty device count: {}",
+                compute.hostname,
+                output.trim()
+            ),
+            MdevProbe::Devices { available, in_use } => {
+                // What the type can give this farm is what is left plus what its own
+                // instances already hold; a farm asked for more than that cannot boot.
+                let total = available + in_use;
+                if total < count {
+                    bail!(
+                        "{} offers {total} mtty devices ({available} free, {in_use} in use), fewer than the {count} the farm asks for",
+                        compute.hostname
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Builds the patched Nova files on every host that runs nova_compute: the deployer when the
+/// farm is all-in-one, else each compute. A compute on another host is reached over the
+/// control VM's SSH key, as [`check_mdev`] reaches it.
+async fn install_nova_mtty_files(
+    deployer: &Sandbox,
+    multinode: bool,
+    computes: &[(Compute, Option<Sandbox>)],
+    release: &str,
+) -> Result<()> {
+    let script = config::nova_mtty_prepare_script(release)
+        .with_context(|| format!("{release} needs no mtty backport"))?;
+    if !multinode {
+        return prepare_nova_mtty(deployer, &script).await;
+    }
+    let prepare = config::NOVA_MTTY_PREPARE;
+    deployer.fs().write(prepare, &script).await?;
+    for (compute, sandbox) in computes {
+        match sandbox {
+            Some(sandbox) => prepare_nova_mtty(sandbox, &script)
+                .await
+                .with_context(|| format!("preparing {}'s mtty backport files", compute.hostname))?,
+            None => {
+                let host = ssh_target(compute)?;
+                run(
+                    deployer,
+                    &format!(
+                        "ssh -o BatchMode=yes -o ConnectTimeout=10 {host} 'mkdir -p /etc/farm && cat > {prepare}' < {prepare} && ssh -o BatchMode=yes -o ConnectTimeout=10 {host} 'bash {prepare}' < /dev/null"
+                    ),
+                )
+                .await
+                .with_context(|| format!("preparing {}'s mtty backport files", compute.hostname))?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Puts the preparation script on `sandbox` and runs it.
+async fn prepare_nova_mtty(sandbox: &Sandbox, script: &str) -> Result<()> {
+    let prepare = config::NOVA_MTTY_PREPARE;
+    run(sandbox, "mkdir -p /etc/farm").await?;
+    sandbox.fs().write(prepare, script).await?;
+    run(sandbox, &format!("bash {prepare}")).await?;
+    Ok(())
+}
+
+/// Whether nova_compute gets the `mtty` backport: an `mtty` GPU on a release whose Nova
+/// lacks `mtty` support.
+fn nova_mtty_backport(gpu: Option<&crate::model::GpuConfig>, release: &str) -> bool {
+    gpu.is_some_and(|gpu| gpu.mode == crate::model::GpuMode::Mtty)
+        && config::nova_mtty_patch(release).is_some()
+}
+
+/// A compute's name as it travels in a shell word to the control VM's `ssh`. Farm builds
+/// these names, but a name that is not a lowercase hostname must not reach a command line.
+fn ssh_target(compute: &Compute) -> Result<&str> {
+    let hostname = compute.hostname.as_str();
+    anyhow::ensure!(
+        hostname.starts_with("farm-")
+            && hostname
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-'),
+        "unexpected compute hostname '{hostname}'"
+    );
+    Ok(hostname)
+}
+
 /// Let Kolla on the control VM reach every compute as root over the management link.
 async fn distribute_ssh_key(
     deployer: &Sandbox,
@@ -1718,7 +1981,7 @@ async fn distribute_ssh_key(
             deployer,
             &format!(
                 "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 {} true",
-                compute.hostname
+                ssh_target(compute)?,
             ),
         )
         .await
@@ -1741,7 +2004,7 @@ async fn authorize_key(sandbox: &Sandbox, key: &str) -> Result<()> {
 mkdir -p /root/.ssh && chmod 700 /root/.ssh
 f=/root/.ssh/authorized_keys
 touch "$f" && chmod 600 "$f"
-grep -qxF '{key}' "$f" || {{ [ -s "$f" ] && [ -n "$(tail -c1 "$f")" ] && echo >> "$f"; echo '{key}' >> "$f"; }}"#
+grep -xF '{key}' "$f" >/dev/null || {{ [ -s "$f" ] && [ -n "$(tail -c1 "$f")" ] && echo >> "$f"; echo '{key}' >> "$f"; }}"#
         ),
     )
     .await?;
@@ -1846,12 +2109,12 @@ echo "glance OK"
             r#"agents=''
 for _ in $(seq 100); do
   agents=$($os network agent list -f value -c "Agent Type" -c Alive 2>/dev/null || true)
-  if [ "$(echo "$agents" | grep -c True)" -ge 4 ] && ! echo "$agents" | grep -q False; then break; fi
+  if [ "$(echo "$agents" | grep -c True)" -ge 4 ] && ! echo "$agents" | grep False >/dev/null; then break; fi
   sleep 3
 done
 echo "$agents"
 for agent in "Open vSwitch agent" "DHCP agent" "L3 agent" "Metadata agent"; do
-  echo "$agents" | grep -q "^$agent True" || { echo "$agent is not alive" >&2; exit 1; }
+  echo "$agents" | grep "^$agent True" >/dev/null || { echo "$agent is not alive" >&2; exit 1; }
 done
 echo "neutron OK"
 "#,
@@ -1869,10 +2132,10 @@ else
 # Every nova-compute, one per compute VM of a multi-node farm.
 for _ in $(seq 60); do
   compute_state=$($os compute service list --service nova-compute -f value -c State 2>/dev/null || true)
-  [ -n "$compute_state" ] && ! echo "$compute_state" | grep -qvx up && break
+  [ -n "$compute_state" ] && ! echo "$compute_state" | grep -vx up >/dev/null && break
   sleep 5
 done
-[ -n "$compute_state" ] && ! echo "$compute_state" | grep -qvx up || {{ echo "nova-compute is not up everywhere: ${{compute_state:-missing}}" >&2; exit 1; }}
+[ -n "$compute_state" ] && ! echo "$compute_state" | grep -vx up >/dev/null || {{ echo "nova-compute is not up everywhere: ${{compute_state:-missing}}" >&2; exit 1; }}
 echo "nova OK"
 fi
 "#,
@@ -1887,7 +2150,7 @@ fi
 /// all-in-one inventory lists the deployer there.
 fn no_compute_hosts(inventory: &str) -> String {
     format!(
-        r#"[ -f {inventory} ] && grep -qx '\[compute\]' {inventory} && [ "$(awk '/^\[/ {{ group = $0; next }} group == "[compute]" && NF && !/^#/ {{ n++ }} END {{ print n + 0 }}' {inventory})" = 0 ]"#
+        r#"[ -f {inventory} ] && grep -x '\[compute\]' {inventory} >/dev/null && [ "$(awk '/^\[/ {{ group = $0; next }} group == "[compute]" && NF && !/^#/ {{ n++ }} END {{ print n + 0 }}' {inventory})" = 0 ]"#
     )
 }
 
@@ -1963,7 +2226,15 @@ fn kolla_ansible(command: &str, release: &releases::ReleaseInfo) -> String {
 
 /// `computes`: the nova-compute services that must be up; none for a control VM whose
 /// computes join later, which only checks that the Nova API answers.
-fn verify_script(components: &[String], computes: usize) -> String {
+///
+/// `release` names the OpenStack series the farm installed; it decides whether a `mtty`
+/// farm's nova-compute carries farm's backport (see [`config::nova_mtty_patch`]).
+fn verify_script(
+    components: &[String],
+    computes: usize,
+    release: &str,
+    gpu: Option<&crate::model::GpuConfig>,
+) -> String {
     let has = |id: &str| components.iter().any(|c| c == id);
     let mut script = format!(
         r#"set -euo pipefail
@@ -2012,7 +2283,7 @@ jar="$work/horizon.cookies"
 curl -sSf -c "$jar" -o "$work/login.html" "$horizon/auth/login/"
 csrf=$(awk '$6 == "csrftoken" {print $7}' "$jar")
 test -n "$csrf"
-region=$(sed -n 's/.*name="region" value="\([^"]*\)".*/\1/p' "$work/login.html" | head -1)
+region=$(sed -n 's/.*name="region" value="\([^"]*\)".*/\1/p' "$work/login.html" | awk 'NR == 1')
 status=$(curl -sS -b "$jar" -c "$jar" -o /dev/null -w '%{http_code} %{redirect_url}' \
   -H "Referer: $horizon/auth/login/" \
   --data-urlencode "csrfmiddlewaretoken=$csrf" \
@@ -2048,6 +2319,20 @@ echo "horizon OK: ${home#200 }"
         } else {
             script.push_str(&nova_verify_script(computes));
         }
+        // A GPU farm advertises its providers first, then verifies them with a flavor and
+        // the allocation the instance it booted holds.
+        if let Some(gpu) = gpu
+            && computes > 0
+        {
+            let hosts: Vec<String> = (1..=computes)
+                .map(|index| format!("farm-compute-{index}"))
+                .collect();
+            let advertise = gpu_advertise_script(Some(gpu), &hosts);
+            if !advertise.is_empty() {
+                script.push_str(&advertise);
+            }
+            script.push_str(&gpu_verify_script(gpu, computes, release));
+        }
     }
     script
 }
@@ -2059,12 +2344,12 @@ fn neutron_verify_script() -> String {
     r#"step "Neutron agent 상태 확인 (OVS·DHCP·L3·Metadata)"
 for _ in $(seq 60); do
   agents=$($os network agent list -f value -c "Agent Type" -c Alive)
-  if [ "$(echo "$agents" | grep -c True)" -ge 4 ] && ! echo "$agents" | grep -q False; then break; fi
+  if [ "$(echo "$agents" | grep -c True)" -ge 4 ] && ! echo "$agents" | grep False >/dev/null; then break; fi
   sleep 3
 done
 echo "$agents"
 for agent in "Open vSwitch agent" "DHCP agent" "L3 agent" "Metadata agent"; do
-  echo "$agents" | grep -q "^$agent True" || { echo "$agent is not alive" >&2; exit 1; }
+  echo "$agents" | grep "^$agent True" >/dev/null || { echo "$agent is not alive" >&2; exit 1; }
 done
 step "테넌트 네트워크·라우터·DHCP 포트 검증"
 name="farm-verify-$(cut -c1-8 /proc/sys/kernel/random/uuid)"
@@ -2176,6 +2461,573 @@ extra_cleanup
 server_id=''; router_id=''; net_id=''
 echo "nova OK: $name at $fixed answered ping and TCP from the router"
 "#
+}
+
+/// The child resource providers a `simulated` GPU farm advertises, one per fake GPU of each
+/// of `hosts`: the name, parent and inventory a vGPU deployment's Nova gives its own, so a
+/// flavor that names the standard class and a custom trait schedules here.
+///
+/// Nothing else writes them. Nova's libvirt driver has no mediated-device type configured,
+/// so `_update_provider_tree_for_vgpu` returns before touching a compute's tree, and its
+/// PCI healing only rewrites providers carrying its own trait. The flip side is that farm
+/// has to write them again whenever the tree could have changed: after a deploy, when a
+/// compute joins, and after a restore. The writes are idempotent, and the inventory of an
+/// existing provider is updated in place, so a re-run keeps whatever is allocated.
+///
+/// Empty for `mtty`, whose providers Nova builds from the mediated device it finds.
+fn gpu_advertise_script(gpu: Option<&crate::model::GpuConfig>, hosts: &[String]) -> String {
+    let Some(gpu) = gpu.filter(|gpu| gpu.mode == crate::model::GpuMode::Simulated) else {
+        return String::new();
+    };
+    let class = gpu.resource_class();
+    let traits = gpu.traits().join(",");
+    let cards = gpu.device_totals();
+    // `<host>:<provider>=<total>,<provider>=<total>`: one argument per compute, so the
+    // Python side reads names and counts without a second format.
+    let specs = hosts
+        .iter()
+        .map(|host| {
+            let providers = cards
+                .iter()
+                .enumerate()
+                .map(|(device, total)| {
+                    format!(
+                        "{}={total}",
+                        crate::model::GpuConfig::provider_name(host, device as u32)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            format!("{host}:{providers}")
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!(
+        r#"step "GPU(simulated) Placement 리소스 프로바이더 광고 ({class}×{count}, 가짜 장치 {devices}개)"
+placement=$($os endpoint list --service placement --interface internal -f value -c URL -c url | awk 'NR == 1 {{print $1}}')
+[ -n "$placement" ] || {{ echo "no placement endpoint" >&2; exit 1; }}
+token=$($os token issue -f value -c id)
+python3 - {class} "{traits}" "$placement" "$token" {specs} <<'PY'
+import json
+import sys
+import time
+import urllib.error
+import urllib.request
+
+resource_class, trait_list, placement, token = sys.argv[1:5]
+traits = [trait for trait in trait_list.split(",") if trait]
+# The child provider name and its inventory total, per compute host.
+wanted = []
+for spec in sys.argv[5:]:
+    host, providers = spec.split(":", 1)
+    wanted.append((host, [card.split("=") for card in providers.split(",")]))
+
+
+def request(method, path, body=None, allow=()):
+    """One Placement request: its parsed body and the answer's Location header."""
+    payload = None if body is None else json.dumps(body).encode()
+    headers = {{
+        "X-Auth-Token": token,
+        "OpenStack-API-Version": "placement 1.14",
+    }}
+    # A bodyless request (a trait PUT) carries no content type either.
+    if payload is not None:
+        headers["Content-Type"] = "application/json"
+    request = urllib.request.Request(
+        placement.rstrip("/") + path,
+        data=payload,
+        method=method,
+        headers=headers,
+    )
+    try:
+        answer = urllib.request.urlopen(request, timeout=60)
+    except urllib.error.HTTPError as error:
+        if error.code in allow:
+            return None, None
+        sys.exit(
+            "%s %s: %s %s"
+            % (method, path, error.code, error.read().decode().strip())
+        )
+    except urllib.error.URLError as error:
+        # A refused connection or an unreachable endpoint: name the request that failed
+        # instead of ending the step with a traceback.
+        sys.exit("%s %s: %s" % (method, path, error.reason))
+    except TimeoutError:
+        sys.exit("%s %s: no answer within 60 seconds" % (method, path))
+    body = answer.read()
+    return (json.loads(body) if body else {{}}), answer.headers.get("Location")
+
+
+def call(method, path, body=None, allow=()):
+    """One Placement request's body; a refusal ends the step with its own message."""
+    return request(method, path, body, allow)[0]
+
+
+def named(name):
+    """The uuid of the provider called `name`, if Placement has it."""
+    for provider in call("GET", "/resource_providers?name=" + name)[
+        "resource_providers"
+    ]:
+        return provider["uuid"]
+    return None
+
+
+# nova-compute reports a compute's resource provider when it first runs; the child providers
+# hang off it, so wait for every compute of the farm.
+providers = {{}}
+for _ in range(60):
+    providers = {{
+        provider["name"]: provider["uuid"]
+        for provider in call("GET", "/resource_providers")["resource_providers"]
+    }}
+    if all(host in providers for host, _ in wanted):
+        break
+    time.sleep(5)
+# A resource provider accepts a trait only when the trait table holds it, and Nova
+# registers just the traits its own providers carry. `PUT /traits/<name>` creates a
+# missing one (201) and accepts an existing one (204), so this is safe on every run.
+for trait in traits:
+    call("PUT", "/traits/" + trait)
+
+for host, cards in wanted:
+    for name, total in cards:
+        total = int(total)
+        uuid = providers.get(name)
+        if uuid is None:
+            created, location = request(
+                "POST",
+                "/resource_providers",
+                {{"name": name, "parent_provider_uuid": providers[host]}},
+                allow=(409,),
+            )
+            if created is None:
+                # A provider of that name exists already, which this run did not list.
+                uuid = named(name)
+                if uuid is None:
+                    sys.exit("resource provider %s exists but cannot be read" % name)
+            else:
+                # From microversion 1.20 on Placement answers a create with the provider;
+                # 1.14, which `parent_provider_uuid` needs here no more than 1.20 does,
+                # answers 201 with an empty body and the new provider's URL in Location.
+                uuid = created.get("uuid")
+                if not uuid and location:
+                    uuid = location.rstrip("/").rsplit("/", 1)[-1]
+                if not uuid:
+                    uuid = named(name)
+                if not uuid:
+                    sys.exit("%s: created, but Placement named no uuid" % name)
+                print("%s: created as a child of %s" % (name, host), flush=True)
+            providers[name] = uuid
+        # Placement takes an inventory and a trait list only with the provider's generation,
+        # which every write bumps.
+        generation = call("GET", "/resource_providers/" + uuid)["generation"]
+        call(
+            "PUT",
+            "/resource_providers/" + uuid + "/inventories",
+            {{
+                "inventories": {{
+                    resource_class: {{
+                        "total": total,
+                        "reserved": 0,
+                        "min_unit": 1,
+                        "max_unit": total,
+                        "step_size": 1,
+                        "allocation_ratio": 1.0,
+                    }}
+                }},
+                "resource_provider_generation": generation,
+            }},
+        )
+        generation = call("GET", "/resource_providers/" + uuid)["generation"]
+        call(
+            "PUT",
+            "/resource_providers/" + uuid + "/traits",
+            {{"traits": traits, "resource_provider_generation": generation}},
+        )
+        print(
+            "%s: %s=%d, traits %s"
+            % (name, resource_class, total, ",".join(traits) or "none"),
+            flush=True,
+        )
+print(
+    "advertised %d GPU provider(s) on %d compute(s)"
+    % (sum(len(cards) for _, cards in wanted), len(wanted))
+)
+PY
+"#,
+        count = gpu.count,
+        devices = cards.len(),
+    )
+}
+
+/// A GPU farm's own verification: Placement carries the mode's resource class on the child
+/// provider of every fake GPU, then a flavor of the mode boots an instance and the
+/// instance's allocation names that class on one of those providers. A flavor asking for one
+/// unit more than any provider holds is refused with `NoValidHost`, which proves the
+/// inventory is what the scheduler reads. `mtty` additionally proves libvirt attached the
+/// mediated device to the instance's domain and, on a release whose Nova needed farm's
+/// backport, that the running nova-compute carries it; the guest-side `lspci` check is left
+/// to the end-to-end test, which reads the console log.
+fn gpu_verify_script(gpu: &crate::model::GpuConfig, computes: usize, release: &str) -> String {
+    let class = gpu.resource_class();
+    let flavor = gpu.flavor();
+    let count = gpu.count;
+    let mode = gpu.mode_name();
+    let mut trait_properties = String::new();
+    for trait_name in gpu.traits() {
+        trait_properties.push_str(&format!(" --property trait:{trait_name}=required"));
+    }
+    let properties = format!("--property resources:{class}=1{trait_properties}");
+    let hosts: Vec<String> = (1..=computes)
+        .map(|index| format!("farm-compute-{index}"))
+        .collect();
+    let joined = hosts.join(" ");
+    let inventory = match gpu.mode {
+        crate::model::GpuMode::Simulated => simulated_inventory_check(gpu, &hosts),
+        crate::model::GpuMode::Mtty => mtty_inventory_check(gpu, &joined),
+    };
+    let overflow = match gpu.mode {
+        // One unit more than any single provider holds: the unsuffixed group of a flavor
+        // takes its virtual GPUs from one provider, so this cannot be scheduled anywhere.
+        crate::model::GpuMode::Simulated => format!(
+            r#"
+step "GPU(simulated) 재고를 넘는 요청이 NoValidHost로 거절되는지 확인 ({class}×{over})"
+over='farm.vgpu-full'
+$os flavor show "$over" >/dev/null 2>&1 || $os flavor create --ram 512 --disk 1 --vcpus 1 "$over" >/dev/null
+$os flavor set "$over" --property resources:{class}={over}{trait_properties} >/dev/null
+full="farm-gpu-full-$(cut -c1-8 /proc/sys/kernel/random/uuid)"
+# The API accepts the request and the scheduler refuses it, so the answer is the instance's
+# fault, not this command's exit status.
+$os server create --flavor "$over" --image cirros-farm --network "$net_id" "$full" --wait >/dev/null 2>&1 || true
+full_id=$($os server list --name "$full" -f value -c ID | awk 'NR == 1 {{print $1}}')
+[ -n "$full_id" ] || {{ echo "the oversubscribed instance was not created" >&2; exit 1; }}
+[ "$($os server show "$full_id" -f value -c status)" = ERROR ] || {{ echo "a {class} request larger than the inventory was scheduled" >&2; exit 1; }}
+$os server show "$full_id" -f value -c fault | grep "No valid host" >/dev/null || {{ echo "the oversubscribed instance failed for another reason" >&2; $os server show "$full_id" -f value -c fault >&2; exit 1; }}
+$os server delete "$full_id" >/dev/null
+echo "a {class} request of {over} was refused with NoValidHost"
+"#,
+            over = count + 1,
+        ),
+        crate::model::GpuMode::Mtty => String::new(),
+    };
+    let mtty_check = match gpu.mode {
+        crate::model::GpuMode::Mtty => format!(
+            r#"bound=''
+for host in {joined}; do
+  # grep reads the whole XML: with -q it would leave at its first match, and the ssh still
+  # writing the other domains' XML would end 255, which `pipefail` fails the check with.
+  if ssh -o BatchMode=yes -o ConnectTimeout=10 "$host" "docker exec nova_libvirt sh -c 'for d in \$(virsh list --name); do virsh dumpxml \"\$d\"; done'" 2>/dev/null | grep "type='mdev'" >/dev/null; then
+    bound=$host
+    break
+  fi
+done
+[ -n "$bound" ] || {{ echo "no libvirt domain on {joined} has an mdev hostdev" >&2; exit 1; }}
+echo "mtty mdev is bound to the instance's libvirt domain on $bound"
+"#
+        ),
+        crate::model::GpuMode::Simulated => String::new(),
+    };
+    // Releases before 2026.2 get `mtty` support from the patched files farm mounts into
+    // nova_compute; a container that started without them has different bytes here.
+    let backport = match (gpu.mode, config::nova_mtty_mounts(release)) {
+        (crate::model::GpuMode::Mtty, Some(mounts)) => {
+            let copies: Vec<&str> = mounts.iter().map(|(host, _)| host.as_str()).collect();
+            let targets: Vec<&str> = mounts
+                .iter()
+                .map(|(_, container)| container.as_str())
+                .collect();
+            format!(
+                r#"
+step "GPU(mtty) nova-compute의 Nova mtty 백포트 확인 ({release})"
+for host in {joined}; do
+  ssh -o BatchMode=yes -o ConnectTimeout=10 "$host" \
+    "a=\$(docker exec nova_compute sha256sum {targets} | cut -d' ' -f1) && b=\$(sha256sum {copies} | cut -d' ' -f1) && [ -n \"\$a\" ] && [ \"\$a\" = \"\$b\" ]" \
+    2>&1 || {{ echo "$host: nova-compute is not running with farm's Nova mtty backport files ({release}); see docker logs nova_compute" >&2; exit 1; }}
+done
+echo "mtty backport files are in place on {joined}"
+"#,
+                targets = targets.join(" "),
+                copies = copies.join(" "),
+            )
+        }
+        _ => String::new(),
+    };
+    format!(
+        r#"{backport}{inventory}
+step "GPU({mode}) flavor {flavor} 인스턴스와 할당 확인 ({class})"
+$os flavor show {flavor} >/dev/null 2>&1 || $os flavor create --ram 512 --disk 1 --vcpus 1 {properties} {flavor} >/dev/null
+# A flavor that already existed may carry other or missing properties; set ours again so
+# the instance is scheduled on the class this script just checked.
+$os flavor set {flavor} {properties} >/dev/null
+name="farm-gpu-$(cut -c1-8 /proc/sys/kernel/random/uuid)"
+net_id=''; subnet_id=''; router_id=''; server_id=''; full_id=''
+extra_cleanup() {{
+  if [ -n "$server_id" ]; then $os server delete "$server_id" >/dev/null 2>&1 || true; fi
+  if [ -n "$full_id" ]; then $os server delete "$full_id" >/dev/null 2>&1 || true; fi
+  if [ -n "$router_id" ]; then
+    if [ -n "$subnet_id" ]; then $os router remove subnet "$router_id" "$subnet_id" >/dev/null 2>&1 || true; fi
+    $os router delete "$router_id" >/dev/null 2>&1 || true
+  fi
+  if [ -n "$net_id" ]; then $os network delete "$net_id" >/dev/null 2>&1 || true; fi
+}}
+net_id=$($os network create "$name" -f value -c id)
+subnet_id=$($os subnet create --network "$net_id" --subnet-range 10.197.0.0/24 "$name" -f value -c id)
+router_id=$($os router create --external-gateway public "$name" -f value -c id)
+$os router add subnet "$router_id" "$subnet_id" >/dev/null
+# CirrOS does not apply Nova vendor data, so the verification instance gets the same
+# installer a user would pass as user-data. It prints the first XML document to the
+# console, which the check below reads.
+user_data="$work/farm-gpu-user-data.sh"
+cat > "$user_data" <<'FARM_GPU_USER_DATA_EOF'
+{installer}
+FARM_GPU_USER_DATA_EOF
+server_id=$($os server create --flavor {flavor} --image cirros-farm --network "$net_id" --user-data "$user_data" "$name" -f value -c id)
+status=''
+for _ in $(seq 90); do
+  status=$($os server show "$server_id" -f value -c status)
+  case "$status" in
+    ACTIVE) break ;;
+    ERROR) echo "GPU instance entered ERROR" >&2; $os server show "$server_id" -f value -c fault >&2; exit 1 ;;
+  esac
+  sleep 10
+done
+[ "$status" = ACTIVE ] || {{ echo "GPU instance status: ${{status:-missing}}" >&2; exit 1; }}
+python3 - {class} "$placement" "$token" "$server_id" "$work/gpu-providers" <<'PY'
+import json
+import os
+import sys
+import urllib.request
+
+resource_class, placement, token, consumer, provider_list = sys.argv[1:6]
+
+
+def get(path):
+    request = urllib.request.Request(
+        placement.rstrip("/") + path,
+        headers={{
+            "X-Auth-Token": token,
+            "OpenStack-API-Version": "placement 1.14",
+        }},
+    )
+    return json.load(urllib.request.urlopen(request, timeout=30))
+
+
+# The providers this farm advertised. An mdev farm leaves the file empty, and then any
+# provider holding the class is the one Nova built.
+watched = set()
+if os.path.exists(provider_list):
+    with open(provider_list) as handle:
+        watched = {{line.split()[1] for line in handle if line.strip()}}
+for uuid, body in get("/allocations/" + consumer)["allocations"].items():
+    if body["resources"].get(resource_class, 0) >= 1:
+        if watched and uuid not in watched:
+            sys.exit(
+                "%s is allocated on %s, which this farm did not advertise"
+                % (resource_class, uuid)
+            )
+        print(
+            "%s allocated to the instance on %s"
+            % (resource_class, "a child GPU provider" if watched else uuid)
+        )
+        break
+else:
+    sys.exit("the instance holds no %s allocation" % resource_class)
+PY
+{overflow}{mtty_check}
+step "GPU({mode}) 게스트의 가짜 nvidia-smi 콘솔 출력 확인"
+console_ok=''
+for _ in $(seq 60); do
+  console=$($os console log show "$server_id" 2>/dev/null || true)
+  case "$console" in *"<nvidia_smi_log>"*) console_ok=1; break ;; esac
+  sleep 2
+done
+[ -n "$console_ok" ] || {{ echo "the GPU instance's console has no nvidia-smi -q -x output; its user-data did not install the fake tool" >&2; exit 1; }}
+echo "the instance's fake nvidia-smi printed its XML to the console"
+extra_cleanup
+server_id=''; full_id=''; router_id=''; net_id=''
+echo "GPU OK: {mode} flavor {flavor} booted an instance with {class}"
+"#,
+        installer = crate::gpu::user_data_installer(),
+    )
+}
+
+/// The child-provider half of [`gpu_verify_script`] for a `simulated` farm: every fake GPU of
+/// every compute is a child of that compute's own provider, carrying exactly the inventory
+/// and the traits the plan asked for, and no compute's root provider carries the class (Nova
+/// replaces that inventory every sync, so a farm that wrote there would lose it).
+fn simulated_inventory_check(gpu: &crate::model::GpuConfig, hosts: &[String]) -> String {
+    let class = gpu.resource_class();
+    let traits = gpu.traits().join(",");
+    let cards = gpu.device_totals();
+    let specs = hosts
+        .iter()
+        .map(|host| {
+            let providers = cards
+                .iter()
+                .enumerate()
+                .map(|(device, total)| {
+                    format!(
+                        "{}={total}",
+                        crate::model::GpuConfig::provider_name(host, device as u32)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            format!("{host}:{providers}")
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!(
+        r#"step "GPU(simulated) 자식 리소스 프로바이더 확인 ({class}×{count}, 가짜 장치 {devices}개)"
+placement=$($os endpoint list --service placement --interface internal -f value -c URL -c url | awk 'NR == 1 {{print $1}}')
+[ -n "$placement" ] || {{ echo "no placement endpoint" >&2; exit 1; }}
+token=$($os token issue -f value -c id)
+python3 - {class} "{traits}" "$work/gpu-providers" "$placement" "$token" {specs} <<'PY'
+import json
+import sys
+import urllib.request
+
+resource_class, trait_list, out, placement, token = sys.argv[1:6]
+traits = {{trait for trait in trait_list.split(",") if trait}}
+# The child provider name and its inventory total, per compute host.
+wanted = []
+for spec in sys.argv[6:]:
+    host, providers = spec.split(":", 1)
+    wanted.append((host, [card.split("=") for card in providers.split(",")]))
+
+
+def get(path):
+    request = urllib.request.Request(
+        placement.rstrip("/") + path,
+        headers={{
+            "X-Auth-Token": token,
+            "OpenStack-API-Version": "placement 1.14",
+        }},
+    )
+    return json.load(urllib.request.urlopen(request, timeout=30))
+
+
+providers = {{
+    provider["name"]: provider
+    for provider in get("/resource_providers")["resource_providers"]
+}}
+lines = []
+for host, cards in wanted:
+    root = providers.get(host)
+    if root is None:
+        sys.exit("no resource provider for %s: nova-compute did not report" % host)
+    if resource_class in get(
+        "/resource_providers/" + root["uuid"] + "/inventories"
+    )["inventories"]:
+        sys.exit(
+            "%s carries %s on its root provider, which Nova rewrites"
+            % (host, resource_class)
+        )
+    for name, total in cards:
+        total = int(total)
+        provider = providers.get(name)
+        if provider is None:
+            sys.exit("no resource provider %s" % name)
+        if provider.get("parent_provider_uuid") != root["uuid"]:
+            sys.exit("%s is not a child of %s" % (name, host))
+        inventory = get(
+            "/resource_providers/" + provider["uuid"] + "/inventories"
+        )["inventories"]
+        held = inventory.get(resource_class, {{}}).get("total")
+        if held != total:
+            sys.exit("%s holds %s=%s, expected %d" % (name, resource_class, held, total))
+        # Placement answers a provider's trait list as strings on every microversion.
+        present = set(
+            get("/resource_providers/" + provider["uuid"] + "/traits")["traits"]
+        )
+        missing = sorted(traits - present)
+        if missing:
+            sys.exit("%s lacks trait(s) %s" % (name, ", ".join(missing)))
+        lines.append((name, provider["uuid"]))
+with open(out, "w") as handle:
+    handle.write("\n".join("%s %s" % line for line in lines) + "\n")
+print(
+    "%s on %d child provider(s) of %d compute(s): %s"
+    % (
+        resource_class,
+        len(lines),
+        len(wanted),
+        ", ".join(
+            "%s=%d" % (card.rsplit("_pci_", 1)[-1], int(total))
+            for _, cards in wanted
+            for card, total in cards
+        ),
+    )
+)
+PY
+"#,
+        count = gpu.count,
+        devices = cards.len(),
+    )
+}
+
+/// The provider half of [`gpu_verify_script`] for `mtty`: Nova built these from the mediated
+/// device it found, so the check only asks that every compute reports the class somewhere in
+/// its tree, at least the requested amount.
+fn mtty_inventory_check(gpu: &crate::model::GpuConfig, hosts: &str) -> String {
+    let class = gpu.resource_class();
+    let count = gpu.count;
+    let expected = hosts.replace(' ', ",");
+    format!(
+        r#"step "GPU(mtty) Placement 인벤토리 확인 ({class}×{count})"
+placement=$($os endpoint list --service placement --interface internal -f value -c URL -c url | awk 'NR == 1 {{print $1}}')
+[ -n "$placement" ] || {{ echo "no placement endpoint" >&2; exit 1; }}
+token=$($os token issue -f value -c id)
+python3 - {class} {count} {expected} "$placement" "$token" <<'PY'
+import json
+import sys
+import urllib.request
+
+resource_class, count, expected, placement, token = sys.argv[1:6]
+count = int(count)
+expected = set(expected.split(","))
+
+def get(path):
+    request = urllib.request.Request(
+        placement.rstrip("/") + path,
+        headers={{
+            "X-Auth-Token": token,
+            "OpenStack-API-Version": "placement 1.4",
+        }},
+    )
+    return json.load(urllib.request.urlopen(request, timeout=30))
+
+found = {{}}
+for provider in get("/resource_providers")["resource_providers"]:
+    # A compute's inventory is on its own provider; an mdev type Nova discovers gets a
+    # child provider named after it (<host>_<type>), which reports the same compute.
+    host = provider["name"].split("_", 1)[0]
+    if host not in expected:
+        continue
+    inventories = get(
+        "/resource_providers/" + provider["uuid"] + "/inventories"
+    )["inventories"]
+    if resource_class in inventories and inventories[resource_class]["total"] >= count:
+        found[host] = found.get(host, 0) + inventories[resource_class]["total"]
+if set(found) != expected:
+    sys.exit(
+        "GPU inventory %s is missing on %s"
+        % (resource_class, ", ".join(sorted(expected - set(found))))
+    )
+# The class total a compute offers, not the units this check asked for: the kernel's mdev
+# type carries 24 whether the farm requested 1 or 24.
+totals = sorted(set(found.values()))
+if len(totals) == 1:
+    counted = "%d each" % totals[0]
+else:
+    counted = ", ".join("%s=%d" % (host, found[host]) for host in sorted(found))
+print(
+    "%s inventory on %d compute resource(s): %s"
+    % (resource_class, len(found), counted)
+)
+PY
+"#
+    )
 }
 
 #[cfg(test)]
@@ -2716,9 +3568,29 @@ mod tests {
             install_script(&info),
             post_deploy_script(&components, false, &info),
             post_deploy_script(&components, true, &info),
-            verify_script(&components, 1),
-            verify_script(&components, 2),
-            verify_script(&components, 0),
+            verify_script(&components, 1, OPENSTACK_RELEASE, None),
+            verify_script(&components, 2, OPENSTACK_RELEASE, None),
+            verify_script(&components, 0, OPENSTACK_RELEASE, None),
+            verify_script(
+                &components,
+                1,
+                OPENSTACK_RELEASE,
+                Some(&crate::model::GpuConfig {
+                    mode: crate::model::GpuMode::Simulated,
+                    count: 4,
+                    ..Default::default()
+                }),
+            ),
+            verify_script(
+                &components,
+                2,
+                OPENSTACK_RELEASE,
+                Some(&crate::model::GpuConfig {
+                    mode: crate::model::GpuMode::Mtty,
+                    count: 24,
+                    ..Default::default()
+                }),
+            ),
             settle_script(None, &components),
             settle_script(Some((&from, &to)), &components),
             forget_computes_script(&components),
@@ -2728,6 +3600,11 @@ mod tests {
             include_str!("../../guest/farm/farm-identity").to_owned(),
             // Deploying a farm and adding a compute read the guest's address the same way.
             identity_command(),
+            // The deploy waits for OVS and the compute prepares its links: both poll commands
+            // that keep writing after the answer is known.
+            deploy_script(&info),
+            RESTART_OVS_AGENT.to_owned(),
+            verify_compute_script("farm-compute-1", true),
             // A compute booted from a template recreates the containers it inherited.
             wipe_template_script("farm-compute-2"),
             // Every end-of-life series installs from its last tag on its own Python, with the
@@ -2740,6 +3617,12 @@ mod tests {
             install_script(&releases::info("2020.1")),
         ];
         for script in scripts {
+            // AGENTS.md: under `set -o pipefail` a reader that stops at its first match
+            // (`grep -q`, `grep -m`) or a `| head` closes the pipe, and the command still
+            // writing the other end (ssh, docker, ldconfig) fails the whole pipeline.
+            for reader in ["grep -q", "grep -m", "| head"] {
+                assert!(!script.contains(reader), "{reader} in:\n{script}");
+            }
             let mut child = Command::new("bash")
                 .arg("-n")
                 .stdin(Stdio::piped())
@@ -2765,8 +3648,8 @@ mod tests {
             install_script(&info),
             post_deploy_script(&components, false, &info),
             post_deploy_script(&components, true, &info),
-            verify_script(&components, 1),
-            verify_script(&components, 2),
+            verify_script(&components, 1, OPENSTACK_RELEASE, None),
+            verify_script(&components, 2, OPENSTACK_RELEASE, None),
             settle_script(None, &components),
             forget_computes_script(&components),
         ] {
@@ -2849,10 +3732,10 @@ mod tests {
         assert!(
             post_deploy_script(&components, control_only.multinode(), &info).contains("physnet2")
         );
-        let alone = verify_script(&components, 0);
+        let alone = verify_script(&components, 0, OPENSTACK_RELEASE, None);
         assert!(alone.contains("no compute VM yet") && !alone.contains("nova-compute is not up"));
 
-        let verify = verify_script(&components, 1);
+        let verify = verify_script(&components, 1, OPENSTACK_RELEASE, None);
         assert!(
             !verify.contains("ssh "),
             "all-in-one verification must not require distributed SSH keys"
@@ -2862,8 +3745,8 @@ mod tests {
         assert!(verify.contains("cirros-0.6.3-aarch64-disk.img"));
         for script in [
             install_script(&releases::info(OPENSTACK_RELEASE)),
-            verify_script(&components, 1),
-            verify_script(&components, 2),
+            verify_script(&components, 1, OPENSTACK_RELEASE, None),
+            verify_script(&components, 2, OPENSTACK_RELEASE, None),
             post_deploy_script(&components, false, &info),
             post_deploy_script(&components, true, &info),
         ] {
@@ -2882,6 +3765,10 @@ mod tests {
             "ssh-keygen -R 10.254.0.13 ",
             "$os compute service delete \"$id\"",
             "conn.placement.delete_resource_provider(rp)",
+            // A GPU farm's child providers hang off a compute's, and Placement refuses to
+            // delete a provider with children: the reverse name order deletes them first.
+            "key=lambda provider: provider.name,",
+            "reverse=True,",
             "nova-manage cell_v2 delete_host --cell_uuid \"$cell\" --host \"$host\"",
             "$os network agent delete \"$id\"",
         ] {
@@ -2981,5 +3868,811 @@ mod tests {
         assert!(globals.contains("keystone_public_url: \"http://localhost:15010\""));
         assert!(globals.contains("glance_public_endpoint: \"http://localhost:15011\""));
         assert!(globals.contains("10.254.0.2"));
+    }
+    #[test]
+    fn the_mdev_probe_tells_a_missing_type_from_a_used_one() {
+        // No mtty-1 type: the compute booted the stock kernel.
+        assert_eq!(mdev_probe("absent\n"), MdevProbe::Absent);
+        assert_eq!(
+            mdev_probe("available 24\nin-use 0\n"),
+            MdevProbe::Devices {
+                available: 24,
+                in_use: 0
+            }
+        );
+        // An instance already holds an mdev, so fewer are free; the type still offers 24.
+        assert_eq!(
+            mdev_probe("available 23\nin-use 1\n"),
+            MdevProbe::Devices {
+                available: 23,
+                in_use: 1
+            }
+        );
+        // Anything else is unreadable, so check_mdev refuses instead of guessing a count.
+        assert_eq!(mdev_probe(""), MdevProbe::Unreadable);
+        assert_eq!(mdev_probe("available 24\n"), MdevProbe::Unreadable);
+        assert_eq!(mdev_probe("available\nin-use\n"), MdevProbe::Unreadable);
+        // The probe travels inside ssh's single quotes, so it may not carry one itself.
+        assert!(!MDEV_PROBE.contains('\''), "{MDEV_PROBE}");
+        assert!(MDEV_PROBE.contains("/sys/bus/mdev/devices"));
+    }
+    /// The `<<'PY'` programs a verification script carries, in order.
+    fn python_blocks(script: &str) -> Vec<String> {
+        let mut blocks = Vec::new();
+        let mut current: Option<String> = None;
+        for line in script.lines() {
+            match &mut current {
+                None if line.contains("<<'PY'") => current = Some(String::new()),
+                None => {}
+                Some(block) if line.trim() == "PY" => blocks.push(current.take().unwrap()),
+                Some(block) => {
+                    block.push_str(line);
+                    block.push('\n');
+                }
+            }
+        }
+        assert!(current.is_none(), "unterminated python heredoc");
+        blocks
+    }
+    /// The GPU verify script installs the fake nvidia-smi through a quoted heredoc; the
+    /// whole script must still be valid shell.
+    #[cfg(unix)]
+    #[test]
+    fn the_gpu_verify_script_is_valid_shell() {
+        let components = ["keystone", "glance", "placement", "neutron", "nova"].map(String::from);
+        let dir = tempfile::tempdir().unwrap();
+        for gpu in [
+            crate::model::GpuConfig {
+                mode: crate::model::GpuMode::Simulated,
+                count: 2,
+                ..Default::default()
+            },
+            crate::model::GpuConfig {
+                mode: crate::model::GpuMode::Mtty,
+                count: 1,
+                ..Default::default()
+            },
+        ] {
+            let script = verify_script(&components, 1, OPENSTACK_RELEASE, Some(&gpu));
+            // The verification instance gets the same installer a user would pass.
+            assert!(script.contains("--user-data \"$user_data\""), "{script}");
+            assert!(script.contains("nvsmi_device_v11.dtd"), "{script}");
+            assert!(script.contains("<nvidia_smi_log>"), "{script}");
+            let path = dir.path().join("verify.sh");
+            std::fs::write(&path, &script).unwrap();
+            let status = std::process::Command::new("sh")
+                .arg("-n")
+                .arg(&path)
+                .status()
+                .unwrap();
+            assert!(
+                status.success(),
+                "the {gpu:?} verify script is not valid shell"
+            );
+        }
+    }
+
+    /// Every `<<'PY'` program of a GPU farm's verify script must still parse as Python after
+    /// `format!` has turned `{{` into `{`.
+    #[test]
+    fn the_gpu_verify_script_holds_valid_python() {
+        let components = ["keystone", "glance", "placement", "neutron", "nova"].map(String::from);
+        for gpu in [
+            crate::model::GpuConfig {
+                mode: crate::model::GpuMode::Simulated,
+                count: 4,
+                ..Default::default()
+            },
+            crate::model::GpuConfig {
+                mode: crate::model::GpuMode::Mtty,
+                count: 2,
+                ..Default::default()
+            },
+        ] {
+            let script = verify_script(&components, 2, OPENSTACK_RELEASE, Some(&gpu));
+            let blocks = python_blocks(&script);
+            // The simulated script advertises, checks and allocates; mtty checks and allocates.
+            let expected = match gpu.mode {
+                crate::model::GpuMode::Simulated => 3,
+                crate::model::GpuMode::Mtty => 2,
+            };
+            assert_eq!(blocks.len(), expected, "{script}");
+            for block in blocks {
+                assert_python_parses(&block);
+            }
+        }
+        // `add-compute` advertises a new compute's providers with a script of its own.
+        let advertise = gpu_advertise_script(
+            Some(&crate::model::GpuConfig {
+                mode: crate::model::GpuMode::Simulated,
+                count: 6,
+                devices: Some(2),
+                ..Default::default()
+            }),
+            &["farm-compute-2".to_owned()],
+        );
+        for block in python_blocks(&advertise) {
+            assert_python_parses(&block);
+        }
+    }
+
+    /// The same scripts are one shell program each; `bash -n` parses them without running
+    /// anything, which catches a quoting slip before it reaches a deployment.
+    #[test]
+    fn the_gpu_scripts_parse_as_shell() {
+        let components = ["keystone", "glance", "placement", "neutron", "nova"].map(String::from);
+        let shaped = crate::model::GpuConfig {
+            mode: crate::model::GpuMode::Simulated,
+            count: 6,
+            devices: Some(2),
+            traits: Some(vec!["CUSTOM_MAAS".into(), "CUSTOM_SRIOV".into()]),
+            resource_class: Some("PGPU".into()),
+        };
+        let scripts = [
+            verify_script(&components, 2, OPENSTACK_RELEASE, Some(&shaped)),
+            verify_script(
+                &components,
+                2,
+                OPENSTACK_RELEASE,
+                Some(&crate::model::GpuConfig {
+                    mode: crate::model::GpuMode::Mtty,
+                    count: 24,
+                    ..Default::default()
+                }),
+            ),
+            gpu_advertise_script(
+                Some(&shaped),
+                &["farm-compute-1".to_owned(), "farm-compute-2".to_owned()],
+            ),
+            // The same farm on a release whose nova-compute carries farm's backport.
+            verify_script(
+                &components,
+                2,
+                "2026.1",
+                Some(&crate::model::GpuConfig {
+                    mode: crate::model::GpuMode::Mtty,
+                    count: 2,
+                    ..Default::default()
+                }),
+            ),
+        ];
+        for script in scripts {
+            let output = match Command::new("bash")
+                .args(["-n", "-c", script.as_str()])
+                .output()
+            {
+                Ok(output) => output,
+                Err(error) => {
+                    eprintln!("bash unavailable, skipping the gpu shell test: {error}");
+                    return;
+                }
+            };
+            assert!(
+                output.status.success(),
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stderr),
+                script
+            );
+        }
+    }
+
+    fn assert_python_parses(block: &str) {
+        let mut child = match Command::new("python3")
+            .args([
+                "-c",
+                "import sys; compile(sys.stdin.read(), 'block', 'exec')",
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+        {
+            Ok(child) => child,
+            Err(error) => {
+                eprintln!("python3 unavailable, skipping the gpu script test: {error}");
+                return;
+            }
+        };
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(block.as_bytes())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn a_simulated_gpu_advertises_a_child_provider_per_fake_gpu() {
+        let gpu = crate::model::GpuConfig {
+            mode: crate::model::GpuMode::Simulated,
+            count: 5,
+            devices: Some(2),
+            ..Default::default()
+        };
+        let hosts = ["farm-compute-1".to_owned(), "farm-compute-2".to_owned()];
+        let script = gpu_advertise_script(Some(&gpu), &hosts);
+        for expected in [
+            // A provider per fake card, under the name a vGPU deployment's Nova would use.
+            "farm-compute-1_pci_0000_84_00_0=3",
+            "farm-compute-1_pci_0000_85_00_0=2",
+            "farm-compute-2_pci_0000_84_00_0=3",
+            "farm-compute-2_pci_0000_85_00_0=2",
+            // The child hangs off the compute's own provider, never the root's inventory.
+            "\"parent_provider_uuid\": providers[host]",
+            "\"resource_provider_generation\": generation",
+            "\"/resource_providers/\" + uuid + \"/inventories\"",
+            "\"/resource_providers/\" + uuid + \"/traits\"",
+            "\"traits\": traits",
+            "\"total\": total",
+            "\"max_unit\": total",
+            "\"allocation_ratio\": 1.0",
+            "OpenStack-API-Version\": \"placement 1.14\"",
+            // A create at 1.14 answers 201 with an empty body and Location, so the uuid
+            // comes from the body, the header or a name lookup, never from the body alone.
+            "uuid = created.get(\"uuid\")",
+            "location.rstrip(\"/\").rsplit(\"/\", 1)[-1]",
+            "uuid = named(name)",
+            // A provider takes only traits the trait table holds; a fresh Placement has
+            // none of farm's CUSTOM_* names.
+            "call(\"PUT\", \"/traits/\" + trait)",
+            // A request farm can shape: class and traits the flavor will ask for.
+            "python3 - VGPU \"CUSTOM_FARM_VGPU\"",
+            "time.sleep(5)",
+        ] {
+            assert!(script.contains(expected), "{expected}\n{script}");
+        }
+        // A farm that named its own contract advertises that one.
+        let custom = crate::model::GpuConfig {
+            mode: crate::model::GpuMode::Simulated,
+            count: 1,
+            traits: Some(vec!["CUSTOM_MAAS".into(), "CUSTOM_SRIOV".into()]),
+            resource_class: Some("PGPU".into()),
+            ..Default::default()
+        };
+        let script = gpu_advertise_script(Some(&custom), &hosts[..1]);
+        assert!(
+            script.contains("python3 - PGPU \"CUSTOM_MAAS,CUSTOM_SRIOV\""),
+            "{script}"
+        );
+        assert!(
+            script.contains("farm-compute-1_pci_0000_84_00_0=1"),
+            "{script}"
+        );
+        // The mediated device's providers are Nova's; farm advertises nothing for them.
+        assert!(
+            gpu_advertise_script(
+                Some(&crate::model::GpuConfig {
+                    mode: crate::model::GpuMode::Mtty,
+                    count: 1,
+                    ..Default::default()
+                }),
+                &hosts
+            )
+            .is_empty()
+        );
+        assert!(gpu_advertise_script(None, &hosts).is_empty());
+    }
+
+    #[test]
+    fn a_gpu_farm_verifies_its_providers_flavor_and_allocation() {
+        let components = ["keystone", "glance", "placement", "neutron", "nova"].map(String::from);
+        let simulated = crate::model::GpuConfig {
+            mode: crate::model::GpuMode::Simulated,
+            count: 4,
+            ..Default::default()
+        };
+        let script = verify_script(&components, 1, OPENSTACK_RELEASE, Some(&simulated));
+        for expected in [
+            // Advertised first, then checked: both name the child providers of the farm.
+            "GPU(simulated) Placement 리소스 프로바이더 광고",
+            "farm-compute-1_pci_0000_84_00_0=4",
+            "GPU(simulated) 자식 리소스 프로바이더 확인",
+            "\"parent_provider_uuid\"",
+            "carries %s on its root provider",
+            "lacks trait(s)",
+            // The flavor asks for the standard class and the trait; the instance's
+            // allocation must land on a provider this farm advertised.
+            "farm.vgpu",
+            "resources:VGPU=1",
+            "trait:CUSTOM_FARM_VGPU=required",
+            "$os flavor set farm.vgpu",
+            "which this farm did not advertise",
+            "$work/gpu-providers",
+            "/allocations/",
+            // An oversubscribed request is refused by the scheduler, with the fault to show
+            // it came from placement rather than from anywhere else.
+            "GPU(simulated) 재고를 넘는 요청",
+            "--property resources:VGPU=5",
+            "grep \"No valid host\" >/dev/null",
+            "was refused with NoValidHost",
+        ] {
+            assert!(script.contains(expected), "{expected}");
+        }
+        // Only the mediated device has a libvirt hostdev to look for.
+        assert!(!script.contains("type='mdev'"));
+        // A farm that asked for no trait writes none into its flavor.
+        let bare = crate::model::GpuConfig {
+            mode: crate::model::GpuMode::Simulated,
+            count: 1,
+            traits: Some(vec![]),
+            ..Default::default()
+        };
+        let script = verify_script(&components, 1, OPENSTACK_RELEASE, Some(&bare));
+        assert!(script.contains("--property resources:VGPU=1 farm.vgpu"));
+        assert!(!script.contains("trait:CUSTOM_FARM_VGPU"));
+
+        let mtty = crate::model::GpuConfig {
+            mode: crate::model::GpuMode::Mtty,
+            count: 24,
+            ..Default::default()
+        };
+        let script = verify_script(&components, 2, OPENSTACK_RELEASE, Some(&mtty));
+        for expected in [
+            "GPU(mtty)",
+            "farm.vgpu",
+            "resources:VGPU=1",
+            "farm-compute-1,farm-compute-2 \"$placement\"",
+            "farm-compute-1 farm-compute-2",
+            "$os flavor set farm.vgpu",
+            "type='mdev'",
+            "docker exec nova_libvirt",
+            "inventory on %d compute resource(s)",
+        ] {
+            assert!(script.contains(expected), "{expected}");
+        }
+        // The mediated device's inventory is Nova's, so farm neither advertises nor
+        // oversubscribes it; the flavor carries no trait the driver does not set.
+        assert!(
+            !script.contains("Placement 리소스 프로바이더 광고"),
+            "{script}"
+        );
+        assert!(!script.contains("farm.vgpu-full"), "{script}");
+        assert!(!script.contains("trait:VGPU"));
+        // 2026.2 is the first release whose nova has the mtty support itself, so this farm's
+        // container needs no backport and the verification asks for none.
+        assert!(!script.contains("백포트"), "{script}");
+
+        // On an older release farm patches nova-compute at start; the verification runs the
+        // same hook in `--check` mode on every compute before it boots an instance.
+        let backported = verify_script(&components, 2, "2026.1", Some(&mtty));
+        for expected in [
+            "nova-compute의 Nova mtty 백포트 확인 (2026.1)",
+            "docker exec nova_compute sha256sum /var/lib/kolla/venv/lib/python3.12/site-packages/nova/virt/libvirt/config.py /var/lib/kolla/venv/lib/python3.12/site-packages/nova/virt/libvirt/driver.py",
+            "sha256sum /etc/farm/nova-mtty/2026.1/nova/virt/libvirt/config.py /etc/farm/nova-mtty/2026.1/nova/virt/libvirt/driver.py",
+            "for host in farm-compute-1 farm-compute-2; do",
+            "nova-compute is not running with farm's Nova mtty backport files",
+        ] {
+            assert!(backported.contains(expected), "{expected}");
+        }
+        // It is a farm's own check: a release farm does not patch (2025.1 is patched too,
+        // and a simulated GPU never is) must not claim one.
+        assert!(
+            !verify_script(&components, 2, "2025.1", Some(&simulated)).contains("백포트"),
+            "{script}"
+        );
+        assert!(!verify_script(&components, 2, "2026.1", None).contains("백포트"));
+        // A farm without a GPU verifies no GPU.
+        let plain = verify_script(&components, 1, OPENSTACK_RELEASE, None);
+        assert!(!plain.contains("farm.vgpu"));
+        assert!(!plain.contains("GPU("));
+    }
+
+    /// The `bound=''` block of the mtty check, which asks each compute for its domains' XML.
+    fn mtty_check(script: &str) -> String {
+        let lines: Vec<&str> = script.lines().collect();
+        let start = lines
+            .iter()
+            .position(|line| *line == "bound=''")
+            .unwrap_or_else(|| panic!("no mtty check in {script}"));
+        let end = lines
+            .iter()
+            .position(|line| line.starts_with("echo \"mtty mdev is bound"))
+            .unwrap_or_else(|| panic!("no mtty check in {script}"));
+        assert!(start < end, "{script}");
+        lines[start..=end].join("\n")
+    }
+
+    /// Runs the mtty check with a stand-in `ssh` on PATH.
+    fn run_mtty_check(check: &str, ssh: &str) -> std::process::Output {
+        let dir = tempfile::tempdir().unwrap();
+        let stand_in = dir.path().join("ssh");
+        std::fs::write(&stand_in, ssh).unwrap();
+        std::fs::set_permissions(
+            &stand_in,
+            std::os::unix::fs::PermissionsExt::from_mode(0o755),
+        )
+        .unwrap();
+        let mut paths = vec![dir.path().to_path_buf()];
+        paths.extend(std::env::split_paths(
+            &std::env::var_os("PATH").unwrap_or_default(),
+        ));
+        Command::new("bash")
+            .args(["-c", &format!("set -euo pipefail\n{check}")])
+            .env("PATH", std::env::join_paths(paths).unwrap())
+            .output()
+            .unwrap()
+    }
+
+    /// The check runs under `set -euo pipefail` and reads libvirt's XML over ssh. A reader that
+    /// stops at its first match (`grep -q`) closes the pipe while ssh is still writing the other
+    /// domains, and ssh's 255 then fails the pipeline through `pipefail` although the mdev is
+    /// bound: with two farm guests up, `deploy --from verify` failed 8 times in 10.
+    #[test]
+    fn the_mtty_check_reads_the_libvirt_xml_to_the_end() {
+        let components = ["keystone", "glance", "placement", "neutron", "nova"].map(String::from);
+        let script = verify_script(
+            &components,
+            2,
+            OPENSTACK_RELEASE,
+            Some(&crate::model::GpuConfig {
+                mode: crate::model::GpuMode::Mtty,
+                count: 24,
+                ..Default::default()
+            }),
+        );
+        let check = mtty_check(&script);
+        // A stand-in ssh writes a domain that carries an mdev hostdev and then keeps writing
+        // the rest, like `virsh dumpxml` of several domains. Leaving early leaves it writing
+        // into a closed pipe, which ssh reports as 255.
+        let output = run_mtty_check(
+            &check,
+            r#"trap 'exit 255' PIPE
+printf '%s\n' "<domain type='kvm'>" "<devices>"
+printf '%s\n' "  <hostdev mode='subsystem' type='mdev' managed='no' model='vfio-pci' display='off'>"
+printf '%s\n' "    <source><address uuid='7166abcc-0000-0000-0000-000000000000'/></source>"
+printf '%s\n' "  </hostdev></devices></domain>"
+# The check has its match by now; a reader that left closes the pipe here.
+sleep 0.3
+for _ in $(seq 200); do printf '%s\n' "  <interface type='network'/>"; done
+"#,
+        );
+        assert!(
+            output.status.success(),
+            "the mtty check rejected a domain that carries an mdev hostdev: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout
+                .contains("mtty mdev is bound to the instance's libvirt domain on farm-compute-1"),
+            "{stdout}"
+        );
+        // A domain without an mdev hostdev still fails the check, so the fix stays a check.
+        let output = run_mtty_check(&check, "printf '%s\\n' \"<domain><devices/></domain>\"\n");
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .contains("no libvirt domain on farm-compute-1 farm-compute-2 has an mdev hostdev"),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    /// Answer the inventory block's Placement requests: the provider list, then the
+    /// inventories of each provider it asks about.
+    fn placement_server(providers: &'static str, inventories: &'static str) -> String {
+        use std::io::{BufRead, BufReader, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            for _ in 0..2 {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    return;
+                };
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut path = String::new();
+                let mut line = String::new();
+                while reader.read_line(&mut line).unwrap_or(0) > 0 {
+                    if let Some(rest) = line.strip_prefix("GET ") {
+                        path = rest.split_whitespace().next().unwrap_or("").to_string();
+                    }
+                    if line == "\r\n" || line == "\n" {
+                        break;
+                    }
+                    line.clear();
+                }
+                let body = if path.starts_with("/resource_providers/") {
+                    inventories
+                } else {
+                    providers
+                };
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    /// The inventory line is read as the farm's capacity, so it names the class total a
+    /// compute offers. Reporting the requested count made a 24-device kernel look like 1.
+    #[test]
+    fn the_gpu_inventory_log_names_the_class_total_not_the_request() {
+        let components = ["keystone", "glance", "placement", "neutron", "nova"].map(String::from);
+        let script = verify_script(
+            &components,
+            1,
+            OPENSTACK_RELEASE,
+            Some(&crate::model::GpuConfig {
+                mode: crate::model::GpuMode::Mtty,
+                count: 1,
+                ..Default::default()
+            }),
+        );
+        let block = python_blocks(&script).remove(0);
+        // Nova discovers the kernel's mdev type as a child provider of the compute, whose
+        // inventory covers all 24 devices however many this farm requested.
+        let placement = placement_server(
+            r#"{"resource_providers":[{"uuid":"p1","name":"farm-compute-1_mtty_mtty"}]}"#,
+            r#"{"inventories":{"VGPU":{"total":24}}}"#,
+        );
+        let mut child = match Command::new("python3")
+            .arg("-")
+            .args(["VGPU", "1", "farm-compute-1", &placement, "token"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+        {
+            Ok(child) => child,
+            Err(error) => {
+                eprintln!("python3 unavailable, skipping the gpu script test: {error}");
+                return;
+            }
+        };
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(block.as_bytes())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            "VGPU inventory on 1 compute resource(s): 24 each"
+        );
+    }
+
+    /// A stateful Placement stand-in (`tests/fixtures/fake-placement.py`) with the response
+    /// shapes a real one produces, so a test can run the generated Python block itself.
+    struct FakePlacement {
+        child: std::process::Child,
+        url: String,
+    }
+
+    impl FakePlacement {
+        /// `None` when python3 is not installed, which the Python tests already skip on.
+        fn start() -> Option<Self> {
+            let mut child = Command::new("python3")
+                .args([
+                    "-u",
+                    "-c",
+                    include_str!("../../tests/fixtures/fake-placement.py"),
+                ])
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+                .ok()?;
+            let mut url = String::new();
+            std::io::BufRead::read_line(
+                &mut std::io::BufReader::new(child.stdout.as_mut()?),
+                &mut url,
+            )
+            .ok()?;
+            let url = url.trim().to_owned();
+            url.starts_with("http://").then_some(Self { child, url })
+        }
+
+        /// Everything the script wrote, as the fixture reports it.
+        fn state(&self) -> serde_json::Value {
+            use std::io::Read as _;
+            let host_path = self.url.trim_start_matches("http://");
+            let (host, _) = host_path.split_once('/').unwrap_or((host_path, ""));
+            let mut stream = std::net::TcpStream::connect(host).unwrap();
+            write!(
+                stream,
+                "GET /_state HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n"
+            )
+            .unwrap();
+            let mut answer = String::new();
+            stream.read_to_string(&mut answer).unwrap();
+            let body = answer.split_once("\r\n\r\n").map(|(_, body)| body);
+            serde_json::from_str(body.unwrap_or_default()).unwrap()
+        }
+    }
+
+    impl Drop for FakePlacement {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+
+    /// Run one `<<'PY'` program of a generated script, as the shell would.
+    fn run_python_block(block: &str, args: &[&str]) -> std::process::Output {
+        let mut child = Command::new("python3")
+            .arg("-")
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("python3 runs the GPU script block");
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(block.as_bytes())
+            .unwrap();
+        child.wait_with_output().unwrap()
+    }
+
+    fn simulated_gpu() -> crate::model::GpuConfig {
+        crate::model::GpuConfig {
+            mode: crate::model::GpuMode::Simulated,
+            count: 2,
+            traits: Some(vec!["CUSTOM_FARM_VGPU".into(), "CUSTOM_E2E_EXTRA".into()]),
+            ..Default::default()
+        }
+    }
+
+    /// The advertise block runs against Placement 1.14: creating a provider answers 201 with
+    /// an empty body, and a provider takes only traits the trait table holds. Reading
+    /// `created["uuid"]` and skipping the trait table failed a simulated deploy.
+    #[cfg(unix)]
+    #[test]
+    fn a_simulated_gpu_advertise_script_creates_its_traits_and_finds_a_new_provider() {
+        let gpu = simulated_gpu();
+        let hosts = ["farm-compute-1".to_owned()];
+        let block = python_blocks(&gpu_advertise_script(Some(&gpu), &hosts)).remove(0);
+        let Some(placement) = FakePlacement::start() else {
+            eprintln!("python3 unavailable, skipping the gpu advertise test");
+            return;
+        };
+        let provider = "farm-compute-1_pci_0000_84_00_0";
+        let spec = format!("farm-compute-1:{provider}=2");
+        for run in 0..2 {
+            let output = run_python_block(
+                &block,
+                &[
+                    "VGPU",
+                    "CUSTOM_FARM_VGPU,CUSTOM_E2E_EXTRA",
+                    &placement.url,
+                    "token",
+                    &spec,
+                ],
+            );
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(output.status.success(), "run {run}: {stderr}");
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            assert!(
+                stdout.contains(&format!(
+                    "{provider}: VGPU=2, traits CUSTOM_FARM_VGPU,CUSTOM_E2E_EXTRA"
+                )),
+                "run {run}: {stdout}"
+            );
+            if run == 0 {
+                assert!(
+                    stdout.contains(&format!("{provider}: created as a child of farm-compute-1")),
+                    "{stdout}"
+                );
+            }
+        }
+        // The provider exists, carries the inventory and both traits, and the second run
+        // reused it instead of failing on the name it had just created.
+        let state = placement.state();
+        assert_eq!(
+            state["traits"],
+            serde_json::json!(["CUSTOM_E2E_EXTRA", "CUSTOM_FARM_VGPU"])
+        );
+        let providers = state["providers"].as_array().unwrap();
+        assert_eq!(providers.len(), 2, "{state}");
+        let child = providers.iter().find(|p| p["name"] == provider).unwrap();
+        assert_eq!(
+            child["parent_provider_uuid"],
+            "11111111-1111-1111-1111-111111111111"
+        );
+        assert_eq!(child["inventories"]["VGPU"]["total"], 2);
+        assert_eq!(
+            child["traits"],
+            serde_json::json!(["CUSTOM_FARM_VGPU", "CUSTOM_E2E_EXTRA"])
+        );
+        assert_eq!(state["microversions"], serde_json::json!(["1.14"]));
+    }
+
+    /// The inventory check reads a provider's trait list, which Placement answers as strings
+    /// on every microversion; reading `trait["name"]` failed the check after the inventory
+    /// was right. A trait the provider does not carry still fails it.
+    #[cfg(unix)]
+    #[test]
+    fn a_simulated_gpu_inventory_check_reads_traits_as_strings_and_fails_on_a_missing_one() {
+        let gpu = simulated_gpu();
+        let hosts = ["farm-compute-1".to_owned()];
+        let Some(placement) = FakePlacement::start() else {
+            eprintln!("python3 unavailable, skipping the gpu inventory test");
+            return;
+        };
+        let provider = "farm-compute-1_pci_0000_84_00_0";
+        let spec = format!("farm-compute-1:{provider}=2");
+        // A deploy advertises first, so the check has something to read.
+        let advertise = python_blocks(&gpu_advertise_script(Some(&gpu), &hosts)).remove(0);
+        let output = run_python_block(
+            &advertise,
+            &[
+                "VGPU",
+                "CUSTOM_FARM_VGPU,CUSTOM_E2E_EXTRA",
+                &placement.url,
+                "token",
+                &spec,
+            ],
+        );
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("gpu-providers");
+        let check = python_blocks(&simulated_inventory_check(&gpu, &hosts)).remove(0);
+        let output = run_python_block(
+            &check,
+            &[
+                "VGPU",
+                "CUSTOM_FARM_VGPU,CUSTOM_E2E_EXTRA",
+                out.to_str().unwrap(),
+                &placement.url,
+                "token",
+                &spec,
+            ],
+        );
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout).trim(),
+            "VGPU on 1 child provider(s) of 1 compute(s): 0000_84_00_0=2"
+        );
+        let lines = std::fs::read_to_string(&out).unwrap();
+        assert_eq!(lines.lines().count(), 1, "{lines}");
+        assert!(lines.starts_with(provider), "{lines}");
+        // A trait the provider does not carry is still a failure.
+        let stricter = crate::model::GpuConfig {
+            traits: Some(vec!["CUSTOM_FARM_VGPU".into(), "CUSTOM_EXTRA_2".into()]),
+            ..gpu
+        };
+        let check = python_blocks(&simulated_inventory_check(&stricter, &hosts)).remove(0);
+        let output = run_python_block(
+            &check,
+            &[
+                "VGPU",
+                "CUSTOM_FARM_VGPU,CUSTOM_EXTRA_2",
+                out.to_str().unwrap(),
+                &placement.url,
+                "token",
+                &spec,
+            ],
+        );
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("lacks trait(s) CUSTOM_EXTRA_2"),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 }

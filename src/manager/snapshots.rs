@@ -295,6 +295,7 @@ fn parse_labels(labels: &BTreeMap<String, String>) -> Result<Imported> {
             compute: None,
             layout: None,
             release,
+            gpu: None,
         })?,
     };
     Ok(Imported {
@@ -415,6 +416,14 @@ impl FarmManager {
                     return Err(conflict(
                         "an all-in-one farm has no control VM to freeze as a template; freeze the whole farm instead",
                     ));
+                }
+                // A control template records the farm without its computes, and the GPU is
+                // part of the computes: restoring the template would silently drop it.
+                if let Some(gpu) = &plan.gpu {
+                    return Err(conflict(format!(
+                        "this farm's computes offer a '{}' GPU, and a control template keeps neither computes nor GPU, so a farm restored from it would lose the GPU; create GPU farms clean instead",
+                        gpu.mode_name()
+                    )));
                 }
                 if farm.status != FarmStatus::Ready {
                     return Err(conflict(
