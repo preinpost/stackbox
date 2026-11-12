@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 
 /// Branches of the public kolla-ansible repository. A release keeps `stable/` while it is
 /// maintained and moves to `unmaintained/` afterwards; both install the same way.
@@ -428,10 +428,14 @@ impl ReleaseInfo {
 
     /// Python inside its containers. The tag's Ubuntu images and a maintained Rocky 10 build
     /// carry the same minor as the release's tooling; the farm's Rocky 9 build is older.
+    /// 2025.1 is the last series kolla publishes on Rocky 9, whose Python 3.9 differs from
+    /// the guest tooling's 3.12.
     pub fn image_python(&self) -> &str {
-        self.images
-            .as_ref()
-            .map_or(&self.python, |images| &images.python)
+        match &self.images {
+            Some(images) => &images.python,
+            None if self.release == "2025.1" => "3.9",
+            None => &self.python,
+        }
     }
 
     /// Whether `kolla-ansible` is the bash launcher of releases before 2024.2, which finds the
@@ -507,6 +511,96 @@ pub fn info(release: &str) -> ReleaseInfo {
             },
         },
     }
+}
+
+/// [`info`] with the kolla-ansible ref the coordinator resolved for `release`. A host's
+/// agent builds its install script in its own process, which never reads the release
+/// catalog, so [`info`] there would fall back to `stable/<release>` even after the series
+/// moved to `unmaintained/` (2025.1 did). Without a ref it keeps [`info`]'s answer.
+pub fn info_with(release: &str, reference: Option<&str>) -> ReleaseInfo {
+    let mut info = info(release);
+    if let Some(reference) = reference.filter(|reference| reference_ok(reference)) {
+        info.reference = reference.to_owned();
+    }
+    info
+}
+
+/// Whether `reference` can name a kolla-ansible branch (`stable/2026.2`,
+/// `unmaintained/2025.1`) or tag (`2024.2-eol`, `12.8.0`). The value arrives from the
+/// coordinator and goes into a shell script, so anything else is refused.
+pub fn reference_ok(reference: &str) -> bool {
+    !reference.is_empty()
+        && !reference.starts_with('-')
+        && !reference.contains("..")
+        && reference
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '/'))
+}
+
+/// The exact kolla-ansible ref to install `release` from, resolved against the branch list
+/// the public repository publishes. The coordinator resolves it once and sends it with the
+/// deploy; the guest then installs that ref instead of the `stable/<release>` guess.
+pub async fn reference(release: &str) -> Result<String> {
+    // A test can state what a fetched listing holds without warming the process-wide cache,
+    // which would change what other tests plan and install.
+    #[cfg(test)]
+    if let Some(found) = remembered(release) {
+        return Ok(found);
+    }
+    // A series the farm builds images for, or an end-of-life tag, pins its ref. A fetched
+    // listing still wins for a built series while it has a branch (`unmaintained/2024.1`).
+    if built(release).is_some() || legacy(release).is_some() {
+        return Ok(info(release).reference);
+    }
+    if let Some(found) = branch(release) {
+        return Ok(found);
+    }
+    // Tests never reach the network, and a host that pinned its catalog has no listing to
+    // read: both keep the branch `info` names.
+    if cfg!(test) || configured().is_some() {
+        return Ok(info(release).reference);
+    }
+    match fetch().await {
+        Ok(refs) => {
+            if let Ok(mut cache) = CACHE.lock() {
+                *cache = Some((Instant::now(), refs));
+            }
+        }
+        Err(error) => {
+            // The guest still reaches the repository and its install fails on a ref that does
+            // not exist, so the guess is not silent.
+            eprintln!(
+                "cannot list the kolla-ansible branches to resolve OpenStack {release}: {error:#}; assuming stable/{release}"
+            );
+            return Ok(format!("stable/{release}"));
+        }
+    }
+    match branch(release) {
+        Some(found) => Ok(found),
+        None => bail!(
+            "kolla-ansible publishes neither stable/{release} nor unmaintained/{release}; an end-of-life series installs from its last tag"
+        ),
+    }
+}
+
+/// A test's answer for [`reference`], keyed by release. Kept apart from [`CACHE`] so a test
+/// that states one does not change what another test plans or installs.
+#[cfg(test)]
+static TEST_REFERENCES: Mutex<Option<BTreeMap<String, String>>> = Mutex::new(None);
+
+/// Seeds the answer [`reference`] gives for a release in this test binary.
+#[cfg(test)]
+pub fn remember(refs: &[(&str, &str)]) {
+    let mut map = TEST_REFERENCES.lock().unwrap();
+    let map = map.get_or_insert_with(BTreeMap::new);
+    for (release, reference) in refs {
+        map.insert((*release).to_owned(), (*reference).to_owned());
+    }
+}
+
+#[cfg(test)]
+fn remembered(release: &str) -> Option<String> {
+    TEST_REFERENCES.lock().ok()?.as_ref()?.get(release).cloned()
 }
 
 /// Whether the farm's Rocky-based Kolla images of `release` are published for aarch64. The
@@ -948,6 +1042,61 @@ mod tests {
             assert!(available_on(release, "x86_64"), "{release}");
             assert!(!available_on(release, "aarch64"), "{release}");
             assert!(!available_on(release, "riscv64"), "{release}");
+        }
+    }
+
+    #[test]
+    fn the_image_python_follows_the_base_the_tag_publishes() {
+        // 2025.1 is the last series on Rocky 9, whose images carry Python 3.9; the L3 patch
+        // mounts into that venv, not the guest tooling's 3.12.
+        assert_eq!(info("2025.1").python, super::super::GUEST_PYTHON);
+        assert_eq!(info("2025.1").image_python(), "3.9");
+        // 2025.2 is the first Rocky 10 set, whose Python is the guest's own.
+        for release in ["2025.2", "2026.1", super::super::OPENSTACK_RELEASE] {
+            assert_eq!(info(release).image_python(), super::super::GUEST_PYTHON);
+        }
+    }
+
+    #[tokio::test]
+    async fn the_coordinator_resolves_the_branch_a_series_moved_to() {
+        // The catalog is the only place a stable/unmaintained move is visible; a host's agent
+        // process never reads it, so the coordinator resolves the ref and sends it along.
+        remember(&[("2025.1", "unmaintained/2025.1")]);
+        assert_eq!(reference("2025.1").await.unwrap(), "unmaintained/2025.1");
+        // A series the listing does not name keeps the branch `info` writes; the install
+        // then fails on a ref that does not exist instead of the deploy pretending it did.
+        assert_eq!(reference("2026.1").await.unwrap(), "stable/2026.1");
+        // What the agent does with it: the ref the coordinator sent wins over the guess.
+        assert_eq!(
+            info_with("2026.1", Some("unmaintained/2026.1")).reference,
+            "unmaintained/2026.1"
+        );
+        assert_eq!(info_with("2026.1", None).reference, "stable/2026.1");
+        assert_eq!(
+            info_with("2025.1", Some("unmaintained/2025.1")).reference,
+            "unmaintained/2025.1"
+        );
+    }
+
+    #[test]
+    fn only_a_ref_a_shell_can_take_reaches_the_install_script() {
+        for good in [
+            "stable/2026.2",
+            "unmaintained/2025.1",
+            "2024.2-eol",
+            "12.8.0",
+        ] {
+            assert!(reference_ok(good), "{good}");
+        }
+        for bad in [
+            "",
+            "-upload-pack=/tmp/x",
+            "stable/2025.1; rm -rf /",
+            "stable/2025.1$(id)",
+            "stable/../2025.1",
+            "stable/2025.1\n",
+        ] {
+            assert!(!reference_ok(bad), "{bad}");
         }
     }
 

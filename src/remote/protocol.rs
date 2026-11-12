@@ -83,6 +83,14 @@ pub enum Operation {
         generation: String,
         from: Phase,
         job_id: String,
+        /// The kolla-ansible ref the coordinator resolved for the farm's release, such as
+        /// `unmaintained/2025.1`. The agent's own process never reads the release catalog,
+        /// so a coordinator built before this field sends none and the install script falls
+        /// back to `stable/<release>`. An older agent never sees such a request: the
+        /// coordinator checks the agent's build first, and `deny_unknown_fields` would
+        /// refuse the field anyway.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reference: Option<String>,
     },
     /// Follow a host-side job this coordinator started, skipping the first `offset` progress
     /// frames it already received, until the job's result.
@@ -462,8 +470,13 @@ pub enum Reply {
     Frozen {
         snapshot: FrozenSnapshot,
     },
+    /// The host as an inspection reports it: the answer to `Inspect`, and to `VerifyVm`, whose
+    /// verification boot updates `mtty_available` and `gpu_kernel`. Agents built before
+    /// `VerifyVm` answered with this reply send `Done`; the coordinator then re-inspects and
+    /// has no verification evidence. Boxed because an inspection is far larger than any other
+    /// reply, and every frame on the wire carries one reply.
     Inspection {
-        inspection: super::HostInspection,
+        inspection: Box<super::HostInspection>,
     },
     Imported {
         snapshot: ImportedSnapshot,
@@ -572,6 +585,9 @@ pub enum TerminalFrame {
         rows: u16,
         cols: u16,
     },
+    /// The coordinator is done writing: EOF for the shell's stdin, while the session stays
+    /// open until the shell exits. Closing the channel instead means the client left.
+    Eof,
 }
 
 #[cfg(test)]
@@ -631,6 +647,44 @@ mod tests {
             generation: "g".into(),
         };
         assert!(deliver(frame, &delete, Some(&sink)).is_err());
+    }
+
+    #[test]
+    fn a_deploy_request_from_before_the_resolved_ref_still_parses() {
+        // An older coordinator sends no ref, and the agent deploys as it did before.
+        let legacy: Request = serde_json::from_str(
+            r#"{"version":1,"coordinator_id":"c","operation":{"operation":"deploy","farm_id":"f","generation":"g","from":"install","job_id":"j"}}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            legacy.operation,
+            Operation::Deploy {
+                reference: None,
+                ..
+            }
+        ));
+        // A new coordinator's request carries it, and the agent reads the same value back.
+        let request = Request {
+            version: VERSION,
+            coordinator_id: "c".into(),
+            operation: Operation::Deploy {
+                farm_id: "f".into(),
+                generation: "g".into(),
+                from: Phase::Install,
+                job_id: "j".into(),
+                reference: Some("unmaintained/2025.1".into()),
+            },
+        };
+        let encoded = serde_json::to_string(&request).unwrap();
+        assert!(encoded.contains(r#""reference":"unmaintained/2025.1""#));
+        let decoded: Request = serde_json::from_str(&encoded).unwrap();
+        assert!(matches!(
+            decoded.operation,
+            Operation::Deploy {
+                reference: Some(reference),
+                ..
+            } if reference == "unmaintained/2025.1"
+        ));
     }
 
     #[test]

@@ -14,6 +14,10 @@ kolla_test_images: true
 # msb keeps the guest clock in step with the host; there is no NTP daemon to detect.
 prechecks_enable_host_ntp_checks: false
 
+# The guest kernel has no module loading (/proc/modules is absent) and ip6_tables is built
+# in. 2025.1 and 2025.2 would otherwise `modprobe` Neutron's default modules and fail the
+# deploy's last play; every other service that loads one is off or patched.
+neutron_modules_default: []
 # The API services bind directly to this VM; SDK port mappings expose them.
 enable_keepalived: false
 enable_haproxy: false
