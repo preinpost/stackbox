@@ -307,7 +307,7 @@ pub async fn freeze_control(
 /// Refuses a farm with instances, asking with the OpenStack CLI and admin credentials the
 /// deploy installs on the control VM.
 const NO_SERVERS: &str = r#"set -euo pipefail
-if [ -x /opt/osc/bin/openstack ] && [ -r /etc/kolla/admin-openrc.sh ] && docker ps --format '{{.Names}}' | grep -qx nova_api; then
+if [ -x /opt/osc/bin/openstack ] && [ -r /etc/kolla/admin-openrc.sh ] && docker ps --format '{{.Names}}' | grep -x nova_api >/dev/null; then
   . /etc/kolla/admin-openrc.sh
   ids=$(/opt/osc/bin/openstack server list --all-projects -f value -c ID)
   n=$(echo "$ids" | grep -c . || true)
@@ -420,7 +420,7 @@ pub async fn freeze_compute(
 /// Docker's units, kept off in a compute template until its identity is wiped.
 const DOCKER_UNITS: &str = "docker.service docker.socket";
 
-const NO_INSTANCES: &str = r#"if docker ps --format '{{.Names}}' | grep -qx nova_libvirt; then
+const NO_INSTANCES: &str = r#"if docker ps --format '{{.Names}}' | grep -x nova_libvirt >/dev/null; then
   n=$(docker exec nova_libvirt virsh list --all --name | grep -c . || true)
   if [ "$n" != 0 ]; then
     echo "$n instance(s) run on this compute; delete them before freezing it as a template" >&2
@@ -476,7 +476,7 @@ async fn start_with_links(name: &str, units: &str) -> Result<()> {
     // farm-identity ran without farm0 at boot, so publish the ports again once it exists.
     run_in(
         name,
-        &format!("for dev in farm0 farm1; do if ip -d link show $dev 2>/dev/null | grep -qw dummy; then ip link del $dev; fi; done\nsystemctl enable --now {units} && systemctl restart farm-identity farm-hostname"),
+        &format!("for dev in farm0 farm1; do if ip -d link show $dev 2>/dev/null | grep -w dummy >/dev/null; then ip link del $dev; fi; done\nsystemctl enable --now {units} && systemctl restart farm-identity farm-hostname"),
     )
     .await
 }

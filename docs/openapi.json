@@ -781,6 +781,310 @@
         }
       }
     },
+    "/api/v1/farms/{id}/gpu/guest-script": {
+      "get": {
+        "tags": [],
+        "operationId": "gpu_guest_script",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The fake nvidia-smi script, ready to install as /usr/bin/nvidia-smi",
+            "content": {
+              "text/x-shellscript": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/farms/{id}/gpu/user-data": {
+      "get": {
+        "tags": [],
+        "operationId": "gpu_user_data",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A user-data installer for images that do not apply Nova vendor data (CirrOS): it writes the fake nvidia-smi and prints its XML to the console",
+            "content": {
+              "text/x-shellscript": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/farms/{id}/instances": {
+      "get": {
+        "tags": [],
+        "operationId": "instances",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Nova servers in the farm, with each flavor's GPU resource classes and the load farm applied",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/FarmInstance"
+                  }
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Not a deployed GPU farm, or Nova is not part of it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/farms/{id}/instances/{server}/gpu-load": {
+      "get": {
+        "tags": [],
+        "operationId": "gpu_load",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "server",
+            "in": "path",
+            "description": "Nova server UUID, or a unique instance name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The load for the instance; a server without one shows the default with applied=false",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GpuLoadView"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [],
+        "operationId": "set_gpu_load",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "server",
+            "in": "path",
+            "description": "Nova server UUID, or a unique instance name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GpuLoad"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The load was written to the instance's metadata; the guest sees it within about 15 seconds",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GpuLoadView"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [],
+        "operationId": "clear_gpu_load",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "server",
+            "in": "path",
+            "description": "Nova server UUID, or a unique instance name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The metadata is removed; the guest returns to its default at the next metadata refresh",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GpuLoadView"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/farms/{id}/logs": {
       "get": {
         "tags": [],
@@ -1462,6 +1766,8 @@
     "/api/v1/hosts/{id}/agent": {
       "post": {
         "tags": [],
+        "summary": "Install only the agent, without msb, the farm kernel or a verification boot.",
+        "description": "Deprecated: `POST /hosts/{id}/prepare` installs the agent too, after the kernel and the\nverification VM, so the portal offers one button. This endpoint stays for older callers.",
         "operationId": "install_agent",
         "parameters": [
           {
@@ -1494,7 +1800,8 @@
               }
             }
           }
-        }
+        },
+        "deprecated": true
       }
     },
     "/api/v1/hosts/{id}/check": {
@@ -2836,6 +3143,17 @@
           "external_host": {
             "type": "string"
           },
+          "gpu": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/GpuConfig",
+                "description": "A virtual GPU on every compute VM (see [`GpuConfig`])."
+              }
+            ]
+          },
           "host_id": {
             "type": [
               "string",
@@ -3110,6 +3428,76 @@
           }
         }
       },
+      "FarmInstance": {
+        "type": "object",
+        "description": "A virtual GPU instance as the portal's load editor lists it. `gpu_count` comes\nfrom the flavor's resource class (or 1 when it asks for none, because the guest\nscript defaults to one virtual GPU).",
+        "required": [
+          "id",
+          "name",
+          "status",
+          "flavor",
+          "gpu_count",
+          "resources",
+          "applied"
+        ],
+        "properties": {
+          "applied": {
+            "type": "boolean",
+            "description": "Whether the instance's metadata currently carries `farm_gpu_*`."
+          },
+          "flavor": {
+            "type": "string"
+          },
+          "gpu_count": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Virtual GPUs the flavor asks for, 0 when it asks for no GPU resource.",
+            "minimum": 0
+          },
+          "id": {
+            "type": "string"
+          },
+          "load": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/GpuLoad",
+                "description": "The load farm applied, or one decoded from the instance's metadata after a\ncoordinator lost its state."
+              }
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "project": {
+            "type": "string"
+          },
+          "properties": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The `farm_gpu_*` keys currently set on the instance."
+          },
+          "resources": {
+            "type": "object",
+            "description": "Resource classes the flavor requires, `VGPU: 1`.",
+            "additionalProperties": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "status": {
+            "type": "string"
+          }
+        }
+      },
       "FarmLayout": {
         "type": "string",
         "description": "The layout of a farm without computes, kept readable for farms and snapshots made\nbefore every new farm ran a control VM with computes.",
@@ -3259,6 +3647,16 @@
               "type": "string"
             }
           },
+          "gpu_loads": {
+            "type": "object",
+            "description": "Virtual GPU loads the portal applied, by Nova server UUID. The guest reads the\nsame values from instance metadata; this copy keeps the pattern the portal shows\nafter a coordinator restart. A farm restored from a snapshot recovers the load\nfrom the instance's metadata instead.",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/GpuLoad"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
           "host_id": {
             "type": [
               "string",
@@ -3396,6 +3794,219 @@
           }
         ],
         "description": "A farm as the API returns it: the stored record plus the release facts the portal labels the\nfarm with. Only the record is kept; the release comes from the release tables, so the names\nlive in one place and a farm's state stays what it was created with."
+      },
+      "GpuConfig": {
+        "type": "object",
+        "description": "A farm's GPU: `count` virtual devices on every compute VM.\n\nThe `simulated` mode's provider layout is farm's own, so a request can describe the\ncontract another deployment's flavor expects: the resource class, the traits it requires\nand how many cards the host has. `mtty` advertises what Nova finds and takes none of them.",
+        "properties": {
+          "count": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Devices per compute VM, 1-[`MAX_GPU_COUNT`].",
+            "maximum": 24,
+            "minimum": 1
+          },
+          "devices": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Fake physical GPUs each compute advertises its virtual GPUs on, one child resource\nprovider each, as a vGPU host has one per card. Two devices make a flavor's request\nland on a card rather than on a host. Omitted: one.",
+            "maximum": 24,
+            "minimum": 1
+          },
+          "mode": {
+            "$ref": "#/components/schemas/GpuMode"
+          },
+          "resource_class": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The resource class the flavor asks for. Omitted: [`DEFAULT_RESOURCE_CLASS`]. `PGPU`\nand `CUSTOM_*` build another deployment's contract; the inventory is farm's either\nway, so no driver checks it.",
+            "example": "VGPU"
+          },
+          "traits": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Traits the flavor requires besides the resource class. Omitted, `simulated` requires\n[`DEFAULT_VGPU_TRAIT`]; `mtty` requires none, because Nova builds that provider."
+          }
+        },
+        "additionalProperties": false
+      },
+      "GpuKernel": {
+        "type": "object",
+        "description": "What the guest kernel of a verification VM reported about the GPU stack. Every flag is\nread inside that VM, so it says the kernel came up with the feature, not that the host\nhas a module for it: farm's kernel is built with VFIO and mdev included.",
+        "properties": {
+          "kernel": {
+            "$ref": "#/components/schemas/GpuKernelKind"
+          },
+          "kernel_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Installed kernel's id: the directory name under `~/.local/share/farm/libkrunfw`."
+          },
+          "kernel_release": {
+            "type": "string",
+            "description": "`uname -r` in the guest."
+          },
+          "mdev_types": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MdevType"
+            },
+            "description": "Every mediated device type the guest kernel offers, as in\n`/sys/class/mdev_bus/*/mdev_supported_types/*`."
+          },
+          "mtty_registered": {
+            "type": "boolean",
+            "description": "`/sys/class/mdev_bus/mtty` exists in the guest: the sample parent device registered."
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the stock kernel booted although a kernel is installed, such as one built for\nanother msb."
+          },
+          "vfio": {
+            "type": "boolean",
+            "description": "`/dev/vfio/vfio` exists in the guest."
+          },
+          "vfio_mdev": {
+            "type": "boolean",
+            "description": "`/sys/class/mdev_bus` exists in the guest, so the mdev bus registered."
+          }
+        }
+      },
+      "GpuKernelKind": {
+        "type": "string",
+        "description": "The kernel a verification VM booted: farm's installed kernel, or microsandbox's stock one.",
+        "enum": [
+          "custom",
+          "stock"
+        ]
+      },
+      "GpuLoad": {
+        "type": "object",
+        "description": "The load a portal sets on one instance. farm turns it into a sample table and\nwrites it to the instance's Nova metadata; the guest script reads that table.\nNothing computes on the values: this exists to exercise monitoring paths.",
+        "properties": {
+          "max": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Highest utilization, percent.",
+            "default": 90,
+            "maximum": 100,
+            "minimum": 0
+          },
+          "memory_ratio": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Share of framebuffer memory reported as used, percent.",
+            "default": 30,
+            "maximum": 100,
+            "minimum": 0
+          },
+          "min": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Lowest utilization, percent.",
+            "default": 10,
+            "maximum": 100,
+            "minimum": 0
+          },
+          "pattern": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/GpuPattern"
+              }
+            ],
+            "default": "sine"
+          },
+          "period_s": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Seconds in one full pattern.",
+            "default": 60,
+            "maximum": 3600,
+            "minimum": 1
+          },
+          "profile": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/GpuProfile"
+              }
+            ],
+            "default": "sim-8g"
+          }
+        },
+        "additionalProperties": false
+      },
+      "GpuLoadView": {
+        "type": "object",
+        "description": "One instance's load plus the metadata keys farm found on it.",
+        "required": [
+          "server",
+          "load",
+          "applied",
+          "properties"
+        ],
+        "properties": {
+          "applied": {
+            "type": "boolean"
+          },
+          "load": {
+            "$ref": "#/components/schemas/GpuLoad"
+          },
+          "properties": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "`farm_gpu_*` keys currently set on the instance."
+          },
+          "server": {
+            "type": "string"
+          }
+        }
+      },
+      "GpuMode": {
+        "type": "string",
+        "description": "How a farm gets a GPU when the host has none. Both modes are virtual devices: no guest\nsees a real GPU, and nothing computes on one.",
+        "enum": [
+          "simulated",
+          "mtty"
+        ]
+      },
+      "GpuPattern": {
+        "type": "string",
+        "description": "How a virtual GPU's utilization moves through one period. farm samples the\npattern into a small table; the guest picks a sample from the current second, so\nthe guest needs no trigonometry and the portal's preview draws the same table.",
+        "enum": [
+          "constant",
+          "sine",
+          "triangle",
+          "square",
+          "sawtooth",
+          "random",
+          "spike"
+        ]
+      },
+      "GpuProfile": {
+        "type": "string",
+        "description": "The memory, power and clock envelope a virtual GPU reports. The guest derives\nutilization, temperature, fan speed and the remaining clocks from its load sample\nwith integer arithmetic, so one profile name is all the metadata carries.",
+        "enum": [
+          "sim-8g",
+          "sim-16g",
+          "sim-40g",
+          "sim-80g"
+        ]
       },
       "HostCapacity": {
         "type": "object",
@@ -3545,6 +4156,20 @@
           "compatible": {
             "type": "boolean"
           },
+          "custom_kernel": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`FARM_LIBKRUNFW_PATH` the host's agent boots farm VMs from, or the kernel host\npreparation installed under `~/.local/share/farm/libkrunfw`; absent for the stock kernel."
+          },
+          "custom_kernel_reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why an installed kernel was found but is not used, such as one built for another msb."
+          },
           "disk_available_mib": {
             "type": "integer",
             "format": "int64",
@@ -3556,6 +4181,17 @@
           "golden_image_available": {
             "type": "boolean",
             "description": "This build's golden image is built; otherwise the first farm on the host builds it."
+          },
+          "gpu_kernel": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/GpuKernel",
+                "description": "What the verification VM read from its own kernel about the GPU stack. Our kernel\ncarries VFIO, mdev and the `mtty` sample driver built in, so there are no modules to\nload; these fields say whether those built-in features came up in the booted guest.\nAbsent until a preparation from a coordinator that probes them."
+              }
+            ]
           },
           "kvm_available": {
             "type": "boolean"
@@ -3578,6 +4214,10 @@
               "string",
               "null"
             ]
+          },
+          "mtty_available": {
+            "type": "boolean",
+            "description": "The farm kernel ran the host's verification VM and exposed the `mtty` mediated\ndevice type, which an OpenStack 2025.1 or newer `mtty` GPU farm binds as a vGPU."
           },
           "os": {
             "type": "string"
@@ -4024,6 +4664,23 @@
           }
         }
       },
+      "MdevType": {
+        "type": "object",
+        "required": [
+          "name",
+          "available_instances"
+        ],
+        "properties": {
+          "available_instances": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
       "NodeSnapshot": {
         "type": "object",
         "description": "One VM's disks in a multi-node snapshot.",
@@ -4157,6 +4814,17 @@
             "description": "Includes both container disks for each container host. Sparse disks consume less initially.",
             "minimum": 0
           },
+          "gpu": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/GpuConfig",
+                "description": "The virtual GPU every compute VM offers; absent on farms without one, and on plans\nrecorded before the option existed."
+              }
+            ]
+          },
           "memory_mib": {
             "type": "integer",
             "format": "int64",
@@ -4211,6 +4879,18 @@
             "description": "Compute VMs beside a control VM, 1-3. A farm always runs Nova and Neutron; a\nrequest with none is refused, as are the legacy layouts below.",
             "default": 0,
             "minimum": 0
+          },
+          "gpu": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/GpuConfig",
+                "description": "A virtual GPU on every compute VM; omitted for none. Not hardware: see [`GpuConfig`]."
+              }
+            ],
+            "default": null
           },
           "layout": {
             "oneOf": [
@@ -4600,6 +5280,17 @@
           },
           "external_host": {
             "type": "string"
+          },
+          "gpu": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/GpuConfig",
+                "description": "A virtual GPU on every compute VM (see [`GpuConfig`]); only a clean install can take\none, because a template's VMs boot with the plan they were frozen with."
+              }
+            ]
           },
           "host_id": {
             "type": [

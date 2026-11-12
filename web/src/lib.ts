@@ -255,7 +255,8 @@ export function hostReady(host: RemoteHost, coordinatorBuildId?: string) {
     !agentBuildMismatch(host.agent?.artifact, coordinatorBuildId)
   );
 }
-/** What still stands between the host and a new farm. */
+/** What still stands between the host and a new farm. Preparation installs the runner,
+ * the farm kernel and the verification VM in one job, so there is one button to press. */
 export function hostNotice(host: RemoteHost, coordinatorBuildId?: string) {
   if (host.kind === "local")
     return "Hosts에서 로컬 호스트를 점검하고 환경 준비를 마치세요. msb 0.7.13이 필요합니다.";
@@ -264,10 +265,25 @@ export function hostNotice(host: RemoteHost, coordinatorBuildId?: string) {
       ? "Hosts에서 이 호스트를 점검하고 환경 준비를 마치세요. 호스트에 msb 0.7.13이 필요합니다."
       : "에이전트가 연결되어 있지 않습니다. 호스트에서 `farm agent connect`를 실행하세요.";
   if (agentBuildMismatch(host.agent?.artifact, coordinatorBuildId))
-    return "설치된 Farm 실행기가 이 coordinator와 다른 소스에서 빌드되었습니다. Coordinator는 시작할 때 현재 실행기를 자동으로 재설치합니다. 실패했다면 `task agent-build` 후 Coordinator를 재시작하거나 Farm 실행기 재설치를 누르세요.";
+    return "설치된 Farm 실행기가 이 coordinator와 다른 소스에서 빌드되었습니다. 환경 준비를 다시 실행하면 이 빌드의 실행기로 바뀝니다. 그래도 실패하면 `task agent-build` 후 Coordinator를 재시작하세요.";
   if (remoteAgentNeedsUpdate(host))
-    return "설치된 Farm 실행기는 단일 VM 생성을 지원하지 않습니다. Hosts에서 최신 Farm 실행기를 설치하세요. 기존 Farm의 조회와 삭제는 계속 사용할 수 있습니다.";
-  return "Hosts에서 환경 준비와 단일 VM용 Farm 실행기 설치를 완료하세요.";
+    return "설치된 Farm 실행기는 단일 VM 생성을 지원하지 않습니다. Hosts에서 환경 준비를 실행하면 최신 실행기까지 함께 설치합니다. 기존 Farm의 조회와 삭제는 계속 사용할 수 있습니다.";
+  return "Hosts에서 환경 준비를 실행하면 단일 VM Farm 실행기까지 함께 설치됩니다. 준비 상태를 확인하세요.";
+}
+/** The id of the kernel farm installed on a host: its directory under libkrunfw. */
+export const customKernelId = (path?: string | null) =>
+  path?.split("/").filter(Boolean).slice(-2, -1)[0];
+/** One line about the guest kernel a host runs, for places that explain the mtty gate. */
+export function hostKernelNote(host: RemoteHost) {
+  const inspection = host.inspection;
+  if (!inspection) return "호스트를 아직 점검하지 않았습니다.";
+  if (inspection.custom_kernel) {
+    const id = customKernelId(inspection.custom_kernel);
+    return `farm 커널${id ? ` ${id}` : ""}로 부팅합니다.`;
+  }
+  return inspection.custom_kernel_reason
+    ? `stock 커널로 부팅합니다: ${inspection.custom_kernel_reason}`
+    : "stock 커널로 부팅합니다. farm 커널을 설치하지 않았습니다.";
 }
 export const hostLabel = (host: RemoteHost) =>
   `${host.id} · ${host.kind === "local" ? "로컬" : host.kind === "agent" ? "에이전트" : "원격"}`;

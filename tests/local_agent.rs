@@ -86,3 +86,60 @@ fn the_farm_binary_looks_for_jobs_under_its_own_home() {
     assert!(!worker.status.success());
     assert!(String::from_utf8_lossy(&worker.stderr).contains("unknown on this host"));
 }
+
+/// Planning and schema commands run without microsandbox, so a path farm cannot use must
+/// not stop them; only the commands that boot VMs read the override as a path.
+#[test]
+fn a_bad_custom_kernel_path_only_fails_the_commands_that_boot_vms() {
+    let run = |args: &[&str]| {
+        std::process::Command::new(env!("CARGO_BIN_EXE_farm"))
+            .args(args)
+            .env(farm::kernel::LIBKRUNFW_VAR, "/nonexistent/libkrunfw.dylib")
+            .output()
+            .expect("run the farm binary")
+    };
+    for args in [
+        vec!["plan", "--components", "nova"],
+        vec!["catalog"],
+        vec!["openapi"],
+    ] {
+        let output = run(&args);
+        assert!(
+            output.status.success(),
+            "farm {} failed with a bad custom kernel: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    // A plan is host-free, so it takes `mtty` whatever kernel this machine has: the host
+    // that boots the VM is judged by its own inspection when the farm is created.
+    let output = run(&["plan", "--components", "nova", "--gpu", "mtty", "--json"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("mtty"));
+    // The same with no kernel at all, as on a coordinator that was never prepared.
+    let home = tempfile::tempdir().unwrap();
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_farm"))
+        .args(["plan", "--components", "nova", "--gpu", "mtty", "--json"])
+        .env_remove(farm::kernel::LIBKRUNFW_VAR)
+        .env("HOME", home.path())
+        .output()
+        .expect("run the farm binary");
+    assert!(
+        output.status.success(),
+        "a coordinator without a kernel cannot plan an mtty farm: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("mtty"));
+    // A command that boots a VM still reports the bad path instead of trying.
+    let output = run(&["golden", "--check"]);
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains(farm::kernel::LIBKRUNFW_VAR),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

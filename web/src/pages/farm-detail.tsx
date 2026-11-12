@@ -10,6 +10,7 @@ import {
   CheckCheck,
   Circle,
   CircleAlert,
+  CircuitBoard,
   Cpu,
   Database,
   Eye,
@@ -49,6 +50,7 @@ import {
   DeployFarmDialog,
 } from "../components/farm-actions";
 import { FreezeFarmDialog } from "../components/snapshot-actions";
+import { GpuLoadPanel } from "../components/gpu-load";
 import { FarmRelease, farmReleaseLabel } from "../components/farm-release";
 import { LogLines, LogViewer, useLogStream } from "../components/log-viewer";
 import {
@@ -316,6 +318,24 @@ export function FarmDetailPage({ id }: { id: string }) {
             </strong>
           </span>
         </div>
+        {farm.plan?.gpu && (
+          <div>
+            <CircuitBoard size={16} />
+            <span>
+              GPU
+              <strong>
+                {farm.plan.gpu.mode === "mtty" ? "mtty mdev" : "simulated"} ×
+                {farm.plan.gpu.count}
+                {farm.plan.gpu.mode === "simulated" &&
+                (farm.plan.gpu.devices ?? 1) > 1
+                  ? ` · 장치 ${farm.plan.gpu.devices}개`
+                  : ""}
+              </strong>
+              {/* The device is advertised and reserved, never computed on. */}
+              <span className="tag">가상 장치</span>
+            </span>
+          </div>
+        )}
       </div>
       <Tabs.Root
         value={tab}
@@ -335,6 +355,11 @@ export function FarmDetailPage({ id }: { id: string }) {
           <Tabs.Tab value="jobs" className="tab">
             Jobs<span className="count-pill">{history.length}</span>
           </Tabs.Tab>
+          {farm.status !== "deleted" && farm.plan?.gpu && (
+            <Tabs.Tab value="gpu" className="tab">
+              GPU 부하
+            </Tabs.Tab>
+          )}
           <Tabs.Tab value="shell" className="tab">
             Shell
           </Tabs.Tab>
@@ -355,6 +380,11 @@ export function FarmDetailPage({ id }: { id: string }) {
         <Tabs.Panel value="logs" className="tab-panel">
           <LogViewer id={id} />
         </Tabs.Panel>
+        {farm.status !== "deleted" && farm.plan?.gpu && (
+          <Tabs.Panel value="gpu" className="tab-panel">
+            <GpuLoadPanel farm={farm} />
+          </Tabs.Panel>
+        )}
         <Tabs.Panel value="jobs" className="tab-panel">
           <section className="panel">
             {jobs.error ? (

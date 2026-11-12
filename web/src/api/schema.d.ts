@@ -212,6 +212,70 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/v1/farms/{id}/gpu/guest-script": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get: operations["gpu_guest_script"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/v1/farms/{id}/gpu/user-data": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get: operations["gpu_user_data"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/v1/farms/{id}/instances": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get: operations["instances"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/v1/farms/{id}/instances/{server}/gpu-load": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get: operations["gpu_load"];
+    put: operations["set_gpu_load"];
+    post?: never;
+    delete: operations["clear_gpu_load"];
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/v1/farms/{id}/logs": {
     parameters: {
       query?: never;
@@ -413,6 +477,12 @@ export interface paths {
     };
     get?: never;
     put?: never;
+    /**
+     * Install only the agent, without msb, the farm kernel or a verification boot.
+     * @deprecated
+     * @description Deprecated: `POST /hosts/{id}/prepare` installs the agent too, after the kernel and the
+     *     verification VM, so the portal offers one button. This endpoint stays for older callers.
+     */
     post: operations["install_agent"];
     delete?: never;
     options?: never;
@@ -867,6 +937,7 @@ export interface components {
        */
       expires_at?: number | null;
       external_host?: string;
+      gpu?: null | components["schemas"]["GpuConfig"];
       /**
        * @description Registered host that runs the farm: this machine's local host or a remote one.
        *     Required; it is optional only so the error can say how to register one.
@@ -958,6 +1029,32 @@ export interface components {
       port_base: number;
     };
     /**
+     * @description A virtual GPU instance as the portal's load editor lists it. `gpu_count` comes
+     *     from the flavor's resource class (or 1 when it asks for none, because the guest
+     *     script defaults to one virtual GPU).
+     */
+    FarmInstance: {
+      /** @description Whether the instance's metadata currently carries `farm_gpu_*`. */
+      applied: boolean;
+      flavor: string;
+      /**
+       * Format: int32
+       * @description Virtual GPUs the flavor asks for, 0 when it asks for no GPU resource.
+       */
+      gpu_count: number;
+      id: string;
+      load?: null | components["schemas"]["GpuLoad"];
+      name: string;
+      project?: string;
+      /** @description The `farm_gpu_*` keys currently set on the instance. */
+      properties?: string[];
+      /** @description Resource classes the flavor requires, `VGPU: 1`. */
+      resources: {
+        [key: string]: number;
+      };
+      status: string;
+    };
+    /**
      * @description The layout of a farm without computes, kept readable for farms and snapshots made
      *     before every new farm ran a control VM with computes.
      * @enum {string}
@@ -1016,6 +1113,15 @@ export interface components {
       faults?: {
         [key: string]: components["schemas"]["Impair"];
       };
+      /**
+       * @description Virtual GPU loads the portal applied, by Nova server UUID. The guest reads the
+       *     same values from instance metadata; this copy keeps the pattern the portal shows
+       *     after a coordinator restart. A farm restored from a snapshot recovers the load
+       *     from the instance's metadata instead.
+       */
+      gpu_loads?: {
+        [key: string]: components["schemas"]["GpuLoad"];
+      };
       host_id?: string | null;
       id: string;
       /** Format: int64 */
@@ -1058,6 +1164,143 @@ export interface components {
     FarmView: components["schemas"]["FarmRecord"] & {
       openstack?: null | components["schemas"]["FarmOpenStack"];
     };
+    /**
+     * @description A farm's GPU: `count` virtual devices on every compute VM.
+     *
+     *     The `simulated` mode's provider layout is farm's own, so a request can describe the
+     *     contract another deployment's flavor expects: the resource class, the traits it requires
+     *     and how many cards the host has. `mtty` advertises what Nova finds and takes none of them.
+     */
+    GpuConfig: {
+      /**
+       * Format: int32
+       * @description Devices per compute VM, 1-[`MAX_GPU_COUNT`].
+       */
+      count?: number;
+      /**
+       * Format: int32
+       * @description Fake physical GPUs each compute advertises its virtual GPUs on, one child resource
+       *     provider each, as a vGPU host has one per card. Two devices make a flavor's request
+       *     land on a card rather than on a host. Omitted: one.
+       */
+      devices?: number | null;
+      mode?: components["schemas"]["GpuMode"];
+      /**
+       * @description The resource class the flavor asks for. Omitted: [`DEFAULT_RESOURCE_CLASS`]. `PGPU`
+       *     and `CUSTOM_*` build another deployment's contract; the inventory is farm's either
+       *     way, so no driver checks it.
+       * @example VGPU
+       */
+      resource_class?: string | null;
+      /**
+       * @description Traits the flavor requires besides the resource class. Omitted, `simulated` requires
+       *     [`DEFAULT_VGPU_TRAIT`]; `mtty` requires none, because Nova builds that provider.
+       */
+      traits?: string[] | null;
+    };
+    /**
+     * @description What the guest kernel of a verification VM reported about the GPU stack. Every flag is
+     *     read inside that VM, so it says the kernel came up with the feature, not that the host
+     *     has a module for it: farm's kernel is built with VFIO and mdev included.
+     */
+    GpuKernel: {
+      kernel?: components["schemas"]["GpuKernelKind"];
+      /** @description Installed kernel's id: the directory name under `~/.local/share/farm/libkrunfw`. */
+      kernel_id?: string | null;
+      /** @description `uname -r` in the guest. */
+      kernel_release?: string;
+      /**
+       * @description Every mediated device type the guest kernel offers, as in
+       *     `/sys/class/mdev_bus/*\/mdev_supported_types/*`.
+       */
+      mdev_types?: components["schemas"]["MdevType"][];
+      /** @description `/sys/class/mdev_bus/mtty` exists in the guest: the sample parent device registered. */
+      mtty_registered?: boolean;
+      /**
+       * @description Why the stock kernel booted although a kernel is installed, such as one built for
+       *     another msb.
+       */
+      reason?: string | null;
+      /** @description `/dev/vfio/vfio` exists in the guest. */
+      vfio?: boolean;
+      /** @description `/sys/class/mdev_bus` exists in the guest, so the mdev bus registered. */
+      vfio_mdev?: boolean;
+    };
+    /**
+     * @description The kernel a verification VM booted: farm's installed kernel, or microsandbox's stock one.
+     * @enum {string}
+     */
+    GpuKernelKind: "custom" | "stock";
+    /**
+     * @description The load a portal sets on one instance. farm turns it into a sample table and
+     *     writes it to the instance's Nova metadata; the guest script reads that table.
+     *     Nothing computes on the values: this exists to exercise monitoring paths.
+     */
+    GpuLoad: {
+      /**
+       * Format: int32
+       * @description Highest utilization, percent.
+       * @default 90
+       */
+      max: number;
+      /**
+       * Format: int32
+       * @description Share of framebuffer memory reported as used, percent.
+       * @default 30
+       */
+      memory_ratio: number;
+      /**
+       * Format: int32
+       * @description Lowest utilization, percent.
+       * @default 10
+       */
+      min: number;
+      /** @default sine */
+      pattern: components["schemas"]["GpuPattern"];
+      /**
+       * Format: int32
+       * @description Seconds in one full pattern.
+       * @default 60
+       */
+      period_s: number;
+      /** @default sim-8g */
+      profile: components["schemas"]["GpuProfile"];
+    };
+    /** @description One instance's load plus the metadata keys farm found on it. */
+    GpuLoadView: {
+      applied: boolean;
+      load: components["schemas"]["GpuLoad"];
+      /** @description `farm_gpu_*` keys currently set on the instance. */
+      properties: string[];
+      server: string;
+    };
+    /**
+     * @description How a farm gets a GPU when the host has none. Both modes are virtual devices: no guest
+     *     sees a real GPU, and nothing computes on one.
+     * @enum {string}
+     */
+    GpuMode: "simulated" | "mtty";
+    /**
+     * @description How a virtual GPU's utilization moves through one period. farm samples the
+     *     pattern into a small table; the guest picks a sample from the current second, so
+     *     the guest needs no trigonometry and the portal's preview draws the same table.
+     * @enum {string}
+     */
+    GpuPattern:
+      | "constant"
+      | "sine"
+      | "triangle"
+      | "square"
+      | "sawtooth"
+      | "random"
+      | "spike";
+    /**
+     * @description The memory, power and clock envelope a virtual GPU reports. The guest derives
+     *     utilization, temperature, fan speed and the remaining clocks from its load sample
+     *     with integer arithmetic, so one profile name is all the metadata carries.
+     * @enum {string}
+     */
+    GpuProfile: "sim-8g" | "sim-16g" | "sim-40g" | "sim-80g";
     HostCapacity: {
       /** Format: int64 */
       memory_budget_mib: number;
@@ -1096,11 +1339,19 @@ export interface components {
       /** Format: int64 */
       checked_at: number;
       compatible: boolean;
+      /**
+       * @description `FARM_LIBKRUNFW_PATH` the host's agent boots farm VMs from, or the kernel host
+       *     preparation installed under `~/.local/share/farm/libkrunfw`; absent for the stock kernel.
+       */
+      custom_kernel?: string | null;
+      /** @description Why an installed kernel was found but is not used, such as one built for another msb. */
+      custom_kernel_reason?: string | null;
       /** Format: int64 */
       disk_available_mib: number;
       docker_available: boolean;
       /** @description This build's golden image is built; otherwise the first farm on the host builds it. */
       golden_image_available: boolean;
+      gpu_kernel?: null | components["schemas"]["GpuKernel"];
       kvm_available: boolean;
       /** Format: int64 */
       memory_available_mib: number;
@@ -1108,6 +1359,11 @@ export interface components {
       memory_total_mib: number;
       msb_compatible: boolean;
       msb_version?: string | null;
+      /**
+       * @description The farm kernel ran the host's verification VM and exposed the `mtty` mediated
+       *     device type, which an OpenStack 2025.1 or newer `mtty` GPU farm binds as a vGPU.
+       */
+      mtty_available?: boolean;
       os: string;
       sudo_available: boolean;
       vm_boot_verified: boolean;
@@ -1266,6 +1522,11 @@ export interface components {
       /** Format: int64 */
       timestamp: number;
     };
+    MdevType: {
+      /** Format: int64 */
+      available_instances: number;
+      name: string;
+    };
     /** @description One VM's disks in a multi-node snapshot. */
     NodeSnapshot: {
       /** @description The VM it was taken from: `control`, `compute-1`, ... */
@@ -1321,6 +1582,7 @@ export interface components {
        * @description Includes both container disks for each container host. Sparse disks consume less initially.
        */
       disk_mib: number;
+      gpu?: null | components["schemas"]["GpuConfig"];
       /** Format: int64 */
       memory_mib: number;
       nodes: components["schemas"]["NodeSpec"][];
@@ -1343,6 +1605,8 @@ export interface components {
        * @default 0
        */
       computes: number;
+      /** @default null */
+      gpu: null | components["schemas"]["GpuConfig"];
       /** @default null */
       layout: null | components["schemas"]["FarmLayout"];
       /**
@@ -1472,6 +1736,7 @@ export interface components {
       /** Format: int64 */
       expires_at?: number | null;
       external_host?: string;
+      gpu?: null | components["schemas"]["GpuConfig"];
       /** @description Registered host of the control VM. Required; optional only for the error message. */
       host_id?: string | null;
       id: string;
@@ -2305,6 +2570,229 @@ export interface operations {
         };
         content: {
           "application/json": components["schemas"]["Endpoints"];
+        };
+      };
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorBody"];
+        };
+      };
+    };
+  };
+  gpu_guest_script: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description The fake nvidia-smi script, ready to install as /usr/bin/nvidia-smi */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "text/x-shellscript": string;
+        };
+      };
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorBody"];
+        };
+      };
+    };
+  };
+  gpu_user_data: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description A user-data installer for images that do not apply Nova vendor data (CirrOS): it writes the fake nvidia-smi and prints its XML to the console */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "text/x-shellscript": string;
+        };
+      };
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorBody"];
+        };
+      };
+    };
+  };
+  instances: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Nova servers in the farm, with each flavor's GPU resource classes and the load farm applied */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["FarmInstance"][];
+        };
+      };
+      /** @description Not a deployed GPU farm, or Nova is not part of it */
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorBody"];
+        };
+      };
+    };
+  };
+  gpu_load: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        id: string;
+        /** @description Nova server UUID, or a unique instance name */
+        server: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description The load for the instance; a server without one shows the default with applied=false */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["GpuLoadView"];
+        };
+      };
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorBody"];
+        };
+      };
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorBody"];
+        };
+      };
+    };
+  };
+  set_gpu_load: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        id: string;
+        /** @description Nova server UUID, or a unique instance name */
+        server: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["GpuLoad"];
+      };
+    };
+    responses: {
+      /** @description The load was written to the instance's metadata; the guest sees it within about 15 seconds */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["GpuLoadView"];
+        };
+      };
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorBody"];
+        };
+      };
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorBody"];
+        };
+      };
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorBody"];
+        };
+      };
+    };
+  };
+  clear_gpu_load: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        id: string;
+        /** @description Nova server UUID, or a unique instance name */
+        server: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description The metadata is removed; the guest returns to its default at the next metadata refresh */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["GpuLoadView"];
+        };
+      };
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorBody"];
         };
       };
       409: {

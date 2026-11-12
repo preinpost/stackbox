@@ -9,6 +9,13 @@ export type RelaySettings = Schema["RelaySettings"];
 export type Catalog = Schema["Catalog"];
 export type Plan = Schema["Plan"];
 export type ComputeSize = Schema["ComputeSize"];
+export type GpuConfig = Schema["GpuConfig"];
+export type GpuMode = Schema["GpuMode"];
+export type GpuLoad = Schema["GpuLoad"];
+export type GpuLoadView = Schema["GpuLoadView"];
+export type GpuPattern = Schema["GpuPattern"];
+export type GpuProfile = Schema["GpuProfile"];
+export type FarmInstance = Schema["FarmInstance"];
 export type FarmLayout = Schema["FarmLayout"];
 export type Phase = Schema["Phase"];
 export type Job = Schema["Job"];
@@ -99,6 +106,7 @@ export const keys = {
   farm: (id: string) => ["farms", id] as const,
   logs: (id: string) => ["logs", id] as const,
   endpoints: (id: string) => ["endpoints", id] as const,
+  gpuInstances: (id: string) => ["gpu-instances", id] as const,
 };
 export const farmsQuery = () =>
   queryOptions({
@@ -174,6 +182,14 @@ export const releasesQuery = (arch?: string) =>
       ),
     staleTime: 30_000,
   });
+/** The farm's Nova servers and their GPU loads; refreshed while a deploy changes them. */
+export const gpuInstancesQuery = (id: string) =>
+  queryOptions({
+    queryKey: keys.gpuInstances(id),
+    queryFn: ({ signal }) =>
+      request<FarmInstance[]>(`/farms/${encode(id)}/instances`, { signal }),
+    refetchInterval: 15_000,
+  });
 export const catalogQuery = () =>
   queryOptions({
     queryKey: ["catalog"],
@@ -199,6 +215,7 @@ export const api = {
       method: "PUT",
       body: JSON.stringify(body),
     }),
+  /** Deprecated endpoint: preparation installs the agent too. Kept for older callers. */
   installHostAgent: (id: string) =>
     request<HostJob>(`/hosts/${encode(id)}/agent`, { method: "POST" }),
   fingerprint: (address: string, port: number) =>
@@ -295,10 +312,16 @@ export const api = {
     computes = 1,
     signal?: AbortSignal,
     compute?: ComputeSize,
+    gpu?: GpuConfig,
   ) =>
     request<Plan>("/plans", {
       method: "POST",
-      body: JSON.stringify({ components, computes, compute }),
+      body: JSON.stringify({
+        components,
+        computes,
+        compute,
+        ...(gpu ? { gpu } : {}),
+      }),
       signal,
     }),
   /** No delay and no loss heals the VM. */
@@ -309,6 +332,23 @@ export const api = {
     }),
   endpoints: (id: string) =>
     request<ServiceEndpoints>(`/farms/${encode(id)}/endpoints`),
+  instances: (id: string) =>
+    request<FarmInstance[]>(`/farms/${encode(id)}/instances`),
+  gpuLoad: (id: string, server: string) =>
+    request<GpuLoadView>(
+      `/farms/${encode(id)}/instances/${encode(server)}/gpu-load`,
+    ),
+  /** Writes the sample table to the instance's Nova metadata. */
+  setGpuLoad: (id: string, server: string, load: GpuLoad) =>
+    request<GpuLoadView>(
+      `/farms/${encode(id)}/instances/${encode(server)}/gpu-load`,
+      { method: "PUT", body: JSON.stringify(load) },
+    ),
+  clearGpuLoad: (id: string, server: string) =>
+    request<GpuLoadView>(
+      `/farms/${encode(id)}/instances/${encode(server)}/gpu-load`,
+      { method: "DELETE" },
+    ),
   settle: (id: string) =>
     request<Job>(`/farms/${encode(id)}/settle`, { method: "POST" }),
   freeze: (farmId: string, body: SnapshotRequest) =>

@@ -203,7 +203,7 @@ systemctl daemon-reload
 # A VM booted with its links off (a restored snapshot) may have got farm-identity's dummy
 # farm0, which would keep the link from creating its TAP.
 for dev in {devs}; do
-  if ip -d link show "$dev" 2>/dev/null | grep -qw dummy; then ip link del "$dev"; fi
+  if ip -d link show "$dev" 2>/dev/null | grep -w dummy >/dev/null; then ip link del "$dev"; fi
 done
 systemctl enable {units}
 systemctl restart {units}

@@ -333,7 +333,9 @@ SSH 정보 등록·점검·msb/이미지 준비·실행기 설치를 거칩니�
 farm-agent에게만 VM 작업을 맡깁니다(원격은 SSH, 로컬 호스트는 같은 바이너리를 `farm agent`로 실행).
 준비된 호스트의 **이 호스트에 Farm 만들기**를 누르거나 Farm 생성 시 실행 호스트를 선택하면
 VM 1대의 생성·조회·Kolla 배포·삭제를 해당 호스트에서 실행합니다. Farm 안의 컴포넌트는 같은 VM을 공유합니다.
-로컬 호스트의 환경 준비는 msb 0.7.13을 설치하거나 낮은 버전을 업그레이드하고 시험 VM을 부팅합니다.
+로컬 호스트의 환경 준비는 msb 0.7.13을 설치하거나 낮은 버전을 업그레이드하고, farm 게스트 커널을
+설치한 뒤 그 커널로 시험 VM을 부팅해 VFIO·mdev·mtty까지 확인합니다. 실행기는 coordinator 자신이라
+따로 설치하지 않습니다.
 golden image는 아래 [Golden image](#golden-image)처럼 호스트의 첫 farm이 msb로 빌드합니다.
 **에이전트 호스트 등록**은 호스트의 agent가 coordinator로 먼저 접속하는 방식입니다. 등록하면 받는 토큰으로
 호스트에서 `FARM_AGENT_TOKEN=<token> farm agent connect https://<coordinator>`(Linux 서버는 `farm-agent connect`)를
@@ -363,13 +365,15 @@ sh scripts/build-agent.sh macos-aarch64    # 또는 x86_64, aarch64, windows-x86
 cargo run -- serve              # dist/agent 아래 모든 실행기를 읽음
 ```
 
-Hosts에서 환경 준비를 완료하면 실행기도 설치합니다. 이미 준비한 호스트는 `Farm 실행기 설치`를 누르세요.
+Hosts에서 환경 준비를 완료하면 실행기도 함께 설치합니다. 이미 준비한 호스트에서 실행기 버전이
+바뀌었거나 준비가 필요하면 **환경 준비**를 다시 실행하세요.
 실행기에는 빌드 리비전이 박혀 있어서 coordinator와 같은 소스로 빌드한 실행기만 설치합니다.
 `task dev`는 coordinator를 빌드한 뒤 그 build id가 릴리스되지 않았으면 `task agent-build`로 실행기 아티팩트도 만들고
 (소스가 그대로면 건너뜀, 릴리스된 build id면 R2의 실행기를 받으므로 빌드하지 않음),
 `farm serve`는 시작할 때 다른 빌드의 실행기가 설치된 SSH 호스트에 현재 실행기를 자동으로 다시 설치합니다.
 `task dev` 없이 coordinator만 다시 빌드했다면 `task agent-build` 후 재시작하세요. 버전이 다르면 Hosts
-체크리스트의 **Farm 실행기 버전**에 표시되고, 설치와 Farm 생성이 그 리비전을 안내하며 거절됩니다.
+체크리스트의 **Farm 실행기 버전**에 표시되고, **환경 준비**를 다시 실행하면 이 빌드의 실행기로 바뀝니다.
+설치와 Farm 생성이 그 리비전을 안내하며 거절됩니다.
 그다음 Farm 생성 화면의 `실행 호스트`에서 선택합니다. CLI는
 `farm create remote-demo --host-id worker-01 --external-host worker-01.example` 형태입니다.
 원격 호스트의 설치 조건·지문 검증·암호화 키 보관은 [docs/remote-hosts.md](docs/remote-hosts.md)를 참고하세요.
@@ -395,7 +399,8 @@ curl -N http://127.0.0.1:10010/api/v1/farms/demo/logs/stream
 | GET / POST | `/hosts` | 원격 호스트 목록 / SSH 정보 등록 (201) |
 | POST | `/hosts/fingerprint` | 인증 전에 서버 SHA256 지문 조회 |
 | GET / PUT / DELETE | `/hosts/{id}` | 호스트 상세 / 인증 정보 변경 / 등록 해제 |
-| POST | `/hosts/{id}/check`, `/hosts/{id}/prepare`, `/hosts/{id}/agent` | 점검 / 환경 준비 / 실행기 설치 job |
+| POST | `/hosts/{id}/check`, `/hosts/{id}/prepare` | 점검 / 환경 준비 job(`prepare`가 실행기까지 설치) |
+| POST | `/hosts/{id}/agent` | (deprecated) 실행기만 설치 job; `prepare`를 쓰세요 |
 | GET | `/host-jobs`, `/host-jobs/{id}` | 원격 호스트 작업과 단계 기록 |
 | GET | `/catalog` | 실제 지원 컴포넌트·프로필·제약 |
 | POST | `/plans` | 노드·게스트 메모리·디스크·경고 계산 |
@@ -540,6 +545,79 @@ msb 게스트 커널에는 모듈 로딩이 없고 openvswitch datapath, `xt_con
 게스트는 남는 램을 페이지 캐시로 채우므로 실제 사용량은 할당량의 합까지 늘어날 수 있습니다.
 디스크 계획에는 root disk와
 Docker/containerd용 ext4 디스크 두 개가 포함됩니다. sparse disk의 현재 사용량과는 다릅니다.
+
+### farm 게스트 커널(VFIO/mdev)
+
+msb의 기본 게스트 커널에는 모듈 로딩이 없고 VFIO·mdev도 들어 있지 않습니다. farm은 커널 설정
+조각(`scripts/libkrunfw/fragments/`)을 얹은 libkrunfw를 빌드해 **기본 게스트 커널**로 씁니다.
+`vfio-mtty` 조각이 켜는 VFIO·VFIO_MDEV·VFIO_PCI·SAMPLES와 커널 샘플 `mtty` 드라이버로 게스트
+안에 `mtty-1` mdev 타입이 생기므로, Nova의 vGPU 경로를 실제 GPU 없이 시험할 수 있습니다.
+`neutron-netfilter` 조각은 Neutron L3 agent가 라우터마다 쓰는 CONNMARK(연결 mark 저장·복원)를
+켜서, 이 커널에서도 테넌트 라우터와 플로팅 IP가 동작하게 합니다.
+새 기능이 필요하면 조각 파일을 하나 더 넣으면 되고 빌드 스크립트는 고치지 않습니다.
+
+```bash
+task dev                          # 커널 빌드(실패해도 계속) + 데몬 + 포탈
+farm host local                   # 이 머신 준비: msb, farm 커널 설치, 검증 VM
+farm host list                    # local Local Ready · custom kernel …/libkrunfw/<id>/… · kernel 6.12.113 · VFIO · mdev · mtty-1×24
+
+task libkrunfw                    # 이 머신용 커널만 빌드: target/libkrunfw/<arch>/
+task libkrunfw:all                # aarch64와 x86_64 (호스트와 다른 쪽은 크로스 컴파일)
+sh scripts/build-libkrunfw.sh --list-fragments   # 조각 목록과 각 조각의 목적
+```
+
+호스트 준비는 그 호스트의 `~/.local/share/farm/libkrunfw/<id>/`에 커널을 설치합니다(`id`는
+manifest의 sha256 앞 16자). coordinator와 각 호스트의 farm-agent는 시작할 때 이 설치를 찾아
+microsandbox SDK에 msb와 라이브러리 짝을 넣습니다. `~/.microsandbox`는 건드리지 않습니다.
+SSH 호스트도 준비 단계에서 Linux `.so`를 같은 방식으로 업로드하고 sha256을 확인합니다.
+manifest에 적힌 `msb`가 호스트의 msb와 다르면 stock 커널로 부팅하고 그 이유를 호스트 정보의
+`custom_kernel_reason`과 `farm host list`에 남깁니다.
+
+조각은 커널 `.config` 문법 그대로(`=y`, 문자열·숫자 값, `# CONFIG_... is not set`) 쓰고,
+아키텍처 전용 설정은 `<name>.<arch>.config`에 둡니다. 빌드는 `olddefconfig` 뒤에 모든 조각의 모든
+줄이 최종 `.config`에 남았는지 확인하고, 하나라도 바뀌면 어떤 조각의 어떤 줄이 무엇으로 바뀌었는지
+보여 주며 실패합니다. 두 조각이 같은 심볼에 다른 값을 적으면 빌드 전에 멈춥니다.
+
+`FARM_LIBKRUNFW_PATH`는 최우선 override입니다. 저장소 밖에서 빌드한 커널을 한 프로세스에서만
+시험할 때 쓰고, `FARM_LIBKRUNFW_DIR`은 빌드 산출물 디렉터리를 바꿉니다. `task libkrunfw:path`는
+이 머신이 빌드한 커널 경로를 출력합니다. Docker가 없으면 커널 빌드를 건너뛰고 farm은 stock
+커널로 동작하며(mtty 불가), 그 사실이 호스트 정보에 나옵니다. 릴리스 바이너리가 커널을 버킷에서
+받아 오는 배포 훅은 아직 없습니다([docs/libkrunfw.md](docs/libkrunfw.md)의 TODO).
+
+### GPU(가상 장치)
+
+farm에는 실제 GPU가 없습니다. 그래도 Nova가 GPU를 스케줄링하는 경로를 시험할 수 있도록 가상 장치
+두 가지를 제공합니다. `simulated`는 일반적인 vGPU 배포와 같은 모양으로 compute마다 표준 `VGPU`
+인벤토리를 child resource provider에 광고하고(OpenStack 2025.1 이상, 게스트 장치 없음),
+`mtty`는 farm 커널의 `mtty` mdev를 `VGPU`로 붙입니다(2025.1 이상). 둘 다 연산하지 않습니다.
+`mtty`는 업스트림 Nova가 `mtty`를 아는 2026.2부터는 Nova 코드를 그대로 쓰고, 2025.1·2025.2·
+2026.1은 farm이 배포 때 Nova에 넣는 백포트로 같은 경로를 씁니다(docs/gpu.md).
+
+```bash
+# 계약을 직접 정할 수도 있습니다: 가짜 GPU 장치 수와 flavor가 요구할 CUSTOM_* trait.
+farm plan --components nova --gpu simulated --gpu-count 4 --gpu-devices 2 --gpu-trait CUSTOM_MAAS
+```
+
+
+```bash
+farm plan --components nova --gpu simulated --gpu-count 2
+farm create demo-gpu --host-id local --components nova --gpu simulated --gpu-count 2
+farm deploy demo-gpu
+
+# mtty는 farm 커널이 준비된 호스트에서 바로 됩니다(위 `farm host local`).
+farm create demo-vgpu --host-id local --components nova --gpu mtty
+farm deploy demo-vgpu
+```
+
+GPU farm의 인스턴스에는 실제 GPU 없이 `nvidia-smi`를 흉내 내는 게스트 스크립트가 설치되고,
+포탈의 **GPU 부하** 탭에서 프로파일·패턴·주기·메모리 비율을 조절할 수 있습니다. Telegraf
+`inputs.nvidia_smi`나 `nvidia-smi --query-gpu=... --format=csv` 같은 모니터링 경로를 그대로
+시험할 수 있습니다. 게스트 설치는 cloud-init 이미지에 vendordata로 자동으로 되고, CirrOS는
+user-data 설치 스크립트를 씁니다. 지원 명령·메타데이터 형식·반영 지연·한계는
+[docs/gpu.md](docs/gpu.md#가짜-nvidia-smi와-부하-제어)에 정리했습니다.
+
+GPU farm은 템플릿(스냅샷) 대신 클린 설치하고, GPU farm의 control VM은 control 템플릿으로 얼릴 수
+없습니다. 릴리스별 조건·배포가 쓰는 설정·한계는 [docs/gpu.md](docs/gpu.md)에 정리했습니다.
 
 ## 코드와 검증
 

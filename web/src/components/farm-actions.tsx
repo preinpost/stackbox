@@ -38,6 +38,7 @@ import {
   snapshotsQuery,
   type ComputeSize,
   type Farm,
+  type GpuMode,
   type Job,
   type Phase,
   type ReleaseCreateRequest,
@@ -46,6 +47,7 @@ import {
 } from "../api/client";
 import {
   componentInfo,
+  hostKernelNote,
   hostLabel,
   hostNotice,
   hostReady,
@@ -71,6 +73,11 @@ import {
   SelectInput,
 } from "./ui";
 import { archName, releaseLabel, runsOn, sourceLabel } from "./release-create";
+
+/** A `year.release` at least `min`; a legacy series name never is. */
+function releaseAtLeast(release: string | undefined, min: string) {
+  return !!release && /^\d{4}\.\d+$/.test(release) && release >= min;
+}
 
 async function refresh(client: ReturnType<typeof useQueryClient>) {
   await Promise.all([
@@ -257,6 +264,13 @@ export function CreateFarmForm({
   const [setup, setSetup] = useState("1");
   const computes = Number(setup);
   const [sizeIndex, setSizeIndex] = useState(0);
+  // A virtual GPU on every compute; "none" means the farm has none.
+  const [gpuMode, setGpuMode] = useState<GpuMode | "none">("none");
+  const [gpuCount, setGpuCount] = useState("1");
+  // A simulated GPU's own contract: how many fake cards the virtual GPUs sit on, and the
+  // traits its flavor requires.
+  const [gpuDevices, setGpuDevices] = useState("1");
+  const [gpuTraits, setGpuTraits] = useState("CUSTOM_FARM_VGPU");
   // Compute VMs placed on another host than the control VM's (`compute-2` → host id).
   const [placed, setPlaced] = useState<Record<string, string>>({});
   const compute = computeSizes[sizeIndex].size;
@@ -303,6 +317,71 @@ export function CreateFarmForm({
         host !== hostId && Number(node.slice("compute-".length)) <= computes,
     ),
   );
+  // The simulated mode writes Placement providers itself, which needs a provider with a
+  // parent (microversion 1.14, long before 2025.1); the mtty mdev path needs every
+  // compute's host to boot the custom kernel, and farm patches Nova's driver on the
+  // releases before 2026.2. A GPU is a virtual device, never hardware. The coordinator
+  // checks the same set of hosts when the farm is created (src/manager/mod.rs), so the
+  // form asks each compute's host, not the control's.
+  const mttyHosts = new Set(
+    (hosts.data ?? [])
+      .filter((h) => h.inspection?.mtty_available === true)
+      .map((h) => h.id),
+  );
+  const computeHostIds = Array.from(
+    { length: computes },
+    (_, i) => placement[`compute-${i + 1}`] ?? hostId,
+  );
+  const mttyHost =
+    computes > 0 && computeHostIds.every((id) => !!id && mttyHosts.has(id));
+  // 2025.1 is the oldest release farm supports: its Placement takes a provider with a
+  // parent, and farm's Nova backport gives it the mediated device.
+  const gpuModeMinRelease = "2025.1";
+  const gpuModeRelease = releaseAtLeast(release, gpuModeMinRelease);
+  const gpuCountShown = Math.max(1, Math.min(24, Number(gpuCount) || 1));
+  const gpuDevicesShown = Math.max(
+    1,
+    Math.min(gpuCountShown, Number(gpuDevices) || 1),
+  );
+  const gpuTraitsShown = gpuTraits
+    .split(",")
+    .map((trait) => trait.trim())
+    .filter(Boolean);
+  const gpu =
+    gpuMode !== "none" &&
+    computes > 0 &&
+    gpuModeRelease &&
+    (gpuMode !== "mtty" || mttyHost)
+      ? gpuMode === "simulated"
+        ? {
+            mode: gpuMode,
+            count: gpuCountShown,
+            ...(gpuDevicesShown > 1 ? { devices: gpuDevicesShown } : {}),
+            traits: gpuTraitsShown,
+          }
+        : { mode: gpuMode, count: gpuCountShown }
+      : undefined;
+  // What the request carries: a mode the release or a compute's host cannot express is not
+  // sent, and the notice below says why instead of leaving the select on a silent mismatch.
+  const gpuModeShown = gpu?.mode ?? "none";
+  const missingMttyHosts = Array.from(
+    new Set(
+      computeHostIds.filter((id): id is string => !!id && !mttyHosts.has(id)),
+    ),
+  );
+  // Why those hosts cannot bind an mtty vGPU now: their stored kernel and GPU probe say it.
+  const missingMttyNotes = missingMttyHosts
+    .map((id) => hosts.data?.find((h) => h.id === id))
+    .filter((h): h is RemoteHost => !!h)
+    .map((h) => `${h.id}: ${hostKernelNote(h)}`);
+  const gpuProblem =
+    gpuMode === "none" || gpu
+      ? undefined
+      : !gpuModeRelease
+        ? `GPU(${gpuMode})는 OpenStack ${gpuModeMinRelease} 이상에서만 됩니다. 이 릴리스로는 GPU 없이 farm을 만듭니다.`
+        : gpuMode === "mtty"
+          ? `compute 호스트(${missingMttyHosts.join(", ") || hostId})가 mtty 커널 검증을 마치지 않아 GPU 없이 farm을 만듭니다. ${missingMttyNotes.join(" ")} Hosts에서 환경 준비를 실행하면 farm 커널 설치와 검증 VM의 mtty 확인까지 한 번에 끝납니다.`
+          : undefined;
   const readyHosts = (hosts.data ?? []).filter((h) => hostReady(h, buildId));
   const canSpan =
     computes > 0 &&
@@ -314,8 +393,9 @@ export function CreateFarmForm({
     requested,
   );
   const plan = useQuery({
-    queryKey: ["plan", components, computes, compute],
-    queryFn: ({ signal }) => api.plan(components, computes, signal, compute),
+    queryKey: ["plan", components, computes, compute, gpu],
+    queryFn: ({ signal }) =>
+      api.plan(components, computes, signal, compute, gpu),
     enabled: catalog.isSuccess,
     staleTime: Infinity,
   });
@@ -338,6 +418,7 @@ export function CreateFarmForm({
             (_, i) => placement[`compute-${i + 1}`] ?? "",
           ),
           ...(compute ? { compute } : {}),
+          ...(gpu ? { gpu } : {}),
           external_host: hostName,
         }
       : undefined;
@@ -532,6 +613,83 @@ export function CreateFarmForm({
                 디스크 크기 안에 만들어지며, 처음 쓰는 디스크 크기는 호스트에서
                 golden image를 한 번 더 만듭니다(약 35초).
               </p>
+            </div>
+            <div>
+              <span className="field-label">GPU</span>
+              <div className="grid gap-3 sm:grid-cols-2">
+                <SelectInput
+                  value={gpuModeShown}
+                  onChange={(value) => setGpuMode(value as GpuMode | "none")}
+                  disabled={mutation.isPending}
+                  label="GPU 모드"
+                  items={[
+                    { value: "none", label: "없음" },
+                    {
+                      value: "simulated",
+                      label: "simulated · 표준 VGPU (2025.1+)",
+                      disabled: !releaseAtLeast(release, "2025.1"),
+                    },
+                    {
+                      value: "mtty",
+                      label: `mtty · 커널 mdev (2025.1+)${mttyHost ? "" : " · 호스트 준비 필요"}`,
+                      disabled: !releaseAtLeast(release, "2025.1") || !mttyHost,
+                    },
+                  ]}
+                />
+                {gpuModeShown !== "none" && (
+                  <label className="field">
+                    <span>GPU 수량 (compute마다)</span>
+                    <Input
+                      value={gpuCount}
+                      onValueChange={setGpuCount}
+                      className="input"
+                      type="number"
+                      min={1}
+                      max={24}
+                      required
+                      disabled={mutation.isPending}
+                    />
+                  </label>
+                )}
+                {gpuModeShown === "simulated" && (
+                  <>
+                    <label className="field">
+                      <span>가짜 GPU 장치 수 (compute마다)</span>
+                      <Input
+                        value={gpuDevices}
+                        onValueChange={setGpuDevices}
+                        className="input"
+                        type="number"
+                        min={1}
+                        max={gpuCountShown}
+                        disabled={mutation.isPending}
+                      />
+                    </label>
+                    <label className="field">
+                      <span>flavor가 요구할 trait (쉼표 구분)</span>
+                      <Input
+                        value={gpuTraits}
+                        onValueChange={setGpuTraits}
+                        className="input font-mono"
+                        type="text"
+                        placeholder="CUSTOM_FARM_VGPU"
+                        disabled={mutation.isPending}
+                      />
+                    </label>
+                  </>
+                )}
+              </div>
+              <p className="field-hint mt-2">
+                실제 GPU가 아닌 가상 장치입니다. simulated는 compute마다 표준
+                VGPU 리소스를 Placement에 광고하고 flavor로 예약만 하며 (게스트
+                장치 없음), mtty는 farm 커널의 mtty mdev를 VGPU로 붙여 게스트에
+                장치가 보입니다. GPU farm은 템플릿 대신 클린 설치합니다. 장치
+                수를 늘리면 가짜 카드마다 resource provider가 하나씩 생기고,
+                수량이 그 위에 나뉩니다.
+              </p>
+              {gpuProblem && (
+                <div className="warning-notice mt-2">{gpuProblem}</div>
+              )}
             </div>
             {canSpan && (
               <div>

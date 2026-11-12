@@ -38,15 +38,17 @@ EOL 시리즈를 opt-in으로 켜면 그 태그의 기본값(`ubuntu`)과 그 �
   정합니다. 사설 미러는 `FARM_EOL_REGISTRY`·`FARM_EOL_NAMESPACE`로 바꾸며, 값이 registry 경로에
   쓸 수 있는 문자(`[A-Za-z0-9._:/-]`)가 아니면 경고를 남기고 기본값을 씁니다.
 - 게스트는 Rocky 10과 Python 3.12입니다. 2024.1의 requirements에는 Ansible이 없어 설치 단계가
-  ansible-core 2.16을 넣고, 2024.2는 requirements의 ansible-core 2.16~2.18을 씁니다. 2025.1 이전
-  릴리스에는 호스트 OS precheck·SELinux·Neutron 모듈 호환 값이 globals에 들어갑니다.
+  ansible-core 2.16을 넣고, 2024.2는 requirements의 ansible-core 2.16~2.18을 씁니다. 게스트 커널은
+  모듈을 로드할 수 없으므로 모든 릴리스의 globals에 `neutron_modules_default: []`가 들어가고,
+  2025.1 이전 릴리스에는 호스트 OS precheck·SELinux 호환 값도 들어갑니다. 2025.1의 Kolla 이미지는
+  Rocky 9(Python 3.9)이고, 2025.2부터 Rocky 10(Python 3.12)입니다.
 - `arches`와 `ReleaseInfo.arm64`는 실제로 게시된 이미지를 따라야 합니다. farm은 arm64용으로
   배포판을 바꾸지 않으므로 2026.2 이전 릴리스는 amd64 전용입니다.
 
 ## 개발
 
 ```bash
-task dev                        # coordinator + 포탈 개발 서버
+task dev                        # coordinator + 포탈 개발 서버; 커널 빌드(Docker) 선행, 없으면 건너뜀
 cargo test
 cargo fmt --check
 cargo clippy --all-targets
@@ -57,3 +59,16 @@ cd web && npx vitest run
 - API 타입을 바꾸면 `farm openapi`로 `docs/openapi.json`을 다시 만들고
   `npm --prefix web run api:types`로 `web/src/api/schema.d.ts`를 갱신합니다.
 - `task golden`과 `task agent-build`는 실제 VM·Docker가 필요합니다.
+
+## 테스트와 셸 스크립트
+
+- coordinator와 agent 경계를 넘는 상태는 그 경계를 실제로 통과하는 테스트로 검증합니다. 로컬
+  agent는 요청마다 자식 프로세스로 뜨므로(`src/remote/link.rs`의 `ProcessLink`) agent 프로세스의
+  정적·메모리 상태는 다음 요청에 남지 않습니다. 검증 결과(`HostInspection.mtty_available` 등)는
+  응답(`Reply`)에 실어 coordinator가 저장해야 하며, 단위 테스트만으로는 이런 누락을 잡지 못합니다
+  (`src/manager/tests.rs`의 `agent_host_preparation_keeps_the_verification_replys_mtty_result`).
+- 생성 셸 스크립트와 `src/shell.rs` 래퍼는 `set -o pipefail` 아래에서 돕니다. 파이프 앞쪽이 아직
+  쓰는 중에 읽기를 일찍 끝내는 명령(`grep -q`, `head`, `grep -m`)은 쓰지 않습니다. 앞 명령(ssh,
+  docker 등)이 SIGPIPE로 끝나 파이프라인 전체가 실패하므로 `grep ... >/dev/null`을 쓰거나 출력을
+  변수에 담아 검사합니다. `src/kolla/mod.rs`의 mtty 검사와 그 테스트
+  `the_mtty_check_reads_the_libvirt_xml_to_the_end`가 이 형태입니다.

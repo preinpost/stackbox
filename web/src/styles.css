@@ -3902,6 +3902,36 @@ html[data-theme="dark"] .phase-current .phase-marker {
 .remote-checks li.check-missing svg {
   color: var(--bad);
 }
+/* 검증 VM이 읽은 커널·GPU 값: 체크리스트 아래에서 필요할 때만 펼친다. */
+.remote-kernel-detail {
+  margin: -2px 0 12px;
+  border-top: 1px dashed var(--line);
+  font-size: var(--fs-xs);
+  color: var(--ink-3);
+}
+.remote-kernel-detail summary {
+  cursor: pointer;
+  padding: 6px 0;
+  color: var(--ink-3);
+}
+.remote-kernel-detail summary:hover {
+  color: var(--ink-1);
+}
+.remote-kernel-detail .build-compare {
+  margin: 2px 0 8px;
+}
+.remote-kernel-detail code {
+  font-family: var(--font-mono);
+  overflow-wrap: anywhere;
+}
+.remote-kernel-detail .field-hint {
+  padding-bottom: 8px;
+}
+/* stock 커널로 부팅한 호스트는 이유와 함께 경고한다. */
+.remote-kernel-stock {
+  margin: -6px 0 10px;
+  color: var(--warn);
+}
 .remote-actions {
   display: flex;
   flex-wrap: wrap;
@@ -5819,4 +5849,110 @@ html[data-theme="dark"] .phase-current .phase-marker {
   line-height: 1.2;
   color: var(--ink-3);
   font-size: var(--fs-2xs);
+}
+
+/* GPU load: instances, their sample table, and the guest install help. */
+.gpu-panel-body {
+  display: grid;
+  gap: 14px;
+}
+.gpu-install {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-md);
+  background: var(--surface-2);
+}
+.gpu-install strong {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--fs-sm);
+}
+.gpu-install p {
+  margin-top: 4px;
+  max-width: 62ch;
+}
+.gpu-downloads {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.gpu-list {
+  display: grid;
+  gap: 12px;
+}
+.gpu-row {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-md);
+  background: var(--surface);
+}
+.gpu-row-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.gpu-row-head > div {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.gpu-editor {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 10px;
+}
+.gpu-editor .field {
+  gap: 6px;
+}
+.gpu-editor .field-label {
+  margin-bottom: 4px;
+}
+.gpu-preview {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+.gpu-preview > div {
+  display: grid;
+  gap: 2px;
+  min-width: 220px;
+}
+.gpu-spark {
+  width: 220px;
+  height: 48px;
+  flex: none;
+  border-radius: var(--r-sm);
+  background: var(--surface-2);
+}
+.gpu-spark polyline {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 2;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+.gpu-spark-axis {
+  stroke: var(--line-2);
+  stroke-width: 1;
+}
+.gpu-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.gpu-actions .field-hint {
+  max-width: 60ch;
 }

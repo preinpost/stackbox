@@ -604,3 +604,221 @@ test("labels releases by their templates and shows an assemble job's steps", () 
   expect(steps.textContent).toContain("1. 완료 · restore-");
   expect(steps.textContent).toContain("2. 진행 중");
 });
+
+/** Hosts of the GPU cases: `local` verified the custom kernel, `edge` did not. */
+const gpuHosts = (mtty: { local: boolean; edge: boolean }) => [
+  {
+    id: "local",
+    kind: "local",
+    address: "localhost",
+    ...ready,
+    inspection: {
+      checked_at: Date.now() / 1000,
+      custom_kernel: mtty.local ? "/srv/libkrunfw.5.dylib" : undefined,
+      mtty_available: mtty.local,
+    },
+  },
+  {
+    id: "edge",
+    kind: "ssh",
+    address: "10.0.0.21",
+    ...ready,
+    inspection: {
+      checked_at: Date.now() / 1000,
+      custom_kernel: mtty.edge ? "/srv/libkrunfw.5.dylib" : undefined,
+      mtty_available: mtty.edge,
+    },
+  },
+];
+
+const releases = (...list: string[]) => ({
+  arch: "aarch64",
+  releases: list.map((release, index) => ({
+    release,
+    local_control: index === 0 ? 1 : 0,
+    local_compute: 0,
+    bucket_control: 0,
+    bucket_compute: 0,
+    installable: true,
+  })),
+  unreachable: [],
+});
+
+/** `/releases/plan` answering with the plan of a farm made from `body`, as the portal shows. */
+const releasePlan = (previews: Record<string, unknown>[], offered: string[]) =>
+  vi.fn(async (path: string, options?: RequestInit) => {
+    if (path.endsWith("/releases")) return Response.json(releases(...offered));
+    if (path.endsWith("/releases/plan")) {
+      const body = JSON.parse(String(options?.body));
+      previews.push(body);
+      return Response.json({
+        ...plan(
+          Array.from(
+            { length: body.computes },
+            (_, i) => body.compute_hosts[i] || body.host_id,
+          ),
+        ),
+        release: body.release,
+      });
+    }
+    if (path.endsWith("/catalog")) return Response.json(catalog);
+    if (path.endsWith("/plans")) return Response.json(resourcePlan);
+    if (path.endsWith("/host"))
+      return Response.json({
+        build_id: "b",
+        relay_url: "https://relay.test",
+      });
+    if (path.endsWith("/hosts"))
+      return Response.json(gpuHosts({ local: true, edge: false }));
+    return Response.json([]);
+  });
+
+const combo = (name: string) => screen.getByRole("combobox", { name });
+const disabledOption = (option: HTMLElement) =>
+  option.getAttribute("aria-disabled") === "true" ||
+  option.hasAttribute("disabled") ||
+  option.dataset.disabled === "true";
+
+test("mtty is offered on every compute's host, not only the control VM's", async () => {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+  });
+  const previews: Record<string, unknown>[] = [];
+  vi.stubGlobal("fetch", releasePlan(previews, ["2026.2"]));
+  renderForm(client);
+  const user = userEvent.setup();
+  await user.type(screen.getByPlaceholderText("dev-openstack"), "gpu");
+  await user.click(combo("VM 구성"));
+  await user.click(
+    await screen.findByRole("option", { name: "Control + Compute 2대" }),
+  );
+  // Both computes run on the host that verified the custom kernel, so mtty is choosable.
+  await user.click(combo("GPU 모드"));
+  const mtty = await screen.findByRole("option", { name: /mtty/ });
+  expect(disabledOption(mtty)).toBe(false);
+  await user.click(mtty);
+  await waitFor(() =>
+    expect(previews.at(-1)).toMatchObject({
+      computes: 2,
+      gpu: { mode: "mtty", count: 1 },
+    }),
+  );
+  // The second compute on a host without the kernel takes mtty away, says which host, and
+  // the request goes out without a GPU instead of being refused.
+  await user.click(combo("compute-2 호스트"));
+  await user.click(
+    await screen.findByRole("option", { name: "compute-2 · edge · 원격" }),
+  );
+  await waitFor(() => expect(previews.at(-1)).not.toHaveProperty("gpu"));
+  expect(screen.getByText(/edge.*mtty 커널 검증을 마치지 않아/)).toBeTruthy();
+  expect(combo("GPU 모드").textContent).toContain("없음");
+  client.clear();
+});
+
+test("lowering the release drops a GPU the farm can no longer have", async () => {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+  });
+  const previews: Record<string, unknown>[] = [];
+  vi.stubGlobal("fetch", releasePlan(previews, ["2026.2", "2024.2"]));
+  renderForm(client);
+  const user = userEvent.setup();
+  await user.type(screen.getByPlaceholderText("dev-openstack"), "gpu");
+  await user.click(combo("GPU 모드"));
+  await user.click(await screen.findByRole("option", { name: /mtty/ }));
+  await waitFor(() =>
+    expect(previews.at(-1)).toMatchObject({ gpu: { mode: "mtty" } }),
+  );
+  // 2024.2 has neither the Placement side farm writes nor Nova's mediated-device path, so
+  // the farm goes out without a GPU and says why.
+  await user.click(combo("OpenStack 릴리스"));
+  await user.click(await screen.findByRole("option", { name: /2024\.2/ }));
+  await waitFor(() =>
+    expect(previews.at(-1)).toMatchObject({ release: "2024.2" }),
+  );
+  await waitFor(() => expect(previews.at(-1)).not.toHaveProperty("gpu"));
+  expect(screen.getByText(/OpenStack 2025\.1 이상에서만/)).toBeTruthy();
+  expect(combo("GPU 모드").textContent).toContain("없음");
+  client.clear();
+});
+
+test("the oldest supported release offers both GPU modes", async () => {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+  });
+  const previews: Record<string, unknown>[] = [];
+  vi.stubGlobal("fetch", releasePlan(previews, ["2025.1"]));
+  renderForm(client);
+  const user = userEvent.setup();
+  await user.type(screen.getByPlaceholderText("dev-openstack"), "old");
+  await user.click(combo("GPU 모드"));
+  // 2025.1's Placement takes a provider with a parent, and farm's Nova backport gives it the
+  // mediated-device path, so both modes work on the oldest release farm supports.
+  const simulated = await screen.findByRole("option", { name: /simulated/ });
+  expect(disabledOption(simulated)).toBe(false);
+  const mtty = await screen.findByRole("option", { name: /mtty/ });
+  expect(disabledOption(mtty)).toBe(false);
+  await user.click(simulated);
+  await waitFor(() =>
+    expect(previews.at(-1)).toMatchObject({
+      release: "2025.1",
+      gpu: { mode: "simulated", count: 1, traits: ["CUSTOM_FARM_VGPU"] },
+    }),
+  );
+  await user.click(combo("GPU 모드"));
+  await user.click(await screen.findByRole("option", { name: /mtty/ }));
+  await waitFor(() =>
+    expect(previews.at(-1)).toMatchObject({
+      release: "2025.1",
+      gpu: { mode: "mtty" },
+    }),
+  );
+  client.clear();
+});
+
+test("a simulated GPU carries the fake cards and traits the form names", async () => {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+  });
+  const previews: Record<string, unknown>[] = [];
+  vi.stubGlobal("fetch", releasePlan(previews, ["2026.2"]));
+  renderForm(client);
+  const user = userEvent.setup();
+  await user.type(screen.getByPlaceholderText("dev-openstack"), "shaped");
+  await user.click(combo("GPU 모드"));
+  await user.click(await screen.findByRole("option", { name: /simulated/ }));
+  await waitFor(() =>
+    expect(previews.at(-1)).toMatchObject({
+      gpu: { mode: "simulated", count: 1 },
+    }),
+  );
+  // Two virtual GPUs on two fake cards, on a flavor that requires two CUSTOM_ traits.
+  await user.clear(screen.getByLabelText("GPU 수량 (compute마다)"));
+  await user.type(screen.getByLabelText("GPU 수량 (compute마다)"), "4");
+  await user.clear(screen.getByLabelText("가짜 GPU 장치 수 (compute마다)"));
+  await user.type(screen.getByLabelText("가짜 GPU 장치 수 (compute마다)"), "2");
+  await user.clear(screen.getByLabelText("flavor가 요구할 trait (쉼표 구분)"));
+  await user.type(
+    screen.getByLabelText("flavor가 요구할 trait (쉼표 구분)"),
+    "CUSTOM_MAAS, CUSTOM_SRIOV",
+  );
+  await waitFor(() =>
+    expect(previews.at(-1)).toMatchObject({
+      gpu: {
+        mode: "simulated",
+        count: 4,
+        devices: 2,
+        traits: ["CUSTOM_MAAS", "CUSTOM_SRIOV"],
+      },
+    }),
+  );
+  // A mediated device takes none of the simulated mode's knobs.
+  await user.click(combo("GPU 모드"));
+  await user.click(await screen.findByRole("option", { name: /mtty/ }));
+  await waitFor(() =>
+    expect(previews.at(-1)).toMatchObject({
+      gpu: { mode: "mtty", count: 4 },
+    }),
+  );
+  client.clear();
+});

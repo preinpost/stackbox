@@ -46,6 +46,7 @@ import {
 } from "../components/ui";
 import {
   agentBuildMismatch,
+  customKernelId,
   dateTime,
   hostNotice,
   hostReady,
@@ -91,18 +92,16 @@ export function RemoteHostsPage() {
       snapshots = false,
     }: {
       id: string;
-      kind: "check" | "prepare" | "remove" | "purge" | "agent";
+      kind: "check" | "prepare" | "remove" | "purge";
       snapshots?: boolean;
     }) =>
       kind === "check"
         ? api.checkHost(id)
         : kind === "prepare"
           ? api.prepareHost(id)
-          : kind === "agent"
-            ? api.installHostAgent(id)
-            : kind === "purge"
-              ? api.purgeHost(id, snapshots)
-              : api.unregisterHost(id),
+          : kind === "purge"
+            ? api.purgeHost(id, snapshots)
+            : api.unregisterHost(id),
     onSuccess: refresh,
   });
   // Registering this machine checks it right away, like a new remote host.
@@ -114,7 +113,6 @@ export function RemoteHostsPage() {
     },
     onSettled: refresh,
   });
-  const agentMismatch = agentBuildMismatch(selected?.agent?.artifact, buildId);
   const hostJobs =
     jobs.data
       ?.filter((j) => j.host_id === selected?.id)
@@ -402,31 +400,6 @@ export function RemoteHostsPage() {
                   인증 변경
                 </Button>
               )}
-              {ssh && (
-                <Button
-                  variant={agentMismatch ? "primary" : "default"}
-                  disabled={
-                    !!selected.active_job ||
-                    action.isPending ||
-                    !hasAgent(coordinator.data?.agent_artifacts, selected)
-                  }
-                  onClick={() =>
-                    action.mutate({ id: selected.id, kind: "agent" })
-                  }
-                  title={
-                    agentMismatch
-                      ? "설치된 실행기의 빌드가 coordinator와 다릅니다. 재설치하세요."
-                      : undefined
-                  }
-                >
-                  <Terminal size={16} />
-                  {agentMismatch
-                    ? "Farm 실행기 재설치"
-                    : remoteAgentNeedsUpdate(selected)
-                      ? "Farm 실행기 업데이트"
-                      : "Farm 실행기 설치"}
-                </Button>
-              )}
               <Button
                 disabled={!!selected.active_job || action.isPending}
                 onClick={() =>
@@ -476,7 +449,8 @@ export function RemoteHostsPage() {
                 <p className="field-hint mt-3">
                   {selected.inspection.os}-{selected.inspection.arch} 실행기가
                   없습니다. 이 빌드가 릴리스되지 않았다면 task agent-build로
-                  빌드한 뒤 Coordinator를 재시작하세요.
+                  빌드하고 Coordinator를 재시작한 뒤 환경 준비를 다시
+                  실행하세요.
                 </p>
               )}
             {selected.active_job && (
@@ -742,7 +716,7 @@ function HostInspection({
   const i = host.inspection!;
   // This machine and dial-in hosts run their own agent and prepare their image by hand.
   const local = host.kind !== "ssh";
-  const runtime = [
+  const boot = [
     {
       label: local
         ? "macOS · Linux, x86_64 · aarch64"
@@ -762,6 +736,44 @@ function HostInspection({
     },
     { label: "VM 부팅·실행 검증", ready: i.vm_boot_verified },
   ];
+  // What that verification VM read from the kernel it booted. State written before farm
+  // probed it has no `gpu_kernel`, so the checks ask for another preparation.
+  const gpu = i.gpu_kernel;
+  const kernelId = customKernelId(i.custom_kernel);
+  const mttyType = gpu?.mdev_types?.find((type) => type.name === "mtty-1");
+  const kernel = [
+    {
+      label: "Farm 게스트 커널",
+      ready: Boolean(i.custom_kernel),
+      note: i.custom_kernel ? `${kernelId ?? "설치됨"} 확인됨` : "stock 커널",
+    },
+    {
+      label: "GPU 커널 기능 (VFIO · mdev)",
+      ready: Boolean(gpu?.vfio && gpu?.vfio_mdev),
+      pending: gpu ? undefined : "환경 준비 후 확인",
+      note: gpu
+        ? [gpu.vfio && "VFIO", gpu.vfio_mdev && "mdev"]
+            .filter(Boolean)
+            .join(" · ") || "미탑재"
+        : undefined,
+    },
+    {
+      label: "mtty 가상 GPU",
+      // An older preparation verified the type but stored no count, so keep its result and
+      // say the details arrive with the next preparation.
+      ready: i.mtty_available === true,
+      pending: !gpu && !i.mtty_available ? "환경 준비 후 확인" : undefined,
+      note: mttyType
+        ? `${mttyType.name} · ${mttyType.available_instances}개 가능`
+        : i.mtty_available
+          ? gpu
+            ? "mtty 확인됨"
+            : "확인됨 · 상세는 환경 준비 후"
+          : gpu
+            ? "mtty 없음"
+            : undefined,
+    },
+  ];
   // Only SSH hosts get an agent installed by the coordinator.
   const agent = [
     {
@@ -779,9 +791,12 @@ function HostInspection({
         !agentBuildMismatch(host.agent?.artifact, coordinatorBuildId),
     },
   ];
-  const checks: { label: string; ready: boolean; pending?: string }[] = local
-    ? runtime
-    : [...runtime, ...agent];
+  const checks: {
+    label: string;
+    ready: boolean;
+    pending?: string;
+    note?: string;
+  }[] = local ? [...boot, ...kernel] : [...boot, ...kernel, ...agent];
   return (
     <>
       <HostResources
@@ -811,11 +826,94 @@ function HostInspection({
             )}
             <span>{check.label}</span>
             <span>
-              {check.ready ? "확인됨" : (check.pending ?? "확인 필요")}
+              {check.note ??
+                (check.ready ? "확인됨" : (check.pending ?? "확인 필요"))}
             </span>
           </li>
         ))}
       </ul>
+      {!i.custom_kernel && (
+        <p className="field-hint remote-kernel-stock">
+          {i.custom_kernel_reason
+            ? `stock 커널로 부팅합니다: ${i.custom_kernel_reason}.`
+            : "stock 커널로 부팅합니다. farm 커널이 설치되지 않았습니다."}{" "}
+          mtty GPU를 쓰려면 환경 준비를 실행하세요.
+        </p>
+      )}
+      <details className="remote-kernel-detail">
+        <summary>커널·GPU 상세</summary>
+        <dl className="build-compare">
+          <div>
+            <dt>게스트 커널</dt>
+            <dd className={i.custom_kernel ? "" : "build-mismatch"}>
+              {i.custom_kernel ? "farm 커널" : "stock 커널"}
+            </dd>
+          </div>
+          {i.custom_kernel && (
+            <div>
+              <dt>커널 ID</dt>
+              <dd>
+                <code>{kernelId ?? "미상"}</code>
+              </dd>
+            </div>
+          )}
+          {i.custom_kernel && (
+            <div>
+              <dt>경로</dt>
+              <dd>
+                <code>{i.custom_kernel}</code>
+              </dd>
+            </div>
+          )}
+          {i.custom_kernel_reason && (
+            <div>
+              <dt>stock 커널 이유</dt>
+              <dd className="build-mismatch">{i.custom_kernel_reason}</dd>
+            </div>
+          )}
+          {gpu && (
+            <div>
+              <dt>커널 릴리스</dt>
+              <dd>
+                <code>{gpu.kernel_release || "미상"}</code>
+              </dd>
+            </div>
+          )}
+          {gpu && (
+            <div>
+              <dt>VFIO</dt>
+              <dd>{gpu.vfio ? "/dev/vfio/vfio 준비됨" : "없음"}</dd>
+            </div>
+          )}
+          {gpu && (
+            <div>
+              <dt>mdev 버스</dt>
+              <dd>{gpu.vfio_mdev ? "/sys/class/mdev_bus 준비됨" : "없음"}</dd>
+            </div>
+          )}
+          {gpu && (
+            <div>
+              <dt>mtty 장치</dt>
+              <dd>
+                {gpu.mtty_registered
+                  ? "/sys/class/mdev_bus/mtty 등록됨"
+                  : "등록 안 됨"}
+              </dd>
+            </div>
+          )}
+          {gpu?.mdev_types?.map((type) => (
+            <div key={type.name}>
+              <dt>{type.name}</dt>
+              <dd>{type.available_instances}개 생성 가능</dd>
+            </div>
+          ))}
+        </dl>
+        <p className="field-hint">
+          farm 커널은 VFIO·mdev를 내장(built-in)으로 넣으므로 모듈을 적재하지
+          않습니다. 위 값은 검증 VM의 게스트 커널에서 읽은 내장 기능의 활성
+          상태입니다.
+        </p>
+      </details>
       <dl className="build-compare">
         <div>
           <dt>msb</dt>
@@ -867,7 +965,7 @@ export function HostJobHistory({ job }: { job: HostJob }) {
           {job.kind === "check"
             ? "점검"
             : job.kind === "install_agent"
-              ? "Farm 실행기 설치"
+              ? "Farm 실행기 설치 (구)"
               : "환경 준비"}
         </span>
         <span className="hostjob-msg">
@@ -962,8 +1060,15 @@ function HostActionDialog({
               <>
                 <ol className="remote-prepare-list">
                   <li>msb 0.7.13 설치, 낮은 버전이면 업그레이드</li>
+                  <li>
+                    farm 게스트 커널(VFIO · mdev · mtty 내장) 설치, 이 호스트에
+                    설치할 수 없으면 stock 커널로 진행
+                  </li>
                   <li>가상화 확인</li>
-                  <li>512 MiB 시험 VM 부팅 → 명령 실행 → 시험 VM 삭제</li>
+                  <li>
+                    512 MiB 시험 VM을 그 커널로 부팅 → 커널·GPU 기능 확인 → 시험
+                    VM 삭제
+                  </li>
                 </ol>
                 <p className="field-hint">
                   golden image는 첫 Farm을 만들 때 msb가 Rocky Linux 10 이미지로
@@ -974,8 +1079,19 @@ function HostActionDialog({
             ) : prepare ? (
               <>
                 <ol className="remote-prepare-list">
-                  <li>msb 0.7.13과 libkrunfw 설치, 낮은 버전이면 업그레이드</li>
-                  <li>512 MiB 시험 VM 부팅 → 명령 실행 → 시험 VM 삭제</li>
+                  <li>msb 0.7.13 설치, 낮은 버전이면 업그레이드</li>
+                  <li>
+                    farm 게스트 커널을 이 호스트의 아키텍처용으로 업로드하고
+                    sha256 확인
+                  </li>
+                  <li>
+                    512 MiB 시험 VM을 그 커널로 부팅 → 커널·GPU 기능 확인 → 시험
+                    VM 삭제
+                  </li>
+                  <li>
+                    이 빌드의 단일 VM Farm 실행기 업로드 · SHA256 · 프로토콜
+                    확인 (환경 준비 하나로 끝납니다)
+                  </li>
                 </ol>
                 <p className="field-hint">
                   Linux, 동일 CPU 아키텍처, /dev/kvm 접근, 가용 메모리 768 MiB와
@@ -992,8 +1108,8 @@ function HostActionDialog({
                   <div className="warning-notice">
                     설치된 Farm 실행기가 coordinator와 다른 빌드입니다
                     {` (${host.agent?.artifact?.build_id || "버전 미상"} ≠ ${coordinatorBuildId})`}
-                    . VM 정리는 새 실행기가 필요하므로, 먼저 실행기를
-                    재설치하거나 이 옵션을 끄고 기록만 지우세요.
+                    . VM 정리는 새 실행기가 필요하므로, 먼저 환경 준비를 다시
+                    실행하거나 이 옵션을 끄고 기록만 지우세요.
                   </div>
                 )}
                 <label className="checkbox-row">

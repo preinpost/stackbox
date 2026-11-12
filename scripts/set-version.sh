@@ -1,4 +1,5 @@
 #!/bin/sh
+# shellcheck disable=SC2016 # the awk programs below are single-quoted on purpose
 # Records a release version everywhere the repo states one: the crate and the portal.
 # Usage: sh scripts/set-version.sh 1.2.3
 set -eu

@@ -14,8 +14,9 @@ Farm마다 VM 1대를 실행하고 모든 선택 서비스를 같은 VM에 설�
 4. 호스트 ID, SSH 사용자, 비밀번호 또는 SSH 개인 키와 필요 시 키 암호를 입력한다.
    **접속 테스트**는 인증 정보를 저장하지 않고 SSH 로그인과 `uname`만 확인한다.
    등록 후 SSH 접속과 OS·아키텍처·KVM·메모리·디스크·sudo·msb·Docker·이미지를 점검한다.
-5. **환경 준비**에서 실제 설치 작업을 시작한다. 진행 단계와 오류는 Hosts/Jobs에서 확인한다.
-6. **Farm 실행기 설치** 후 호스트 상세의 **이 호스트에 Farm 만들기**로 Farm을 생성한다.
+5. **환경 준비** 하나로 실제 설치 작업을 시작한다: msb → farm 게스트 커널 → 검증 VM(커널·GPU
+   기능 확인) → 이 빌드의 Farm 실행기. 진행 단계와 오류는 Hosts/Jobs에서 확인한다.
+6. 준비가 끝나면 호스트 상세의 **이 호스트에 Farm 만들기**로 Farm을 생성한다.
    준비가 끝나지 않았거나 마지막 SSH 점검이 5분을 넘은 호스트는 선택할 수 없다.
 
 접속할 때마다 등록한 SHA256 지문을 대조하며 불일치 시 인증 정보를 보내기 전에 중단한다.
@@ -29,7 +30,7 @@ keyboard-interactive/MFA, 호스트 인증서/CA, sudo 비밀번호 입력은 �
 - Linux x86_64 또는 aarch64. Coordinator와 다른 아키텍처여도 된다. 실행기는 대상 아키텍처용 바이너리를 따로 둔다.
 - SSH 사용자가 `/dev/kvm`을 읽고 쓸 수 있어야 한다. 클라우드 VM이면 nested virtualization이 필요할 수 있다.
   설치 작업으로 KVM을 활성화하거나 접근 권한을 임의 변경하지 않는다.
-- 비대화형 SSH exec, Bash, GNU `timeout`, `awk`, `grep`, `df`, `flock`, `tar`, `install`, `sha256sum`, `curl`이 필요하다.
+- 비대화형 SSH exec, Bash, GNU `timeout`, `awk`, `sed`, `grep`, `df`, `flock`, `tar`, `install`, `base64`, `sha256sum`, `curl`이 필요하다.
 - 시험 VM 준비에는 가용 메모리 768 MiB와 홈 디렉터리 볼륨의 여유 디스크 8 GiB 이상을 요구한다.
   실제 Farm은 별도로 기본 3 GiB에 선택 서비스 메모리를 더한 게스트 메모리를 예약하며, 원격 호스트별 한도는 전체 메모리의 80%다.
 - Docker는 필요 없다. OS 패키지와 sudo 정책은 자동 설치·변경하지 않는다.
@@ -44,11 +45,15 @@ keyboard-interactive/MFA, 호스트 인증서/CA, sudo 비밀번호 입력은 �
    `~/.microsandbox/lib`에 설치한다. 이후 명령은 해당 bin 경로를 사용한다.
    이미 0.7.13이면 재사용한다. 낮은 버전은 msb 공식 설치기처럼 그 자리에서 교체하며,
    실행 중인 sandbox는 기존 런타임으로 계속 돈다. 더 높은 버전은 다운그레이드하지 않고 실패한다.
-3. golden image는 빌드하지 않는다. 그 호스트의 첫 farm이 msb로 빌드한다(README의 Golden image 참고).
+3. coordinator가 빌드한 farm 커널 중 대상 `linux-<arch>` 것을 `~/.local/share/farm/libkrunfw/<id>/`에
+   업로드하고 SHA256을 확인한다. `~/.microsandbox`는 쓰지 않는다. 빌드된 커널이 없거나 manifest의
+   `msb`가 0.7.13과 다르면 이 단계를 건너뛰고 그 호스트는 stock 커널로 남는다(mtty 불가).
+4. golden image는 빌드하지 않는다. 그 호스트의 첫 farm이 msb로 빌드한다(README의 Golden image 참고).
    점검 결과의 `golden_image_available`은 이 빌드의 golden image가 이미 있는지만 알린다.
-4. UUID를 포함한 `farm-check-*` 시험 VM을 golden image의 기본 이미지로 512 MiB 부팅하고 `msb exec ... /bin/true`를 실행한 뒤 삭제한다.
-   외부 네트워크는 비활성화하고 최대 실행 시간을 120초로 제한한다.
-5. 최종 점검과 시험 VM 성공 후에만 호스트를 `ready`로 표시한다. `FARM_AGENT_PATH`가 설정되어 있으면 실행기 업로드·체크섬·프로토콜 검증도 수행한다.
+5. UUID를 포함한 `farm-check-*` 시험 VM을 golden image의 기본 이미지로 512 MiB 부팅하고 `msb exec ... /bin/true`를 실행한 뒤 삭제한다.
+   외부 네트워크는 비활성화하고 최대 실행 시간을 120초로 제한한다. 시험 VM은 설치된 farm 커널로
+   부팅하며, `/sys/class/mdev_bus/mtty/mdev_supported_types/mtty-1`가 보이면 `mtty_available`이 된다.
+6. 최종 점검과 시험 VM 성공 후에만 호스트를 `ready`로 표시한다. `FARM_AGENT_PATH`가 설정되어 있으면 실행기 업로드·체크섬·프로토콜 검증도 수행한다.
 
 `runtime_ready`는 Linux/KVM/msb 조건을 확인한 상태다. `ready`는 이미지와 시험 VM 검증까지 통과한 상태다.
 읽기 전용 점검은 같은 runtime에서 앞서 성공한 시험 VM 검증 결과를 유지한다.
@@ -91,9 +96,9 @@ Farm이 남아 있는 호스트의 등록 해제는 거절한다. 먼저 해당 
 | POST | `/hosts/fingerprint` | `{address, port}` → `{fingerprint, algorithm}`; 인증 전 조회 |
 | GET / POST | `/hosts` | 목록 / `RegisterHost` 저장, 201 + Location |
 | GET / PUT / DELETE | `/hosts/{id}` | 상세 / 인증 변경 / 등록 해제; 작업 실행 중이면 409 |
-| POST | `/hosts/{id}/agent` | 실행기 업로드·SHA256·프로토콜 확인; 202 + HostJob |
+| POST | `/hosts/{id}/agent` | (deprecated) 실행기만 업로드·SHA256·프로토콜 확인; 202 + HostJob. `/prepare`가 실행기까지 설치하므로 새 호출자는 쓰지 않는다 |
 | POST | `/hosts/{id}/check` | 읽기 전용 SSH 점검; 202 + HostJob |
-| POST | `/hosts/{id}/prepare` | 조건 점검·설치·이미지·시험 VM; 202 + HostJob |
+| POST | `/hosts/{id}/prepare` | 조건 점검·msb·farm 커널·시험 VM·실행기 설치; 202 + HostJob |
 | GET | `/host-jobs`, `/host-jobs/{id}` | 상태·단계·실패 이유 |
 
 호스트 작업의 Location은 `/api/v1/host-jobs/{id}`다. 같은 호스트의 중복 작업은 409로 거절한다.
@@ -147,8 +152,10 @@ SSH 설치는 아직 Linux 호스트만 지원한다.
 `farm serve`는 시작할 때, 다른 빌드의 실행기가 설치돼 있고 작업 중이 아닌 SSH 호스트마다 현재 빌드의 실행기가
 로드돼 있으면 `install_agent` host job을 시작한다. 그래서 coordinator를 다시 빌드해도 호스트를 손으로 재설치할 필요가 없다.
 `GET /host`의 `agent_artifacts`는 로드했거나 받을 수 있는 실행기마다 SHA256·OS·아키텍처·프로토콜·`supports_single_vm` 기능 정보를 반환한다. 경로와 binary는 노출하지 않는다.
-Hosts의 `환경 준비`는 설정된 실행기가 있으면 함께 설치하며, `Farm 실행기 설치` 버튼으로 따로 설치할 수도 있다.
-실행기 설치 자체는 KVM이 없어도 버전 확인까지 가능하지만 Farm 생성에는 KVM·이미지·시험 VM 준비 성공이 필요하다.
+Hosts의 `환경 준비` 하나가 이 빌드의 실행기까지 함께 설치한다. 실행기만 설치하던
+`POST /hosts/{id}/agent`와 포탈의 **Farm 실행기 설치** 버튼은 없어졌다(엔드포인트는 구형 호출자를
+위해 남아 있으며 OpenAPI에서 deprecated다). 실행기 설치 자체는 KVM이 없어도 버전 확인까지
+가능하지만 Farm 생성에는 KVM·이미지·시험 VM 준비 성공이 필요하다.
 
 실행기는 SSH로 `~/.local/share/farm/agents/<sha256>/farm-agent`에 전송한다.
 임시 파일의 checksum을 확인한 뒤 0700으로 atomic rename하며 같은 digest는 checksum 확인 후 재사용한다.
@@ -157,7 +164,8 @@ Hosts의 `환경 준비`는 설정된 실행기가 있으면 함께 설치하며
 
 Farm 생성 요청에는 `host_id`가 필요하다. Coordinator가 실행 중인 머신도 `POST /local-host`로 등록한
 `kind: "local"` 호스트이며, 같은 farm-agent 프로토콜을 SSH 대신 하위 프로세스(`farm agent`)로 주고받는다.
-로컬 호스트는 인증정보·실행기 설치가 없고, 환경 준비는 msb·golden image 확인과 시험 VM 부팅만 한다.
+로컬 호스트는 인증정보·실행기 설치가 없고(실행기는 coordinator 자신), 환경 준비는 msb 설치,
+farm 게스트 커널 설치, 시험 VM 부팅으로 같은 검증을 한다.
 
 ```json
 {"id":"remote-demo","host_id":"worker-01","external_host":"worker-01.example"}
@@ -225,7 +233,8 @@ SSH 세션이 끝날 때 세션의 worker도 종료되므로, 실행 사용자�
 
 새 Coordinator는 `supports_single_vm: true`인 실행기에서만 신규 Farm 생성을 허용한다.
 이 필드가 없는 구형 실행기는 기존 Farm의 inventory·삭제 경로를 위해 유지하며 새 생성에는 사용하지 않는다.
-실행기를 다시 빌드하고 `FARM_AGENT_PATH`를 지정해 Coordinator를 재시작한 뒤 Hosts의 실행기 업데이트를 실행한다.
+실행기를 다시 빌드하고 `FARM_AGENT_PATH`를 지정해 Coordinator를 재시작한 뒤 Hosts에서 **환경 준비**를
+실행한다. 준비가 실행기까지 함께 설치하므로 실행기만 다시 설치하는 버튼은 없다.
 기존 Farm의 고정 digest와 registry는 변경하지 않으며 다중 VM Farm의 재배포는 거절한다.
 
 ## 호스트 등록 해제와 VM 정리
