@@ -167,6 +167,7 @@ fn terminal_line(message: TerminalInput) -> Result<Vec<u8>> {
             rows: size.rows,
             cols: size.cols,
         },
+        TerminalInput::Close => TerminalFrame::Eof,
     };
     let mut line = serde_json::to_vec(&frame)?;
     line.push(b'\n');

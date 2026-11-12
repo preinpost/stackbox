@@ -24,7 +24,9 @@ pub trait Backend: Send + Sync + 'static {
         plan: Plan,
         exposure: Exposure,
     ) -> BoxFuture<'_, Result<Vec<FarmNode>>>;
-    /// `components` and `release` are the farm plan's resolved services and OpenStack release.
+    /// `components` and `release` are the farm plan's resolved services and OpenStack release;
+    /// `reference` is the kolla-ansible ref the coordinator resolved for it.
+    #[allow(clippy::too_many_arguments)]
     fn deploy(
         &self,
         id: String,
@@ -32,6 +34,8 @@ pub trait Backend: Send + Sync + 'static {
         exposure: Option<Exposure>,
         components: Vec<String>,
         release: String,
+        reference: Option<String>,
+        gpu: Option<crate::model::GpuConfig>,
         sink: EventSink,
     ) -> BoxFuture<'_, Result<()>>;
     fn delete(&self, id: String) -> BoxFuture<'_, Result<()>>;
@@ -116,6 +120,8 @@ pub trait Backend: Send + Sync + 'static {
         _exposure: Option<Exposure>,
         _components: Vec<String>,
         _release: String,
+        _reference: Option<String>,
+        _gpu: Option<crate::model::GpuConfig>,
         _remote: Vec<u8>,
         _ssh_private_key: String,
         _sink: EventSink,
@@ -128,6 +134,13 @@ pub trait Backend: Send + Sync + 'static {
         exposure: Option<Exposure>,
         components: Vec<String>,
     ) -> BoxFuture<'_, Result<Endpoints>>;
+    /// Run `script` in the farm's all-in-one or control VM and return its stdout. A
+    /// non-zero exit status is an error carrying the script's stderr. Unlike `endpoints`,
+    /// whose script is fixed, this lets the coordinator read and write instance metadata
+    /// through the OpenStack CLI the VM already has.
+    fn control_script(&self, _id: String, _script: String) -> BoxFuture<'_, Result<String>> {
+        Box::pin(async { Err(anyhow!("this backend cannot run commands in a farm VM")) })
+    }
     /// Stop the farm's VM, capture its disks under `labels`, and start it again. With
     /// `node`, only that VM is captured, as a control or compute template.
     fn freeze(
@@ -373,6 +386,7 @@ impl Backend for MicrosandboxBackend {
             async move { kolla::prepare_share(&id, &components, &release, &ssh_public_key).await },
         )
     }
+    #[allow(clippy::too_many_arguments)]
     fn deploy_spanning(
         &self,
         id: String,
@@ -380,6 +394,8 @@ impl Backend for MicrosandboxBackend {
         exposure: Option<Exposure>,
         components: Vec<String>,
         release: String,
+        reference: Option<String>,
+        gpu: Option<crate::model::GpuConfig>,
         remote: Vec<u8>,
         ssh_private_key: String,
         sink: EventSink,
@@ -391,6 +407,8 @@ impl Backend for MicrosandboxBackend {
                 exposure,
                 &components,
                 &release,
+                reference.as_deref(),
+                gpu,
                 &remote,
                 &ssh_private_key,
                 sink,
@@ -398,6 +416,7 @@ impl Backend for MicrosandboxBackend {
             .await
         })
     }
+    #[allow(clippy::too_many_arguments)]
     fn deploy(
         &self,
         id: String,
@@ -405,10 +424,22 @@ impl Backend for MicrosandboxBackend {
         exposure: Option<Exposure>,
         components: Vec<String>,
         release: String,
+        reference: Option<String>,
+        gpu: Option<crate::model::GpuConfig>,
         sink: EventSink,
     ) -> BoxFuture<'_, Result<()>> {
         Box::pin(async move {
-            kolla::deploy_with(&id, from, exposure, &components, &release, sink).await
+            kolla::deploy_with(
+                &id,
+                from,
+                exposure,
+                &components,
+                &release,
+                reference.as_deref(),
+                gpu,
+                sink,
+            )
+            .await
         })
     }
     fn delete(&self, id: String) -> BoxFuture<'_, Result<()>> {
@@ -592,6 +623,9 @@ PY"#).await;
         reference: String,
     ) -> BoxFuture<'_, Result<Option<BTreeMap<String, String>>>> {
         Box::pin(async move { farm::snapshot_labels(&reference).await })
+    }
+    fn control_script(&self, id: String, script: String) -> BoxFuture<'_, Result<String>> {
+        Box::pin(async move { farm::run_script(&id, None, &script).await })
     }
     fn terminal(
         &self,

@@ -3,6 +3,28 @@ async fn main() {
     // `farm-agent connect <coordinator URL>` keeps this host dialled in to a coordinator,
     // with the host token in FARM_AGENT_TOKEN. Otherwise serve one request on stdin.
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // `agent switch <dir>` and `agent link [--setup] <conf>`, as `farm` takes them: the
+    // host's link switch, and a guest's link to it. Neither boots a VM, so a bad
+    // FARM_LIBKRUNFW_PATH must not keep them from starting.
+    let link = match &args.iter().map(String::as_str).collect::<Vec<_>>()[..] {
+        ["agent", "switch", dir] => Some(farm::link::host::serve_dir(dir.as_ref()).await),
+        ["agent", "link", "--setup", conf] => Some(farm::link::guest::setup(conf.as_ref()).await),
+        ["agent", "link", conf] => Some(farm::link::guest::run(conf.as_ref()).await),
+        _ => None,
+    };
+    if let Some(result) = link {
+        if let Err(error) = result {
+            eprintln!("farm-agent: {error:#}");
+            std::process::exit(1);
+        }
+        return;
+    }
+    // Everything below boots this host's farms, so a custom kernel must be registered before
+    // the SDK resolves its runtime. Only failures here are fatal to these paths.
+    if let Err(error) = farm::kernel::configure_sdk() {
+        eprintln!("farm-agent: {error:#}");
+        std::process::exit(1);
+    }
     if let [mode, coordinator] = &args[..]
         && mode == "connect"
     {
@@ -31,21 +53,6 @@ async fn main() {
             std::process::exit(1);
         }
         std::process::exit(0);
-    }
-    // `agent switch <dir>` and `agent link [--setup] <conf>`, as `farm` takes them: the
-    // host's link switch, and a guest's link to it.
-    let result = match &args.iter().map(String::as_str).collect::<Vec<_>>()[..] {
-        ["agent", "switch", dir] => Some(farm::link::host::serve_dir(dir.as_ref()).await),
-        ["agent", "link", "--setup", conf] => Some(farm::link::guest::setup(conf.as_ref()).await),
-        ["agent", "link", conf] => Some(farm::link::guest::run(conf.as_ref()).await),
-        _ => None,
-    };
-    if let Some(result) = result {
-        if let Err(error) = result {
-            eprintln!("farm-agent: {error:#}");
-            std::process::exit(1);
-        }
-        return;
     }
     if let Err(error) = farm::remote::agent::serve_stdio().await {
         eprintln!("farm-agent: {error}");

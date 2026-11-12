@@ -25,7 +25,9 @@ pub use snapshot::{
 pub use template::{
     ALL_IN_ONE, COMPUTE, CONTROL, MAX_COMPUTES, NodeSpec, Role, address, hostname, suffix,
 };
-pub use terminal::{TerminalInput, TerminalIo, TerminalSize, attach as attach_terminal};
+pub use terminal::{
+    ScriptSession, TerminalInput, TerminalIo, TerminalSize, attach as attach_terminal, run_script,
+};
 
 /// A multi-node farm's networks, each a link on every VM: `(guest device, network, addressed)`.
 /// `mgmt` carries Kolla's network and API traffic on the VM's fixed address; `tenant` carries

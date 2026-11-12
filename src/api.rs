@@ -81,6 +81,8 @@ pub fn router(manager: FarmManager, token: Option<String>) -> Router {
         token: token.map(Arc::from),
         ssh_discovery: Arc::new(tokio::sync::Semaphore::new(2)),
     };
+    // The agent-only endpoint is kept for older callers; the router still mounts it.
+    #[allow(deprecated)]
     Router::new()
         .route("/api/v1/host", get(host))
         .route("/api/v1/hosts", get(remote_hosts).post(register_host))
@@ -109,6 +111,13 @@ pub fn router(manager: FarmManager, token: Option<String>) -> Router {
         .route("/api/v1/farms/{id}", get(detail).delete(delete))
         .route("/api/v1/farms/{id}/deploy", post(deploy))
         .route("/api/v1/farms/{id}/computes", post(add_compute))
+        .route("/api/v1/farms/{id}/instances", get(instances))
+        .route(
+            "/api/v1/farms/{id}/instances/{server}/gpu-load",
+            get(gpu_load).put(set_gpu_load).delete(clear_gpu_load),
+        )
+        .route("/api/v1/farms/{id}/gpu/guest-script", get(gpu_guest_script))
+        .route("/api/v1/farms/{id}/gpu/user-data", get(gpu_user_data))
         .route("/api/v1/farms/{id}/settle", post(settle))
         .route("/api/v1/farms/{id}/endpoints", get(endpoints))
         .route("/api/v1/farms/{id}/nodes/{node}/faults", put(set_faults))
@@ -533,7 +542,12 @@ async fn prepare_host(
         app.manager.start_host_job(&id, HostJobKind::Prepare)?,
     ))
 }
+/// Install only the agent, without msb, the farm kernel or a verification boot.
+///
+/// Deprecated: `POST /hosts/{id}/prepare` installs the agent too, after the kernel and the
+/// verification VM, so the portal offers one button. This endpoint stays for older callers.
 #[utoipa::path(post, path="/api/v1/hosts/{id}/agent", params(("id"=String, Path)), responses((status=202, body=HostJob), (status=409, body=ErrorBody)))]
+#[deprecated(note = "prepare installs the agent too; use POST /api/v1/hosts/{id}/prepare")]
 async fn install_agent(
     State(app): State<App>,
     Path(id): Path<String>,
@@ -652,6 +666,79 @@ async fn add_compute(
 ) -> Result<Response, ApiError> {
     Ok(accepted(app.manager.add_compute(&id, body(value)?)?))
 }
+#[utoipa::path(get, path="/api/v1/farms/{id}/instances", params(("id"=String, Path)), responses((status=200, description="Nova servers in the farm, with each flavor's GPU resource classes and the load farm applied", body=Vec<FarmInstance>), (status=409, description="Not a deployed GPU farm, or Nova is not part of it", body=ErrorBody)))]
+async fn instances(
+    State(app): State<App>,
+    Path(id): Path<String>,
+) -> Result<Json<Vec<FarmInstance>>, ApiError> {
+    Ok(Json(app.manager.instances(&id).await?))
+}
+
+#[utoipa::path(get, path="/api/v1/farms/{id}/instances/{server}/gpu-load", params(("id"=String, Path), ("server"=String, Path, description="Nova server UUID, or a unique instance name")), responses((status=200, description="The load for the instance; a server without one shows the default with applied=false", body=GpuLoadView), (status=404, body=ErrorBody), (status=409, body=ErrorBody)))]
+async fn gpu_load(
+    State(app): State<App>,
+    Path((id, server)): Path<(String, String)>,
+) -> Result<Json<GpuLoadView>, ApiError> {
+    Ok(Json(app.manager.gpu_load(&id, &server).await?))
+}
+
+#[utoipa::path(put, path="/api/v1/farms/{id}/instances/{server}/gpu-load", params(("id"=String, Path), ("server"=String, Path, description="Nova server UUID, or a unique instance name")), request_body=GpuLoad, responses((status=200, description="The load was written to the instance's metadata; the guest sees it within about 15 seconds", body=GpuLoadView), (status=400, body=ErrorBody), (status=404, body=ErrorBody), (status=409, body=ErrorBody)))]
+async fn set_gpu_load(
+    State(app): State<App>,
+    Path((id, server)): Path<(String, String)>,
+    value: Result<Json<GpuLoad>, JsonRejection>,
+) -> Result<Json<GpuLoadView>, ApiError> {
+    Ok(Json(
+        app.manager.set_gpu_load(&id, &server, body(value)?).await?,
+    ))
+}
+
+#[utoipa::path(delete, path="/api/v1/farms/{id}/instances/{server}/gpu-load", params(("id"=String, Path), ("server"=String, Path, description="Nova server UUID, or a unique instance name")), responses((status=200, description="The metadata is removed; the guest returns to its default at the next metadata refresh", body=GpuLoadView), (status=404, body=ErrorBody), (status=409, body=ErrorBody)))]
+async fn clear_gpu_load(
+    State(app): State<App>,
+    Path((id, server)): Path<(String, String)>,
+) -> Result<Json<GpuLoadView>, ApiError> {
+    Ok(Json(app.manager.clear_gpu_load(&id, &server).await?))
+}
+
+#[utoipa::path(get, path="/api/v1/farms/{id}/gpu/guest-script", params(("id"=String, Path)), responses((status=200, description="The fake nvidia-smi script, ready to install as /usr/bin/nvidia-smi", content_type="text/x-shellscript", body=String), (status=409, body=ErrorBody)))]
+async fn gpu_guest_script(
+    State(app): State<App>,
+    Path(id): Path<String>,
+) -> Result<Response, ApiError> {
+    let script = app.manager.gpu_guest_script(&id)?;
+    Ok((
+        [
+            (header::CONTENT_TYPE, "text/x-shellscript; charset=utf-8"),
+            (
+                header::CONTENT_DISPOSITION,
+                "attachment; filename=\"nvidia-smi.sh\"",
+            ),
+        ],
+        script,
+    )
+        .into_response())
+}
+
+#[utoipa::path(get, path="/api/v1/farms/{id}/gpu/user-data", params(("id"=String, Path)), responses((status=200, description="A user-data installer for images that do not apply Nova vendor data (CirrOS): it writes the fake nvidia-smi and prints its XML to the console", content_type="text/x-shellscript", body=String), (status=409, body=ErrorBody)))]
+async fn gpu_user_data(
+    State(app): State<App>,
+    Path(id): Path<String>,
+) -> Result<Response, ApiError> {
+    let script = app.manager.gpu_user_data(&id)?;
+    Ok((
+        [
+            (header::CONTENT_TYPE, "text/x-shellscript; charset=utf-8"),
+            (
+                header::CONTENT_DISPOSITION,
+                "attachment; filename=\"farm-gpu-user-data.sh\"",
+            ),
+        ],
+        script,
+    )
+        .into_response())
+}
+
 #[utoipa::path(post, path="/api/v1/farms/{id}/settle", params(("id"=String, Path)), responses((status=202, description="Wait for the farm's services to answer again after its VM started from disk; no deployment runs", body=Job), (status=409, body=ErrorBody)))]
 async fn settle(State(app): State<App>, Path(id): Path<String>) -> Result<Response, ApiError> {
     Ok(accepted(app.manager.settle(&id)?))
@@ -1063,7 +1150,7 @@ async fn relay_shell(
 }
 
 #[derive(OpenApi)]
-#[openapi(paths(host, remote_hosts, remote_host, host_fingerprint, test_connection, register_host, register_local_host, register_agent_host, update_host_credentials, unregister_host, check_host, prepare_host, install_agent, host_jobs, host_job, catalog_handler, plan_handler, list, detail, create, releases, release_plan, create_release, deploy, add_compute, settle, delete, endpoints, set_faults, logs, log_stream, freeze, snapshots, snapshot, delete_snapshot, delete_snapshot_copy, export_snapshot, import_snapshot, buckets, bucket, register_bucket, update_bucket, unregister_bucket, test_bucket, check_bucket, bucket_objects, rebuild_bucket_index, relay_status, set_relay, remove_relay, update_cloudflared, jobs, job), components(schemas(ErrorBody)), modifiers(&Security))]
+#[openapi(paths(host, remote_hosts, remote_host, host_fingerprint, test_connection, register_host, register_local_host, register_agent_host, update_host_credentials, unregister_host, check_host, prepare_host, install_agent, host_jobs, host_job, catalog_handler, plan_handler, list, detail, create, releases, release_plan, create_release, deploy, add_compute, instances, gpu_load, set_gpu_load, clear_gpu_load, gpu_guest_script, gpu_user_data, settle, delete, endpoints, set_faults, logs, log_stream, freeze, snapshots, snapshot, delete_snapshot, delete_snapshot_copy, export_snapshot, import_snapshot, buckets, bucket, register_bucket, update_bucket, unregister_bucket, test_bucket, check_bucket, bucket_objects, rebuild_bucket_index, relay_status, set_relay, remove_relay, update_cloudflared, jobs, job), components(schemas(ErrorBody)), modifiers(&Security))]
 struct ApiDoc;
 struct Security;
 impl utoipa::Modify for Security {

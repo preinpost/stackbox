@@ -1,5 +1,7 @@
 pub mod api;
 pub mod farm;
+pub mod gpu;
+pub mod kernel;
 pub mod kolla;
 pub mod link;
 pub mod manager;

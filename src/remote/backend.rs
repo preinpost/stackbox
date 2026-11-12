@@ -37,11 +37,14 @@ impl AgentBackend {
         }
     }
     /// Deploy as the host-side job `job_id`, which keeps running if this request ends.
+    /// `reference` is the kolla-ansible ref the coordinator resolved for the farm's release;
+    /// the agent has no catalog cache to resolve it itself.
     pub async fn deploy_job(
         &self,
         id: String,
         from: Phase,
         job_id: String,
+        reference: Option<String>,
         sink: EventSink,
     ) -> Result<()> {
         self.done(
@@ -50,6 +53,7 @@ impl AgentBackend {
                 generation: self.generation.clone(),
                 from,
                 job_id,
+                reference,
             },
             Some(sink),
         )
@@ -402,17 +406,20 @@ impl Backend for AgentBackend {
             None,
         ))
     }
+    #[allow(clippy::too_many_arguments)]
     fn deploy(
         &self,
         id: String,
         from: Phase,
         _: Option<Exposure>,
-        // The agent deploys the components and release recorded with its own reservation.
+        // The agent deploys the components, release and GPU recorded with its own reservation.
         _: Vec<String>,
         _: String,
+        reference: Option<String>,
+        _: Option<crate::model::GpuConfig>,
         sink: EventSink,
     ) -> BoxFuture<'_, Result<()>> {
-        Box::pin(self.deploy_job(id, from, uuid::Uuid::new_v4().to_string(), sink))
+        Box::pin(self.deploy_job(id, from, uuid::Uuid::new_v4().to_string(), reference, sink))
     }
     fn delete(&self, id: String) -> BoxFuture<'_, Result<()>> {
         Box::pin(self.done(
@@ -443,6 +450,27 @@ impl Backend for AgentBackend {
                 Reply::Endpoints { endpoints } => Ok(endpoints),
                 _ => bail!("unexpected farm-agent endpoints response"),
             }
+        })
+    }
+    fn control_script(&self, id: String, script: String) -> BoxFuture<'_, Result<String>> {
+        Box::pin(async move {
+            // The Shell operation already opens a login shell in the farm's VM; farm drives
+            // it as a non-interactive `bash -s` session, so no protocol version changes.
+            let request = self.request(Operation::Shell {
+                farm_id: id,
+                generation: self.generation.clone(),
+                node: None,
+                size: crate::farm::TerminalSize {
+                    rows: 40,
+                    cols: 240,
+                },
+            });
+            let link = self.link.clone();
+            crate::farm::ScriptSession::new(move |io| {
+                Box::pin(async move { link.terminal(request, io).await })
+            })
+            .run(&script)
+            .await
         })
     }
     fn freeze(

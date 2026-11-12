@@ -198,6 +198,10 @@ impl AgentLink for HubLink {
                                 session: id,
                                 frame: TerminalFrame::Resize { rows: size.rows, cols: size.cols },
                             },
+                            Some(TerminalInput::Close) => Envelope::Input {
+                                session: id,
+                                frame: TerminalFrame::Eof,
+                            },
                             None => {
                                 open = false;
                                 Envelope::Close { session: id }

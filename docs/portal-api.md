@@ -7,7 +7,11 @@
 원격 호스트 등록·SSH 점검·환경 준비와 `/host-jobs` 계약은
 [원격 호스트 운영](remote-hosts.md)에 정리했습니다. 모든 Farm은 등록된 호스트에서 실행하므로
 `POST /farms`에는 `host_id`가 필요합니다. coordinator가 도는 머신은 `POST /local-host`로 로컬 호스트로 등록한 뒤 다른 호스트처럼
-`POST /hosts/{id}/check`, `POST /hosts/{id}/prepare`로 점검·준비합니다.
+`POST /hosts/{id}/check`, `POST /hosts/{id}/prepare`로 점검·준비합니다. 포탈의 **환경 준비**는
+msb·farm 게스트 커널·검증 VM·Farm 실행기를 한 job으로 처리하므로 실행기 설치 버튼은 없고,
+`POST /hosts/{id}/agent`는 구형 호출자를 위해서만 남아 있습니다(OpenAPI deprecated).
+Hosts 체크리스트의 **Farm 게스트 커널**·**GPU 커널 기능 (VFIO · mdev)**·**mtty 가상 GPU**는
+`inspection.custom_kernel`, `inspection.gpu_kernel`, `inspection.mtty_available`을 그대로 보여 줍니다.
 
 API prefix는 `/api/v1`입니다. token이 설정된 경우 모든 경로에
 `Authorization: Bearer ...`를 전달합니다. 성공·오류 응답은 JSON이며, SSE는 예외입니다.
@@ -22,9 +26,20 @@ API prefix는 `/api/v1`입니다. token이 설정된 경우 모든 경로에
    `components`는 catalog 순서로 정리된 최종 목록입니다. 모르는 컴포넌트나 `available: false`인
    컴포넌트는 `400`으로 거절합니다. 새 farm은 항상 control VM 1대와 compute VM 1~3대이므로
    `computes`는 1~3이고, 0이나 `layout`(`all-in-one`·`control`)은 `400`입니다. Nova와 그 의존성은
-   compute VM과 함께 들어갑니다. 이 단계는 포트·메모리를 예약하지 않는 순수 계산입니다.
+   compute VM과 함께 들어갑니다. 선택 필드 `gpu`는 `{"mode":"simulated"|"mtty","count":1..24}`이며
+   (기본 `count` 1), 확정된 값이 응답의 `plan.gpu`에 들어갑니다. `simulated`는 선택 필드로 계약을
+   정합니다: `devices`(가짜 GPU 장치 수, 1~`count`), `traits`(`CUSTOM_[A-Z0-9_]+` 목록, 기본
+   `["CUSTOM_FARM_VGPU"]`), `resource_class`(`VGPU`·`PGPU`·`CUSTOM_*`, 기본 `VGPU`). `mtty`는 이
+   세 필드를 받지 않습니다(`400`). `simulated`는 OpenStack 2025.1 이상, `mtty`는 2026.2 이상이면
+   받습니다. 계획은 호스트와 무관하므로 커널 준비 여부를 보지 않습니다. 그 밖의 릴리스·모드 조합은
+   `400`입니다. GPU는 실제 하드웨어가 아닙니다.
 3. `POST /farms`에 `id`, `components`, `computes`(1~3), `external_host`, `owner`, `expires_at`을 전달합니다.
-   `snapshot_id` 없이 만드는 farm은 computes와 layout에도 같은 규칙이 적용됩니다.
+   `snapshot_id` 없이 만드는 farm은 computes와 layout에도 같은 규칙이 적용됩니다. `gpu`를 넣으면
+   farm의 plan에 그대로 저장되고 배포 때 compute마다 설정됩니다. `mtty` farm은 compute VM이 뜨는
+   모든 호스트가 farm 커널 검증(`inspection.mtty_available`)을 마쳐야 하고(control 호스트에
+   compute가 있으면 그 호스트도 포함), 아니면 그 호스트의 id와 저장된 커널 정보를 담은 `400`이
+   납니다. SSH·dial-in 호스트도 준비만 되면 됩니다. `POST /releases/farms`도 같은 호스트를 보고,
+   준비되지 않았으면 job을 시작하지 않고 `400`으로 거절합니다.
    `host_id`는 `ready`인 호스트여야 하며, 없으면 `400`, 모르는 호스트는 `404`입니다.
    원격 호스트에는 타겟의 접근 가능한 IPv4/DNS `external_host`를 지정하세요.
    필수 값은 `id`와 `host_id`입니다. `expires_at`은 UTC Unix seconds이며 현재 metadata로만 저장합니다.
@@ -102,8 +117,12 @@ amd64 전용이라 aarch64에서는 `installable: false`입니다. 계획(`POST 
 생략하면 등록된 모든 버킷을 셉니다(조회하지 못한 버킷은 `unreachable`).
 
 `POST /releases/plan`은 `ReleaseCreateRequest`(`id`, `release`, `host_id`, `computes`(1~3), 선택:
-`components`, `compute_hosts`, `control_template`, `compute_template`, `bucket`, `external_host`,
-`owner`, `expires_at`)로 아무것도 만들지 않고 계획(`ReleasePlan`)을 돌려줍니다. `computes`가 0이거나
+`components`, `compute_hosts`, `compute`, `gpu`, `control_template`, `compute_template`, `bucket`,
+`external_host`, `owner`, `expires_at`)로 아무것도 만들지 않고 계획(`ReleasePlan`)을 돌려줍니다.
+`gpu`(`{"mode":...,"count":...}`)를 주면 템플릿이 있어도 모든 VM을 클린 설치하고(`source:
+"clean"`), 그 이유를 `reason`에 적습니다. 템플릿의 VM은 동결 당시 plan으로 부팅해 GPU 설정을
+가질 수 없기 때문입니다. 같은 이유로 GPU farm의 control VM은 control 템플릿으로 얼릴 수 없고
+(`409`), 다른 릴리스용 템플릿과 섞을 수도 없습니다. `computes`가 0이거나
 `layout`을 주면 `400`입니다. `control`과 `computes[]`의
 각 VM은 `source`(`template`, `bucket`, `clean`), `snapshot_id`(버킷 템플릿은 가져올 ID), `bucket`/`key`,
 `reason`을 가집니다. 여러 템플릿이 맞으면 로컬 것 중 가장 최근, 없으면 버킷에서 가장 최근에 내보낸 것을
@@ -199,6 +218,28 @@ WebSocket에는 CORS가 적용되지 않으므로 farmd는 `Origin`이 없거나
 응답에는 `Cache-Control: no-store`를 설정합니다. 로컬 테스트 포털은 Horizon 카드에 admin 로그인을 표시합니다.
 외부에 공개된 포털이라면 이 표시를 끄세요. 로그에도 민감한 배포 정보가 있을 수 있으므로 API token을 설정하고
 포탈 사용자의 접근 권한을 backend에서 확인하세요.
+
+## GPU 부하 제어
+
+GPU farm(`plan.gpu`가 있는 farm)은 인스턴스에 실제 GPU 대신 가짜 `nvidia-smi`를 설치하고,
+인스턴스별 부하를 메타데이터로 밀어 넣습니다. 자세한 값 형식과 게스트 명령은
+[docs/gpu.md](gpu.md#가짜-nvidia-smi와-부하-제어)에 있습니다.
+
+| 요청 | 응답 |
+| --- | --- |
+| `GET /farms/{id}/instances` | farm의 모든 Nova 서버. 각 항목에 flavor, `resources`(예: `VGPU: 1`), `gpu_count`, 적용된 `load`, `applied`가 있습니다 |
+| `GET /farms/{id}/instances/{server}/gpu-load` | 그 인스턴스의 부하. 적용한 적이 없으면 기본값과 `applied: false`입니다 |
+| `PUT /farms/{id}/instances/{server}/gpu-load` | 부하를 메타데이터에 씁니다. body는 `{"profile":"sim-8g","pattern":"sine","min":10,"max":90,"period_s":60,"memory_ratio":30}` |
+| `DELETE /farms/{id}/instances/{server}/gpu-load` | `farm_gpu_*` 메타데이터를 지우고 기본값으로 되돌립니다 |
+| `GET /farms/{id}/gpu/guest-script` | 가짜 `nvidia-smi` 원본(`text/x-shellscript`) |
+| `GET /farms/{id}/gpu/user-data` | 설치 스크립트(`text/x-shellscript`). CirrOS처럼 vendordata를 적용하지 않는 이미지에 넘깁니다 |
+
+`{server}`는 Nova 서버 UUID 또는 유일한 이름입니다. 이름이 겹치면 `400`입니다. 다음은 모두
+`409`입니다: GPU farm이 아닌 farm, Nova가 없는 farm, 아직 배포되지 않았거나 진행 중인 작업이
+있는 farm, 삭제된 farm. 게스트 스크립트 다운로드는 배포 전에도 되지만, 부하 제어와 인스턴스
+목록은 farm이 `ready`일 때만 됩니다. 부하는 인스턴스 메타데이터를 거치므로 게스트에 보이기까지
+Nova 캐시 때문에 최대 약 15초 걸립니다. `farm`은 마지막으로 적용한 부하를 farm 기록
+(`gpu_loads`)에 남기고, 상태를 잃은 farm은 인스턴스 메타데이터에서 부하를 복원합니다.
 
 ## 현재 제약
 

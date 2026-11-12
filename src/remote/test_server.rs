@@ -24,6 +24,10 @@ pub struct Observed {
     pub legacy_agent: AtomicBool,
     /// Snapshot IDs this host keeps a copy of, with their references.
     pub cached: Mutex<std::collections::BTreeMap<String, String>>,
+    /// The farm kernel path this host's shell inspection would report.
+    pub kernel: Mutex<Option<String>>,
+    /// Why an installed kernel is not used, as the shell inspection would report it.
+    pub kernel_reason: Mutex<Option<String>>,
 }
 pub fn client_key() -> PrivateKey {
     PrivateKey::from(Ed25519Keypair::from_seed(&[19; 32]))
@@ -52,6 +56,7 @@ impl Fixture {
             observed: observed.clone(),
             input: Vec::new(),
             shell: false,
+            kernel_upload: false,
         };
         let (send, receive) = tokio::sync::oneshot::channel();
         let task = tokio::spawn(async move {
@@ -93,6 +98,8 @@ struct Handler {
     input: Vec<u8>,
     /// A shell request arrived: stdin stays open and carries terminal frames.
     shell: bool,
+    /// A farm kernel upload arrived: stdin carries the library, not a script.
+    kernel_upload: bool,
 }
 impl Handler {
     fn frame(
@@ -133,6 +140,8 @@ impl Handler {
             let data = match serde_json::from_slice(&line).unwrap() {
                 TerminalFrame::Input { data } => data,
                 TerminalFrame::Resize { rows, cols } => STANDARD.encode(format!("{rows}x{cols}")),
+                // EOF has nothing to echo; the fixture's shell keeps its session open.
+                TerminalFrame::Eof => continue,
             };
             Self::frame(session, channel, &Frame::Terminal { data })?;
         }
@@ -146,6 +155,7 @@ impl server::Server for Handler {
             observed: self.observed.clone(),
             input: Vec::new(),
             shell: false,
+            kernel_upload: false,
         }
     }
 }
@@ -192,10 +202,10 @@ impl server::Handler for Handler {
         command: &[u8],
         session: &mut server::Session,
     ) -> Result<(), Self::Error> {
-        assert!(
-            String::from_utf8_lossy(command).starts_with("timeout ")
-                || String::from_utf8_lossy(command).contains("/farm-agent")
-        );
+        let text = String::from_utf8_lossy(command);
+        assert!(text.starts_with("timeout ") || text.contains("/farm-agent"));
+        // The kernel upload carries its script in the command and the library on stdin.
+        self.kernel_upload = text.contains("libkrunfw") && text.contains("sha256sum -c");
         self.input.clear();
         self.shell = false;
         session.channel_success(channel)?;
@@ -216,6 +226,21 @@ impl server::Handler for Handler {
         channel: ChannelId,
         session: &mut server::Session,
     ) -> Result<(), Self::Error> {
+        if self.kernel_upload {
+            self.observed
+                .calls
+                .lock()
+                .unwrap()
+                .push("kernel-upload".into());
+            *self.observed.kernel.lock().unwrap() = Some(
+                "/home/operator/.local/share/farm/libkrunfw/0123456789abcdef/libkrunfw.so.5.6.1"
+                    .into(),
+            );
+            session.exit_status_request(channel, 0)?;
+            session.eof(channel)?;
+            session.close(channel)?;
+            return Ok(());
+        }
         if self.shell {
             use super::protocol::{Frame, Reply};
             Self::frame(
@@ -497,7 +522,7 @@ impl server::Handler for Handler {
         let output = if script.contains("field()") {
             self.observed.calls.lock().unwrap().push("inspect".into());
             format!(
-                "FARM\tos\tLinux\nFARM\tarch\t{}\nFARM\tkvm\t1\nFARM\tsudo\t0\nFARM\tmemory_total\t32768\nFARM\tmemory_available\t24000\nFARM\tdisk_available\t200000\nFARM\tmsb\t{}\nFARM\tdocker\t1\nFARM\tgolden\t{}\n",
+                "FARM\tos\tLinux\nFARM\tarch\t{}\nFARM\tkvm\t1\nFARM\tsudo\t0\nFARM\tmemory_total\t32768\nFARM\tmemory_available\t24000\nFARM\tdisk_available\t200000\nFARM\tmsb\t{}\nFARM\tdocker\t1\nFARM\tgolden\t{}\nFARM\tlibkrunfw\t{}\nFARM\tlibkrunfw_note\t{}\n",
                 std::env::consts::ARCH,
                 self.observed
                     .msb
@@ -505,8 +530,34 @@ impl server::Handler for Handler {
                     .unwrap()
                     .as_deref()
                     .map_or(String::new(), |version| format!("msb {version}")),
-                u8::from(self.observed.golden.load(Ordering::SeqCst))
+                u8::from(self.observed.golden.load(Ordering::SeqCst)),
+                self.observed
+                    .kernel
+                    .lock()
+                    .unwrap()
+                    .clone()
+                    .unwrap_or_default(),
+                self.observed
+                    .kernel_reason
+                    .lock()
+                    .unwrap()
+                    .clone()
+                    .unwrap_or_default()
             )
+        } else if script.contains("libkrunfw") && script.contains("sha256sum -c --status") {
+            self.observed
+                .calls
+                .lock()
+                .unwrap()
+                .push("kernel-check".into());
+            "missing".into()
+        } else if script.contains("manifest.txt.tmp") {
+            self.observed
+                .calls
+                .lock()
+                .unwrap()
+                .push("kernel-manifest".into());
+            String::new()
         } else if script.contains("base=https://github.com") {
             self.observed.calls.lock().unwrap().push("install".into());
             *self.observed.msb.lock().unwrap() = Some(MSB_VERSION.into());
@@ -517,7 +568,17 @@ impl server::Handler for Handler {
                 code = 1;
             }
             // Deliberately include credential-looking output; callers must never persist it.
-            "fixture-password-only PRIVATE-KEY-DO-NOT-PERSIST".into()
+            // The markers are what preparation reads: the kernel it installed came up with
+            // VFIO and the mdev bus built in, and registers the sample mtty device.
+            let mtty = u8::from(self.observed.kernel.lock().unwrap().is_some());
+            let types = if mtty == 1 {
+                "FARM-GPU type mtty-1 24\n"
+            } else {
+                ""
+            };
+            format!(
+                "fixture-password-only PRIVATE-KEY-DO-NOT-PERSIST\nFARM-GPU vfio {mtty}\nFARM-GPU mdev {mtty}\nFARM-GPU mtty {mtty}\nFARM-GPU release 6.12.113\n{types}FARM-MDEV {mtty}\n"
+            )
         } else {
             code = 1;
             "unsupported fixture command".into()

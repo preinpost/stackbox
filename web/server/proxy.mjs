@@ -29,6 +29,15 @@ function upstreamUrl(req, env) {
   }
 }
 
+/**
+ * The portal's API surface, including canonical farm IDs: every route the browser may reach
+ * through this boundary. Encoded or alternate spellings cannot bypass the credential
+ * response filter. A route the portal calls but this does not list fails as a 404, so
+ * `proxy.test.mjs` checks every path of `docs/openapi.json` against this expression.
+ */
+export const portalApiPath =
+  /^\/api\/v1\/(?:host|local-host|agent-hosts|hosts(?:\/[a-z0-9-]+(?:\/(?:check|prepare|agent))?)?|host-jobs(?:\/[a-f0-9-]+)?|catalog|plans|releases(?:\/(?:plan|farms))?|openapi\.json|jobs(?:\/[a-f0-9-]+)?|farms(?:\/[a-z0-9-]+(?:\/(?:deploy|computes|settle|endpoints|instances(?:\/[a-z0-9-]+\/gpu-load)?|nodes\/[a-z0-9-]+\/faults|gpu\/(?:guest-script|user-data)|snapshots|logs(?:\/stream)?))?)?|snapshots(?:\/[a-z0-9-]+(?:\/(?:export|copies\/[a-z0-9-]+))?)?|buckets(?:\/[a-z0-9-]+(?:\/(?:check|objects))?)?|relay(?:\/cloudflared\/update)?)$/;
+
 /** Shared dev/production boundary. Secrets remain on this side of the connection. */
 export function proxyApi(req, res, env = process.env) {
   if (!req.url?.startsWith("/api/v1/"))
@@ -46,11 +55,7 @@ export function proxyApi(req, res, env = process.env) {
 
   // Only expose the portal's known API surface, including canonical farm IDs.
   // Encoded/alternate spellings cannot bypass the credential response filter.
-  if (
-    !/^\/api\/v1\/(?:host|local-host|agent-hosts|hosts(?:\/[a-z0-9-]+(?:\/(?:check|prepare|agent))?)?|host-jobs(?:\/[a-f0-9-]+)?|catalog|plans|releases(?:\/(?:plan|farms))?|openapi\.json|jobs(?:\/[a-f0-9-]+)?|farms(?:\/[a-z0-9-]+(?:\/(?:deploy|computes|settle|endpoints|snapshots|logs(?:\/stream)?))?)?|snapshots(?:\/[a-z0-9-]+(?:\/(?:export|copies\/[a-z0-9-]+))?)?|buckets(?:\/[a-z0-9-]+(?:\/(?:check|objects))?)?|relay(?:\/cloudflared\/update)?)$/.test(
-      url.pathname,
-    )
-  ) {
+  if (!portalApiPath.test(url.pathname)) {
     return json(res, 404, "API 경로를 찾을 수 없습니다.");
   }
   const headers = { accept: req.headers.accept || "application/json" };

@@ -280,6 +280,7 @@ impl Agent {
                 compute: requested.compute,
                 layout: None,
                 release: requested.release.clone(),
+                gpu: requested.gpu.clone(),
             })?
         };
         ensure!(
@@ -309,6 +310,7 @@ impl Agent {
             expires_at: None,
             snapshot_id: None,
             placement: Default::default(),
+            gpu: None,
         }
         .validate()?;
         if let Some(share) = share {
@@ -512,6 +514,7 @@ impl Agent {
                     TerminalFrame::Resize { rows, cols } => {
                         TerminalInput::Resize(TerminalSize { rows, cols }.validate()?)
                     }
+                    TerminalFrame::Eof => TerminalInput::Close,
                 };
                 if input_tx.send(message).await.is_err() {
                     return Ok(());
@@ -630,11 +633,17 @@ impl Agent {
             farm_id: id,
             generation,
             from,
+            reference,
             ..
         } = &request.operation
         else {
             bail!("not a deploy job");
         };
+        // The coordinator resolved this ref against the catalog; this process has no cache
+        // of its own. An older coordinator sends none, and the install keeps `info`'s ref.
+        let reference = reference
+            .clone()
+            .filter(|reference| crate::kolla::releases::reference_ok(reference));
         let _farm_lock = lock(&self.dir, &format!("{id}.lock"))?;
         let entry = self.deployable(request, id, generation)?;
         let _deploy_lock = lock(&self.dir, "deploy.lock")?;
@@ -663,6 +672,8 @@ impl Agent {
                     Some(entry.exposure.clone()),
                     entry.plan.components.clone(),
                     release,
+                    reference.clone(),
+                    entry.plan.gpu,
                     remote,
                     share
                         .ssh_private_key
@@ -684,6 +695,8 @@ impl Agent {
                     .release
                     .clone()
                     .unwrap_or_else(|| crate::kolla::OPENSTACK_RELEASE.to_owned()),
+                reference,
+                entry.plan.gpu,
                 progress(emit),
             )
             .await?;
@@ -767,12 +780,20 @@ impl Agent {
         // Host-wide checks have no farm id either.
         if matches!(request.operation, Operation::Inspect) {
             return Ok(Reply::Inspection {
-                inspection: crate::remote::host::inspect().await,
+                inspection: Box::new(crate::remote::host::inspect().await),
             });
         }
         if matches!(request.operation, Operation::VerifyVm) {
-            crate::remote::host::smoke(&uuid::Uuid::new_v4().to_string()).await?;
-            return Ok(Reply::Done);
+            let gpu = crate::remote::host::smoke(&uuid::Uuid::new_v4().to_string()).await?;
+            // The coordinator stores the inspection it gets here, so the boot's GPU probe
+            // survives this one-request process. A plain `Done` would leave the host looking
+            // unverified until something else happened to inspect it in the same process.
+            let mut inspection = crate::remote::host::inspect().await;
+            inspection.mtty_available = gpu.mtty_available();
+            inspection.gpu_kernel = Some(gpu);
+            return Ok(Reply::Inspection {
+                inspection: Box::new(inspection),
+            });
         }
         if matches!(request.operation, Operation::InstallMsb) {
             // Stands in for flock(1), which macOS lacks; Linux installs also take it in the script.
@@ -986,6 +1007,7 @@ impl Agent {
                     compute: requested.compute,
                     layout: None,
                     release: requested.release.clone(),
+                    gpu: requested.gpu.clone(),
                 })?;
                 ensure!(
                     serde_json::to_value(requested)? == serde_json::to_value(&canonical)?,
@@ -1654,6 +1676,7 @@ mod tests {
                 generation: generation.into(),
                 from: crate::kolla::Phase::Prepare,
                 job_id: job_id.into(),
+                reference: None,
             },
         )
     }
@@ -1709,6 +1732,8 @@ mod tests {
             .unwrap();
         assert_eq!(again.lock().unwrap().len(), 3);
         assert_eq!(backend.deployed.load(Ordering::SeqCst), 1);
+        // A request without the field, as an older coordinator sends it, deploys as before.
+        assert_eq!(backend.references.lock().unwrap().as_slice(), [None]);
         let (rest, collect) = collector();
         agent
             .execute(attach(&owner, &job_id, 2), collect)
@@ -1785,6 +1810,7 @@ mod tests {
         ) -> futures::future::BoxFuture<'_, Result<Vec<crate::farm::FarmNode>>> {
             Box::pin(async { bail!("not in this test") })
         }
+        #[allow(clippy::too_many_arguments)]
         fn deploy(
             &self,
             _: String,
@@ -1792,6 +1818,8 @@ mod tests {
             _: Option<Exposure>,
             _: Vec<String>,
             _: String,
+            _: Option<String>,
+            _: Option<crate::model::GpuConfig>,
             sink: crate::kolla::EventSink,
         ) -> futures::future::BoxFuture<'_, Result<()>> {
             use crate::kolla::DeployEvent;
@@ -2043,5 +2071,55 @@ mod tests {
         );
         // A shell is a stream; the one-shot entry point refuses it.
         assert!(agent.execute(shell(&owner), silent).await.is_err());
+    }
+
+    /// A script session over the agent link: the coordinator's EOF travels as a frame that
+    /// closes the shell's stdin, and the session stays up until the real `bash -s` behind the
+    /// fake backend finishes. A dropped connection would mean a client that left, and the
+    /// session would hang the shell up.
+    #[tokio::test]
+    async fn a_script_session_over_the_link_runs_to_its_end_after_eof() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = Arc::new(Fake::default());
+        backend.run_scripts.store(true, Ordering::SeqCst);
+        let agent = Arc::new(Agent {
+            dir: dir.path().into(),
+            backend,
+            limits: Limits {
+                memory_budget_mib: 10000,
+                available_mib: 10000,
+                virtualization: true,
+                probe_ports: true,
+            },
+            runner: Runner::Inline,
+        });
+        let owner = uuid::Uuid::new_v4().to_string();
+        let generation = uuid::Uuid::new_v4().to_string();
+        let silent: Emitter = Arc::new(|_| Ok(()));
+        agent
+            .execute(request(&owner, create("one", &generation, 23950)), silent)
+            .await
+            .unwrap();
+        let request = request(
+            &owner,
+            Operation::Shell {
+                farm_id: "one".into(),
+                generation,
+                node: None,
+                size: TerminalSize {
+                    rows: 40,
+                    cols: 240,
+                },
+            },
+        );
+        let link = std::sync::Arc::new(crate::remote::link::InProcessLink { agent });
+        use crate::remote::link::AgentLink;
+        let script = "printf 'a\\n'; sleep 0.3\nprintf 'b\\n'";
+        let session = crate::farm::ScriptSession::new({
+            let link = link.clone();
+            move |io| Box::pin(async move { link.terminal(request, io).await })
+        });
+        let out = session.run(script).await.unwrap();
+        assert_eq!(out, "a\nb");
     }
 }

@@ -2,7 +2,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
 import { once } from "node:events";
-import { proxyApi, proxyUpgrade } from "./proxy.mjs";
+import { readFileSync } from "node:fs";
+import { portalApiPath, proxyApi, proxyUpgrade } from "./proxy.mjs";
 
 async function listen(server) {
   server.listen(0, "127.0.0.1");
@@ -458,4 +459,66 @@ test("refuses cross-origin, origin-less and unknown shell upgrades and relays fa
   let body = "";
   for await (const chunk of response) body += chunk;
   assert.match(JSON.parse(body).error, /running/);
+});
+
+test("forwards the GPU routes and keeps others closed", async (t) => {
+  const seen = [];
+  const address = await setup(t, (req, res) => {
+    seen.push(`${req.method} ${req.url}`);
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end("{}");
+  });
+  const server = "4c4b1c0e-1f4a-4c40-9c39-2b5a3f7c0f11";
+  const allowed = [
+    ["GET", "/api/v1/farms/demo/instances"],
+    ["GET", `/api/v1/farms/demo/instances/${server}/gpu-load`],
+    ["PUT", `/api/v1/farms/demo/instances/${server}/gpu-load`],
+    ["DELETE", `/api/v1/farms/demo/instances/${server}/gpu-load`],
+    ["GET", "/api/v1/farms/demo/gpu/user-data"],
+    ["GET", "/api/v1/farms/demo/gpu/guest-script"],
+    ["PUT", "/api/v1/farms/demo/nodes/control/faults"],
+  ];
+  for (const [method, path] of allowed) {
+    const response = await fetch(address + path, { method });
+    assert.equal(response.status, 200, `${method} ${path}`);
+  }
+  assert.equal(seen.length, allowed.length);
+  for (const path of [
+    "/api/v1/farms/demo/instances/secret",
+    "/api/v1/farms/demo/instances/../gpu-load",
+    "/api/v1/farms/demo/gpu/secret",
+    "/api/v1/farms/demo/gpu/user-data/x",
+    "/api/v1/farms/Demo/instances",
+  ]) {
+    assert.equal((await fetch(address + path)).status, 404, path);
+  }
+  assert.equal(seen.length, allowed.length);
+});
+test("keeps every documented API path reachable and closes the rest", async (t) => {
+  // The portal and farmd share docs/openapi.json, so a route added there but not here
+  // would pass every unit test and still fail in the browser as a 404.
+  const document = JSON.parse(
+    readFileSync(new URL("../../docs/openapi.json", import.meta.url), "utf8"),
+  );
+  // API-only, never called from the browser.
+  const notForThePortal = new Set(["/api/v1/buckets/{id}/index"]);
+  for (const path of Object.keys(document.paths)) {
+    if (notForThePortal.has(path)) continue;
+    // Job ids are UUIDs and farm ids are canonical, so one UUID stands for every id.
+    const concrete = path
+      .replaceAll("{id}", "4c4b1c0e-1f4a-4c40-9c39-2b5a3f7c0f11")
+      .replaceAll("{host_id}", "edge-1")
+      .replaceAll("{node}", "control")
+      .replaceAll("{server}", "4c4b1c0e-1f4a-4c40-9c39-2b5a3f7c0f11");
+    assert.ok(portalApiPath.test(concrete), `${path} is not reachable`);
+  }
+  // An unknown route still is not: the surface is a list, not a prefix.
+  for (const path of [
+    "/api/v1/farms/demo/instances/x",
+    "/api/v1/farms/demo/credentials",
+    "/api/v1/hosts/demo/credentials",
+    "/api/v1/farms/demo/gpu/secret",
+  ]) {
+    assert.equal(portalApiPath.test(path), false, path);
+  }
 });
