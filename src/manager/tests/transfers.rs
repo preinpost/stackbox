@@ -979,3 +979,70 @@ async fn a_release_plan_follows_the_architecture_of_the_control_vms_host() {
         "{error:#}"
     );
 }
+
+#[tokio::test]
+async fn a_farm_on_a_host_another_coordinator_publishes_on_takes_a_free_port_block() {
+    let fixture = crate::remote::test_server::Fixture::start().await;
+    fixture.observed.reserved_ports.lock().unwrap().push(15000);
+    let dir = tempfile::tempdir().unwrap();
+    let backend = Arc::new(Fake::default());
+    let manager = open_with(options(dir.path()), backend.clone()).await;
+    ssh_host(&manager, &fixture).await;
+    let created = manager
+        .create(CreateRequest {
+            host_id: Some("edge".into()),
+            external_host: "edge.example".into(),
+            ..request("remote-farm")
+        })
+        .unwrap();
+    assert_eq!(done(&manager, &created).await.status, JobStatus::Succeeded);
+    let base = manager
+        .get("remote-farm")
+        .unwrap()
+        .exposure
+        .unwrap()
+        .port_base;
+    assert!(
+        base.abs_diff(15000) >= crate::model::PUBLIC_PORT_BLOCK,
+        "{base}"
+    );
+    settle(&manager).await;
+}
+
+#[tokio::test]
+async fn a_snapshot_restored_on_a_host_another_coordinator_publishes_on_takes_a_free_port_block() {
+    let fixture = crate::remote::test_server::Fixture::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let backend = Arc::new(Fake::default());
+    let manager = open_with(options(dir.path()), backend.clone()).await;
+    ssh_host(&manager, &fixture).await;
+    keep_snapshot(&manager, &backend, "snap", None);
+    manager
+        .update(|state| {
+            state.snapshots.get_mut("snap").unwrap().host_id = Some("edge".into());
+            Ok(())
+        })
+        .unwrap();
+    fixture.observed.reserved_ports.lock().unwrap().push(15000);
+    let restored = manager
+        .create(CreateRequest {
+            host_id: Some("edge".into()),
+            external_host: "edge.example".into(),
+            snapshot_id: Some("snap".into()),
+            ..request("restored")
+        })
+        .unwrap();
+    let restored = done(&manager, &restored).await;
+    assert_eq!(
+        restored.status,
+        JobStatus::Succeeded,
+        "{:?}",
+        restored.error
+    );
+    let base = manager.get("restored").unwrap().exposure.unwrap().port_base;
+    assert!(
+        base.abs_diff(15000) >= crate::model::PUBLIC_PORT_BLOCK,
+        "{base}"
+    );
+    settle(&manager).await;
+}

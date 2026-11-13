@@ -18,6 +18,10 @@ fn unsupported<T: Send + 'static>() -> BoxFuture<'static, Result<T>> {
 /// VM boundary; tests can exercise the real manager without launching guests.
 pub trait Backend: Send + Sync + 'static {
     fn scan(&self) -> BoxFuture<'_, Result<BTreeMap<String, Vec<FarmNode>>>>;
+    /// Public port bases the host reserves for farms of every coordinator.
+    fn public_ports(&self) -> BoxFuture<'_, Result<Vec<u16>>> {
+        Box::pin(async { Ok(Vec::new()) })
+    }
     fn create(
         &self,
         id: String,

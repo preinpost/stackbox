@@ -777,6 +777,17 @@ impl Agent {
                 .collect();
             return Ok(Reply::Inventory { farms });
         }
+        if matches!(request.operation, Operation::PublicPorts) {
+            let registry = LockedRegistry::open(&self.dir)?;
+            let bases = registry
+                .state
+                .farms
+                .values()
+                .filter(|r| !r.deleted && r.publishes())
+                .map(|r| r.exposure.port_base)
+                .collect();
+            return Ok(Reply::PublicPorts { bases });
+        }
         // Host-wide checks have no farm id either.
         if matches!(request.operation, Operation::Inspect) {
             return Ok(Reply::Inspection {
@@ -1502,6 +1513,50 @@ mod tests {
             coordinator_id: owner.into(),
             operation,
         }
+    }
+    #[tokio::test]
+    async fn public_ports_list_the_publishing_blocks_of_every_coordinator() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent = Agent {
+            dir: dir.path().into(),
+            backend: Arc::new(Fake::default()),
+            limits: Limits {
+                memory_budget_mib: 50000,
+                available_mib: 100000,
+                virtualization: true,
+                probe_ports: false,
+            },
+            runner: Runner::Inline,
+        };
+        let other = uuid::Uuid::new_v4().to_string();
+        let generation = uuid::Uuid::new_v4().to_string();
+        let emit: Emitter = Arc::new(|_| Ok(()));
+        agent
+            .execute(
+                request(&other, create("held", &generation, 15000)),
+                emit.clone(),
+            )
+            .await
+            .unwrap();
+        let asker = uuid::Uuid::new_v4().to_string();
+        assert!(matches!(
+            agent.execute(request(&asker, Operation::PublicPorts), emit.clone()).await.unwrap(),
+            Reply::PublicPorts { bases } if bases == vec![15000]
+        ));
+        assert!(
+            agent
+                .execute(
+                    request(
+                        &asker,
+                        create("new", &uuid::Uuid::new_v4().to_string(), 15000)
+                    ),
+                    emit
+                )
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("reserved by another farm")
+        );
     }
     #[tokio::test]
     async fn durable_ownership_replay_budgets_failure_reservations_and_foreign_vms() {

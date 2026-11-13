@@ -20,6 +20,8 @@ pub struct Request {
 pub enum Operation {
     Hello,
     Scan,
+    /// The public port bases this host reserves for farms of every coordinator.
+    PublicPorts,
     Create {
         farm_id: String,
         generation: String,
@@ -461,6 +463,9 @@ pub enum Reply {
     Inventory {
         farms: BTreeMap<String, Vec<FarmNode>>,
     },
+    PublicPorts {
+        bases: Vec<u16>,
+    },
     Nodes {
         nodes: Vec<FarmNode>,
     },
@@ -529,7 +534,7 @@ impl Operation {
     fn reports_output(&self) -> bool {
         !matches!(
             self,
-            Self::Endpoints { .. } | Self::Hello | Self::Scan | Self::Inspect
+            Self::Endpoints { .. } | Self::Hello | Self::Scan | Self::PublicPorts | Self::Inspect
         )
     }
 }

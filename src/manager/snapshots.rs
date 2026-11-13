@@ -651,6 +651,8 @@ impl FarmManager {
         // On a host other than the original's, from a copy there.
         let host_id = farm.host_id.clone().context("restored farm has no host")?;
         self.read(|state| ensure_compatible(state, &snapshot, &host_id))??;
+        self.avoid_foreign_ports(job, &farm).await?;
+        let farm = self.get(&farm.id)?;
         let reference = self
             .ensure_snapshot_on_host(&id, &host_id, Some(self.event_sink(job, None)))
             .await?;

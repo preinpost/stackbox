@@ -24,6 +24,8 @@ pub struct Observed {
     pub legacy_agent: AtomicBool,
     /// Snapshot IDs this host keeps a copy of, with their references.
     pub cached: Mutex<std::collections::BTreeMap<String, String>>,
+    /// Public port bases that farms of other coordinators hold on this host.
+    pub reserved_ports: Mutex<Vec<u16>>,
     /// The farm kernel path this host's shell inspection would report.
     pub kernel: Mutex<Option<String>>,
     /// Why an installed kernel is not used, as the shell inspection would report it.
@@ -296,6 +298,9 @@ impl server::Handler for Handler {
                         },
                     }
                 }
+                Operation::PublicPorts => Reply::PublicPorts {
+                    bases: self.observed.reserved_ports.lock().unwrap().clone(),
+                },
                 Operation::Scan => {
                     if self.observed.fail_scan.load(Ordering::SeqCst) {
                         session.data(
@@ -323,8 +328,26 @@ impl server::Handler for Handler {
                     plan,
                     share,
                     source,
+                    exposure,
                     ..
                 } => {
+                    if self.observed.reserved_ports.lock().unwrap().contains(&exposure.port_base) {
+                        session.data(
+                            channel,
+                            format!(
+                                "{}\n",
+                                serde_json::to_string(&Frame::Error {
+                                    message: "remote public ports are reserved by another farm".into()
+                                })
+                                .unwrap()
+                            )
+                            .into_bytes(),
+                        )?;
+                        session.exit_status_request(channel, 1)?;
+                        session.eof(channel)?;
+                        session.close(channel)?;
+                        return Ok(());
+                    }
                     if let Some(source) = &source {
                         self.observed
                             .calls
@@ -487,8 +510,49 @@ impl server::Handler for Handler {
                 | Operation::SendArchive { .. } => {
                     unimplemented!("the SSH fixture does not take streamed archives")
                 }
+                Operation::Restore {
+                    farm_id,
+                    plan,
+                    exposure,
+                    ..
+                } => {
+                    if self.observed.reserved_ports.lock().unwrap().contains(&exposure.port_base) {
+                        session.data(
+                            channel,
+                            format!(
+                                "{}\n",
+                                serde_json::to_string(&Frame::Error {
+                                    message: "remote public ports are reserved by another farm".into()
+                                })
+                                .unwrap()
+                            )
+                            .into_bytes(),
+                        )?;
+                        session.exit_status_request(channel, 1)?;
+                        session.eof(channel)?;
+                        session.close(channel)?;
+                        return Ok(());
+                    }
+                    let nodes: Vec<_> = plan
+                        .nodes
+                        .into_iter()
+                        .map(|node| crate::farm::FarmNode {
+                            index: node.index,
+                            name: crate::farm::node_name(&farm_id, node.role, node.index),
+                            role: Some(node.role),
+                            status: "running".into(),
+                            memory_mib: node.memory_mib,
+                            ip: Some("10.250.0.1".into()),
+                        })
+                        .collect();
+                    self.observed
+                        .rpc_farms
+                        .lock()
+                        .unwrap()
+                        .insert(farm_id, nodes.clone());
+                    Reply::Nodes { nodes }
+                }
                 Operation::Freeze { .. }
-                | Operation::Restore { .. }
                 | Operation::Impair { .. }
                 | Operation::ImportSnapshot { .. }
                 | Operation::Inspect => {

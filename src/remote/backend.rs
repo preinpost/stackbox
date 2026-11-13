@@ -273,6 +273,14 @@ impl Backend for AgentBackend {
             }
         })
     }
+    fn public_ports(&self) -> BoxFuture<'_, Result<Vec<u16>>> {
+        Box::pin(async {
+            match self.call(Operation::PublicPorts, None).await? {
+                Reply::PublicPorts { bases } => Ok(bases),
+                _ => bail!("unexpected farm-agent public ports response"),
+            }
+        })
+    }
     fn create(
         &self,
         id: String,

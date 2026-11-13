@@ -811,6 +811,63 @@ impl FarmManager {
             })?;
         self.agent_backend(&local, None, "")
     }
+    /// Moves a farm off a public port block its host's agent holds for another coordinator.
+    /// The agent refuses a collision anyway; asking first avoids a create that is bound to fail.
+    async fn avoid_foreign_ports(&self, job: &Job, farm: &FarmRecord) -> Result<()> {
+        let taken = match self.backend_for(farm)?.public_ports().await {
+            Ok(taken) => taken,
+            Err(error) => {
+                self.log(
+                    &farm.id,
+                    &job.id,
+                    None,
+                    format!("could not read the host's reserved ports: {error}\n"),
+                )?;
+                return Ok(());
+            }
+        };
+        let Some(current) = farm.exposure.as_ref() else {
+            return Ok(());
+        };
+        if !taken
+            .iter()
+            .any(|&t| blocks_overlap(t, current.port_base, PUBLIC_PORT_BLOCK))
+        {
+            return Ok(());
+        }
+        let host_id = farm.host_id.clone().context("farm has no host")?;
+        let moved = self.update(|state| {
+            let probe = state
+                .hosts
+                .get(&host_id)
+                .is_some_and(|h| h.host.kind == HostKind::Local);
+            let exposure = allocate_ports(
+                state,
+                current.host.clone(),
+                current.bind,
+                &host_id,
+                probe,
+                &taken,
+            )?;
+            state
+                .farms
+                .get_mut(&farm.id)
+                .context("farm missing")?
+                .exposure = Some(exposure.clone());
+            Ok(exposure)
+        })?;
+        self.log(
+            &farm.id,
+            &job.id,
+            None,
+            format!(
+                "public ports {}.. are held on host {host_id} by another coordinator; using {}..\n",
+                current.port_base, moved.port_base
+            ),
+        )?;
+        Ok(())
+    }
+
     /// Whether a farm can be created on `host_id`: its memory budget, the agent the farm
     /// pins there, the address its ports bind and whether it is this machine.
     fn admit_host(
@@ -1508,7 +1565,7 @@ impl FarmManager {
                     )));
                 }
             }
-            let exposure = allocate_ports(state, request.external_host, bind, &host_id, local)?;
+            let exposure = allocate_ports(state, request.external_host, bind, &host_id, local, &[])?;
             let remote_generation = Some(uuid::Uuid::new_v4().to_string());
             let mut job = new_job(&id, if request.snapshot_id.is_some() { JobKind::Restore } else { JobKind::Create });
             job.snapshot_id = request.snapshot_id.clone();
@@ -2047,6 +2104,8 @@ impl FarmManager {
                 {
                     self.log(&farm.id, &job.id, None, format!("re-inspected host {host_id} over SSH\n"))?;
                 }
+                self.avoid_foreign_ports(job, &farm).await?;
+                let farm = self.get(&job.farm_id)?;
                 let nodes = if farm.shares.is_empty() {
                     self.backend_for(&farm)?
                         .create(
@@ -2984,10 +3043,14 @@ fn allocate_ports(
     bind: IpAddr,
     host_id: &str,
     probe: bool,
+    taken: &[u16],
 ) -> Result<Exposure> {
     let block = PUBLIC_PORT_BLOCK;
     for base in (15000u16..24000).step_by(usize::from(block)) {
         // Compare blocks, not just bases, so a widened block cannot overlap an older farm's ports.
+        if taken.iter().any(|&t| blocks_overlap(t, base, block)) {
+            continue;
+        }
         if state.farms.values().any(|f| {
             f.status != FarmStatus::Deleted
                 && f.host_id.as_deref() == Some(host_id)
