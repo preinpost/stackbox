@@ -89,6 +89,10 @@ control VM 하나로 시작해 원본 compute의 OpenStack 등록을 지운 뒤 
 3. 배포된 스냅샷이면 Keystone 카탈로그의 public endpoint를 원본의 `host:port`에서 새 farm의
    `host:port`로 바꾸고, `/etc/kolla/globals.yml`도 같이 고친 뒤 서비스 응답을 기다립니다.
 
+복원하면 compute VM이 다시 올라올 때 nova-compute가 DB에서 실행 중이던 인스턴스를 스스로 다시 켭니다.
+모든 farm의 `/etc/kolla/config/nova/nova-compute.conf`에 `[DEFAULT] resume_guests_state_on_host_boot = True`가
+들어가므로 수동 `server start`는 필요 없습니다. 이 옵션이 없으면 Nova 기본값(False)대로 인스턴스가 SHUTOFF로 남습니다.
+
 배포 전에 얼린 스냅샷은 `created` 상태로 복원되며 일반 farm처럼 배포합니다.
 복원한 farm도 다시 배포할 수 있습니다.
 

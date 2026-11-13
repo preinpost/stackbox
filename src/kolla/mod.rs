@@ -1738,19 +1738,16 @@ async fn configure(
     // from it. A simulated GPU's providers are farm's, written through Placement after the
     // deploy (see `gpu_advertise_script`), because Kolla's provider-config file takes only
     // custom classes and this contract is the standard VGPU one.
+    // Every farm's nova-compute resumes its guests after a restore; an mtty farm adds its sections.
     let nova_compute_conf = format!("{CONFIG_DIR}/config/nova/nova-compute.conf");
-    match gpu {
-        Some(gpu) if gpu.mode == crate::model::GpuMode::Mtty => {
-            step(sink, "compute VM의 mtty mdev 장치 확인")?;
-            check_mdev(deployer, computes, gpu.count).await?;
-            run(deployer, &format!("mkdir -p {CONFIG_DIR}/config/nova")).await?;
-            fs.write(&nova_compute_conf, config::MDEV_NOVA_COMPUTE_CONF)
-                .await?;
-        }
-        _ => {
-            run(deployer, &format!("rm -f {nova_compute_conf}")).await?;
-        }
+    let mtty = gpu.is_some_and(|gpu| gpu.mode == crate::model::GpuMode::Mtty);
+    if let Some(gpu) = gpu.filter(|gpu| gpu.mode == crate::model::GpuMode::Mtty) {
+        step(sink, "compute VM의 mtty mdev 장치 확인")?;
+        check_mdev(deployer, computes, gpu.count).await?;
     }
+    run(deployer, &format!("mkdir -p {CONFIG_DIR}/config/nova")).await?;
+    fs.write(&nova_compute_conf, &config::nova_compute_conf(mtty))
+        .await?;
     // A GPU farm installs the fake nvidia-smi on every instance through Nova's static
     // vendor data: cloud-init merges this cloud-config without user-data. Images that are
     // not cloud-init (CirrOS) ignore it and use the user-data installer the API serves.

@@ -264,6 +264,19 @@ glance_backend_file: true
 pub const MDEV_NOVA_COMPUTE_CONF: &str =
     "[devices]\nenabled_mdev_types = mtty-1\n\n[mdev_mtty-1]\ndevice_addresses = mtty_mtty\n";
 
+/// The nova-compute.conf of every farm. Without `resume_guests_state_on_host_boot`, Nova
+/// leaves each instance SHUTOFF when its compute VM comes back from a snapshot.
+pub const NOVA_COMPUTE_BASE_CONF: &str = "[DEFAULT]\nresume_guests_state_on_host_boot = True\n";
+
+/// The whole nova-compute.conf: the base section, then the mtty sections when `mdev`.
+pub fn nova_compute_conf(mdev: bool) -> String {
+    if mdev {
+        format!("{NOVA_COMPUTE_BASE_CONF}\n{MDEV_NOVA_COMPUTE_CONF}")
+    } else {
+        NOVA_COMPUTE_BASE_CONF.to_owned()
+    }
+}
+
 /// Where each host keeps the Nova files farm's mtty backport mounts into nova_compute, as
 /// `<release>/<module>` (see [`NOVA_MTTY_MODULES`]).
 pub const NOVA_MTTY_DIR: &str = "/etc/farm/nova-mtty";
@@ -924,6 +937,23 @@ mod tests {
             MDEV_NOVA_COMPUTE_CONF,
             "[devices]\nenabled_mdev_types = mtty-1\n\n[mdev_mtty-1]\ndevice_addresses = mtty_mtty\n"
         );
+    }
+
+    #[test]
+    fn nova_compute_resumes_its_guests_on_host_boot_with_or_without_mtty() {
+        let plain = nova_compute_conf(false);
+        assert_eq!(
+            plain,
+            "[DEFAULT]\nresume_guests_state_on_host_boot = True\n"
+        );
+        let mdev = nova_compute_conf(true);
+        assert!(
+            mdev.starts_with("[DEFAULT]\nresume_guests_state_on_host_boot = True\n\n"),
+            "{mdev}"
+        );
+        assert!(mdev.contains(MDEV_NOVA_COMPUTE_CONF), "{mdev}");
+        assert_eq!(mdev.matches("[DEFAULT]").count(), 1, "{mdev}");
+        assert_eq!(mdev.matches("[devices]").count(), 1, "{mdev}");
     }
 
     #[test]

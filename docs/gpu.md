@@ -233,8 +233,8 @@ curl -sS http://127.0.0.1:10010/api/v1/releases/farms \
   `PUT /traits/<name>`으로 등록합니다(이미 있으면 그대로입니다). 이어서 flavor `farm.vgpu`를
   `resources:<RC>=1`과 trait `=required`로 맞춥니다. compute를 추가하면 그 compute의
   provider만 같은 방식으로 광고합니다.
-- `mtty`: control VM의 `/etc/kolla/config/nova/nova-compute.conf`에 아래를 씁니다. 이 파일과
-  같은 배포에서, 2026.1 이하 릴리스에는 아래의 백포트 파일도 compute마다 만들어 둡니다. 둘은 함께
+- `mtty`: control VM의 `/etc/kolla/config/nova/nova-compute.conf`에 아래 절을 덧붙입니다(모든 farm이
+  이 파일의 `[DEFAULT]` 절을 씁니다). 이 파일과 같은 배포에서, 2026.1 이하 릴리스에는 아래의 백포트 파일도 compute마다 만들어 둡니다. 둘은 함께
   들어가야 합니다. `enabled_mdev_types`만 있고 백포트가 없으면 nova-compute는
   `InvalidLibvirtMdevConfig`(또는 `mtty_mtty`를 본 뒤의 `AttributeError`)로 기동하지 못합니다.
 
