@@ -213,7 +213,7 @@ pub fn globals(
     // Designate runs its bind9 backend inside the farm, with one name server record for its pool.
     // When Neutron runs beside it, Neutron's DNS domain is the same `farm.local.` zone.
     let designate = if newer_services && components.iter().any(|c| c == "designate") {
-        "designate_backend: \"bind9\"\ndesignate_ns_record:\n  - \"ns1.farm.local.\"\n"
+        "designate_backend: \"bind9\"\ndesignate_ns_record:\n  - \"ns1.farm.local\"\n"
     } else {
         ""
     };
@@ -621,7 +621,9 @@ mod tests {
             assert!(rendered.contains(&format!("enable_{id}: false\n")), "{id}");
         }
         assert!(rendered.contains("designate_backend: \"bind9\"\n"));
-        assert!(rendered.contains("designate_ns_record:\n  - \"ns1.farm.local.\"\n"));
+        // kolla's pools.yaml.j2 appends the trailing dot itself; a dotted value would render `ns1.farm.local..`.
+        assert!(rendered.contains("designate_ns_record:\n  - \"ns1.farm.local\"\n"));
+        assert!(!rendered.contains("ns1.farm.local.\""));
         assert!(rendered.contains("neutron_dns_domain: \"farm.local.\"\n"));
 
         // Without Designate, Neutron keeps its own DNS domain and no backend is named.
