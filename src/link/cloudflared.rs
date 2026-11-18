@@ -9,6 +9,7 @@
 
 use std::{
     path::{Path, PathBuf},
+    pin::Pin,
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -346,6 +347,14 @@ impl Tunnel {
         origin: String,
         on_url: Arc<dyn Fn(String) + Send + Sync>,
     ) -> Self {
+        Self::spawn(state_dir, origin, on_url, DNS_SETTLE)
+    }
+    fn spawn(
+        state_dir: &Path,
+        origin: String,
+        on_url: Arc<dyn Fn(String) + Send + Sync>,
+        settle: Duration,
+    ) -> Self {
         let installer = Arc::new(Installer::new(state_dir));
         let status = Arc::new(Mutex::new(TunnelStatus {
             version: installer.installed(),
@@ -361,6 +370,7 @@ impl Tunnel {
             restart.clone(),
             on_url,
             log,
+            settle,
         ));
         let updater = tokio::spawn({
             let (status, restart) = (status.clone(), restart.clone());
@@ -467,6 +477,7 @@ async fn supervise(
     restart: Arc<Notify>,
     on_url: Arc<dyn Fn(String) + Send + Sync>,
     log: PathBuf,
+    settle: Duration,
 ) {
     let mut first = true;
     let mut delay = Duration::from_secs(2);
@@ -510,6 +521,7 @@ async fn supervise(
             let stderr = child.stderr.take().context("no cloudflared stderr")?;
             let mut lines = BufReader::new(stderr).lines();
             let mut found: Option<String> = None;
+            let mut settling: Option<(String, Pin<Box<tokio::time::Sleep>>)> = None;
             let mut file = std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
@@ -530,14 +542,22 @@ async fn supervise(
                                 s.error = None;
                             }
                             // Announce a quick tunnel's address once, after its name resolves.
+                            // The wait belongs to this loop, not a detached task, so dropping
+                            // or restarting the tunnel cancels it.
                             if let Some(url) = found.take() {
-                                let (status, on_url) = (status.clone(), on_url.clone());
-                                tokio::spawn(async move {
-                                    tokio::time::sleep(DNS_SETTLE).await;
-                                    status.lock().unwrap().url = Some(url.clone());
-                                    on_url(url);
-                                });
+                                settling = Some((url, Box::pin(tokio::time::sleep(settle))));
                             }
+                        }
+                    }
+                    _ = async {
+                        match settling.as_mut() {
+                            Some((_, wait)) => wait.await,
+                            None => std::future::pending().await,
+                        }
+                    } => {
+                        if let Some((url, _)) = settling.take() {
+                            status.lock().unwrap().url = Some(url.clone());
+                            on_url(url);
                         }
                     }
                     _ = restart.notified() => {
@@ -681,5 +701,71 @@ mod tests {
         }
         assert_eq!(body, "pong", "{:?}", tunnel.status());
         assert!(tunnel.status().connected);
+    }
+
+    /// A stand-in for cloudflared that registers a quick tunnel at `address` and runs until
+    /// stopped. It sits in a state dir's `bin/`, so `Installer` finds it without the network.
+    #[cfg(unix)]
+    fn fake_quick_tunnel(state_dir: &Path, address: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        let bin = state_dir.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let name = "cloudflared-9999.0.0";
+        let script = bin.join(name);
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\necho 'INF |  {address}  |' >&2\necho 'INF Registered tunnel connection connIndex=0' >&2\nexec sleep 600\n"
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::os::unix::fs::symlink(name, bin.join("cloudflared")).unwrap();
+    }
+
+    /// A tunnel dropped after its address was found but before the name settled must not
+    /// announce that address later: the next tunnel's address is the first one heard.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_dropped_tunnel_does_not_announce_its_address_after_the_drop() {
+        let settle = Duration::from_millis(1500);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let on_url = |tx: tokio::sync::mpsc::UnboundedSender<String>| {
+            Arc::new(move |url: String| {
+                let _ = tx.send(url);
+            }) as Arc<dyn Fn(String) + Send + Sync>
+        };
+
+        let old_dir = tempfile::tempdir().unwrap();
+        fake_quick_tunnel(old_dir.path(), "https://old-river-1111.trycloudflare.com");
+        let old = Tunnel::spawn(
+            old_dir.path(),
+            "http://127.0.0.1:1".to_owned(),
+            on_url(tx.clone()),
+            settle,
+        );
+        for _ in 0..200 {
+            if old.status().connected {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert!(old.status().connected, "{:?}", old.status());
+        // The restart: the old tunnel goes while its address is still settling.
+        drop(old);
+
+        let new_dir = tempfile::tempdir().unwrap();
+        fake_quick_tunnel(new_dir.path(), "https://new-river-2222.trycloudflare.com");
+        let _new = Tunnel::spawn(
+            new_dir.path(),
+            "http://127.0.0.1:1".to_owned(),
+            on_url(tx.clone()),
+            settle,
+        );
+        let first = tokio::time::timeout(Duration::from_secs(20), rx.recv())
+            .await
+            .expect("no address announced")
+            .unwrap();
+        assert_eq!(first, "https://new-river-2222.trycloudflare.com");
     }
 }
