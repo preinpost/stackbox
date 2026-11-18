@@ -954,6 +954,12 @@ function HostInspection({
 }
 
 export function HostJobHistory({ job }: { job: HostJob }) {
+  const kindLabel =
+    job.kind === "check"
+      ? "점검"
+      : job.kind === "install_agent"
+        ? "Farm 실행기 업데이트"
+        : "환경 준비";
   return (
     <details
       className="host-job-history"
@@ -961,19 +967,15 @@ export function HostJobHistory({ job }: { job: HostJob }) {
     >
       <summary>
         <strong>{job.host_id}</strong>
-        <span className="job-kind">
-          {job.kind === "check"
-            ? "점검"
-            : job.kind === "install_agent"
-              ? "Farm 실행기 설치 (구)"
-              : "환경 준비"}
+        <span className="job-kind job-kind-label" title={kindLabel}>
+          {kindLabel}
         </span>
         <span className="hostjob-msg">
           {job.events.at(-1)?.message ??
             (job.error ? "작업이 실패했습니다" : "기록된 이벤트가 없습니다")}
         </span>
         <StatusBadge status={job.status} />
-        <time>{dateTime(job.created_at)}</time>
+        <time className="hostjob-time">{dateTime(job.created_at)}</time>
       </summary>
       {job.events.length > 0 && (
         <ol>
