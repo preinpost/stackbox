@@ -1674,10 +1674,13 @@ async fn configure(
     // all internal API/database calls use the VM's eth0 address and native ports.
     if let Some(exposure) = exposure {
         for c in crate::model::COMPONENTS {
-            let (Some(port), Some(variable)) = (&c.public, public_url_variable(c.id)) else {
+            if !components.iter().any(|id| id == c.id) {
                 continue;
-            };
-            if components.iter().any(|id| id == c.id) {
+            }
+            for port in c.public {
+                let Some(variable) = public_url_variable(port.id) else {
+                    continue;
+                };
                 globals.push_str(&format!(
                     "{variable}: \"http://{}:{}\"\n",
                     exposure.host,
@@ -2038,7 +2041,7 @@ pub async fn settle(
 fn rebind_map(from: &Exposure, to: &Exposure) -> BTreeMap<String, String> {
     crate::model::COMPONENTS
         .iter()
-        .filter_map(|c| c.public.as_ref())
+        .flat_map(|c| c.public.iter())
         .map(|p| {
             (
                 format!("http://{}:{}", from.host, from.port_base + p.offset),
@@ -2151,15 +2154,24 @@ fn no_compute_hosts(inventory: &str) -> String {
     )
 }
 
-/// Kolla variable holding each service's public base URL (without the API version path).
-fn public_url_variable(component: &str) -> Option<&'static str> {
-    Some(match component {
+/// Kolla variable holding each published port's public base URL (without the API version path),
+/// keyed by [`crate::model::PublicPort::id`]. The 2025.1 names are those of the 2025.2, 2026.1
+/// and 2026.2 kolla-ansible branches.
+fn public_url_variable(port: &str) -> Option<&'static str> {
+    Some(match port {
         "keystone" => "keystone_public_url",
         "glance" => "glance_public_endpoint",
         "placement" => "placement_public_endpoint",
         "horizon" => "horizon_public_endpoint",
         "neutron" => "neutron_public_endpoint",
         "nova" => "nova_public_base_endpoint",
+        "heat" => "heat_public_base_endpoint",
+        "heat-cfn" => "heat_cfn_public_base_endpoint",
+        "barbican" => "barbican_public_endpoint",
+        "designate" => "designate_public_endpoint",
+        "magnum" => "magnum_public_base_endpoint",
+        "skyline" => "skyline_apiserver_public_endpoint",
+        "skyline-console" => "skyline_console_public_endpoint",
         _ => return None,
     })
 }
@@ -3805,6 +3817,49 @@ mod tests {
     }
 
     #[test]
+    fn each_published_port_maps_to_its_kolla_variable_at_its_own_offset() {
+        let exposure = Exposure {
+            host: "farm.example".into(),
+            bind: [127, 0, 0, 1].into(),
+            port_base: 15000,
+        };
+        let all: Vec<String> = crate::model::COMPONENTS
+            .iter()
+            .map(|c| c.id.to_owned())
+            .collect();
+        let urls = exposure.urls(Some(&all));
+        // Every published port is listed and has a Kolla variable to be written into globals.yml.
+        let ports: Vec<_> = crate::model::COMPONENTS
+            .iter()
+            .flat_map(|c| c.public.iter())
+            .collect();
+        assert_eq!(urls.len(), ports.len());
+        for port in &ports {
+            assert!(
+                public_url_variable(port.id).is_some(),
+                "{} has no kolla variable",
+                port.id
+            );
+        }
+        // Heat's API and CFN ports, and Skyline's console, keep distinct offsets.
+        assert_eq!(urls["heat"], "http://farm.example:15009");
+        assert_eq!(urls["heat-cfn"], "http://farm.example:15010");
+        assert_eq!(urls["barbican"], "http://farm.example:15011");
+        assert_eq!(urls["designate"], "http://farm.example:15012");
+        assert_eq!(urls["magnum"], "http://farm.example:15013");
+        assert_eq!(urls["skyline"], "http://farm.example:15014");
+        assert_eq!(urls["skyline-console"], "http://farm.example:15015");
+        assert_eq!(
+            public_url_variable("heat-cfn"),
+            Some("heat_cfn_public_base_endpoint")
+        );
+        assert_eq!(
+            public_url_variable("skyline-console"),
+            Some("skyline_console_public_endpoint")
+        );
+    }
+
+    #[test]
     fn rebinding_moves_whole_host_port_prefixes_and_keeps_paths() {
         let exposure = |host: &str, port_base| Exposure {
             host: host.into(),
@@ -3813,15 +3868,21 @@ mod tests {
         };
         let map = rebind_map(
             &exposure("localhost", 15000),
-            &exposure("farm.example", 15010),
+            &exposure("farm.example", 15020),
         );
-        assert_eq!(map["http://localhost:15000"], "http://farm.example:15010");
-        assert_eq!(map["http://localhost:15005"], "http://farm.example:15015");
-        assert_eq!(map.len(), crate::model::COMPONENTS.len());
+        assert_eq!(map["http://localhost:15000"], "http://farm.example:15020");
+        assert_eq!(map["http://localhost:15005"], "http://farm.example:15025");
+        assert_eq!(
+            map.len(),
+            crate::model::COMPONENTS
+                .iter()
+                .map(|c| c.public.len())
+                .sum::<usize>()
+        );
         // Run the generated rewrite against a stub client and globals.yml.
         let dir = tempfile::tempdir().unwrap();
         let script = settle_script(
-            Some((&exposure("localhost", 15000), &exposure("localhost", 15010))),
+            Some((&exposure("localhost", 15000), &exposure("localhost", 15020))),
             &["keystone".into(), "glance".into()],
         );
         let python = script
@@ -3858,12 +3919,12 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
         let calls = std::fs::read_to_string(calls).unwrap();
-        assert!(calls.contains("endpoint set --url http://localhost:15010 k"));
-        assert!(calls.contains("endpoint set --url http://localhost:15015/v2.1 n"));
+        assert!(calls.contains("endpoint set --url http://localhost:15020 k"));
+        assert!(calls.contains("endpoint set --url http://localhost:15025/v2.1 n"));
         assert!(!calls.contains(" o\n"), "{calls}");
         let globals = std::fs::read_to_string(dir.path().join("globals.yml")).unwrap();
-        assert!(globals.contains("keystone_public_url: \"http://localhost:15010\""));
-        assert!(globals.contains("glance_public_endpoint: \"http://localhost:15011\""));
+        assert!(globals.contains("keystone_public_url: \"http://localhost:15020\""));
+        assert!(globals.contains("glance_public_endpoint: \"http://localhost:15021\""));
         assert!(globals.contains("10.254.0.2"));
     }
     #[test]

@@ -7,6 +7,7 @@ import type { Datastore } from "../api/client";
 import {
   DatastoreCard,
   DeploymentPhases,
+  Endpoints,
   FarmMeta,
   HorizonLogin,
   NodeTopology,
@@ -356,4 +357,53 @@ test("lays out a multi-node farm by VM and cuts a compute off its links", async 
     { loss: 1 },
   ]);
   client.clear();
+});
+
+test("the public port block covers every port a selected service publishes", () => {
+  const exposed: Farm = {
+    ...farm,
+    id: "heat-test",
+    status: "ready",
+    exposure: { bind: "127.0.0.1", host: "127.0.0.1", port_base: 15000 },
+    plan: { ...farm.plan!, components: ["keystone", "glance", "heat"] },
+  };
+  const { container } = render(
+    <QueryClientProvider client={new QueryClient()}>
+      <NodeTopology farm={exposed} />
+    </QueryClientProvider>,
+  );
+  // heat publishes its API at 15009 and its CloudFormation API at 15010.
+  expect(container.querySelector(".topology-net")?.textContent).toContain(
+    "public :15000–15010",
+  );
+});
+
+test("lists every public endpoint of heat and skyline, not one per component", () => {
+  const exposed: Farm = {
+    ...farm,
+    id: "heat-test",
+    status: "ready",
+    exposure: { bind: "127.0.0.1", host: "127.0.0.1", port_base: 15000 },
+    plan: {
+      ...farm.plan!,
+      components: ["keystone", "glance", "heat", "skyline"],
+    },
+  };
+  const { container } = render(
+    <QueryClientProvider client={new QueryClient()}>
+      <Endpoints farm={exposed} />
+    </QueryClientProvider>,
+  );
+  expect(container.querySelector(".panel-toolbar .chip")?.textContent).toBe(
+    ":15000–15015",
+  );
+  for (const [name, url] of [
+    ["Heat", "http://127.0.0.1:15009"],
+    ["Heat CloudFormation", "http://127.0.0.1:15010"],
+    ["Skyline", "http://127.0.0.1:15014"],
+    ["Skyline Console", "http://127.0.0.1:15015"],
+  ] as const) {
+    expect(screen.getByText(name, { selector: "strong" })).toBeTruthy();
+    expect(screen.getByText(url, { selector: "code" })).toBeTruthy();
+  }
 });

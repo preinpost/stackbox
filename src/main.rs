@@ -147,6 +147,9 @@ enum Command {
         public_bind: IpAddr,
     },
     Catalog {
+        /// Check each service against this OpenStack release, such as 2025.2.
+        #[arg(long)]
+        release: Option<String>,
         #[arg(long)]
         json: bool,
     },
@@ -492,18 +495,23 @@ async fn main() -> Result<()> {
     // usable farm kernel: computing a plan never boots a VM, and whether a host can bind the
     // `mtty` device is decided by that host's inspection when the farm is created.
     match &cli.command {
-        Command::Catalog { json } => {
-            let c = model::catalog();
+        Command::Catalog { release, json } => {
+            let c = model::catalog(release.as_deref());
             if *json {
                 return print_json(&c);
             }
             for component in c.components {
                 let status = if component.required {
-                    "required"
+                    "required".to_owned()
                 } else if component.available {
-                    "optional"
+                    match &component.min_release {
+                        Some(min) => format!("optional, {min} or newer"),
+                        None => "optional".to_owned(),
+                    }
+                } else if let Some(reason) = &component.reason {
+                    format!("unavailable: {reason}")
                 } else {
-                    "not deployable yet"
+                    "not deployable yet".to_owned()
                 };
                 let depends = if component.depends_on.is_empty() {
                     String::new()

@@ -880,10 +880,27 @@ export interface components {
       constraints: string[];
     };
     Component: {
-      /** @description False while the service is listed for planning but cannot be deployed yet. */
+      /**
+       * @description False while the service is listed for planning but cannot be deployed yet, or, when a
+       *     release was asked for, cannot run in that release (see `reason`).
+       */
       available: boolean;
       depends_on: string[];
+      /** @description True while `footprint_mib` is a planning estimate that no farm has measured yet. */
+      estimated: boolean;
+      /**
+       * Format: int32
+       * @description Guest memory the service adds to the VM that runs it, in MiB.
+       */
+      footprint_mib: number;
       id: string;
+      /** @description The oldest OpenStack release that runs the service; `None` when every release does. */
+      min_release?: string | null;
+      /**
+       * @description Why the service cannot run in the requested release; `None` when it can, or when the
+       *     catalog was asked without a release.
+       */
+      reason?: string | null;
       required: boolean;
       requires_data_plane: boolean;
     };
@@ -2332,7 +2349,13 @@ export interface operations {
   };
   catalog_handler: {
     parameters: {
-      query?: never;
+      query?: {
+        /**
+         * @description OpenStack release to check each service against, such as 2025.2; omitted lists every
+         *     service with its static availability.
+         */
+        release?: string;
+      };
       header?: never;
       path?: never;
       cookie?: never;

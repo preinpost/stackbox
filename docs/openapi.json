@@ -463,6 +463,17 @@
       "get": {
         "tags": [],
         "operationId": "catalog_handler",
+        "parameters": [
+          {
+            "name": "release",
+            "in": "query",
+            "description": "OpenStack release to check each service against, such as 2025.2; omitted lists every\nservice with its static availability.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "",
@@ -3000,12 +3011,14 @@
           "required",
           "depends_on",
           "requires_data_plane",
-          "available"
+          "available",
+          "footprint_mib",
+          "estimated"
         ],
         "properties": {
           "available": {
             "type": "boolean",
-            "description": "False while the service is listed for planning but cannot be deployed yet."
+            "description": "False while the service is listed for planning but cannot be deployed yet, or, when a\nrelease was asked for, cannot run in that release (see `reason`)."
           },
           "depends_on": {
             "type": "array",
@@ -3013,8 +3026,32 @@
               "type": "string"
             }
           },
+          "estimated": {
+            "type": "boolean",
+            "description": "True while `footprint_mib` is a planning estimate that no farm has measured yet."
+          },
+          "footprint_mib": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Guest memory the service adds to the VM that runs it, in MiB.",
+            "minimum": 0
+          },
           "id": {
             "type": "string"
+          },
+          "min_release": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The oldest OpenStack release that runs the service; `None` when every release does."
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the service cannot run in the requested release; `None` when it can, or when the\ncatalog was asked without a release."
           },
           "required": {
             "type": "boolean"

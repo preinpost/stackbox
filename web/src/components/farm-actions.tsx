@@ -251,7 +251,6 @@ export function CreateFarmForm({
 }) {
   const client = useQueryClient();
   const navigate = useNavigate();
-  const catalog = useQuery(catalogQuery());
   const coordinator = useQuery(hostQuery());
   const hosts = useQuery(hostsQuery());
   const buildId = coordinator.data?.build_id;
@@ -310,6 +309,22 @@ export function CreateFarmForm({
           (a.local_control + a.bucket_control),
       )[0]?.release;
   const releaseInfo = offered.find((r) => r.release === release);
+  // The catalog says which services the chosen release can run; it is asked again on change.
+  const catalog = useQuery({
+    ...catalogQuery(release),
+    placeholderData: keepPreviousData,
+  });
+  // A release that cannot run a selected service drops it from the selection.
+  useEffect(() => {
+    const services = catalog.data?.components;
+    if (!services) return;
+    setSelected((current) => {
+      const kept = current.filter(
+        (id) => services.find((c) => c.id === id)?.available !== false,
+      );
+      return kept.length === current.length ? current : kept;
+    });
+  }, [catalog.data]);
   // Only the computes that exist, on hosts other than the control VM's.
   const placement = Object.fromEntries(
     Object.entries(placed).filter(
@@ -391,6 +406,10 @@ export function CreateFarmForm({
   const components = resolveComponents(
     catalog.data?.components ?? [],
     requested,
+  );
+  // Estimated footprints are planning guesses; the plan's memory already includes them.
+  const estimated = (catalog.data?.components ?? []).some(
+    (c) => c.estimated && components.includes(c.id),
   );
   const plan = useQuery({
     queryKey: ["plan", components, computes, compute, gpu],
@@ -530,10 +549,10 @@ export function CreateFarmForm({
                   />
                   <p className="field-hint mt-2">
                     {target?.kind === "local"
-                      ? "coordinator(farmd)가 실행 중인 머신의 microsandbox에서 farm의 VM을 실행합니다."
-                      : "farm의 VM이 선택한 서버에서 실행됩니다. 서비스 포트는 해당 서버의 모든 IPv4 인터페이스에 바인딩됩니다."}
+                      ? "coordinator(farmd) 머신에서 VM을 실행합니다"
+                      : "선택한 서버에서 VM을 실행합니다"}
                     {remaining !== null &&
-                      ` · 추가 예약 가능 ${memory(Math.max(0, remaining))}`}
+                      ` · 여유 ${memory(Math.max(0, remaining))}`}
                   </p>
                 </>
               )}
@@ -588,11 +607,7 @@ export function CreateFarmForm({
                 }))}
               />
               <p className="field-hint mt-2">
-                control VM이 API·DB·MQ·네트워크 노드와 Kolla를 맡고, compute
-                VM에서 Nova 인스턴스가 실행됩니다. VM끼리는 호스트의 링크
-                스위치로 연결되며, 상세 화면에서 compute VM을 고립시켜
-                evacuate를 시험할 수 있습니다. compute는 스냅샷(compute
-                템플릿)으로 붙일 수 있고, 템플릿이 없으면 클린 설치합니다.
+                control은 API·DB·네트워크, compute는 Nova 인스턴스를 실행합니다.
               </p>
             </div>
             <div>
@@ -608,10 +623,7 @@ export function CreateFarmForm({
                 }))}
               />
               <p className="field-hint mt-2">
-                compute VM마다 같은 사양입니다. nova-compute·libvirt·OVS가 약
-                0.8 GiB를 쓰고 나머지가 인스턴스 몫입니다. 인스턴스 디스크는
-                디스크 크기 안에 만들어지며, 처음 쓰는 디스크 크기는 호스트에서
-                golden image를 한 번 더 만듭니다(약 35초).
+                compute VM마다 같은 사양이 적용됩니다 (약 0.8 GiB는 시스템용).
               </p>
             </div>
             <div>
@@ -680,12 +692,7 @@ export function CreateFarmForm({
                 )}
               </div>
               <p className="field-hint mt-2">
-                실제 GPU가 아닌 가상 장치입니다. simulated는 compute마다 표준
-                VGPU 리소스를 Placement에 광고하고 flavor로 예약만 하며 (게스트
-                장치 없음), mtty는 farm 커널의 mtty mdev를 VGPU로 붙여 게스트에
-                장치가 보입니다. GPU farm은 템플릿 대신 클린 설치합니다. 장치
-                수를 늘리면 가짜 카드마다 resource provider가 하나씩 생기고,
-                수량이 그 위에 나뉩니다.
+                실제 GPU가 아닌 가상 장치입니다. GPU farm은 클린 설치됩니다.
               </p>
               {gpuProblem && (
                 <div className="warning-notice mt-2">{gpuProblem}</div>
@@ -774,9 +781,7 @@ export function CreateFarmForm({
                       </div>
                     )}
                   <p className="field-hint mt-2">
-                    고른 릴리스의 템플릿이 구성과 맞으면 그 템플릿으로 VM을
-                    만들고, 없으면 그 릴리스의 kolla-ansible 브랜치로 클린
-                    설치합니다.
+                    템플릿이 있으면 사용하고, 없으면 클린 설치합니다.
                   </p>
                 </>
               )}
@@ -808,6 +813,7 @@ export function CreateFarmForm({
                     <label
                       className={`component-option ${included ? "selected" : ""} ${!c.available ? "unavailable" : ""}`}
                       key={c.id}
+                      title={c.reason ?? undefined}
                     >
                       <Checkbox.Root
                         checked={included}
@@ -832,7 +838,9 @@ export function CreateFarmForm({
                             {c.required
                               ? "필수"
                               : !c.available
-                                ? "준비 중"
+                                ? c.min_release
+                                  ? `${c.min_release}+`
+                                  : "준비 중"
                                 : forCompute
                                   ? "Compute VM에 필요"
                                   : neededBy.length
@@ -949,6 +957,7 @@ export function CreateFarmForm({
                   <span>
                     <Cpu size={17} />
                     <strong>{memory(plan.data.memory_mib)}</strong> 메모리
+                    {estimated && <small className="muted"> · 추정 포함</small>}
                   </span>
                   <span>
                     <HardDrive size={17} />

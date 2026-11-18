@@ -779,7 +779,7 @@ fn normalize<'a>(releases: impl Iterator<Item = &'a str>) -> Vec<String> {
 
 /// `2026.2`: a year and one release number. The legacy series reached before the year names
 /// (`victoria`) are offered from [`LEGACY`] instead, under the names a farm records.
-fn year_release(release: &str) -> bool {
+pub fn year_release(release: &str) -> bool {
     let (year, number) = release.split_once('.').unwrap_or_default();
     year.len() == 4
         && year.bytes().all(|c| c.is_ascii_digit())

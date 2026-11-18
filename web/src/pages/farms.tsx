@@ -29,6 +29,7 @@ import {
 import { useMemo, useState } from "react";
 import {
   activeJob,
+  catalogQuery,
   farmsQuery,
   hostsQuery,
   jobsQuery,
@@ -61,6 +62,7 @@ const tagLimit = 4;
 
 export function FarmsPage() {
   const farms = useQuery(farmsQuery());
+  const catalog = useQuery(catalogQuery());
   const hosts = useQuery(hostsQuery());
   const jobs = useQuery(jobsQuery());
   const [search, setSearch] = useState("");
@@ -537,7 +539,9 @@ export function FarmsPage() {
             </span>
           </div>
           <p>
-            Keystone · Glance · Placement · Horizon · Neutron · Nova 지원 ·
+            {catalog.data?.components?.length
+              ? `OpenStack 서비스 ${catalog.data.components.length}개 지원 · `
+              : ""}
             배포는 한 번에 하나씩 실행됩니다.
           </p>
         </section>

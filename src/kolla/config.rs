@@ -199,8 +199,29 @@ pub fn globals(
     // These series derive `enable_heat` from `enable_openstack_core`, which the farm turns off
     // below; naming the flag keeps a series whose published images leave heat out from pulling
     // one anyway. A maintained branch keeps the flag implicit, as it deployed before.
-    let heat = if release.release.as_str() < "2025.1" {
-        "enable_heat: false\n"
+    // From 2025.1 on, every service the farm can offer gets its flag written out, true when the
+    // farm selected it, so an unselected one stays off whatever the series defaults to.
+    let newer_services = release.release.as_str() >= "2025.1";
+    let flags = if newer_services {
+        ["heat", "barbican", "designate", "magnum", "skyline"]
+            .iter()
+            .map(|id| format!("enable_{id}: {}\n", components.iter().any(|c| c == id)))
+            .collect::<String>()
+    } else {
+        "enable_heat: false\n".to_owned()
+    };
+    // Designate runs its bind9 backend inside the farm, with one name server record for its pool.
+    // When Neutron runs beside it, Neutron's DNS domain is the same `farm.local.` zone.
+    let designate = if newer_services && components.iter().any(|c| c == "designate") {
+        "designate_backend: \"bind9\"\ndesignate_ns_record:\n  - \"ns1.farm.local.\"\n"
+    } else {
+        ""
+    };
+    let dns_domain = if newer_services
+        && components.iter().any(|c| c == "designate")
+        && components.iter().any(|c| c == "neutron")
+    {
+        "neutron_dns_domain: \"farm.local.\"\n"
     } else {
         ""
     };
@@ -248,13 +269,13 @@ memcached_max_memory: 64
 rabbitmq_server_additional_erl_args: "+S 1:1 +sbwt none +sbwtdcpu none +sbwtdio none"
 
 enable_openstack_core: false
-{heat}enable_mariadb: true
+{flags}enable_mariadb: true
 enable_memcached: true
 enable_rabbitmq: true
 enable_keystone: true
 enable_glance: true
 glance_backend_file: true
-{enabled}{links}{external}{neutron}{nova}"#
+{enabled}{links}{external}{neutron}{nova}{designate}{dns_domain}"#
     )
 }
 
@@ -589,6 +610,47 @@ mod tests {
         assert!(alone.contains("[compute]\n\n[monitoring]\nfarm-control\n"));
     }
 
+    #[test]
+    fn newer_services_get_explicit_flags_and_designate_its_backend() {
+        let selected = ["keystone", "glance", "heat", "designate", "neutron"].map(String::from);
+        let rendered = globals_at(&selected, "2025.2");
+        assert!(rendered.contains("enable_heat: true\n"));
+        assert!(rendered.contains("enable_designate: true\n"));
+        // Unselected services are named off rather than left to the series' defaults.
+        for id in ["barbican", "magnum", "skyline"] {
+            assert!(rendered.contains(&format!("enable_{id}: false\n")), "{id}");
+        }
+        assert!(rendered.contains("designate_backend: \"bind9\"\n"));
+        assert!(rendered.contains("designate_ns_record:\n  - \"ns1.farm.local.\"\n"));
+        assert!(rendered.contains("neutron_dns_domain: \"farm.local.\"\n"));
+
+        // Without Designate, Neutron keeps its own DNS domain and no backend is named.
+        let without = ["keystone", "glance", "heat", "neutron"].map(String::from);
+        let rendered = globals_at(&without, "2025.2");
+        assert!(rendered.contains("enable_designate: false\n"));
+        assert!(!rendered.contains("designate_backend"));
+        assert!(!rendered.contains("designate_ns_record"));
+        assert!(!rendered.contains("neutron_dns_domain"));
+
+        // Before 2025.1 the newer flags are not written; heat keeps its explicit false.
+        let old = globals_at(&["keystone", "glance"].map(String::from), "2024.2");
+        assert!(old.contains("enable_heat: false\n"));
+        assert!(!old.contains("enable_barbican"));
+        assert!(!old.contains("enable_skyline"));
+    }
+
+    fn globals_at(selected: &[String], release: &str) -> String {
+        globals(
+            "10.254.0.2",
+            "farm0",
+            "aarch64",
+            false,
+            selected,
+            false,
+            &crate::kolla::releases::info(release),
+        )
+    }
+
     fn globals_single(selected: &[String]) -> String {
         globals(
             "10.254.0.2",
@@ -685,11 +747,12 @@ mod tests {
             "prechecks_enable_host_os_checks",
             "docker_yum_url",
             "change_selinux",
-            "enable_heat",
             "docker_sdk_",
         ] {
             assert!(!globals.contains(absent), "{absent}");
         }
+        // From 2025.1 every newer service is named, and the unselected ones are off.
+        assert!(globals.contains("enable_heat: false\n"));
         let legacy = self::globals(
             "192.168.127.2",
             "eth0",
@@ -762,6 +825,35 @@ mod tests {
         );
         assert!(!text.contains("docker_registry"));
         assert!(!text.contains("docker_namespace"));
+    }
+
+    #[test]
+    fn the_2024_2_globals_are_unchanged_from_the_fixture() {
+        // The fixture is this function's output for 2024.2 at HEAD (41caea6), with the same
+        // inputs as the 2026.2 golden above. An equality failure means the 2024.2 globals a
+        // deployed farm would get have changed.
+        let selected = [
+            "keystone",
+            "glance",
+            "placement",
+            "horizon",
+            "neutron",
+            "nova",
+        ]
+        .map(String::from);
+        let text = globals(
+            "10.254.0.2",
+            "farm0",
+            "x86_64",
+            false,
+            &selected,
+            false,
+            &crate::kolla::releases::info("2024.2"),
+        );
+        assert_eq!(
+            text,
+            include_str!("../../tests/fixtures/kolla/globals-2024.2.yml")
+        );
     }
 
     #[test]
