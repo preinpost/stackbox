@@ -359,6 +359,7 @@ impl Session {
             active_job: None,
             error: None,
             connected: false,
+            reachability: None,
             created_at: 0,
             updated_at: 0,
         };
@@ -1006,6 +1007,7 @@ mod tests {
             active_job: None,
             error: None,
             connected: false,
+            reachability: None,
             created_at: 0,
             updated_at: 0,
         }

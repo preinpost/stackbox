@@ -4371,6 +4371,46 @@
           "agent"
         ]
       },
+      "HostReachability": {
+        "type": "object",
+        "description": "What the coordinator's last attempts to reach an SSH host found: its inventory scan, or a\nplain connection check for a host that runs no farm.",
+        "required": [
+          "reachable"
+        ],
+        "properties": {
+          "checked_at": {
+            "type": "integer",
+            "format": "int64",
+            "description": "When the coordinator last tried the host, in Unix seconds; 0 if never.",
+            "minimum": 0
+          },
+          "consecutive_failures": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the last attempt failed; absent after a successful one."
+          },
+          "last_ok_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "When the host last answered, in Unix seconds.",
+            "minimum": 0
+          },
+          "reachable": {
+            "type": "boolean",
+            "description": "Whether the host is considered reachable. One failed attempt is not enough to say it is\ngone; it takes two in a row."
+          }
+        }
+      },
       "HostShare": {
         "type": "object",
         "description": "The compute VMs of a farm that one other host runs.",
@@ -5558,6 +5598,17 @@
             "format": "int32",
             "description": "SSH port, user and host key; unused for the local host.",
             "minimum": 0
+          },
+          "reachability": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/HostReachability",
+                "description": "The coordinator's last attempt to reach an SSH host; absent until one ran."
+              }
+            ]
           },
           "status": {
             "$ref": "#/components/schemas/HostStatus"

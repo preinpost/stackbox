@@ -1415,6 +1415,31 @@ export interface components {
      * @enum {string}
      */
     HostKind: "ssh" | "local" | "agent";
+    /**
+     * @description What the coordinator's last attempts to reach an SSH host found: its inventory scan, or a
+     *     plain connection check for a host that runs no farm.
+     */
+    HostReachability: {
+      /**
+       * Format: int64
+       * @description When the coordinator last tried the host, in Unix seconds; 0 if never.
+       */
+      checked_at?: number;
+      /** Format: int32 */
+      consecutive_failures?: number;
+      /** @description Why the last attempt failed; absent after a successful one. */
+      error?: string | null;
+      /**
+       * Format: int64
+       * @description When the host last answered, in Unix seconds.
+       */
+      last_ok_at?: number | null;
+      /**
+       * @description Whether the host is considered reachable. One failed attempt is not enough to say it is
+       *     gone; it takes two in a row.
+       */
+      reachable: boolean;
+    };
     /** @description The compute VMs of a farm that one other host runs. */
     HostShare: {
       /** @description The agent this host's part was created with, for a remote host. */
@@ -1821,6 +1846,7 @@ export interface components {
        * @description SSH port, user and host key; unused for the local host.
        */
       port: number;
+      reachability?: null | components["schemas"]["HostReachability"];
       status: components["schemas"]["HostStatus"];
       /** Format: int64 */
       updated_at: number;

@@ -21,6 +21,8 @@ type Expansion = (String, Vec<String>, Vec<String>);
 #[derive(Default)]
 pub(crate) struct Fake {
     pub(crate) fail_create: AtomicBool,
+    /// Make the inventory scan fail, as an unreachable host's scan does.
+    pub(crate) fail_scan: AtomicBool,
     pub(crate) farms: Mutex<BTreeMap<String, Vec<FarmNode>>>,
     /// msb snapshot references and their labels.
     snapshots: Mutex<BTreeMap<String, BTreeMap<String, String>>>,
@@ -234,6 +236,9 @@ impl Backend for Fake {
     }
     fn scan(&self) -> BoxFuture<'_, Result<BTreeMap<String, Vec<FarmNode>>>> {
         Box::pin(async {
+            if self.fail_scan.load(Ordering::SeqCst) {
+                bail!("scan failed: connection timed out");
+            }
             let snapshot = self.farms.lock().unwrap().clone();
             let delay = self.scan_delay.lock().unwrap().take();
             if let Some((started, release)) = delay {
@@ -2470,6 +2475,111 @@ async fn stale_inventory_scan_does_not_break_a_newly_created_farm() {
     let farm = manager.get("racing").unwrap();
     assert_eq!(farm.status, FarmStatus::Created);
     assert_eq!(farm.nodes.len(), 1);
+    settle(&manager).await;
+}
+
+#[tokio::test]
+async fn a_running_job_still_lets_inventory_clear_or_record_the_host_observation() {
+    let dir = tempfile::tempdir().unwrap();
+    let backend = Arc::new(Fake::default());
+    let manager = open_with(options(dir.path()), backend.clone()).await;
+    done(&manager, &manager.create(request("busy")).unwrap()).await;
+    // Stand in for a job that is still running on the farm.
+    manager
+        .update(|state| {
+            let farm = state.farms.get_mut("busy").unwrap();
+            farm.active_job = Some("running-job".into());
+            farm.observation_error = Some("host inventory unavailable: old".into());
+            farm.last_seen_at = None;
+            Ok(())
+        })
+        .unwrap();
+    manager.reconcile().await.unwrap();
+    let farm = manager.get("busy").unwrap();
+    assert!(
+        farm.observation_error.is_none(),
+        "{:?}",
+        farm.observation_error
+    );
+    assert!(farm.last_seen_at.is_some());
+    backend.fail_scan.store(true, Ordering::SeqCst);
+    manager.reconcile().await.unwrap();
+    let farm = manager.get("busy").unwrap();
+    assert!(
+        farm.observation_error
+            .as_deref()
+            .is_some_and(|e| e.starts_with("host inventory unavailable")),
+        "{:?}",
+        farm.observation_error
+    );
+    backend.fail_scan.store(false, Ordering::SeqCst);
+    manager
+        .update(|state| {
+            state.farms.get_mut("busy").unwrap().active_job = None;
+            Ok(())
+        })
+        .unwrap();
+    settle(&manager).await;
+}
+
+#[tokio::test]
+async fn host_reachability_needs_two_failed_scans_to_go_offline() {
+    let dir = tempfile::tempdir().unwrap();
+    let backend = Arc::new(Fake::default());
+    let manager = open_with(options(dir.path()), backend.clone()).await;
+    done(&manager, &manager.create(request("one")).unwrap()).await;
+    backend.fail_scan.store(true, Ordering::SeqCst);
+    manager.reconcile().await.unwrap();
+    let reach = manager.host("local").unwrap().reachability.unwrap();
+    assert!(reach.reachable, "one failed attempt is not enough");
+    assert_eq!(reach.consecutive_failures, 1);
+    assert!(reach.error.as_deref().unwrap().contains("scan failed"));
+    manager.reconcile().await.unwrap();
+    let reach = manager.host("local").unwrap().reachability.unwrap();
+    assert!(!reach.reachable);
+    assert_eq!(reach.consecutive_failures, 2);
+    backend.fail_scan.store(false, Ordering::SeqCst);
+    manager.reconcile().await.unwrap();
+    let reach = manager.host("local").unwrap().reachability.unwrap();
+    assert!(reach.reachable);
+    assert_eq!(reach.consecutive_failures, 0);
+    assert!(reach.error.is_none());
+    assert!(reach.last_ok_at.is_some());
+    settle(&manager).await;
+}
+
+#[tokio::test]
+async fn ssh_hosts_without_farms_get_a_plain_connection_check_each_reconcile() {
+    use crate::remote::test_server::Fixture;
+    let fixture = Fixture::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let backend = Arc::new(Fake::default());
+    let manager = open_with(options(dir.path()), backend.clone()).await;
+    manager.register_host(fixture.registration("idle")).unwrap();
+    // A port nothing listens on refuses the connection at once.
+    let closed = {
+        let socket = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        socket.local_addr().unwrap().port()
+    };
+    let mut gone = fixture.registration("gone");
+    gone.port = closed;
+    manager.register_host(gone).unwrap();
+    manager.reconcile().await.unwrap();
+    let idle = manager.host("idle").unwrap().reachability.unwrap();
+    assert!(idle.reachable);
+    assert!(idle.last_ok_at.is_some());
+    assert!(idle.checked_at > 0);
+    assert_eq!(fixture.observed.auth_attempts.load(Ordering::SeqCst), 1);
+    let gone = manager.host("gone").unwrap().reachability.unwrap();
+    assert!(gone.reachable);
+    assert_eq!(gone.consecutive_failures, 1);
+    manager.reconcile().await.unwrap();
+    let gone = manager.host("gone").unwrap().reachability.unwrap();
+    assert!(!gone.reachable);
+    assert_eq!(gone.consecutive_failures, 2);
+    assert!(gone.error.is_some());
+    manager.unregister_host("gone").unwrap();
+    manager.unregister_host("idle").unwrap();
     settle(&manager).await;
 }
 

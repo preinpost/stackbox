@@ -314,12 +314,29 @@ export const remoteAgentNeedsUpdate = (host: RemoteHost) =>
  * from this coordinator's build; the farm's job re-inspects it if the last check is old. */
 export function hostReady(host: RemoteHost, coordinatorBuildId?: string) {
   if (host.status !== "ready" || host.active_job) return false;
+  if (host.reachability?.reachable === false) return false;
   if (host.kind === "local") return true;
   if (host.kind === "agent") return host.connected;
   return (
     host.agent?.artifact?.supports_single_vm === true &&
     !agentBuildMismatch(host.agent?.artifact, coordinatorBuildId)
   );
+}
+/** Seconds after which the coordinator's last attempt to reach a host is too old to rely on. */
+export const REACHABILITY_STALE_SECONDS = 90;
+/** What the coordinator's last attempt to reach a host says, for display.
+ * `stale` means the check is too old to say anything; it never claims the host is down. */
+export type HostLink = "unchecked" | "stale" | "disconnected" | "reachable";
+export function hostLink(
+  host: RemoteHost,
+  nowSeconds = Date.now() / 1000,
+): HostLink {
+  const reach = host.reachability;
+  if (!reach) return "unchecked";
+  // A check time the coordinator never wrote reads as the oldest possible.
+  if (nowSeconds - (reach.checked_at ?? 0) > REACHABILITY_STALE_SECONDS)
+    return "stale";
+  return reach.reachable ? "reachable" : "disconnected";
 }
 /** What still stands between the host and a new farm. Preparation installs the runner,
  * the farm kernel and the verification VM in one job, so there is one button to press. */
