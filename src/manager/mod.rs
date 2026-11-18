@@ -1271,6 +1271,8 @@ impl FarmManager {
         let mut listener = self.0.relay_listener.lock().await;
         if let Some(task) = listener.task.take() {
             task.abort();
+            // The socket closes only once the task has ended, so the address can be bound again.
+            let _ = task.await;
         }
         listener.tunnel = None;
         if let Ok(mut url) = self.0.tunnel_url.lock() {
@@ -1402,8 +1404,16 @@ impl FarmManager {
             .relay_tls
             .write()
             .map_err(|_| anyhow!("relay lock poisoned"))? = tls;
-        let serving = self.0.relay_listener.lock().await.serving;
-        if serving {
+        let (serving, running) = {
+            let listener = self.0.relay_listener.lock().await;
+            (
+                listener.serving,
+                listener.addr.is_some() && listener.error.is_none(),
+            )
+        };
+        // Saving the settings already in place keeps the listener and its tunnel, so a quick
+        // tunnel keeps its address. A listener that failed to start is tried again.
+        if serving && !(running && current == settings) {
             self.start_relay().await;
         }
         self.relay_status().await

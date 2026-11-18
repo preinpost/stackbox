@@ -5860,6 +5860,108 @@ async fn a_farm_spans_hosts_with_its_computes_placed_elsewhere() {
     settle(&manager).await;
 }
 
+/// A stand-in for cloudflared: it logs each start to `starts`, reports `address` and its
+/// registration like a quick tunnel, and runs until stopped. It is installed as a release newer
+/// than any real one, so the update check neither replaces nor restarts it.
+#[cfg(unix)]
+fn fake_cloudflared(state_dir: &Path, starts: &Path, address: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    let bin = state_dir.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let name = "cloudflared-9999.0.0";
+    let script = bin.join(name);
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\necho start >> '{}'\necho 'INF |  {address}  |' >&2\necho 'INF Registered tunnel connection connIndex=0' >&2\nexec sleep 600\n",
+            starts.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::os::unix::fs::symlink(name, bin.join("cloudflared")).unwrap();
+}
+
+/// Saving the relay with settings it already has keeps its running quick tunnel: cloudflared is
+/// not started again, so the address stays.
+#[cfg(unix)]
+#[tokio::test]
+async fn saving_unchanged_relay_settings_keeps_the_running_quick_tunnel() {
+    use crate::link::relay::{RelaySettings, RelayTlsMode};
+    let dir = tempfile::tempdir().unwrap();
+    let starts = dir.path().join("starts");
+    fake_cloudflared(
+        dir.path(),
+        &starts,
+        "https://calm-river-1234.trycloudflare.com",
+    );
+    let backend = Arc::new(Fake::default());
+    let manager = open_with(options(dir.path()), backend).await;
+    let quick = RelaySettings {
+        url: String::new(),
+        mode: RelayTlsMode::QuickTunnel,
+        bind: Some("127.0.0.1:0".parse().unwrap()),
+    };
+    manager.set_relay(Some(quick.clone())).await.unwrap();
+    manager.start_relay().await;
+    let mut first = manager.relay_status().await.unwrap();
+    for _ in 0..300 {
+        if first.tunnel.as_ref().is_some_and(|t| t.url.is_some()) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        first = manager.relay_status().await.unwrap();
+    }
+    let address = first.tunnel.as_ref().and_then(|t| t.url.clone());
+    assert!(address.is_some(), "{first:?}");
+    let listening = first.listening.clone();
+
+    let saved = manager.set_relay(Some(quick)).await.unwrap();
+    assert_eq!(
+        saved.tunnel.as_ref().and_then(|t| t.url.clone()),
+        address,
+        "an unchanged save restarted the tunnel: {saved:?}"
+    );
+    assert_eq!(saved.listening, listening);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let lines = std::fs::read_to_string(&starts).unwrap();
+    assert_eq!(
+        lines.lines().count(),
+        1,
+        "cloudflared started again: {lines:?}"
+    );
+    settle(&manager).await;
+}
+
+/// Each change of the relay's settings rebinds its listen address at once, so the new listener
+/// must find the address free again.
+#[tokio::test]
+async fn the_relay_rebinds_its_listen_address_on_each_change() {
+    use crate::link::relay::{RelaySettings, RelayTlsMode};
+    let dir = tempfile::tempdir().unwrap();
+    let backend = Arc::new(Fake::default());
+    let manager = open_with(options(dir.path()), backend).await;
+    // Serve, as the daemon does, so each change restarts the listener.
+    manager.start_relay().await;
+    let port = {
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        probe.local_addr().unwrap()
+    };
+    for n in 0..8 {
+        let status = manager
+            .set_relay(Some(RelaySettings {
+                url: format!("https://relay{n}.example"),
+                mode: RelayTlsMode::Proxy,
+                bind: Some(port),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(status.error, None, "change {n}");
+        assert_eq!(status.listening, Some(port.to_string()), "change {n}");
+    }
+    settle(&manager).await;
+}
+
 /// A deployed multi-node farm `src`, frozen into control templates `ctl-old` and `ctl` (the
 /// newer) and compute template `cpt`.
 async fn release_templates(dir: &Path) -> (FarmManager, Arc<Fake>) {
