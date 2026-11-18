@@ -1105,8 +1105,8 @@ export function DeployFarmDialog({
             </label>
             <p className="field-hint">
               처음 배포할 때는 Prepare부터 시작하세요. 실패한 배포는 저장된
-              단계부터 재개할 수 있습니다. 호스트당 배포는 한 번에 하나씩
-              실행됩니다.
+              단계부터 재개할 수 있습니다. 설정을 바꿨다면 configure부터
+              재개하세요. 호스트당 배포는 한 번에 하나씩 실행됩니다.
             </p>
             {mutation.error && <ErrorNotice error={mutation.error} />}
           </div>

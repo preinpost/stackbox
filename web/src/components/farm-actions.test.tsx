@@ -519,6 +519,37 @@ function singleVmPlan(memory_mib = 3072): Plan {
   };
 }
 
+test("the deploy dialog says a changed configuration resumes from configure", async () => {
+  const user = userEvent.setup();
+  const client = new QueryClient();
+  const farm: Farm = {
+    id: "single",
+    created_at: 0,
+    updated_at: 0,
+    status: "failed",
+    active_job: null,
+    plan: singleVmPlan(),
+    nodes: [
+      {
+        name: "single-all-in-one",
+        role: "all-in-one",
+        status: "running",
+        memory_mib: 3072,
+      },
+    ],
+  };
+  render(
+    <QueryClientProvider client={client}>
+      <DeployFarmDialog farm={farm} />
+    </QueryClientProvider>,
+  );
+  await user.click(screen.getByRole("button", { name: /OpenStack 배포/ }));
+  expect(
+    await screen.findByText(/설정을 바꿨다면 configure부터\s*재개하세요/),
+  ).toBeTruthy();
+  cleanup();
+});
+
 test("allows deployment only for a running all-in-one VM and preserves legacy farms", () => {
   const client = new QueryClient();
   const single: Farm = {

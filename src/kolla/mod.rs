@@ -851,9 +851,7 @@ async fn deploy_phases(
                 stream(deployer, &script, &log, sink).await
             }
         }
-        .with_context(|| {
-            format!("phase '{phase}' failed; resume with `farm deploy {farm_id} --from {phase}`")
-        })?;
+        .with_context(|| resume_hint(farm_id, phase))?;
         sink(DeployEvent::Output(format!("phase {phase} completed\n")))?;
     }
     let url = if let Some(exposure) = exposure {
@@ -1717,6 +1715,17 @@ async fn configure(
     } else {
         run(deployer, &format!("rm -f {horizon_settings}")).await?;
     }
+    // Skyline's login reads the public catalog entry by default, which the control VM cannot reach.
+    let skyline_settings = format!("{CONFIG_DIR}/config/skyline/skyline.yaml");
+    match config::skyline_override(components) {
+        Some(settings) => {
+            run(deployer, &format!("mkdir -p {CONFIG_DIR}/config/skyline")).await?;
+            fs.write(&skyline_settings, settings).await?;
+        }
+        None => {
+            run(deployer, &format!("rm -f {skyline_settings}")).await?;
+        }
+    }
     // Kolla's default hybrid iptables firewall needs physdev, which the guest kernel lacks.
     // The OVS firewall uses the userspace datapath's own conntrack instead.
     let ovs_agent = format!("{CONFIG_DIR}/config/neutron/openvswitch_agent.ini");
@@ -2317,6 +2326,9 @@ echo "horizon OK: ${home#200 }"
 "#,
         );
     }
+    if has("skyline") {
+        script.push_str(&skyline_verify_script());
+    }
     if has("neutron") {
         script.push_str(&neutron_verify_script());
     }
@@ -2349,6 +2361,38 @@ echo "horizon OK: ${home#200 }"
 /// Builds a throwaway tenant network behind a router on `public`, then proves the
 /// userspace datapath forwards: the all-in-one host pings the router's gateway and,
 /// from the router namespace, the DHCP port on the tenant network.
+/// Skyline's API answers the login the browser uses, on the internal address (port 9998, the
+/// apiserver's default). Its login response carries a Keystone token, as kolla's own test checks.
+fn skyline_verify_script() -> String {
+    r#"step "Skyline 로그인 확인"
+skyline="http://$(awk -F'"' '/^kolla_internal_vip_address:/ {print $2}' /etc/kolla/globals.yml):9998"
+status=$(curl -sS -o "$work/skyline.json" -w '%{http_code}' \
+  -H 'Accept: application/json' -H 'Content-Type: application/json' \
+  -d "{\"region\": \"$OS_REGION_NAME\", \"domain\": \"Default\", \"username\": \"admin\", \"password\": \"$OS_PASSWORD\"}" \
+  "$skyline/api/v1/login") || true
+if [ "$status" != 200 ]; then
+  echo "skyline login returned $status ($skyline/api/v1/login)" >&2
+  exit 1
+fi
+grep '"keystone_token"' "$work/skyline.json" >/dev/null || { echo "skyline login response has no keystone_token" >&2; exit 1; }
+echo "skyline OK: $skyline"
+"#
+    .to_owned()
+}
+
+/// The failure message for `phase`. Phases after `configure` read the configuration that
+/// `configure` wrote, so a user who edited it must resume from `configure` to rewrite it.
+fn resume_hint(farm_id: &str, phase: Phase) -> String {
+    let mut hint =
+        format!("phase '{phase}' failed; resume with `farm deploy {farm_id} --from {phase}`");
+    if phase > Phase::Configure {
+        hint.push_str(&format!(
+            "; if you changed the configuration, resume with `farm deploy {farm_id} --from configure`"
+        ));
+    }
+    hint
+}
+
 fn neutron_verify_script() -> String {
     r#"step "Neutron agent 상태 확인 (OVS·DHCP·L3·Metadata)"
 for _ in $(seq 60); do
@@ -3063,6 +3107,45 @@ mod tests {
     }
 
     #[test]
+    fn skyline_verification_logs_in_on_the_internal_apiserver() {
+        let with = verify_script(
+            &["keystone", "glance", "skyline"].map(String::from),
+            1,
+            OPENSTACK_RELEASE,
+            None,
+        );
+        assert!(with.contains("Skyline 로그인 확인"));
+        assert!(with.contains("kolla_internal_vip_address"));
+        assert!(with.contains("\"$skyline/api/v1/login\""));
+        assert!(with.contains(r#"\"domain\": \"Default\", \"username\": \"admin\""#));
+        assert!(with.contains("skyline login returned $status"));
+        let without = verify_script(
+            &["keystone", "glance"].map(String::from),
+            1,
+            OPENSTACK_RELEASE,
+            None,
+        );
+        assert!(!without.contains("api/v1/login"));
+    }
+
+    #[test]
+    fn a_failure_after_configure_also_names_configure_as_the_resume_point() {
+        let after = resume_hint("demo", Phase::Deploy);
+        assert_eq!(
+            after,
+            "phase 'deploy' failed; resume with `farm deploy demo --from deploy`; if you changed the configuration, resume with `farm deploy demo --from configure`"
+        );
+        assert!(resume_hint("demo", Phase::Verify).contains("--from configure"));
+        assert!(resume_hint("demo", Phase::Prechecks).contains("--from configure"));
+        let before = resume_hint("demo", Phase::Configure);
+        assert_eq!(
+            before,
+            "phase 'configure' failed; resume with `farm deploy demo --from configure`"
+        );
+        assert!(!resume_hint("demo", Phase::Install).contains("configuration"));
+    }
+
+    #[test]
     fn only_a_release_whose_tooling_predates_the_guest_python_installs_its_own() {
         assert_eq!(
             python_command(&releases::info(OPENSTACK_RELEASE)),
@@ -3562,6 +3645,7 @@ mod tests {
             "glance",
             "placement",
             "horizon",
+            "skyline",
             "neutron",
             "nova",
         ]

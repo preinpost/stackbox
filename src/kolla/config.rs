@@ -432,6 +432,21 @@ pub const MULTINODE_ML2: &str = "[ml2_type_vlan]\nnetwork_vlan_ranges = physnet1
 /// userspace datapath's own conntrack.
 pub const MULTINODE_OVS_AGENT: &str = "[agent]\ntunnel_types =\nl2_population = false\n[securitygroup]\nfirewall_driver = openvswitch\n";
 
+/// The file Kolla merges into Skyline's `skyline.yaml` (`{{ node_custom_config }}/skyline/skyline.yaml`,
+/// `node_custom_config` = `/etc/kolla/config`) in 2025.1, 2025.2 and 2026.2. Skyline's login asks
+/// Keystone for the catalog's `public` endpoint by default (`openstack.interface_type`). On the
+/// control VM that address is a host DNAT the VM cannot reach, so the login fails with 401 while the
+/// password is right. The internal endpoint is the one the VM serves.
+pub const SKYLINE_OVERRIDE: &str = "# Written by farm: the control VM cannot reach the public endpoint (host DNAT), so log in through the internal one.\nopenstack:\n  interface_type: internal\n";
+
+/// The Skyline override for a farm, or `None` when Skyline is not selected.
+pub fn skyline_override(components: &[String]) -> Option<&'static str> {
+    components
+        .iter()
+        .any(|c| c == "skyline")
+        .then_some(SKYLINE_OVERRIDE)
+}
+
 /// Kolla's multinode inventory with the groups that place services filled in: the control
 /// VM runs the control plane, network node and Kolla itself; Nova runs on the computes.
 pub fn multinode_inventory(template: &str, control: &str, computes: &[Compute]) -> Result<String> {
@@ -1506,5 +1521,21 @@ print("hunks matched")
         );
         let unchecked = run(&["--check", patch, root_text]).unwrap();
         assert!(!unchecked.status.success());
+    }
+
+    #[test]
+    fn skyline_logs_in_through_the_internal_endpoint_only_when_selected() {
+        let selected = skyline_override(&["keystone".into(), "skyline".into()]).unwrap();
+        // The file is merged into Skyline's skyline.yaml: the key sits under `openstack:`.
+        assert_eq!(
+            selected
+                .lines()
+                .filter(|l| !l.starts_with('#'))
+                .collect::<Vec<_>>(),
+            ["openstack:", "  interface_type: internal"]
+        );
+        assert!(selected.starts_with("# Written by farm"));
+        assert!(skyline_override(&["keystone".into(), "horizon".into()]).is_none());
+        assert!(skyline_override(&[]).is_none());
     }
 }
