@@ -967,3 +967,30 @@ test("switching to a release that cannot run a selected service unselects it", a
   expect(screen.queryByText(/추정 포함/)).toBeNull();
   client.clear();
 });
+
+test("the GPU mode select and the GPU count share a label row when a GPU is on", async () => {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+  });
+  const previews: Record<string, unknown>[] = [];
+  vi.stubGlobal("fetch", releasePlan(previews, ["2026.2"]));
+  renderForm(client);
+  const user = userEvent.setup();
+  await user.type(screen.getByPlaceholderText("dev-openstack"), "aligned");
+  // With no GPU there is one select under its own label, like the other single selects.
+  const noneLabel = combo("GPU 모드").closest(".field, div");
+  expect(noneLabel?.querySelector(":scope > span")?.textContent).toBe("GPU");
+  await user.click(combo("GPU 모드"));
+  await user.click(await screen.findByRole("option", { name: /simulated/ }));
+  // With a GPU on, the select and the count are two cells of one grid, each a label + control
+  // pair, so both labels and both controls start on the same row.
+  const select = combo("GPU 모드");
+  const countLabel = screen.getByLabelText("GPU 수량 (compute마다)");
+  const selectCell = select.parentElement;
+  const grid = selectCell?.parentElement;
+  expect(selectCell?.classList.contains("field")).toBe(true);
+  expect(selectCell?.querySelector(":scope > span")?.textContent).toBe("GPU");
+  expect(countLabel.closest(".field")).toBe(countLabel.closest("label"));
+  expect(countLabel.closest(".grid")).toBe(grid);
+  expect(grid?.classList.contains("grid")).toBe(true);
+});

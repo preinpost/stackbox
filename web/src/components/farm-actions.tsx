@@ -496,6 +496,27 @@ export function CreateFarmForm({
   const targetError = hosts.error || coordinator.error;
   const noHosts = hosts.isSuccess && !hosts.data.length;
   const hostUnavailable = !target || !hostReady(target, buildId);
+  const gpuModeSelect = (
+    <SelectInput
+      value={gpuModeShown}
+      onChange={(value) => setGpuMode(value as GpuMode | "none")}
+      disabled={mutation.isPending}
+      label="GPU 모드"
+      items={[
+        { value: "none", label: "없음" },
+        {
+          value: "simulated",
+          label: "simulated · 표준 VGPU (2025.1+)",
+          disabled: !releaseAtLeast(release, "2025.1"),
+        },
+        {
+          value: "mtty",
+          label: `mtty · 커널 mdev (2025.1+)${mttyHost ? "" : " · 호스트 준비 필요"}`,
+          disabled: !releaseAtLeast(release, "2025.1") || !mttyHost,
+        },
+      ]}
+    />
+  );
   return (
     <Modal
       title="새 farm 만들기"
@@ -627,28 +648,17 @@ export function CreateFarmForm({
               </p>
             </div>
             <div>
-              <span className="field-label">GPU</span>
-              <div className="grid gap-3 sm:grid-cols-2">
-                <SelectInput
-                  value={gpuModeShown}
-                  onChange={(value) => setGpuMode(value as GpuMode | "none")}
-                  disabled={mutation.isPending}
-                  label="GPU 모드"
-                  items={[
-                    { value: "none", label: "없음" },
-                    {
-                      value: "simulated",
-                      label: "simulated · 표준 VGPU (2025.1+)",
-                      disabled: !releaseAtLeast(release, "2025.1"),
-                    },
-                    {
-                      value: "mtty",
-                      label: `mtty · 커널 mdev (2025.1+)${mttyHost ? "" : " · 호스트 준비 필요"}`,
-                      disabled: !releaseAtLeast(release, "2025.1") || !mttyHost,
-                    },
-                  ]}
-                />
-                {gpuModeShown !== "none" && (
+              {gpuModeShown === "none" ? (
+                <div>
+                  <span className="field-label">GPU</span>
+                  {gpuModeSelect}
+                </div>
+              ) : (
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <div className="field">
+                    <span>GPU</span>
+                    {gpuModeSelect}
+                  </div>
                   <label className="field">
                     <span>GPU 수량 (compute마다)</span>
                     <Input
@@ -662,35 +672,35 @@ export function CreateFarmForm({
                       disabled={mutation.isPending}
                     />
                   </label>
-                )}
-                {gpuModeShown === "simulated" && (
-                  <>
-                    <label className="field">
-                      <span>가짜 GPU 장치 수 (compute마다)</span>
-                      <Input
-                        value={gpuDevices}
-                        onValueChange={setGpuDevices}
-                        className="input"
-                        type="number"
-                        min={1}
-                        max={gpuCountShown}
-                        disabled={mutation.isPending}
-                      />
-                    </label>
-                    <label className="field">
-                      <span>flavor가 요구할 trait (쉼표 구분)</span>
-                      <Input
-                        value={gpuTraits}
-                        onValueChange={setGpuTraits}
-                        className="input font-mono"
-                        type="text"
-                        placeholder="CUSTOM_FARM_VGPU"
-                        disabled={mutation.isPending}
-                      />
-                    </label>
-                  </>
-                )}
-              </div>
+                  {gpuModeShown === "simulated" && (
+                    <>
+                      <label className="field">
+                        <span>가짜 GPU 장치 수 (compute마다)</span>
+                        <Input
+                          value={gpuDevices}
+                          onValueChange={setGpuDevices}
+                          className="input"
+                          type="number"
+                          min={1}
+                          max={gpuCountShown}
+                          disabled={mutation.isPending}
+                        />
+                      </label>
+                      <label className="field">
+                        <span>flavor가 요구할 trait (쉼표 구분)</span>
+                        <Input
+                          value={gpuTraits}
+                          onValueChange={setGpuTraits}
+                          className="input font-mono"
+                          type="text"
+                          placeholder="CUSTOM_FARM_VGPU"
+                          disabled={mutation.isPending}
+                        />
+                      </label>
+                    </>
+                  )}
+                </div>
+              )}
               <p className="field-hint mt-2">
                 실제 GPU가 아닌 가상 장치입니다. GPU farm은 클린 설치됩니다.
               </p>
