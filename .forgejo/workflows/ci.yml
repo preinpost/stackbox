@@ -1,4 +1,4 @@
-# Quality gates for pull requests and every branch push except main. Nothing is
+# Quality gates for pull requests and pushes to dev. Nothing is
 # built, tagged, uploaded, or released here; release.yml runs the same gates before it
 # deploys from main.
 name: ci
@@ -6,7 +6,7 @@ name: ci
 on:
   pull_request:
   push:
-    branches-ignore: [main]
+    branches: [dev]
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -25,7 +25,8 @@ jobs:
       - name: Install the Rust toolchain
         run: |
           set -eu
-          curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal \
+          curl -fsSL --proto '=https' --tlsv1.2 -o /tmp/rustup-init.sh https://sh.rustup.rs
+          sh /tmp/rustup-init.sh -y --profile minimal \
             --default-toolchain 1.99.1 -c clippy -c rustfmt
           echo "$HOME/.cargo/bin" >>"$GITHUB_PATH"
 
