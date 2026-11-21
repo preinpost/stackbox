@@ -7511,3 +7511,41 @@ async fn gpu_load_control_is_refused_with_409_outside_a_deployed_gpu_farm() {
     assert_eq!(response.status(), StatusCode::CONFLICT);
     settle(&manager).await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn a_state_write_does_not_hold_the_only_runtime_worker() {
+    let dir = tempfile::tempdir().unwrap();
+    let manager = open_with(options(dir.path()), Arc::new(Fake::default())).await;
+    let started = Arc::new(AtomicBool::new(false));
+    let other_ran = Arc::new(AtomicBool::new(false));
+    let writer = {
+        let (manager, started, other_ran) = (manager.clone(), started.clone(), other_ran.clone());
+        tokio::spawn(async move {
+            manager.update(|_| {
+                started.store(true, Ordering::SeqCst);
+                // Stands in for a slow fsync: another task must get a worker meanwhile.
+                let deadline = std::time::Instant::now() + Duration::from_secs(2);
+                while !other_ran.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Ok(other_ran.load(Ordering::SeqCst))
+            })
+        })
+    };
+    while !started.load(Ordering::SeqCst) {
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let flag = other_ran.clone();
+    tokio::spawn(async move { flag.store(true, Ordering::SeqCst) });
+    assert!(
+        writer.await.unwrap().unwrap(),
+        "the write blocked the runtime worker"
+    );
+}
+
+#[tokio::test]
+async fn a_state_write_still_works_on_a_current_thread_runtime() {
+    let dir = tempfile::tempdir().unwrap();
+    let manager = open_with(options(dir.path()), Arc::new(Fake::default())).await;
+    assert_eq!(manager.update(|_| Ok(7)).unwrap(), 7);
+}

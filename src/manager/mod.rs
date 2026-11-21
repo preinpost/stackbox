@@ -444,12 +444,24 @@ impl FarmManager {
         manager.abort_pending_uploads();
         Ok(manager)
     }
+    /// Writes and fsyncs `state.json` under the store lock. On a multi-thread runtime worker the
+    /// blocking section runs in `block_in_place`, so the worker's other tasks move to another
+    /// thread instead of waiting on the disk. A current-thread runtime (where `block_in_place`
+    /// panics) and plain threads run it inline as before.
     fn update<T>(&self, f: impl FnOnce(&mut State) -> Result<T>) -> Result<T> {
-        self.0
-            .store
-            .lock()
-            .map_err(|_| anyhow!("state mutex poisoned"))?
-            .update(f)
+        let write = || {
+            self.0
+                .store
+                .lock()
+                .map_err(|_| anyhow!("state mutex poisoned"))?
+                .update(f)
+        };
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+                tokio::task::block_in_place(write)
+            }
+            _ => write(),
+        }
     }
     pub fn list(&self) -> Result<Vec<FarmRecord>> {
         Ok(self
