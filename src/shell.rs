@@ -135,7 +135,7 @@ impl<F: FnOnce()> Drop for TerminateOnDrop<F> {
 fn wrapped_script(script: &str, log: &str) -> String {
     let log = sh_quote(log);
     format!(
-        "step() {{ printf '{STEP_PREFIX}%s\\n' \"$*\"; }}; mkdir -p \"$(dirname {log})\"; set -o pipefail; set -m; ( {script} ) 2>&1 | tee -a {log} & set +m; trap 'kill -TERM %1 2>/dev/null; wait %1; exit 143' TERM INT HUP; wait %1"
+        "step() {{ printf '{STEP_PREFIX}%s\\n' \"$*\"; }}; mkdir -p \"$(dirname {log})\"; set -o pipefail; trap '' TERM INT HUP; set -m; ( trap - TERM INT HUP; {script} ) 2>&1 | tee -a {log} & set +m; trap 'kill -TERM %1 2>/dev/null; wait %1; exit 143' TERM INT HUP; wait %1"
     )
 }
 
