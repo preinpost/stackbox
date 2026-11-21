@@ -626,10 +626,7 @@ impl FarmManager {
         // A shell needs only the host's reservation, not the agent the farm was built
         // with, so a remote farm uses the host's current agent once that matches this coordinator.
         let current = farm.host_id.as_ref().and_then(|host_id| {
-            self.0
-                .store
-                .lock()
-                .ok()?
+            lock_unpoisoned(&self.0.store)
                 .state
                 .hosts
                 .get(host_id)?
@@ -1053,12 +1050,7 @@ impl FarmManager {
             .relay
             .as_ref()
             .context("farms that span hosts need the relay; set it up under Hosts")?;
-        let tunnel = self
-            .0
-            .tunnel_url
-            .lock()
-            .map_err(|_| anyhow!("tunnel lock poisoned"))?
-            .clone();
+        let tunnel = lock_unpoisoned(&self.0.tunnel_url).clone();
         let url = effective_url(settings, tunnel.as_deref())
             .context("the relay's quick tunnel has no address yet; see Hosts and try again")?;
         let ca = match settings.mode {
@@ -1227,12 +1219,7 @@ impl FarmManager {
         // A poisoned lock is read through, not reported as no relay: a farm created then would
         // skip the relay it needs. Both guarded values stay consistent when a holder panics:
         // the store publishes a change only after it is saved, and the tunnel is one assignment.
-        let tunnel = self
-            .0
-            .tunnel_url
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone();
+        let tunnel = lock_unpoisoned(&self.0.tunnel_url).clone();
         effective_url(&self.relay_settings()?, tunnel.as_deref())
     }
     pub fn relay_settings(&self) -> Option<crate::link::relay::RelaySettings> {
@@ -1252,9 +1239,7 @@ impl FarmManager {
             task.abort();
         }
         listener.tunnel = None;
-        if let Ok(mut url) = self.0.tunnel_url.lock() {
-            *url = None;
-        }
+        *lock_unpoisoned(&self.0.tunnel_url) = None;
         listener.addr = None;
         listener.error = None;
         listener.serving = true;
@@ -1288,9 +1273,7 @@ impl FarmManager {
                             return;
                         };
                         let manager = FarmManager(inner);
-                        if let Ok(mut current) = manager.0.tunnel_url.lock() {
-                            *current = Some(url.clone());
-                        }
+                        *lock_unpoisoned(&manager.0.tunnel_url) = Some(url.clone());
                         tokio::spawn(async move { manager.relink(&url).await });
                     });
                     listener.tunnel = Some(crate::link::cloudflared::Tunnel::start(
@@ -1316,12 +1299,7 @@ impl FarmManager {
             .as_ref()
             .map(|tls| crate::link::token_hash(&tls.ca_pem));
         let settings = self.relay_settings();
-        let tunnel_url = self
-            .0
-            .tunnel_url
-            .lock()
-            .map_err(|_| anyhow!("tunnel lock poisoned"))?
-            .clone();
+        let tunnel_url = lock_unpoisoned(&self.0.tunnel_url).clone();
         Ok(RelayStatus {
             url: settings
                 .as_ref()
@@ -1415,7 +1393,7 @@ impl FarmManager {
     /// Retry [`Self::relink`] for the hosts whose switch is not on the relay, as one that
     /// was unreachable when a quick tunnel got its address. The reconciler calls it.
     pub async fn relink_missing(&self) {
-        let url = self.0.tunnel_url.lock().ok().and_then(|url| url.clone());
+        let url = lock_unpoisoned(&self.0.tunnel_url).clone();
         if let Some(url) = url {
             self.relink_hosts(&url, true).await
         }
@@ -1468,12 +1446,7 @@ impl FarmManager {
     pub fn create(&self, request: CreateRequest) -> Result<Job> {
         let mut plan = request.validate()?;
         let id = request.id.clone();
-        let tunnel_url = self
-            .0
-            .tunnel_url
-            .lock()
-            .map_err(|_| anyhow!("tunnel lock poisoned"))?
-            .clone();
+        let tunnel_url = lock_unpoisoned(&self.0.tunnel_url).clone();
         let job = self.update(|state| {
             self.ensure_accepting()?;
             if state
@@ -1722,12 +1695,7 @@ impl FarmManager {
     /// on the farm's primary host when it is omitted. A remote host joins the farm's link
     /// segments through the coordinator's relay.
     pub fn add_compute(&self, id: &str, request: AddComputeRequest) -> Result<Job> {
-        let tunnel_url = self
-            .0
-            .tunnel_url
-            .lock()
-            .map_err(|_| anyhow!("tunnel lock poisoned"))?
-            .clone();
+        let tunnel_url = lock_unpoisoned(&self.0.tunnel_url).clone();
         let job = self.update(|state| {
             self.ensure_accepting()?;
             let farm = state
@@ -3105,6 +3073,13 @@ fn expansion_share_aad(farm: &str, host: &str) -> String {
 }
 
 /// The relay URL other hosts reach: the settings', or a quick tunnel's current address.
+/// Locks a value that a panicking holder may have poisoned. Both guarded values stay
+/// consistent when a holder panics (see [`FarmManager::relay_url`]), so reads and writes
+/// go through here instead of dropping the write or the read on poison.
+fn lock_unpoisoned<T>(lock: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 fn effective_url(
     settings: &crate::link::relay::RelaySettings,
     tunnel: Option<&str>,
@@ -3238,5 +3213,34 @@ mod poison_tests {
             manager.relay_url().as_deref(),
             Some("https://quick.trycloudflare.com")
         );
+    }
+
+    #[tokio::test]
+    async fn a_tunnel_write_after_its_lock_is_poisoned_still_reaches_relay_url() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = manager(dir.path()).await;
+        // A proxy relay runs no tunnel, but starting it still clears the quick tunnel's address.
+        manager
+            .update(|state| {
+                state.relay = Some(RelaySettings {
+                    url: String::new(),
+                    mode: RelayTlsMode::Proxy,
+                    bind: Some("127.0.0.1:0".parse().unwrap()),
+                });
+                Ok(())
+            })
+            .unwrap();
+        *manager.0.tunnel_url.lock().unwrap() = Some("https://old.trycloudflare.com".into());
+        poison(&manager.0.tunnel_url);
+        manager.start_relay().await;
+        manager
+            .update(|state| {
+                if let Some(relay) = state.relay.as_mut() {
+                    relay.mode = RelayTlsMode::QuickTunnel;
+                }
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(manager.relay_url(), None);
     }
 }
