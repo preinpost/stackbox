@@ -1224,11 +1224,25 @@ impl FarmManager {
     }
     /// The relay URL new farms that span hosts get, once there is one.
     pub fn relay_url(&self) -> Option<String> {
-        let tunnel = self.0.tunnel_url.lock().ok()?.clone();
+        // A poisoned lock is read through, not reported as no relay: a farm created then would
+        // skip the relay it needs. Both guarded values stay consistent when a holder panics:
+        // the store publishes a change only after it is saved, and the tunnel is one assignment.
+        let tunnel = self
+            .0
+            .tunnel_url
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
         effective_url(&self.relay_settings()?, tunnel.as_deref())
     }
     pub fn relay_settings(&self) -> Option<crate::link::relay::RelaySettings> {
-        self.0.store.lock().ok()?.state.relay.clone()
+        self.0
+            .store
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .state
+            .relay
+            .clone()
     }
     /// Listen for the switches of farms that span hosts, replacing an earlier listener. A
     /// failure is reported in [`Self::relay_status`] and leaves the rest of the daemon up.
@@ -3151,3 +3165,78 @@ fn new_ssh_key() -> Result<(String, String)> {
 
 #[cfg(test)]
 pub(crate) mod tests;
+
+#[cfg(test)]
+mod poison_tests {
+    use super::*;
+    use crate::link::relay::{RelaySettings, RelayTlsMode};
+
+    /// Poisons a mutex the way a holder that panics does.
+    fn poison<T>(lock: &Mutex<T>) {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _held = lock.lock().unwrap();
+            panic!("poison the lock");
+        }));
+        assert!(lock.is_poisoned());
+    }
+
+    async fn manager(dir: &std::path::Path) -> FarmManager {
+        FarmManager::with_backend(
+            ManagerOptions {
+                state_dir: dir.into(),
+                memory_budget_mib: 50_000,
+                agent_binary: None,
+                agent_url: None,
+                public_bind: "127.0.0.1".parse().unwrap(),
+                relay: None,
+                libkrunfw_dir: None,
+            },
+            Arc::new(super::tests::Fake::default()),
+        )
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn relay_url_still_reads_the_settings_after_the_state_lock_is_poisoned() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = manager(dir.path()).await;
+        manager
+            .update(|state| {
+                state.relay = Some(RelaySettings {
+                    url: "https://relay.example".into(),
+                    mode: RelayTlsMode::Proxy,
+                    bind: None,
+                });
+                Ok(())
+            })
+            .unwrap();
+        poison(&manager.0.store);
+        assert_eq!(
+            manager.relay_url().as_deref(),
+            Some("https://relay.example")
+        );
+    }
+
+    #[tokio::test]
+    async fn relay_url_still_reads_the_quick_tunnel_after_its_lock_is_poisoned() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = manager(dir.path()).await;
+        manager
+            .update(|state| {
+                state.relay = Some(RelaySettings {
+                    url: String::new(),
+                    mode: RelayTlsMode::QuickTunnel,
+                    bind: None,
+                });
+                Ok(())
+            })
+            .unwrap();
+        *manager.0.tunnel_url.lock().unwrap() = Some("https://quick.trycloudflare.com".into());
+        poison(&manager.0.tunnel_url);
+        assert_eq!(
+            manager.relay_url().as_deref(),
+            Some("https://quick.trycloudflare.com")
+        );
+    }
+}
