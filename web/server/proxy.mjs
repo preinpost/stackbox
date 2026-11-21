@@ -38,10 +38,47 @@ function upstreamUrl(req, env) {
 export const portalApiPath =
   /^\/api\/v1\/(?:host|local-host|agent-hosts|hosts(?:\/[a-z0-9-]+(?:\/(?:check|prepare|agent))?)?|host-jobs(?:\/[a-f0-9-]+)?|catalog|plans|releases(?:\/(?:plan|farms))?|openapi\.json|jobs(?:\/[a-f0-9-]+)?|farms(?:\/[a-z0-9-]+(?:\/(?:deploy|computes|settle|endpoints|instances(?:\/[a-z0-9-]+\/gpu-load)?|nodes\/[a-z0-9-]+\/faults|gpu\/(?:guest-script|user-data)|snapshots|logs(?:\/stream)?))?)?|snapshots(?:\/[a-z0-9-]+(?:\/(?:export|copies\/[a-z0-9-]+))?)?|buckets(?:\/[a-z0-9-]+(?:\/(?:check|objects))?)?|relay(?:\/cloudflared\/update)?)$/;
 
+/** Hostname of a Host header or config value (no port, no IPv6 brackets), or null. */
+function hostName(value) {
+  const text = String(value ?? "")
+    .trim()
+    .toLowerCase();
+  const bracketed = text.match(/^\[([0-9a-f:.]+)\](?::\d+)?$/);
+  if (bracketed) return bracketed[1];
+  // A bare IPv6 address from configuration, e.g. fd00::5.
+  if (text.split(":").length > 2) return text;
+  return text.match(/^([a-z0-9.-]+)(?::\d+)?$/)?.[1] ?? null;
+}
+
+/**
+ * Host names the portal answers to: loopback, PORTAL_HOST and PORTAL_ALLOWED_HOSTS
+ * (comma-separated). Wildcard bind addresses are not names a browser can use.
+ */
+function allowedHostNames(env) {
+  const names = new Set(["localhost", "127.0.0.1", "::1"]);
+  const configured = [
+    env.PORTAL_HOST,
+    ...String(env.PORTAL_ALLOWED_HOSTS || "").split(","),
+  ];
+  for (const value of configured) {
+    const name = hostName(value);
+    if (name && !["0.0.0.0", "::"].includes(name)) names.add(name);
+  }
+  return names;
+}
+
+/** DNS rebinding guard: the Host name must be one the portal serves, whatever the Origin. */
+function hostAllowed(req, env) {
+  const name = hostName(req.headers.host);
+  return name !== null && allowedHostNames(env).has(name);
+}
+
 /** Shared dev/production boundary. Secrets remain on this side of the connection. */
 export function proxyApi(req, res, env = process.env) {
   if (!req.url?.startsWith("/api/v1/"))
     return json(res, 404, "API 경로를 찾을 수 없습니다.");
+  if (!hostAllowed(req, env))
+    return json(res, 403, "허용되지 않은 Host 헤더입니다.");
   if (req.headers.origin) {
     try {
       if (new URL(req.headers.origin).host !== req.headers.host)
@@ -180,6 +217,8 @@ const refuse = (socket, status, error) => {
  */
 export function proxyUpgrade(req, socket, head, env = process.env) {
   socket.on("error", () => socket.destroy());
+  if (!hostAllowed(req, env))
+    return refuse(socket, 403, "허용되지 않은 Host 헤더입니다.");
   try {
     if (new URL(req.headers.origin).host !== req.headers.host)
       return refuse(socket, 403, "다른 출처의 셸 연결은 허용하지 않습니다.");

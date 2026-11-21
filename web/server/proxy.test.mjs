@@ -461,6 +461,116 @@ test("refuses cross-origin, origin-less and unknown shell upgrades and relays fa
   assert.match(JSON.parse(body).error, /running/);
 });
 
+function rawRequest(address, path, headers) {
+  const url = new URL(address);
+  return new Promise((resolve, reject) => {
+    const req = http.request(
+      { host: url.hostname, port: url.port, path, headers },
+      async (res) => {
+        let text = "";
+        for await (const chunk of res) text += chunk;
+        resolve({ status: res.statusCode, text });
+      },
+    );
+    req.on("error", reject);
+    req.end();
+  });
+}
+async function apiPortal(t, env, handler) {
+  const upstream = http.createServer(
+    handler ?? (() => assert.fail("request must not reach farmd")),
+  );
+  const url = await listen(upstream);
+  const portal = http.createServer((req, res) =>
+    proxyApi(req, res, {
+      FARM_API_URL: url,
+      FARM_API_TOKEN: "server-only-token",
+      ...env,
+    }),
+  );
+  const address = await listen(portal);
+  t.after(() => {
+    portal.closeAllConnections();
+    portal.close();
+    upstream.closeAllConnections();
+    upstream.close();
+  });
+  return address;
+}
+test("refuses a rebound Host name even when Origin matches it (DNS rebinding)", async (t) => {
+  const address = await apiPortal(t, {});
+  const port = new URL(address).port;
+  for (const host of [`evil.test:${port}`, "evil.test", `[::ffff:1.2.3.4]:${port}`]) {
+    const withOrigin = await rawRequest(address, "/api/v1/farms", {
+      host,
+      origin: `http://${host}`,
+      "content-type": "application/json",
+    });
+    assert.equal(withOrigin.status, 403, host);
+    const withoutOrigin = await rawRequest(address, "/api/v1/farms", { host });
+    assert.equal(withoutOrigin.status, 403, host);
+  }
+});
+test("accepts loopback Host names, PORTAL_HOST and PORTAL_ALLOWED_HOSTS", async (t) => {
+  const address = await apiPortal(t, {
+    PORTAL_HOST: "portal.lan",
+    PORTAL_ALLOWED_HOSTS: "farm.example, [fd00::5]",
+  }, (_req, res) => {
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end("[]");
+  });
+  const port = new URL(address).port;
+  for (const host of [
+    `localhost:${port}`,
+    `127.0.0.1:${port}`,
+    `[::1]:${port}`,
+    `portal.lan:${port}`,
+    `farm.example:${port}`,
+    `[fd00::5]:${port}`,
+  ]) {
+    const withOrigin = await rawRequest(address, "/api/v1/farms", {
+      host,
+      origin: `http://${host}`,
+    });
+    assert.equal(withOrigin.status, 200, host);
+    const withoutOrigin = await rawRequest(address, "/api/v1/farms", { host });
+    assert.equal(withoutOrigin.status, 200, host);
+  }
+});
+test("ignores wildcard bind addresses as Host names", async (t) => {
+  const address = await apiPortal(t, { PORTAL_HOST: "0.0.0.0" });
+  const port = new URL(address).port;
+  const r = await rawRequest(address, "/api/v1/farms", { host: `0.0.0.0:${port}` });
+  assert.equal(r.status, 403);
+});
+test("refuses shell upgrades from a rebound Host name", async (t) => {
+  const address = await upgradeSetup(t);
+  const port = new URL(address).port;
+  const response = await new Promise((resolve, reject) => {
+    const req = http.request({
+      host: "127.0.0.1",
+      port,
+      path: "/api/v1/farms/demo/shell?rows=24&cols=80",
+      headers: {
+        host: `evil.test:${port}`,
+        origin: `http://evil.test:${port}`,
+        connection: "Upgrade",
+        upgrade: "websocket",
+        "sec-websocket-key": "dGhlIHNhbXBsZSBub25jZQ==",
+        "sec-websocket-version": "13",
+      },
+    });
+    req.end();
+    req.on("upgrade", (res, socket) => {
+      socket.destroy();
+      resolve(res);
+    });
+    req.on("response", resolve);
+    req.on("error", reject);
+  });
+  assert.equal(response.statusCode, 403);
+});
+
 test("forwards the GPU routes and keeps others closed", async (t) => {
   const seen = [];
   const address = await setup(t, (req, res) => {
