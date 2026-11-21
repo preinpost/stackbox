@@ -698,13 +698,24 @@ fn verify_compute_script(host: &str, neutron: bool) -> String {
         r#"set -euo pipefail
 . {CONFIG_DIR}/admin-openrc.sh
 os={OSC_VENV}/bin/openstack
+errf=$(mktemp)
 state=''
+err=''
 for _ in $(seq 60); do
-  state=$($os compute service list --service nova-compute --host {host} -f value -c State 2>/dev/null || true)
+  rc=0
+  out=$($os compute service list --service nova-compute --host {host} -f value -c State 2>"$errf") || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    state=$out
+    err=''
+  else
+    state=''
+    err=$(awk 'NF {{ last = $0 }} END {{ print last }}' "$errf")
+  fi
   [ "$state" = up ] && break
   sleep 5
 done
-[ "$state" = up ] || {{ echo "nova-compute {host} is not up: ${{state:-missing}}" >&2; exit 1; }}
+rm -f "$errf"
+[ "$state" = up ] || {{ echo "nova-compute {host} is not up: ${{state:-missing}}${{err:+ (last error: $err)}}" >&2; exit 1; }}
 echo "nova-compute {host} up"
 "#
     );
@@ -714,13 +725,22 @@ echo "nova-compute {host} up"
         // own type column decides.
         script.push_str(&format!(
             r#"alive=''
+err=''
 for _ in $(seq 60); do
-  alive=$($os network agent list --host {host} -f value -c "Agent Type" -c Alive 2>/dev/null \
-    | awk '$1 == "Open" && $2 == "vSwitch" {{ print $NF; exit }}' || true)
+  rc=0
+  out=$($os network agent list --host {host} -f value -c "Agent Type" -c Alive 2>"$errf") || rc=$?
+  if [ "$rc" -eq 0 ]; then
+    alive=$(printf '%s\n' "$out" | awk '$1 == "Open" && $2 == "vSwitch" && !seen++ {{ print $NF }}')
+    err=''
+  else
+    alive=''
+    err=$(awk 'NF {{ last = $0 }} END {{ print last }}' "$errf")
+  fi
   [ "$alive" = True ] && break
   sleep 5
 done
-[ "$alive" = True ] || {{ echo "Open vSwitch agent on {host} is not alive: ${{alive:-missing}}" >&2; exit 1; }}
+rm -f "$errf"
+[ "$alive" = True ] || {{ echo "Open vSwitch agent on {host} is not alive: ${{alive:-missing}}${{err:+ (last error: $err)}}" >&2; exit 1; }}
 echo "Open vSwitch agent on {host} alive"
 "#
         ));
@@ -3617,7 +3637,7 @@ mod tests {
             // AGENTS.md: under `set -o pipefail` a reader that stops at its first match
             // (`grep -q`, `grep -m`) or a `| head` closes the pipe, and the command still
             // writing the other end (ssh, docker, ldconfig) fails the whole pipeline.
-            for reader in ["grep -q", "grep -m", "| head"] {
+            for reader in ["grep -q", "grep -m", "| head", "exit }"] {
                 assert!(!script.contains(reader), "{reader} in:\n{script}");
             }
             let mut child = Command::new("bash")
@@ -4294,6 +4314,82 @@ mod tests {
             .env("PATH", std::env::join_paths(paths).unwrap())
             .output()
             .unwrap()
+    }
+
+    /// The compute and agent waits poll OpenStack for minutes. A failing `openstack` must not be
+    /// hidden behind `|| true`: the timeout names the last error, and a healthy answer still
+    /// passes. The interval is shortened here; the loop count and the script's interval stay.
+    #[test]
+    fn the_compute_wait_reports_the_last_openstack_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let rc = dir.path().join("admin-openrc.sh");
+        std::fs::write(&rc, "").unwrap();
+        let fake = dir.path().join("openstack");
+        std::fs::write(
+            &fake,
+            r#"#!/bin/bash
+case "$*" in
+  *"compute service list"*)
+    [ "$FAKE_FAIL" = compute ] && { echo "Missing value auth-url required" >&2; exit 1; }
+    echo up ;;
+  *"network agent list"*)
+    [ "$FAKE_FAIL" = network ] && { echo "Unable to establish connection to https://keystone:5000" >&2; exit 1; }
+    echo "Open vSwitch True" ;;
+  *) echo "unexpected: $*" >&2; exit 2 ;;
+esac
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        let script = verify_compute_script("farm-compute-1", true)
+            .replace("/etc/kolla/admin-openrc.sh", rc.to_str().unwrap())
+            .replace("/opt/osc/bin/openstack", fake.to_str().unwrap())
+            .replace("sleep 5", "sleep 0.01");
+        let run = |fail: Option<&str>| {
+            let mut cmd = Command::new("bash");
+            cmd.arg("-c").arg(&script).env_remove("FAKE_FAIL");
+            if let Some(fail) = fail {
+                cmd.env("FAKE_FAIL", fail);
+            }
+            cmd.output().unwrap()
+        };
+
+        let output = run(None);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            stdout.contains("nova-compute farm-compute-1 up"),
+            "{stdout}"
+        );
+        assert!(
+            stdout.contains("Open vSwitch agent on farm-compute-1 alive"),
+            "{stdout}"
+        );
+
+        let output = run(Some("compute"));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success());
+        assert!(
+            stderr.contains(
+                "nova-compute farm-compute-1 is not up: missing (last error: Missing value auth-url required)"
+            ),
+            "{stderr}"
+        );
+
+        let output = run(Some("network"));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success());
+        assert!(
+            stderr.contains(
+                "Open vSwitch agent on farm-compute-1 is not alive: missing (last error: Unable to establish connection to https://keystone:5000)"
+            ),
+            "{stderr}"
+        );
     }
 
     /// The check runs under `set -euo pipefail` and reads libvirt's XML over ssh. A reader that
