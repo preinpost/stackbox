@@ -76,6 +76,7 @@ npm start
 원격 사용 시 로그인/접근 제어를 제공하는 reverse proxy 뒤에 배치하고,
 프록시가 로컬 포탈로 연결하도록 구성하세요. 이 포탈 자체에는 사용자 로그인·권한 구분이 없습니다.
 `PORTAL_HOST`를 변경해 직접 노출하면 해당 주소에 접근하는 사람이 VM을 관리할 수 있습니다.
+API는 Host 헤더가 `localhost`, `127.0.0.1`, `[::1]`, `PORTAL_HOST` 또는 `PORTAL_ALLOWED_HOSTS`(쉼표 구분)에 없으면 403을 반환합니다(DNS 리바인딩 방어). `PORTAL_HOST=0.0.0.0`처럼 와일드카드 바인딩이면 접속에 쓰는 호스트 이름을 `PORTAL_ALLOWED_HOSTS`에 넣으세요.
 
 ## 서버 경계
 
