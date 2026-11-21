@@ -3109,6 +3109,9 @@ html[data-theme="dark"] .phase-current .phase-marker {
 .stream-status.reconnecting {
   color: var(--warn);
 }
+.stream-status.closed {
+  color: var(--bad);
+}
 .log-button {
   height: 28px;
   padding: 0 9px;
