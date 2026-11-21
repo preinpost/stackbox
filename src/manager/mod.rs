@@ -3072,7 +3072,6 @@ fn expansion_share_aad(farm: &str, host: &str) -> String {
     format!("farm-expansion-share:{farm}:{host}")
 }
 
-/// The relay URL other hosts reach: the settings', or a quick tunnel's current address.
 /// Locks a value that a panicking holder may have poisoned. Both guarded values stay
 /// consistent when a holder panics (see [`FarmManager::relay_url`]), so reads and writes
 /// go through here instead of dropping the write or the read on poison.
@@ -3080,6 +3079,7 @@ fn lock_unpoisoned<T>(lock: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+/// The relay URL other hosts reach: the settings', or a quick tunnel's current address.
 fn effective_url(
     settings: &crate::link::relay::RelaySettings,
     tunnel: Option<&str>,
