@@ -398,12 +398,16 @@ curl -N http://127.0.0.1:10010/api/v1/farms/demo/logs/stream
 | GET | `/host` | Coordinator 정보: 빌드, 실행기 artifact, 상태 디렉터리 (호스트 준비 상태는 `/hosts`) |
 | GET / POST | `/hosts` | 원격 호스트 목록 / SSH 정보 등록 (201) |
 | POST | `/hosts/fingerprint` | 인증 전에 서버 SHA256 지문 조회 |
+| POST | `/hosts/test-connection` | 호스트를 등록하지 않고 SSH 접속만 시험 |
 | GET / PUT / DELETE | `/hosts/{id}` | 호스트 상세 / 인증 정보 변경 / 등록 해제 |
 | POST | `/hosts/{id}/check`, `/hosts/{id}/prepare` | 점검 / 환경 준비 job(`prepare`가 실행기까지 설치) |
 | POST | `/hosts/{id}/agent` | (deprecated) 실행기만 설치 job; `prepare`를 쓰세요 |
 | GET | `/host-jobs`, `/host-jobs/{id}` | 원격 호스트 작업과 단계 기록 |
 | GET | `/catalog` | 실제 지원 컴포넌트·프로필·제약 |
 | POST | `/plans` | 노드·게스트 메모리·디스크·경고 계산 |
+| GET | `/releases` | OpenStack 릴리스 카탈로그 (`arch`·`bucket` 쿼리), 최신 릴리스 순; control·compute 템플릿 보유 현황 포함 |
+| POST | `/releases/plan` | 릴리스 기반 farm 생성 dry run: VM마다 템플릿과 clean 설치 중 어느 것을 쓸지 계산 (아무것도 만들지 않음) |
+| POST | `/releases/farms` | 릴리스 기반 farm 조립 job (`202`; 단계별 job은 `assembly`에 나열) |
 | POST | `/local-host` | 로컬 호스트 등록 (`{"id":"local"}`, SSH 없음) |
 | POST | `/agent-hosts` | 접속해 오는 호스트 등록 (`{"id":"edge"}`) → 1회만 표시되는 agent 토큰 |
 | GET (WebSocket) | `/agent/connect` | 호스트 agent의 접속 (API token 대신 호스트 토큰) |
@@ -411,6 +415,10 @@ curl -N http://127.0.0.1:10010/api/v1/farms/demo/logs/stream
 | GET / DELETE | `/farms/{id}` | farm 상태 / 삭제 job |
 | POST | `/farms/{id}/deploy` | 배포 job (`{"from":"prechecks"}`로 재개) |
 | POST | `/farms/{id}/computes` | 배포된 다중 VM farm에 다음 compute VM 추가 job (`{"host_id":"dev-01"}`; 생략 시 primary 호스트, `from_snapshot`이면 compute 템플릿에서) |
+| GET | `/farms/{id}/instances` | farm의 OpenStack 인스턴스 목록 |
+| GET / PUT / DELETE | `/farms/{id}/instances/{server}/gpu-load` | 인스턴스의 GPU 부하 조회 / 설정 / 해제 (갱신된 부하 뷰 반환) |
+| GET | `/farms/{id}/gpu/guest-script` | 게스트에서 실행하는 가짜 `nvidia-smi` 스크립트 (첨부 다운로드) |
+| GET | `/farms/{id}/gpu/user-data` | Nova vendor data를 적용하지 않는 이미지(CirrOS)용 user-data 설치 스크립트 (첨부 다운로드, 409 가능) |
 | POST | `/farms/{id}/settle` | VM 재시작 뒤 서비스 응답 확인 job |
 | GET | `/farms/{id}/endpoints` | public 서비스 URL과 admin 인증정보 |
 | PUT | `/farms/{id}/nodes/{node}/faults` | 다중 VM farm의 VM 링크에 지연·손실 설정(`{}`이면 복구), 갱신된 farm |
@@ -422,7 +430,11 @@ curl -N http://127.0.0.1:10010/api/v1/farms/demo/logs/stream
 | DELETE | `/snapshots/{id}/copies/{host_id}` | 다른 호스트에 둔 스냅샷 복사본만 삭제 |
 | POST | `/snapshots/{id}/export`, `/snapshots/import` | `.msb` 아카이브 내보내기 / 가져오기 (파일 또는 S3 버킷) |
 | GET / POST / PUT / DELETE | `/buckets`, `/buckets/{id}` | 스냅샷을 옮길 S3 호환 버킷 등록·관리 |
+| POST | `/buckets/test-connection` | 버킷을 등록하지 않고 S3 접속만 시험 |
+| POST | `/buckets/{id}/check` | 등록된 버킷의 접속 점검 |
 | GET / POST | `/buckets/{id}/objects`, `/buckets/{id}/index` | 버킷의 아카이브와 메타데이터 / `index.json` 다시 만들기 |
+| GET / PUT / DELETE | `/relay` | relay 상태 조회 / 설정 / 해제 |
+| POST | `/relay/cloudflared/update` | cloudflared 바이너리 갱신 |
 | GET | `/jobs`, `/jobs/{id}` | 작업 상태·phase·오류 |
 | GET | `/openapi.json` | 생성된 OpenAPI 스키마 |
 
