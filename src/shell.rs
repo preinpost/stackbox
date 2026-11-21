@@ -43,6 +43,22 @@ pub async fn stream(sandbox: &Sandbox, script: &str, log: &str, sink: &EventSink
     let mut handle = sandbox
         .exec_stream("bash", ["-c", wrapped.as_str()])
         .await?;
+    // `ExecHandle` has no `Drop` (microsandbox 0.7.13): leaving this loop early, by an error
+    // or by the job dropping this future, would leave the guest script running. The guard
+    // terminates it unless the guest already reported how the script ended.
+    let control = handle.control();
+    let name = sandbox.name().to_string();
+    let mut guard = TerminateOnDrop::new(move || {
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            eprintln!("{name}: no runtime to stop the guest script");
+            return;
+        };
+        runtime.spawn(async move {
+            if let Err(e) = control.signal(TERMINATE_SIGNAL).await {
+                eprintln!("{name}: failed to stop the guest script: {e}");
+            }
+        });
+    });
     let mut stdout = std::io::stderr();
     let mut pending = String::new();
     while let Some(event) = handle.recv().await {
@@ -64,25 +80,62 @@ pub async fn stream(sandbox: &Sandbox, script: &str, log: &str, sink: &EventSink
                     pending.clear();
                 }
             }
-            ExecEvent::Exited { code: 0 } => return Ok(()),
+            ExecEvent::Exited { code: 0 } => {
+                guard.disarm();
+                return Ok(());
+            }
             ExecEvent::Exited { code } => {
+                guard.disarm();
                 // The log keeps the whole run; the reason is its last lines, and a job's error
                 // is all a reader sees without opening a shell.
                 let tail = last_lines(sandbox, log).await;
                 bail!("{}: exit {code} (log: {log}){tail}", sandbox.name())
             }
-            ExecEvent::Failed(failure) => bail!("{}: failed to start: {failure:?}", sandbox.name()),
+            ExecEvent::Failed(failure) => {
+                guard.disarm();
+                bail!("{}: failed to start: {failure:?}", sandbox.name())
+            }
             _ => {}
         }
     }
     bail!("{}: output ended without an exit status", sandbox.name())
 }
 
+/// SIGTERM: the wrapper traps it and passes it to the whole script; SIGKILL would only
+/// stop the wrapper itself.
+const TERMINATE_SIGNAL: i32 = 15;
+
+/// Runs `stop` when dropped, unless disarmed first.
+struct TerminateOnDrop<F: FnOnce()> {
+    stop: Option<F>,
+}
+
+impl<F: FnOnce()> TerminateOnDrop<F> {
+    fn new(stop: F) -> Self {
+        Self { stop: Some(stop) }
+    }
+
+    fn disarm(&mut self) {
+        self.stop = None;
+    }
+}
+
+impl<F: FnOnce()> Drop for TerminateOnDrop<F> {
+    fn drop(&mut self) {
+        if let Some(stop) = self.stop.take() {
+            stop();
+        }
+    }
+}
+
 /// The script `stream` runs: `script` under pipefail, its output teed into `log`.
+///
+/// The pipeline runs as a job (`set -m`) in its own process group, so a SIGTERM to the
+/// wrapper reaches every process of the script, kolla-ansible's children included.
 fn wrapped_script(script: &str, log: &str) -> String {
     let log = sh_quote(log);
     format!(
-        "step() {{ printf '{STEP_PREFIX}%s\\n' \"$*\"; }}; mkdir -p \"$(dirname {log})\"; set -o pipefail; ( {script} ) 2>&1 | tee -a {log}"
+        "step() {{ printf '{STEP_PREFIX}%s\\n' \"$*\"; }}; mkdir -p \"$(dirname {log})\"; set -o pipefail; set -m; ( {script} ) 2>&1 | tee -a {log} & set +m; trap 'kill -TERM %1 2>/dev/null; wait %1; exit 143' TERM INT HUP; wait %1"
     )
 }
 
@@ -110,7 +163,87 @@ fn tail_script(log: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{step_of, tail_script, wrapped_script};
+    use super::{TerminateOnDrop, step_of, tail_script, wrapped_script};
+    use std::cell::Cell;
+
+    #[test]
+    fn the_guard_stops_the_script_unless_its_end_was_seen() {
+        let stopped = Cell::new(0);
+        drop(TerminateOnDrop::new(|| stopped.set(stopped.get() + 1)));
+        assert_eq!(stopped.get(), 1);
+        let mut seen = TerminateOnDrop::new(|| stopped.set(stopped.get() + 1));
+        seen.disarm();
+        drop(seen);
+        assert_eq!(stopped.get(), 1);
+    }
+
+    #[test]
+    fn the_wrapper_keeps_the_exit_status() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("run.log");
+        let run = |script: &str| {
+            std::process::Command::new("bash")
+                .arg("-c")
+                .arg(wrapped_script(script, log.to_str().unwrap()))
+                .status()
+                .unwrap()
+                .code()
+        };
+        assert_eq!(run("true"), Some(0));
+        assert_eq!(run("exit 7"), Some(7));
+        assert_eq!(run("false | cat"), Some(1));
+    }
+
+    fn alive(pid: &str) -> bool {
+        std::process::Command::new("kill")
+            .args(["-0", pid])
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap()
+            .success()
+    }
+
+    #[test]
+    fn terminating_the_wrapper_terminates_the_script_it_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("run.log");
+        let pidf = dir.path().join("pid");
+        let script = format!("sleep 300 & echo $! > '{}'; wait", pidf.display());
+        let mut child = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(wrapped_script(&script, log.to_str().unwrap()))
+            .spawn()
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let pid = loop {
+            if let Ok(pid) = std::fs::read_to_string(&pidf)
+                && !pid.trim().is_empty()
+            {
+                break pid.trim().to_string();
+            }
+            assert!(std::time::Instant::now() < deadline, "script never started");
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        };
+        // What `stream` sends when it stops reading early.
+        let wrapper = child.id().to_string();
+        std::process::Command::new("kill")
+            .args(["-TERM", wrapper.as_str()])
+            .status()
+            .unwrap();
+        child.wait().unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while alive(&pid) && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        let orphan = alive(&pid);
+        if orphan {
+            std::process::Command::new("kill")
+                .args(["-KILL", pid.as_str()])
+                .status()
+                .unwrap();
+        }
+        assert!(!orphan, "the script outlived its wrapper");
+    }
 
     #[test]
     fn the_wrapper_and_the_tail_run_with_a_log_path_that_has_spaces_and_quotes() {
