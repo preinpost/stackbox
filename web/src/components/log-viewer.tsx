@@ -10,6 +10,7 @@ import {
   Pause,
   Play,
   Radio,
+  RefreshCw,
   Terminal,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
@@ -45,7 +46,8 @@ export function mergeLogs(
   return [...merged.values()].sort((a, b) => a.id - b.id).slice(-1000);
 }
 
-type StreamConnection = "connecting" | "live" | "reconnecting";
+/** "closed": the browser gave up retrying, so only an explicit reconnect reopens the stream. */
+type StreamConnection = "connecting" | "live" | "reconnecting" | "closed";
 type LogStreamState = { connection: StreamConnection; gap: boolean };
 
 /** The panels showing one farm's logs share its one EventSource, so a tab switch never doubles it. */
@@ -62,19 +64,30 @@ function setStreamState(stream: LogStream, patch: Partial<LogStreamState>) {
 }
 
 function openLogStream(id: string, client: QueryClient): LogStream {
+  const stream: LogStream = {
+    source: null as unknown as EventSource,
+    state: { connection: "connecting", gap: false },
+    listeners: new Set(),
+  };
+  logStreams.set(id, stream);
+  attachSource(id, client, stream);
+  return stream;
+}
+
+/** Opens a new EventSource for the stream, resuming after the last cached event. */
+function attachSource(id: string, client: QueryClient, stream: LogStream) {
   const tail = client.getQueryData<LogEntry[]>(keys.logs(id)) ?? [];
   const lastId = tail.at(-1)?.id ?? 0;
   const source = new EventSource(
     `/api/v1/farms/${encodeURIComponent(id)}/logs/stream?after=${lastId}`,
   );
-  const stream: LogStream = {
-    source,
-    state: { connection: "connecting", gap: false },
-    listeners: new Set(),
-  };
-  logStreams.set(id, stream);
+  stream.source = source;
   source.onopen = () => setStreamState(stream, { connection: "live" });
-  source.onerror = () => setStreamState(stream, { connection: "reconnecting" });
+  source.onerror = () =>
+    setStreamState(stream, {
+      connection:
+        source.readyState === EventSource.CLOSED ? "closed" : "reconnecting",
+    });
   source.addEventListener("gap", () => setStreamState(stream, { gap: true }));
   source.addEventListener("log", (event) => {
     try {
@@ -90,10 +103,18 @@ function openLogStream(id: string, client: QueryClient): LogStream {
       setStreamState(stream, { connection: "reconnecting" });
     }
   });
-  return stream;
 }
 
-function subscribeLogStream(
+/** Replaces a stream the browser gave up on with a fresh connection. */
+export function reconnectLogStream(id: string, client: QueryClient) {
+  const stream = logStreams.get(id);
+  if (!stream) return;
+  stream.source.close();
+  attachSource(id, client, stream);
+  setStreamState(stream, { connection: "connecting", gap: false });
+}
+
+export function subscribeLogStream(
   id: string,
   client: QueryClient,
   listener: (state: LogStreamState) => void,
@@ -112,7 +133,10 @@ function subscribeLogStream(
 
 /** Follows a farm's log stream, opening the one shared connection when `enabled`.
  * The overview tail enables it only while a job runs; the logs tab always does. */
-export function useLogStream(id: string, enabled = true): LogStreamState {
+export function useLogStream(
+  id: string,
+  enabled = true,
+): LogStreamState & { reconnect: () => void } {
   const client = useQueryClient();
   const [state, setState] = useState<LogStreamState>({
     connection: "connecting",
@@ -122,12 +146,12 @@ export function useLogStream(id: string, enabled = true): LogStreamState {
     if (!enabled) return;
     return subscribeLogStream(id, client, setState);
   }, [id, enabled, client]);
-  return state;
+  return { ...state, reconnect: () => reconnectLogStream(id, client) };
 }
 
 export function LogViewer({ id }: { id: string }) {
   const logs = useQuery(logsQuery(id));
-  const { connection, gap } = useLogStream(id, logs.isSuccess);
+  const { connection, gap, reconnect } = useLogStream(id, logs.isSuccess);
   const [follow, setFollow] = useState(true);
   const [copied, setCopied] = useState(false);
   const [copyError, setCopyError] = useState("");
@@ -153,6 +177,7 @@ export function LogViewer({ id }: { id: string }) {
       );
       setCopied(true);
       setCopyError("");
+      clearTimeout(copyTimeout.current);
       copyTimeout.current = setTimeout(() => setCopied(false), 2000);
     } catch {
       setCopyError("복사 권한이 없습니다. 로그를 선택해 복사하세요.");
@@ -170,10 +195,18 @@ export function LogViewer({ id }: { id: string }) {
               ? "LIVE"
               : connection === "connecting"
                 ? "CONNECTING"
-                : "RECONNECTING"}
+                : connection === "closed"
+                  ? "DISCONNECTED"
+                  : "RECONNECTING"}
           </span>
         </div>
         <div className="flex items-center gap-1">
+          {connection === "closed" && (
+            <Button variant="ghost" className="log-button" onClick={reconnect}>
+              <RefreshCw size={15} />
+              다시 연결
+            </Button>
+          )}
           <Button
             variant="ghost"
             className="log-button"
