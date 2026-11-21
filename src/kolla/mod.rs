@@ -262,7 +262,7 @@ async fn deploy_on(
 /// created with one binds to, or `eth0` on farms made before it.
 fn identity_command() -> String {
     format!(
-        "if [ -f {conf} ]; then . {conf}; echo \"{dummy} $FARM_ADDRESS\"; else echo \"eth0 $(ip -4 -o addr show dev eth0 | awk '{{split($4,a,\"/\"); print a[1]; exit}}')\"; fi",
+        "if [ -f {conf} ]; then . {conf}; echo \"{dummy} $FARM_ADDRESS\"; else echo \"eth0 $(ip -4 -o addr show dev eth0 | awk '!seen++ {{split($4,a,\"/\"); print a[1]}}')\"; fi",
         conf = farm::IDENTITY_CONF,
         dummy = farm::GUEST_INTERFACE,
     )
@@ -699,6 +699,7 @@ fn verify_compute_script(host: &str, neutron: bool) -> String {
 . {CONFIG_DIR}/admin-openrc.sh
 os={OSC_VENV}/bin/openstack
 errf=$(mktemp)
+trap 'rm -f "$errf"' EXIT
 state=''
 err=''
 for _ in $(seq 60); do
@@ -714,7 +715,6 @@ for _ in $(seq 60); do
   [ "$state" = up ] && break
   sleep 5
 done
-rm -f "$errf"
 [ "$state" = up ] || {{ echo "nova-compute {host} is not up: ${{state:-missing}}${{err:+ (last error: $err)}}" >&2; exit 1; }}
 echo "nova-compute {host} up"
 "#
@@ -739,7 +739,6 @@ for _ in $(seq 60); do
   [ "$alive" = True ] && break
   sleep 5
 done
-rm -f "$errf"
 [ "$alive" = True ] || {{ echo "Open vSwitch agent on {host} is not alive: ${{alive:-missing}}${{err:+ (last error: $err)}}" >&2; exit 1; }}
 echo "Open vSwitch agent on {host} alive"
 "#
@@ -3637,7 +3636,8 @@ mod tests {
             // AGENTS.md: under `set -o pipefail` a reader that stops at its first match
             // (`grep -q`, `grep -m`) or a `| head` closes the pipe, and the command still
             // writing the other end (ssh, docker, ldconfig) fails the whole pipeline.
-            for reader in ["grep -q", "grep -m", "| head", "exit }"] {
+            // `awk ... exit` is the same early close: awk stops reading its input at the first record.
+            for reader in ["grep -q", "grep -m", "| head", "exit }", "exit}", "exit;"] {
                 assert!(!script.contains(reader), "{reader} in:\n{script}");
             }
             let mut child = Command::new("bash")
@@ -4390,6 +4390,54 @@ esac
             ),
             "{stderr}"
         );
+    }
+
+    /// The wait loops keep their error file until the script ends. A run that dies inside the
+    /// loop (here `set -e` stops it at the pause after a failing openstack call) must not leave
+    /// that file behind. `mktemp` ignores `TMPDIR` on macOS, so a stand-in `mktemp` puts the
+    /// file in the test's directory.
+    #[test]
+    fn the_compute_wait_removes_its_error_file_when_cut_short() {
+        let dir = tempfile::tempdir().unwrap();
+        let rc = dir.path().join("admin-openrc.sh");
+        std::fs::write(&rc, "").unwrap();
+        let fake = dir.path().join("openstack");
+        std::fs::write(&fake, "#!/bin/bash\necho boom >&2\nexit 1\n").unwrap();
+        std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        let made = dir.path().join("made");
+        std::fs::create_dir(&made).unwrap();
+        let mktemp = dir.path().join("mktemp");
+        std::fs::write(
+            &mktemp,
+            format!(
+                "#!/bin/bash\np='{}'/err.$$\n: > \"$p\"\necho \"$p\"\n",
+                made.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&mktemp, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        let script = verify_compute_script("farm-compute-1", false)
+            .replace("/etc/kolla/admin-openrc.sh", rc.to_str().unwrap())
+            .replace("/opt/osc/bin/openstack", fake.to_str().unwrap())
+            .replace("sleep 5", "false");
+        let path = std::env::join_paths(std::iter::once(dir.path().to_path_buf()).chain(
+            std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
+        ))
+        .unwrap();
+        let output = Command::new("bash")
+            .arg("-c")
+            .arg(&script)
+            .env("PATH", path)
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        let left: Vec<_> = std::fs::read_dir(&made)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert!(left.is_empty(), "error files left behind: {left:?}");
     }
 
     /// The check runs under `set -euo pipefail` and reads libvirt's XML over ssh. A reader that
