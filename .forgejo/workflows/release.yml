@@ -21,7 +21,57 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # The same gates as ci.yml, run on the commit before anything is bumped, tagged,
+  # or uploaded. The release job needs it, so a failing gate deploys nothing.
+  gate:
+    if: ${{ github.ref == 'refs/heads/main' && !startsWith(github.event.head_commit.message, 'Release v') }}
+    runs-on: docker
+    container:
+      image: catthehacker/ubuntu:act-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      # The image has node but no Rust; the toolchain matches docker/agent.Dockerfile.
+      - name: Install the Rust toolchain
+        run: |
+          set -eu
+          curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal \
+            --default-toolchain 1.99.1 -c clippy -c rustfmt
+          echo "$HOME/.cargo/bin" >>"$GITHUB_PATH"
+
+      - name: Check formatting
+        run: |
+          set -eu
+          . "$HOME/.cargo/env"
+          cargo fmt --check
+
+      - name: Clippy
+        run: |
+          set -eu
+          . "$HOME/.cargo/env"
+          cargo clippy --all-targets -- -D warnings
+
+      - name: Rust tests
+        run: |
+          set -eu
+          . "$HOME/.cargo/env"
+          cargo test
+
+      - name: Install the portal dependencies
+        run: npm --prefix web ci
+
+      - name: Portal tests
+        run: |
+          set -eu
+          (cd web && npx vitest run)
+          (cd web && node --test server/*.test.mjs)
+
+      - name: Portal build
+        run: npm --prefix web run build
+
   release:
+    needs: gate
     # The release commit is pushed with the job token, which starts no runs; the
     # message check still stops a loop if RELEASE_TOKEN is a user token that would.
     if: ${{ github.ref == 'refs/heads/main' && !startsWith(github.event.head_commit.message, 'Release v') }}
@@ -125,8 +175,9 @@ jobs:
           ids=$(for target in $TARGETS; do
             grep -haoE 'farm-agent-build:[0-9a-f]+' dist/agent/"$target"/farm-agent*
           done | sort -u)
-          if [ "$(printf '%s\n' "$ids" | wc -l)" -ne 1 ]; then
-            echo "the agents disagree on their build id: $ids" >&2
+          # An empty $ids still counts as one line to wc, so check it separately.
+          if [ -z "$ids" ] || [ "$(printf '%s\n' "$ids" | wc -l)" -ne 1 ]; then
+            echo "no build id found, or the agents disagree on it: $ids" >&2
             exit 1
           fi
           echo "BUILD_ID=${ids#farm-agent-build:}" >>"$GITHUB_ENV"
