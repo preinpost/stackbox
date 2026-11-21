@@ -119,6 +119,12 @@ impl Store {
             options.mode(0o600);
         }
         let mut file = options.open(&path)?;
+        // `mode` above applies only when the file is created; a leftover tmp keeps its old mode.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(fs::Permissions::from_mode(0o600))?;
+        }
         file.write_all(&serde_json::to_vec_pretty(&next)?)?;
         file.sync_all()?;
         fs::rename(path, self.dir.join("state.json"))?;
@@ -126,5 +132,27 @@ impl Store {
         self.state = next;
         self.revision += 1;
         Ok(result)
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn a_stale_wide_tmp_file_does_not_make_the_saved_state_readable() {
+        let dir = tempfile::tempdir().unwrap();
+        let tmp = dir.path().join("state.json.tmp");
+        fs::write(&tmp, b"left over from an earlier run").unwrap();
+        fs::set_permissions(&tmp, fs::Permissions::from_mode(0o644)).unwrap();
+        let mut store = Store::open(dir.path()).unwrap();
+        store.update(|_| Ok(())).unwrap();
+        let mode = fs::metadata(dir.path().join("state.json"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
     }
 }

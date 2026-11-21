@@ -1,5 +1,6 @@
 use std::io::Write;
 
+use crate::gpu::sh_quote;
 use crate::kolla::{DeployEvent, EventSink};
 use anyhow::{Result, bail};
 use microsandbox::{ExecEvent, Sandbox};
@@ -38,9 +39,7 @@ fn step_of(line: &str) -> Option<String> {
 /// `step "..."` inside the script reports the current step, which the manager shows while
 /// the phase runs. Kolla-Ansible phases report their task names through the same path.
 pub async fn stream(sandbox: &Sandbox, script: &str, log: &str, sink: &EventSink) -> Result<()> {
-    let wrapped = format!(
-        "step() {{ printf '{STEP_PREFIX}%s\\n' \"$*\"; }}; mkdir -p \"$(dirname {log})\"; set -o pipefail; ( {script} ) 2>&1 | tee -a {log}"
-    );
+    let wrapped = wrapped_script(script, log);
     let mut handle = sandbox
         .exec_stream("bash", ["-c", wrapped.as_str()])
         .await?;
@@ -79,13 +78,18 @@ pub async fn stream(sandbox: &Sandbox, script: &str, log: &str, sink: &EventSink
     bail!("{}: output ended without an exit status", sandbox.name())
 }
 
+/// The script `stream` runs: `script` under pipefail, its output teed into `log`.
+fn wrapped_script(script: &str, log: &str) -> String {
+    let log = sh_quote(log);
+    format!(
+        "step() {{ printf '{STEP_PREFIX}%s\\n' \"$*\"; }}; mkdir -p \"$(dirname {log})\"; set -o pipefail; ( {script} ) 2>&1 | tee -a {log}"
+    )
+}
+
 /// The reason a script failed, from the end of its log: step markers dropped, empty lines
 /// skipped, three lines at most.
 async fn last_lines(sandbox: &Sandbox, log: &str) -> String {
-    let script = format!(
-        "grep -v '^{STEP_PREFIX}' {log} 2>/dev/null | grep -v '^[[:space:]]*$' | tail -n 3"
-    );
-    match run(sandbox, &script).await {
+    match run(sandbox, &tail_script(log)).await {
         Ok(tail) if !tail.trim().is_empty() => {
             let lines: Vec<&str> = tail
                 .lines()
@@ -98,9 +102,42 @@ async fn last_lines(sandbox: &Sandbox, log: &str) -> String {
     }
 }
 
+/// The command `last_lines` runs: the log without step markers and blank lines, last three.
+fn tail_script(log: &str) -> String {
+    let log = sh_quote(log);
+    format!("grep -v '^{STEP_PREFIX}' {log} 2>/dev/null | grep -v '^[[:space:]]*$' | tail -n 3")
+}
+
 #[cfg(test)]
 mod tests {
-    use super::step_of;
+    use super::{step_of, tail_script, wrapped_script};
+
+    #[test]
+    fn the_wrapper_and_the_tail_run_with_a_log_path_that_has_spaces_and_quotes() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("run dir").join("it's $HOME.log");
+        let log = log.to_str().unwrap();
+        let script = "echo hello; echo '__FARM_STEP__ copy'; echo last";
+        let run = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(wrapped_script(script, log))
+            .output()
+            .unwrap();
+        assert!(
+            run.status.success(),
+            "{}",
+            String::from_utf8_lossy(&run.stderr)
+        );
+        assert!(std::fs::read_to_string(log).unwrap().contains("last"));
+
+        let tail = std::process::Command::new("bash")
+            .arg("-c")
+            .arg(tail_script(log))
+            .output()
+            .unwrap();
+        let tail = String::from_utf8_lossy(&tail.stdout).into_owned();
+        assert_eq!(tail, "hello\nlast\n");
+    }
 
     #[test]
     fn recognises_our_markers_and_ansible_tasks_only() {
