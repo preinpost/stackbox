@@ -12,8 +12,11 @@ tasks:
       - Cargo.lock
       - src/**/*.rs
       - src/**/*.py
+      - src/**/*.diff
+      - src/**/*.sh
       - guest/**/*
       - docker/agent.Dockerfile
+      - docker/agent-cross.Dockerfile
     generates:
       - dist/agent/*/farm-agent
     cmds:
