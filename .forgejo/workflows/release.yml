@@ -36,7 +36,8 @@ jobs:
       - name: Install the Rust toolchain
         run: |
           set -eu
-          curl -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal \
+          curl -fsSL --proto '=https' --tlsv1.2 -o /tmp/rustup-init.sh https://sh.rustup.rs
+          sh /tmp/rustup-init.sh -y --profile minimal \
             --default-toolchain 1.99.1 -c clippy -c rustfmt
           echo "$HOME/.cargo/bin" >>"$GITHUB_PATH"
 
