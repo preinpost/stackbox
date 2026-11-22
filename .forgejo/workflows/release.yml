@@ -29,6 +29,12 @@ jobs:
     container:
       image: catthehacker/ubuntu:act-24.04
     timeout-minutes: 60
+    # The runner's memory cannot link the debug test binaries in parallel (ld is
+    # SIGKILLed); no debug info and two jobs keep the gates inside it.
+    env:
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+      CARGO_BUILD_JOBS: 2
     steps:
       - uses: actions/checkout@v4
 
