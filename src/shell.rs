@@ -194,13 +194,16 @@ mod tests {
         assert_eq!(run("false | cat"), Some(1));
     }
 
+    /// Whether `pid` still runs. A zombie counts as gone: an orphaned script is reparented
+    /// to PID 1, and in a CI container that is `tail -f /dev/null`, which never reaps it, so
+    /// `kill -0` would still see the exited process.
     fn alive(pid: &str) -> bool {
-        std::process::Command::new("kill")
-            .args(["-0", pid])
-            .stderr(std::process::Stdio::null())
-            .status()
-            .unwrap()
-            .success()
+        let out = std::process::Command::new("ps")
+            .args(["-o", "stat=", "-p", pid])
+            .output()
+            .unwrap();
+        let stat = String::from_utf8_lossy(&out.stdout);
+        out.status.success() && !stat.trim().is_empty() && !stat.trim_start().starts_with('Z')
     }
 
     #[test]
