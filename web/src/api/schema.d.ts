@@ -2702,7 +2702,7 @@ export interface operations {
     };
     requestBody?: never;
     responses: {
-      /** @description Nova servers in the farm, with each flavor's GPU resource classes and the load farm applied */
+      /** @description Nova servers in a GPU farm, with each flavor's GPU resource classes and the load farm applied */
       200: {
         headers: {
           [name: string]: unknown;

@@ -227,7 +227,7 @@ GPU farm(`plan.gpu`가 있는 farm)은 인스턴스에 실제 GPU 대신 가짜 
 
 | 요청 | 응답 |
 | --- | --- |
-| `GET /farms/{id}/instances` | farm의 모든 Nova 서버. 각 항목에 flavor, `resources`(예: `VGPU: 1`), `gpu_count`, 적용된 `load`, `applied`가 있습니다 |
+| `GET /farms/{id}/instances` | GPU farm(`plan.gpu`가 있는 farm)의 모든 Nova 서버. 각 항목에 flavor, `resources`(예: `VGPU: 1`), `gpu_count`, 적용된 `load`, `applied`가 있습니다 |
 | `GET /farms/{id}/instances/{server}/gpu-load` | 그 인스턴스의 부하. 적용한 적이 없으면 기본값과 `applied: false`입니다 |
 | `PUT /farms/{id}/instances/{server}/gpu-load` | 부하를 메타데이터에 씁니다. body는 `{"profile":"sim-8g","pattern":"sine","min":10,"max":90,"period_s":60,"memory_ratio":30}` |
 | `DELETE /farms/{id}/instances/{server}/gpu-load` | `farm_gpu_*` 메타데이터를 지우고 기본값으로 되돌립니다 |

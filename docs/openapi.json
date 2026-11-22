@@ -884,7 +884,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Nova servers in the farm, with each flavor's GPU resource classes and the load farm applied",
+            "description": "Nova servers in a GPU farm, with each flavor's GPU resource classes and the load farm applied",
             "content": {
               "application/json": {
                 "schema": {

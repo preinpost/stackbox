@@ -72,3 +72,14 @@ cd web && npx vitest run
   docker 등)이 SIGPIPE로 끝나 파이프라인 전체가 실패하므로 `grep ... >/dev/null`을 쓰거나 출력을
   변수에 담아 검사합니다. `src/kolla/mod.rs`의 mtty 검사와 그 테스트
   `the_mtty_check_reads_the_libvirt_xml_to_the_end`가 이 형태입니다.
+- 실환경 E2E는 메모리 예산을 먼저 계산합니다. 기본 예산은 호스트 RAM의 80%이고
+  (`src/manager/mod.rs`의 `memory_budget_mib`, 변경은 `--memory-budget-mib`, `src/main.rs`), 스냅샷
+  복원 farm도 원본과 같은 메모리를 예약합니다(`src/manager/mod.rs`의 `JobKind::Restore` 생성 경로). 원본과
+  복원을 동시에 띄우면 기존 예약 + 원본 + 복원 합계가 예산 안인지 시작 전에 계산합니다. 넘으면
+  `POST /farms`가 409 `memory budget of host '<host>' exceeded: ...`로 거절합니다(`src/manager/mod.rs`의
+  `memory budget of host` 오류, `src/api.rs`의 `StatusCode::CONFLICT`).
+- daemon(`farm serve`)이 실행 중이면 같은 state dir의 `farm` CLI는 `farm state is locked by another
+  process`로 실패합니다(`src/manager/store.rs`). 이때는 daemon의 REST API(`docs/openapi.json`)를 쓰거나 별도
+  state dir(README "코드와 검증" 절의 `mktemp`)을 씁니다. `scripts/verify-openstack.py`는 내부에서
+  `farm status`·`farm endpoints --json`을 호출하므로(`scripts/verify-openstack.py`) daemon 실행 중에는
+  `--state-dir`만으로 안 되고, `--farm-binary`에 API를 중계하는 래퍼(두 하위 명령 지원)를 넘깁니다.

@@ -7673,6 +7673,16 @@ async fn gpu_load_control_is_refused_with_409_outside_a_deployed_gpu_farm() {
     let plain = manager.create(request("plain")).unwrap();
     assert_eq!(done(&manager, &plain).await.status, JobStatus::Succeeded);
     let app = api::router(manager.clone(), None);
+    let response = app
+        .clone()
+        .oneshot(
+            Request::get("/api/v1/farms/plain/instances")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
     let put = |farm: &str| {
         Request::put(format!(
             "/api/v1/farms/{farm}/instances/11111111-2222-3333-4444-555555555555/gpu-load"

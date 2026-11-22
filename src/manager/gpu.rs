@@ -26,7 +26,7 @@ impl FarmManager {
             .and_then(|plan| plan.gpu.clone())
             .ok_or_else(|| {
                 conflict(
-                    "this farm has no virtual GPU; create it with a gpu option to use the fake nvidia-smi (docs/gpu.md)",
+                    "this farm has no virtual GPU; its gpu option is set at creation and cannot be added later (docs/gpu.md)",
                 )
             })?;
         if !farm_components(&farm).iter().any(|c| c == "nova") {

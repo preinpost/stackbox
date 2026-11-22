@@ -673,7 +673,7 @@ async fn add_compute(
 ) -> Result<Response, ApiError> {
     Ok(accepted(app.manager.add_compute(&id, body(value)?)?))
 }
-#[utoipa::path(get, path="/api/v1/farms/{id}/instances", params(("id"=String, Path)), responses((status=200, description="Nova servers in the farm, with each flavor's GPU resource classes and the load farm applied", body=Vec<FarmInstance>), (status=409, description="Not a deployed GPU farm, or Nova is not part of it", body=ErrorBody)))]
+#[utoipa::path(get, path="/api/v1/farms/{id}/instances", params(("id"=String, Path)), responses((status=200, description="Nova servers in a GPU farm, with each flavor's GPU resource classes and the load farm applied", body=Vec<FarmInstance>), (status=409, description="Not a deployed GPU farm, or Nova is not part of it", body=ErrorBody)))]
 async fn instances(
     State(app): State<App>,
     Path(id): Path<String>,
