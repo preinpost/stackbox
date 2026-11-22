@@ -377,7 +377,7 @@ function JobWorkspace({
                     { value: "all", label: "모든 작업" },
                     { value: "check", label: "SSH 점검" },
                     { value: "prepare", label: "환경 준비" },
-                    { value: "install_agent", label: "Farm 실행기 설치 (구)" },
+                    { value: "install_agent", label: "Farm 실행기 업데이트" },
                     { value: "purge", label: "호스트 VM 정리" },
                   ]
             }

@@ -870,9 +870,7 @@ async fn deploy_phases(
                 stream(deployer, &script, &log, sink).await
             }
         }
-        .with_context(|| {
-            format!("phase '{phase}' failed; resume with `farm deploy {farm_id} --from {phase}`")
-        })?;
+        .with_context(|| resume_hint(farm_id, phase))?;
         sink(DeployEvent::Output(format!("phase {phase} completed\n")))?;
     }
     let url = if let Some(exposure) = exposure {
@@ -1693,10 +1691,13 @@ async fn configure(
     // all internal API/database calls use the VM's eth0 address and native ports.
     if let Some(exposure) = exposure {
         for c in crate::model::COMPONENTS {
-            let (Some(port), Some(variable)) = (&c.public, public_url_variable(c.id)) else {
+            if !components.iter().any(|id| id == c.id) {
                 continue;
-            };
-            if components.iter().any(|id| id == c.id) {
+            }
+            for port in c.public {
+                let Some(variable) = public_url_variable(port.id) else {
+                    continue;
+                };
                 globals.push_str(&format!(
                     "{variable}: \"http://{}:{}\"\n",
                     exposure.host,
@@ -1732,6 +1733,17 @@ async fn configure(
         .await?;
     } else {
         run(deployer, &format!("rm -f {horizon_settings}")).await?;
+    }
+    // Skyline's login reads the public catalog entry by default, which the control VM cannot reach.
+    let skyline_settings = format!("{CONFIG_DIR}/config/skyline/skyline.yaml");
+    match config::skyline_override(components) {
+        Some(settings) => {
+            run(deployer, &format!("mkdir -p {CONFIG_DIR}/config/skyline")).await?;
+            fs.write(&skyline_settings, settings).await?;
+        }
+        None => {
+            run(deployer, &format!("rm -f {skyline_settings}")).await?;
+        }
     }
     // Kolla's default hybrid iptables firewall needs physdev, which the guest kernel lacks.
     // The OVS firewall uses the userspace datapath's own conntrack instead.
@@ -2057,7 +2069,7 @@ pub async fn settle(
 fn rebind_map(from: &Exposure, to: &Exposure) -> BTreeMap<String, String> {
     crate::model::COMPONENTS
         .iter()
-        .filter_map(|c| c.public.as_ref())
+        .flat_map(|c| c.public.iter())
         .map(|p| {
             (
                 format!("http://{}:{}", from.host, from.port_base + p.offset),
@@ -2170,15 +2182,24 @@ fn no_compute_hosts(inventory: &str) -> String {
     )
 }
 
-/// Kolla variable holding each service's public base URL (without the API version path).
-fn public_url_variable(component: &str) -> Option<&'static str> {
-    Some(match component {
+/// Kolla variable holding each published port's public base URL (without the API version path),
+/// keyed by [`crate::model::PublicPort::id`]. The 2025.1 names are those of the 2025.2, 2026.1
+/// and 2026.2 kolla-ansible branches.
+fn public_url_variable(port: &str) -> Option<&'static str> {
+    Some(match port {
         "keystone" => "keystone_public_url",
         "glance" => "glance_public_endpoint",
         "placement" => "placement_public_endpoint",
         "horizon" => "horizon_public_endpoint",
         "neutron" => "neutron_public_endpoint",
         "nova" => "nova_public_base_endpoint",
+        "heat" => "heat_public_base_endpoint",
+        "heat-cfn" => "heat_cfn_public_base_endpoint",
+        "barbican" => "barbican_public_endpoint",
+        "designate" => "designate_public_endpoint",
+        "magnum" => "magnum_public_base_endpoint",
+        "skyline" => "skyline_apiserver_public_endpoint",
+        "skyline-console" => "skyline_console_public_endpoint",
         _ => return None,
     })
 }
@@ -2324,6 +2345,9 @@ echo "horizon OK: ${home#200 }"
 "#,
         );
     }
+    if has("skyline") {
+        script.push_str(&skyline_verify_script());
+    }
     if has("neutron") {
         script.push_str(&neutron_verify_script());
     }
@@ -2356,6 +2380,38 @@ echo "horizon OK: ${home#200 }"
 /// Builds a throwaway tenant network behind a router on `public`, then proves the
 /// userspace datapath forwards: the all-in-one host pings the router's gateway and,
 /// from the router namespace, the DHCP port on the tenant network.
+/// Skyline's API answers the login the browser uses, on the internal address (port 9998, the
+/// apiserver's default). Its login response carries a Keystone token, as kolla's own test checks.
+fn skyline_verify_script() -> String {
+    r#"step "Skyline 로그인 확인"
+skyline="http://$(awk -F'"' '/^kolla_internal_vip_address:/ {print $2}' /etc/kolla/globals.yml):9998"
+status=$(curl -sS -o "$work/skyline.json" -w '%{http_code}' \
+  -H 'Accept: application/json' -H 'Content-Type: application/json' \
+  -d "{\"region\": \"$OS_REGION_NAME\", \"domain\": \"Default\", \"username\": \"admin\", \"password\": \"$OS_PASSWORD\"}" \
+  "$skyline/api/v1/login") || true
+if [ "$status" != 200 ]; then
+  echo "skyline login returned $status ($skyline/api/v1/login)" >&2
+  exit 1
+fi
+grep '"keystone_token"' "$work/skyline.json" >/dev/null || { echo "skyline login response has no keystone_token" >&2; exit 1; }
+echo "skyline OK: $skyline"
+"#
+    .to_owned()
+}
+
+/// The failure message for `phase`. Phases after `configure` read the configuration that
+/// `configure` wrote, so a user who edited it must resume from `configure` to rewrite it.
+fn resume_hint(farm_id: &str, phase: Phase) -> String {
+    let mut hint =
+        format!("phase '{phase}' failed; resume with `farm deploy {farm_id} --from {phase}`");
+    if phase > Phase::Configure {
+        hint.push_str(&format!(
+            "; if you changed the configuration, resume with `farm deploy {farm_id} --from configure`"
+        ));
+    }
+    hint
+}
+
 fn neutron_verify_script() -> String {
     r#"step "Neutron agent 상태 확인 (OVS·DHCP·L3·Metadata)"
 for _ in $(seq 60); do
@@ -3070,6 +3126,45 @@ mod tests {
     }
 
     #[test]
+    fn skyline_verification_logs_in_on_the_internal_apiserver() {
+        let with = verify_script(
+            &["keystone", "glance", "skyline"].map(String::from),
+            1,
+            OPENSTACK_RELEASE,
+            None,
+        );
+        assert!(with.contains("Skyline 로그인 확인"));
+        assert!(with.contains("kolla_internal_vip_address"));
+        assert!(with.contains("\"$skyline/api/v1/login\""));
+        assert!(with.contains(r#"\"domain\": \"Default\", \"username\": \"admin\""#));
+        assert!(with.contains("skyline login returned $status"));
+        let without = verify_script(
+            &["keystone", "glance"].map(String::from),
+            1,
+            OPENSTACK_RELEASE,
+            None,
+        );
+        assert!(!without.contains("api/v1/login"));
+    }
+
+    #[test]
+    fn a_failure_after_configure_also_names_configure_as_the_resume_point() {
+        let after = resume_hint("demo", Phase::Deploy);
+        assert_eq!(
+            after,
+            "phase 'deploy' failed; resume with `farm deploy demo --from deploy`; if you changed the configuration, resume with `farm deploy demo --from configure`"
+        );
+        assert!(resume_hint("demo", Phase::Verify).contains("--from configure"));
+        assert!(resume_hint("demo", Phase::Prechecks).contains("--from configure"));
+        let before = resume_hint("demo", Phase::Configure);
+        assert_eq!(
+            before,
+            "phase 'configure' failed; resume with `farm deploy demo --from configure`"
+        );
+        assert!(!resume_hint("demo", Phase::Install).contains("configuration"));
+    }
+
+    #[test]
     fn only_a_release_whose_tooling_predates_the_guest_python_installs_its_own() {
         assert_eq!(
             python_command(&releases::info(OPENSTACK_RELEASE)),
@@ -3569,6 +3664,7 @@ mod tests {
             "glance",
             "placement",
             "horizon",
+            "skyline",
             "neutron",
             "nova",
         ]
@@ -3825,6 +3921,49 @@ mod tests {
     }
 
     #[test]
+    fn each_published_port_maps_to_its_kolla_variable_at_its_own_offset() {
+        let exposure = Exposure {
+            host: "farm.example".into(),
+            bind: [127, 0, 0, 1].into(),
+            port_base: 15000,
+        };
+        let all: Vec<String> = crate::model::COMPONENTS
+            .iter()
+            .map(|c| c.id.to_owned())
+            .collect();
+        let urls = exposure.urls(Some(&all));
+        // Every published port is listed and has a Kolla variable to be written into globals.yml.
+        let ports: Vec<_> = crate::model::COMPONENTS
+            .iter()
+            .flat_map(|c| c.public.iter())
+            .collect();
+        assert_eq!(urls.len(), ports.len());
+        for port in &ports {
+            assert!(
+                public_url_variable(port.id).is_some(),
+                "{} has no kolla variable",
+                port.id
+            );
+        }
+        // Heat's API and CFN ports, and Skyline's console, keep distinct offsets.
+        assert_eq!(urls["heat"], "http://farm.example:15009");
+        assert_eq!(urls["heat-cfn"], "http://farm.example:15010");
+        assert_eq!(urls["barbican"], "http://farm.example:15011");
+        assert_eq!(urls["designate"], "http://farm.example:15012");
+        assert_eq!(urls["magnum"], "http://farm.example:15013");
+        assert_eq!(urls["skyline"], "http://farm.example:15014");
+        assert_eq!(urls["skyline-console"], "http://farm.example:15015");
+        assert_eq!(
+            public_url_variable("heat-cfn"),
+            Some("heat_cfn_public_base_endpoint")
+        );
+        assert_eq!(
+            public_url_variable("skyline-console"),
+            Some("skyline_console_public_endpoint")
+        );
+    }
+
+    #[test]
     fn rebinding_moves_whole_host_port_prefixes_and_keeps_paths() {
         let exposure = |host: &str, port_base| Exposure {
             host: host.into(),
@@ -3833,15 +3972,21 @@ mod tests {
         };
         let map = rebind_map(
             &exposure("localhost", 15000),
-            &exposure("farm.example", 15010),
+            &exposure("farm.example", 15020),
         );
-        assert_eq!(map["http://localhost:15000"], "http://farm.example:15010");
-        assert_eq!(map["http://localhost:15005"], "http://farm.example:15015");
-        assert_eq!(map.len(), crate::model::COMPONENTS.len());
+        assert_eq!(map["http://localhost:15000"], "http://farm.example:15020");
+        assert_eq!(map["http://localhost:15005"], "http://farm.example:15025");
+        assert_eq!(
+            map.len(),
+            crate::model::COMPONENTS
+                .iter()
+                .map(|c| c.public.len())
+                .sum::<usize>()
+        );
         // Run the generated rewrite against a stub client and globals.yml.
         let dir = tempfile::tempdir().unwrap();
         let script = settle_script(
-            Some((&exposure("localhost", 15000), &exposure("localhost", 15010))),
+            Some((&exposure("localhost", 15000), &exposure("localhost", 15020))),
             &["keystone".into(), "glance".into()],
         );
         let python = script
@@ -3878,12 +4023,12 @@ mod tests {
             String::from_utf8_lossy(&output.stderr)
         );
         let calls = std::fs::read_to_string(calls).unwrap();
-        assert!(calls.contains("endpoint set --url http://localhost:15010 k"));
-        assert!(calls.contains("endpoint set --url http://localhost:15015/v2.1 n"));
+        assert!(calls.contains("endpoint set --url http://localhost:15020 k"));
+        assert!(calls.contains("endpoint set --url http://localhost:15025/v2.1 n"));
         assert!(!calls.contains(" o\n"), "{calls}");
         let globals = std::fs::read_to_string(dir.path().join("globals.yml")).unwrap();
-        assert!(globals.contains("keystone_public_url: \"http://localhost:15010\""));
-        assert!(globals.contains("glance_public_endpoint: \"http://localhost:15011\""));
+        assert!(globals.contains("keystone_public_url: \"http://localhost:15020\""));
+        assert!(globals.contains("glance_public_endpoint: \"http://localhost:15021\""));
         assert!(globals.contains("10.254.0.2"));
     }
     #[test]

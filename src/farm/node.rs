@@ -33,7 +33,7 @@ pub const IDENTITY_CONF: &str = "/etc/farm/identity.conf";
 pub fn identity_conf(spec: &NodeSpec, publish: bool, peers: &[(String, String)]) -> String {
     let ports: Vec<String> = crate::model::COMPONENTS
         .iter()
-        .filter_map(|c| c.public.as_ref().map(|p| p.guest_port.to_string()))
+        .flat_map(|c| c.public.iter().map(|p| p.guest_port.to_string()))
         .chain(
             crate::model::INFRA_PORTS
                 .iter()
@@ -468,7 +468,7 @@ mod tests {
     fn identity_dnats_every_published_guest_port() {
         let conf = identity_conf(&super::super::ALL_IN_ONE, true, &[]);
         assert!(conf.contains("FARM_ADDRESS=10.254.0.2\n"));
-        assert!(conf.contains("FARM_PORTS=\"5000 9292 8780 80 9696 8774 3306 5672 15672\"\n"));
+        assert!(conf.contains("FARM_PORTS=\"5000 9292 8780 80 9696 8774 8004 8000 9311 9001 9511 9998 9999 3306 5672 15672\"\n"));
         // The nft set is rendered from FARM_PORTS by bash substitution.
         let output = std::process::Command::new("bash")
             .args([
@@ -479,7 +479,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             String::from_utf8_lossy(&output.stdout),
-            "{ 5000, 9292, 8780, 80, 9696, 8774, 3306, 5672, 15672 }\n"
+            "{ 5000, 9292, 8780, 80, 9696, 8774, 8004, 8000, 9311, 9001, 9511, 9998, 9999, 3306, 5672, 15672 }\n"
         );
         // A compute VM publishes nothing; farm-identity then skips the DNAT table.
         let compute = super::super::NodeSpec {

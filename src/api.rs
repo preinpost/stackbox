@@ -567,9 +567,16 @@ async fn host_job(
 ) -> Result<Json<HostJob>, ApiError> {
     Ok(Json(app.manager.host_job(&id)?))
 }
-#[utoipa::path(get, path="/api/v1/catalog", responses((status=200, body=Catalog)))]
-async fn catalog_handler() -> Json<Catalog> {
-    Json(catalog())
+#[derive(Deserialize, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
+struct CatalogQuery {
+    /// OpenStack release to check each service against, such as 2025.2; omitted lists every
+    /// service with its static availability.
+    release: Option<String>,
+}
+#[utoipa::path(get, path="/api/v1/catalog", params(CatalogQuery), responses((status=200, body=Catalog)))]
+async fn catalog_handler(Query(query): Query<CatalogQuery>) -> Json<Catalog> {
+    Json(catalog(query.release.as_deref()))
 }
 #[utoipa::path(post, path="/api/v1/plans", request_body=PlanRequest, responses((status=200, body=Plan), (status=400, body=ErrorBody)))]
 async fn plan_handler(

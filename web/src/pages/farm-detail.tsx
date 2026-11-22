@@ -78,7 +78,8 @@ import {
   nodeSuffix,
   pendingCompute,
   phases,
-  publicServices,
+  dataStoreOffsets,
+  farmPublicPorts,
 } from "../lib";
 import { shellTargets } from "../components/shell-targets";
 import { JobRow } from "./jobs";
@@ -747,14 +748,18 @@ function TopologyHost({
   );
 }
 
-/** The public port block a farm's services answer on, as `:25000–25005`. */
+/** The public port block a farm's services answer on, as `:25000–25005`. It spans every
+ * published service port, including Heat's CloudFormation and Skyline's console, and the
+ * data stores. */
 function publicPortRange(farm: Farm) {
   const exposure = farm.status !== "deleted" ? farm.exposure : null;
   if (!exposure) return "—";
-  const ports = farmComponents(farm)
-    .filter((id) => publicServices[id])
-    .map((id) => exposure.port_base + publicServices[id].offset);
-  if (!ports.length) return "—";
+  const services = farmPublicPorts(farmComponents(farm));
+  if (!services.length) return "—";
+  const ports = [
+    ...services.map((service) => service.offset),
+    ...dataStoreOffsets,
+  ].map((offset) => exposure.port_base + offset);
   return ports.length === 1
     ? `:${ports[0]}`
     : `:${Math.min(...ports)}–${Math.max(...ports)}`;
@@ -965,7 +970,7 @@ export function DeploymentPhases({ farm }: { farm: Farm }) {
     </section>
   );
 }
-function Endpoints({ farm }: { farm: Farm }) {
+export function Endpoints({ farm }: { farm: Farm }) {
   const exposure = farm.status !== "deleted" ? farm.exposure : null;
   const deployed = farmDeployed(farm);
   // Credentials come from the VM, which a snapshot has stopped.
@@ -978,13 +983,12 @@ function Endpoints({ farm }: { farm: Farm }) {
     staleTime: 60_000,
   });
   const services = exposure
-    ? farmComponents(farm)
-        .filter((id) => publicServices[id])
-        .map((id) => ({
-          name: componentLabel(id),
-          type: publicServices[id].type,
-          url: `http://${exposure.host}:${exposure.port_base + publicServices[id].offset}${publicServices[id].path}`,
-        }))
+    ? farmPublicPorts(farmComponents(farm)).map((port) => ({
+        key: port.id,
+        name: port.label ?? componentLabel(port.component),
+        type: port.type,
+        url: `http://${exposure.host}:${exposure.port_base + port.offset}${port.path}`,
+      }))
     : [];
   return (
     <section className="panel endpoints-panel">
@@ -1010,7 +1014,7 @@ function Endpoints({ farm }: { farm: Farm }) {
           </p>
           <div className="endpoint-list">
             {services.map((s) => (
-              <div className="endpoint" key={s.name}>
+              <div className="endpoint" key={s.key}>
                 <div>
                   <span className="endpoint-icon">
                     {s.name === "Keystone" ? (

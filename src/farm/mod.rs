@@ -234,7 +234,7 @@ fn public_ports(components: &[String]) -> Vec<(u16, u16)> {
     crate::model::COMPONENTS
         .iter()
         .filter(|c| components.iter().any(|id| id == c.id))
-        .filter_map(|c| c.public.as_ref().map(|p| (p.offset, p.guest_port)))
+        .flat_map(|c| c.public.iter().map(|p| (p.offset, p.guest_port)))
         .chain(
             crate::model::INFRA_PORTS
                 .iter()

@@ -40,6 +40,15 @@ pub struct PlanRequest {
     pub gpu: Option<GpuConfig>,
 }
 
+impl PlanRequest {
+    /// The release the farm installs: the request's, or this coordinator's own.
+    pub fn release_or_default(&self) -> &str {
+        self.release
+            .as_deref()
+            .unwrap_or(crate::kolla::OPENSTACK_RELEASE)
+    }
+}
+
 /// The layout of a farm without computes, kept readable for farms and snapshots made
 /// before every new farm ran a control VM with computes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -225,10 +234,19 @@ impl GpuConfig {
             GpuMode::Mtty => "mtty",
         }
     }
-    /// Refuses a release that cannot express this mode. `release` may be a series name; it is
-    /// compared after [`crate::kolla::releases::info`] resolves it.
+    /// Refuses a release that cannot express this mode. `release` is trimmed and may be a
+    /// series name; it is compared after [`crate::kolla::releases::info`] resolves it. Like
+    /// [`ComponentDef::unavailable_in`], only a numbered `YYYY.N` release can be ordered, so a
+    /// branch name such as `master` is refused.
     pub fn check_release(&self, release: &str) -> Result<()> {
-        let release = crate::kolla::releases::info(release).release;
+        let release = crate::kolla::releases::info(release.trim()).release;
+        if !crate::kolla::releases::year_release(&release) {
+            bail!(
+                "OpenStack {release} is not a numbered release; a '{}' GPU needs {} or newer",
+                self.mode_name(),
+                self.min_release()
+            );
+        }
         if release.as_str() < self.min_release() {
             bail!(
                 "OpenStack {release} cannot offer a '{}' GPU; it needs {} or newer",
@@ -562,8 +580,18 @@ pub struct Component {
     pub required: bool,
     pub depends_on: Vec<String>,
     pub requires_data_plane: bool,
-    /// False while the service is listed for planning but cannot be deployed yet.
+    /// False while the service is listed for planning but cannot be deployed yet, or, when a
+    /// release was asked for, cannot run in that release (see `reason`).
     pub available: bool,
+    /// The oldest OpenStack release that runs the service; `None` when every release does.
+    pub min_release: Option<String>,
+    /// Guest memory the service adds to the VM that runs it, in MiB.
+    pub footprint_mib: u32,
+    /// True while `footprint_mib` is a planning estimate that no farm has measured yet.
+    pub estimated: bool,
+    /// Why the service cannot run in the requested release; `None` when it can, or when the
+    /// catalog was asked without a release.
+    pub reason: Option<String>,
 }
 #[derive(Clone, Debug, Serialize, ToSchema)]
 pub struct Catalog {
@@ -573,6 +601,9 @@ pub struct Catalog {
 
 /// A service published on the all-in-one guest at `port_base + offset`.
 pub struct PublicPort {
+    /// The key the URL is listed under in a farm's `services`. Kolla names the service's
+    /// public URL variable after it.
+    pub id: &'static str,
     pub offset: u16,
     pub guest_port: u16,
     pub path: &'static str,
@@ -580,12 +611,14 @@ pub struct PublicPort {
 
 /// Host ports reserved per farm: `[port_base, port_base + PUBLIC_PORT_BLOCK)`.
 ///
-/// Twenty leaves room for the twelve optional OpenStack APIs beyond the six published
-/// today, and still yields 450 blocks in `15000..24000` — more than a host's memory budget
-/// can hold. Every [`PublicPort::offset`] must stay below this, and offsets are append-only
-/// so an existing farm's public URLs never move when the catalog grows. Raising the block
-/// also changes the grid of port blocks, so `allocate_ports` rejects any overlap, not just
-/// an equal base.
+/// Twenty holds the published offsets: 0 through 5 are the six original services, 6 through 8
+/// are the infrastructure ports (MariaDB, RabbitMQ, and the RabbitMQ management console), and
+/// 9 through 15 are the 2025.1 services (heat, barbican, designate, magnum, skyline). Offsets
+/// 16 through 19 are spare. It still yields 450 blocks in `15000..24000` —
+/// more than a host's memory budget can hold. Every [`PublicPort::offset`] must stay below
+/// this, and offsets are append-only so an existing farm's public URLs never move when the
+/// catalog grows. Raising the block also changes the grid of port blocks, so `allocate_ports`
+/// rejects any overlap, not just an equal base.
 pub const PUBLIC_PORT_BLOCK: u16 = 20;
 
 /// A data store installed in every farm and published for integrations.
@@ -623,9 +656,36 @@ pub struct ComponentDef {
     pub depends_on: &'static [&'static str],
     pub requires_data_plane: bool,
     pub available: bool,
+    /// The oldest release that can run the service; `None` runs on every release.
+    pub since: Option<&'static str>,
     /// Guest memory added by each optional service process group.
     pub footprint_mib: u32,
-    pub public: Option<PublicPort>,
+    /// Whether `footprint_mib` is an estimate rather than a measurement.
+    pub estimated: bool,
+    /// Public ports in offset order; a service may publish several, or none.
+    pub public: &'static [PublicPort],
+}
+impl ComponentDef {
+    /// Why `release` cannot run this service, or `None` when it can. `release` may be a series
+    /// name; it is compared after [`crate::kolla::releases::info`] resolves it.
+    fn unavailable_in(&self, release: &str) -> Option<String> {
+        let since = self.since?;
+        // Trimmed like `PlanRequest::check_release`. Only a numbered `YYYY.N` release can be
+        // ordered against `since`; a branch name such as `master` cannot, so it is refused.
+        let release = crate::kolla::releases::info(release.trim()).release;
+        if !crate::kolla::releases::year_release(&release) {
+            return Some(format!(
+                "OpenStack {release} is not a numbered release; '{}' needs {since} or newer",
+                self.id
+            ));
+        }
+        (release.as_str() < since).then(|| {
+            format!(
+                "OpenStack {release} cannot run '{}'; it needs {since} or newer",
+                self.id
+            )
+        })
+    }
 }
 /// Catalog order is also deployment and display order; dependencies come first.
 pub const COMPONENTS: &[ComponentDef] = &[
@@ -635,12 +695,15 @@ pub const COMPONENTS: &[ComponentDef] = &[
         depends_on: &[],
         requires_data_plane: false,
         available: true,
+        since: None,
         footprint_mib: 0,
-        public: Some(PublicPort {
+        estimated: false,
+        public: &[PublicPort {
+            id: "keystone",
             offset: 0,
             guest_port: 5000,
             path: "/v3",
-        }),
+        }],
     },
     ComponentDef {
         id: "glance",
@@ -648,12 +711,15 @@ pub const COMPONENTS: &[ComponentDef] = &[
         depends_on: &["keystone"],
         requires_data_plane: false,
         available: true,
+        since: None,
         footprint_mib: 0,
-        public: Some(PublicPort {
+        estimated: false,
+        public: &[PublicPort {
+            id: "glance",
             offset: 1,
             guest_port: 9292,
             path: "",
-        }),
+        }],
     },
     ComponentDef {
         id: "placement",
@@ -661,12 +727,15 @@ pub const COMPONENTS: &[ComponentDef] = &[
         depends_on: &["keystone"],
         requires_data_plane: false,
         available: true,
+        since: None,
         footprint_mib: 256,
-        public: Some(PublicPort {
+        estimated: false,
+        public: &[PublicPort {
+            id: "placement",
             offset: 2,
             guest_port: 8780,
             path: "",
-        }),
+        }],
     },
     ComponentDef {
         id: "horizon",
@@ -674,12 +743,15 @@ pub const COMPONENTS: &[ComponentDef] = &[
         depends_on: &["keystone"],
         requires_data_plane: false,
         available: true,
+        since: None,
         footprint_mib: 512,
-        public: Some(PublicPort {
+        estimated: false,
+        public: &[PublicPort {
+            id: "horizon",
             offset: 3,
             guest_port: 80,
             path: "/",
-        }),
+        }],
     },
     ComponentDef {
         id: "neutron",
@@ -687,13 +759,16 @@ pub const COMPONENTS: &[ComponentDef] = &[
         depends_on: &["keystone"],
         requires_data_plane: true,
         available: true,
+        since: None,
         // Measured: neutron-server, rpc-server and periodic worker use ~780 MiB; the four agents ~800 MiB.
         footprint_mib: 1024 + 1280,
-        public: Some(PublicPort {
+        estimated: false,
+        public: &[PublicPort {
+            id: "neutron",
             offset: 4,
             guest_port: 9696,
             path: "",
-        }),
+        }],
     },
     ComponentDef {
         id: "nova",
@@ -701,28 +776,141 @@ pub const COMPONENTS: &[ComponentDef] = &[
         depends_on: &["keystone", "glance", "placement", "neutron"],
         requires_data_plane: true,
         available: true,
+        since: None,
         // nova-api, scheduler, conductor, compute and libvirt, plus a small guest.
         footprint_mib: 2048,
-        public: Some(PublicPort {
+        estimated: false,
+        public: &[PublicPort {
+            id: "nova",
             offset: 5,
             guest_port: 8774,
             path: "/v2.1",
-        }),
+        }],
+    },
+    // The services below need OpenStack 2025.1 or newer: their Kolla images and
+    // `enable_<service>` flags exist from that release. Their footprints are estimates.
+    ComponentDef {
+        id: "heat",
+        required: false,
+        depends_on: &["keystone"],
+        requires_data_plane: false,
+        available: true,
+        since: Some("2025.1"),
+        // Measured 2026-11-18 on 2026.2: ~416 MiB idle (heat_engine 240.6 + heat_api 88.9 +
+        // heat_api_cfn 86.6), with peak headroom included.
+        footprint_mib: 512,
+        estimated: false,
+        public: &[
+            PublicPort {
+                id: "heat",
+                offset: 9,
+                guest_port: 8004,
+                path: "",
+            },
+            PublicPort {
+                id: "heat-cfn",
+                offset: 10,
+                guest_port: 8000,
+                path: "",
+            },
+        ],
+    },
+    ComponentDef {
+        id: "barbican",
+        required: false,
+        depends_on: &["keystone"],
+        requires_data_plane: false,
+        available: true,
+        since: Some("2025.1"),
+        footprint_mib: 320,
+        estimated: true,
+        public: &[PublicPort {
+            id: "barbican",
+            offset: 11,
+            guest_port: 9311,
+            path: "",
+        }],
+    },
+    ComponentDef {
+        id: "designate",
+        required: false,
+        depends_on: &["keystone", "neutron"],
+        requires_data_plane: false,
+        available: true,
+        since: Some("2025.1"),
+        // Includes the bind9 backend's name server.
+        footprint_mib: 576,
+        estimated: true,
+        public: &[PublicPort {
+            id: "designate",
+            offset: 12,
+            guest_port: 9001,
+            path: "",
+        }],
+    },
+    ComponentDef {
+        id: "magnum",
+        required: false,
+        depends_on: &["keystone", "glance", "heat", "nova", "neutron"],
+        requires_data_plane: false,
+        available: true,
+        since: Some("2025.1"),
+        footprint_mib: 512,
+        estimated: true,
+        public: &[PublicPort {
+            id: "magnum",
+            offset: 13,
+            guest_port: 9511,
+            path: "",
+        }],
+    },
+    ComponentDef {
+        id: "skyline",
+        required: false,
+        depends_on: &["keystone"],
+        requires_data_plane: false,
+        available: true,
+        since: Some("2025.1"),
+        footprint_mib: 384,
+        estimated: true,
+        public: &[
+            PublicPort {
+                id: "skyline",
+                offset: 14,
+                guest_port: 9998,
+                path: "",
+            },
+            PublicPort {
+                id: "skyline-console",
+                offset: 15,
+                guest_port: 9999,
+                path: "",
+            },
+        ],
     },
 ];
 /// Farms recorded before component selection, and imported farms, run the original pair.
 pub const BASE_COMPONENTS: &[&str] = &["keystone", "glance"];
 
-pub fn catalog() -> Catalog {
+/// The service catalog. With a `release`, each service says whether that release can run it;
+/// without one, every service reports only its static availability.
+pub fn catalog(release: Option<&str>) -> Catalog {
     Catalog {
         components: COMPONENTS
             .iter()
-            .map(|c| Component {
-                id: c.id.into(),
-                required: c.required,
-                depends_on: c.depends_on.iter().map(|d| (*d).into()).collect(),
-                requires_data_plane: c.requires_data_plane,
-                available: c.available,
+            .map(|c| {
+                let reason = release.and_then(|release| c.unavailable_in(release));
+                Component {
+                    id: c.id.into(),
+                    required: c.required,
+                    depends_on: c.depends_on.iter().map(|d| (*d).into()).collect(),
+                    requires_data_plane: c.requires_data_plane,
+                    available: c.available && reason.is_none(),
+                    min_release: c.since.map(Into::into),
+                    footprint_mib: c.footprint_mib,
+                    estimated: c.estimated,
+                    reason,
+                }
             })
             .collect(),
         constraints: vec![
@@ -735,8 +923,12 @@ pub fn catalog() -> Catalog {
     }
 }
 
-/// Required services plus the request and every dependency, in catalog order.
-pub fn resolve_components(requested: &[String]) -> Result<Vec<&'static ComponentDef>> {
+/// Required services plus the request and every dependency, in catalog order, for a farm that
+/// installs `release` (a series name is resolved as [`catalog`] does).
+pub fn resolve_components(
+    requested: &[String],
+    release: &str,
+) -> Result<Vec<&'static ComponentDef>> {
     let mut wanted: Vec<&str> = COMPONENTS
         .iter()
         .filter(|c| c.required)
@@ -764,6 +956,9 @@ pub fn resolve_components(requested: &[String]) -> Result<Vec<&'static Component
     if let Some(c) = resolved.iter().find(|c| !c.available) {
         bail!("component '{}' is not deployable yet", c.id);
     }
+    if let Some(reason) = resolved.iter().find_map(|c| c.unavailable_in(release)) {
+        bail!("{reason}");
+    }
     Ok(resolved)
 }
 
@@ -779,7 +974,7 @@ pub fn plan(request: &PlanRequest) -> Result<Plan> {
     // and a control VM stays alone until computes are added.
     if request.computes == 0
         && request.layout.is_none()
-        && resolve_components(&request.components)?
+        && resolve_components(&request.components, request.release_or_default())?
             .iter()
             .any(|c| c.id == "nova")
     {
@@ -832,7 +1027,7 @@ pub fn layout(request: &PlanRequest) -> Result<Plan> {
     }
     let control_only = request.layout == Some(FarmLayout::Control);
     if request.layout == Some(FarmLayout::AllInOne)
-        && resolve_components(&request.components)?
+        && resolve_components(&request.components, request.release_or_default())?
             .iter()
             .any(|c| c.id == "nova")
     {
@@ -845,7 +1040,7 @@ pub fn layout(request: &PlanRequest) -> Result<Plan> {
         // Compute VMs exist to run instances; Nova brings Neutron and Placement along.
         requested.push("nova".into());
     }
-    let components = resolve_components(&requested)?;
+    let components = resolve_components(&requested, request.release_or_default())?;
     let computes = request.computes;
     // The default size is stored as none, so a farm planned before sizes keeps its plan.
     let compute = match request.compute {
@@ -897,7 +1092,7 @@ pub fn layout(request: &PlanRequest) -> Result<Plan> {
         node.memory_mib += footprint;
         vec![node]
     };
-    let mut warnings = catalog().constraints;
+    let mut warnings = catalog(None).constraints;
     if computes > 0 {
         warnings[0] = format!(
             "The farm runs its control plane, network node and Kolla on one control VM and Nova instances on {} compute VM(s), joined by the host's link switch.",
@@ -1116,17 +1311,17 @@ impl Exposure {
                 Some(list) => list.iter().any(|id| id == c.id),
                 None => BASE_COMPONENTS.contains(&c.id),
             })
-            .filter_map(|c| {
-                let port = c.public.as_ref()?;
-                Some((
-                    c.id.to_owned(),
+            .flat_map(|c| c.public.iter())
+            .map(|port| {
+                (
+                    port.id.to_owned(),
                     format!(
                         "http://{}:{}{}",
                         self.host,
                         self.port_base + port.offset,
                         port.path
                     ),
-                ))
+                )
             })
             .collect()
     }
@@ -2244,7 +2439,7 @@ mod tests {
     fn public_port_offsets_stay_inside_one_farm_block() {
         let mut offsets: Vec<u16> = COMPONENTS
             .iter()
-            .filter_map(|c| c.public.as_ref().map(|p| p.offset))
+            .flat_map(|c| c.public.iter().map(|p| p.offset))
             .chain(INFRA_PORTS.iter().map(|p| p.offset))
             .collect();
         let published = offsets.len();
@@ -2260,10 +2455,10 @@ mod tests {
             highest < PUBLIC_PORT_BLOCK,
             "offset {highest} would spill into the next farm's block of {PUBLIC_PORT_BLOCK} ports; raise PUBLIC_PORT_BLOCK or reuse an offset"
         );
-        // Offsets 9..19 are free for optional services such as cinder, swift and heat.
+        // Offsets 16..19 are free for optional services such as cinder and swift.
         assert_eq!(
-            highest, 8,
-            "the published set ends with the RabbitMQ console"
+            highest, 15,
+            "the published set ends with the skyline console"
         );
         assert_eq!(PUBLIC_PORT_BLOCK, 20, "the block is capped at twenty ports");
         // The grid still holds more farms than one host's memory can admit.
@@ -2389,6 +2584,33 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(why.contains("2025.1"), "{why}");
+    }
+
+    #[test]
+    fn a_gpu_release_is_trimmed_before_it_is_compared() {
+        let with_nova = nova_components();
+        // A padded numbered release names the same release, as the service minimum does.
+        assert!(
+            gpu(GpuMode::Simulated, 1)
+                .validate(" 2025.2", &with_nova)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn a_gpu_refuses_a_branch_name_as_a_release() {
+        let with_nova = nova_components();
+        // `master` is not a numbered release, so it cannot prove the GPU's minimum.
+        let why = gpu(GpuMode::Simulated, 1)
+            .validate("master", &with_nova)
+            .unwrap_err()
+            .to_string();
+        assert!(why.contains("not a numbered release"), "{why}");
+        let why = gpu(GpuMode::Mtty, 1)
+            .validate(" master ", &with_nova)
+            .unwrap_err()
+            .to_string();
+        assert!(why.contains("not a numbered release"), "{why}");
     }
 
     #[test]
@@ -2702,5 +2924,165 @@ mod tests {
         )
         .unwrap();
         assert!(farm.plan.unwrap().gpu.is_none());
+    }
+
+    fn names(components: &[&str]) -> Vec<String> {
+        components.iter().map(|c| (*c).to_owned()).collect()
+    }
+
+    #[test]
+    fn the_2025_services_are_refused_before_2025_1() {
+        let heat = names(&["heat"]);
+        let refused = resolve_components(&heat, "2024.2")
+            .err()
+            .expect("heat needs 2025.1")
+            .to_string();
+        assert_eq!(
+            refused,
+            "OpenStack 2024.2 cannot run 'heat'; it needs 2025.1 or newer"
+        );
+        assert!(resolve_components(&heat, "2025.1").is_ok());
+        assert!(resolve_components(&heat, "2025.2").is_ok());
+        // A padded year is the same release the planner trims to; a branch name is not a
+        // numbered release, so it cannot prove the service's minimum and is refused.
+        assert!(resolve_components(&heat, " 2025.2").is_ok());
+        let branch = resolve_components(&heat, "master")
+            .err()
+            .expect("master is not a numbered release")
+            .to_string();
+        assert_eq!(
+            branch,
+            "OpenStack master is not a numbered release; 'heat' needs 2025.1 or newer"
+        );
+        // The planner refuses it too, so the API and the CLI agree.
+        let before = PlanRequest {
+            components: heat.clone(),
+            release: Some("2024.2".into()),
+            ..PlanRequest::default()
+        };
+        assert!(plan(&before).is_err());
+        let after = PlanRequest {
+            release: Some("2025.2".into()),
+            ..before
+        };
+        let planned = plan(&after).unwrap();
+        assert!(planned.components.iter().any(|c| c == "heat"));
+    }
+
+    #[test]
+    fn magnum_brings_heat_and_its_other_dependencies() {
+        let request = PlanRequest {
+            components: names(&["magnum"]),
+            release: Some("2025.2".into()),
+            ..PlanRequest::default()
+        };
+        let planned = plan(&request).unwrap();
+        for id in [
+            "keystone",
+            "glance",
+            "placement",
+            "neutron",
+            "nova",
+            "heat",
+            "magnum",
+        ] {
+            assert!(
+                planned.components.iter().any(|c| c == id),
+                "magnum should bring {id}: {:?}",
+                planned.components
+            );
+        }
+        assert!(!planned.components.iter().any(|c| c == "barbican"));
+        // Nova needs a compute VM, so the planner adds one beside the control VM.
+        assert_eq!(planned.computes, 1);
+    }
+
+    #[test]
+    fn selected_footprints_count_against_the_control_vm() {
+        let release = Some("2025.2".to_owned());
+        let bare = plan(&PlanRequest {
+            release: release.clone(),
+            ..PlanRequest::default()
+        })
+        .unwrap();
+        let with = plan(&PlanRequest {
+            components: names(&["heat", "barbican"]),
+            release: release.clone(),
+            ..PlanRequest::default()
+        })
+        .unwrap();
+        // One all-in-one VM carries every footprint.
+        assert_eq!(with.nodes.len(), 1);
+        assert_eq!(with.memory_mib - bare.memory_mib, 512 + 320);
+
+        // With computes, the control VM carries heat and magnum on top of Nova's set.
+        let nova = plan(&PlanRequest {
+            components: names(&["nova"]),
+            computes: 1,
+            release: release.clone(),
+            ..PlanRequest::default()
+        })
+        .unwrap();
+        let magnum = plan(&PlanRequest {
+            components: names(&["magnum"]),
+            computes: 1,
+            release,
+            ..PlanRequest::default()
+        })
+        .unwrap();
+        assert_eq!(
+            magnum.nodes[0].memory_mib - nova.nodes[0].memory_mib,
+            512 + 512
+        );
+    }
+
+    #[test]
+    fn the_catalog_says_whether_a_release_can_run_each_service() {
+        let find = |catalog: &Catalog, id: &str| {
+            catalog
+                .components
+                .iter()
+                .find(|c| c.id == id)
+                .unwrap()
+                .clone()
+        };
+        let old = catalog(Some("2024.2"));
+        let heat = find(&old, "heat");
+        assert!(!heat.available);
+        assert_eq!(
+            heat.reason.as_deref(),
+            Some("OpenStack 2024.2 cannot run 'heat'; it needs 2025.1 or newer")
+        );
+        assert!(find(&old, "keystone").available);
+        assert!(find(&old, "keystone").reason.is_none());
+
+        let new = catalog(Some("2025.2"));
+        assert!(find(&new, "heat").available);
+        assert!(find(&new, "heat").reason.is_none());
+
+        // Without a release every service is listed with its static availability.
+        let any = catalog(None);
+        let heat = find(&any, "heat");
+        assert!(heat.available);
+        assert_eq!(heat.min_release.as_deref(), Some("2025.1"));
+        assert!(!heat.estimated);
+        assert_eq!(heat.footprint_mib, 512);
+        let nova = find(&any, "nova");
+        assert!(nova.min_release.is_none());
+        assert!(!nova.estimated);
+    }
+
+    #[test]
+    fn every_published_port_has_its_own_id_and_offset() {
+        let mut ids: Vec<&str> = COMPONENTS
+            .iter()
+            .flat_map(|c| c.public.iter().map(|p| p.id))
+            .collect();
+        let published = ids.len();
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids.len(), published, "port ids must be unique");
+        // Heat publishes two ports; the new services add seven ports in all.
+        assert_eq!(published, 6 + 7);
     }
 }

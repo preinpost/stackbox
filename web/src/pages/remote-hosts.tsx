@@ -48,6 +48,7 @@ import {
   agentBuildMismatch,
   customKernelId,
   dateTime,
+  hostLink,
   hostNotice,
   hostReady,
   memory,
@@ -285,7 +286,7 @@ export function RemoteHostsPage() {
                 <span className="remote-host-row-side">
                   {/* A runner that needs an update is the row's state, so it stands in for the badge. */}
                   {!remoteAgentNeedsUpdate(host) && (
-                    <StatusBadge status={host.status} />
+                    <HostStateBadge host={host} />
                   )}
                   {host.capacity && (
                     <small>
@@ -346,7 +347,7 @@ export function RemoteHostsPage() {
                         : "에이전트 연결 끊김 · 호스트에서 farm agent connect를 실행하세요"}
                 </code>
               </div>
-              <StatusBadge status={selected.status} />
+              <HostStateBadge host={selected} />
             </div>
             {selected.error && (
               <div role="alert" className="remote-error">
@@ -354,6 +355,7 @@ export function RemoteHostsPage() {
                 <p>{selected.error}</p>
               </div>
             )}
+            <HostLinkNotice host={selected} />
             {ssh && (
               <div className="remote-fingerprint">
                 <Fingerprint size={17} />
@@ -597,6 +599,53 @@ export function RegisterAgentHostDialog({
         </Modal>
       )}
     </Dialog.Root>
+  );
+}
+
+/** The host's state as its last attempt to reach it saw it. A host that stopped answering
+ * reads as disconnected, and an old check as unconfirmed, never as Ready. */
+function HostStateBadge({ host }: { host: RemoteHost }) {
+  const link = hostLink(host);
+  if (link === "disconnected")
+    return (
+      <span className="status-badge status-unreachable">
+        <span className="status-dot" />
+        연결 끊김
+      </span>
+    );
+  if (link === "stale")
+    return (
+      <span className="status-badge status-stale">
+        <span className="status-dot" />
+        확인 지연
+      </span>
+    );
+  return <StatusBadge status={host.status} />;
+}
+
+/** Why a host is disconnected, or that its last check is too old to say. */
+function HostLinkNotice({ host }: { host: RemoteHost }) {
+  const link = hostLink(host);
+  const reach = host.reachability;
+  if (!reach || link === "reachable") return null;
+  if (link === "stale")
+    return (
+      <p className="field-hint mt-3" role="status">
+        마지막 확인 {dateTime(reach.checked_at ?? 0)}이 90초보다 오래되어 연결
+        상태를 확인할 수 없습니다.
+      </p>
+    );
+  return (
+    <div role="alert" className="remote-error">
+      <CircleAlert size={16} />
+      <p>
+        {reach.error ?? "응답이 없습니다."}
+        {" · "}
+        {reach.last_ok_at
+          ? `마지막 연결 ${dateTime(reach.last_ok_at)}`
+          : "연결된 기록이 없습니다"}
+      </p>
+    </div>
   );
 }
 
@@ -954,6 +1003,12 @@ function HostInspection({
 }
 
 export function HostJobHistory({ job }: { job: HostJob }) {
+  const kindLabel =
+    job.kind === "check"
+      ? "점검"
+      : job.kind === "install_agent"
+        ? "Farm 실행기 업데이트"
+        : "환경 준비";
   return (
     <details
       className="host-job-history"
@@ -961,19 +1016,15 @@ export function HostJobHistory({ job }: { job: HostJob }) {
     >
       <summary>
         <strong>{job.host_id}</strong>
-        <span className="job-kind">
-          {job.kind === "check"
-            ? "점검"
-            : job.kind === "install_agent"
-              ? "Farm 실행기 설치 (구)"
-              : "환경 준비"}
+        <span className="job-kind job-kind-label" title={kindLabel}>
+          {kindLabel}
         </span>
         <span className="hostjob-msg">
           {job.events.at(-1)?.message ??
             (job.error ? "작업이 실패했습니다" : "기록된 이벤트가 없습니다")}
         </span>
         <StatusBadge status={job.status} />
-        <time>{dateTime(job.created_at)}</time>
+        <time className="hostjob-time">{dateTime(job.created_at)}</time>
       </summary>
       {job.events.length > 0 && (
         <ol>

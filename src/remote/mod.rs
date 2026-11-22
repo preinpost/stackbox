@@ -398,8 +398,43 @@ pub struct RemoteHost {
     /// Whether a dial-in host's agent holds its connection now. Not stored.
     #[serde(default)]
     pub connected: bool,
+    /// The coordinator's last attempt to reach an SSH host; absent until one ran.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reachability: Option<HostReachability>,
     pub created_at: u64,
     pub updated_at: u64,
+}
+
+/// What the coordinator's last attempts to reach an SSH host found: its inventory scan, or a
+/// plain connection check for a host that runs no farm.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct HostReachability {
+    /// Whether the host is considered reachable. One failed attempt is not enough to say it is
+    /// gone; it takes two in a row.
+    pub reachable: bool,
+    /// When the coordinator last tried the host, in Unix seconds; 0 if never.
+    #[serde(default)]
+    pub checked_at: u64,
+    /// When the host last answered, in Unix seconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_ok_at: Option<u64>,
+    /// Why the last attempt failed; absent after a successful one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub consecutive_failures: u32,
+}
+
+impl Default for HostReachability {
+    fn default() -> Self {
+        Self {
+            reachable: true,
+            checked_at: 0,
+            last_ok_at: None,
+            error: None,
+            consecutive_failures: 0,
+        }
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]

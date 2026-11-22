@@ -119,6 +119,8 @@ struct Inner {
     accepting: AtomicBool,
     vault: crate::remote::Vault,
     host_gate: Semaphore,
+    /// Hosts whose plain connection check is running, so a slow one is not doubled up.
+    probing: Probing,
     /// The Linux farm-agent the local host's multi-node guests run, where this binary is not one.
     guest_agent: std::sync::RwLock<Option<PathBuf>>,
     /// Agent binaries loaded at startup, by platform.
@@ -228,6 +230,38 @@ impl std::fmt::Display for Detached {
 }
 impl std::error::Error for Detached {}
 /// How long a deploy keeps trying to reach its host-side job again before giving it up.
+/// How long a plain connection check of an SSH host may take before it counts as a failure.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+/// Failed checks in a row before a host is called unreachable.
+const FAILURES_BEFORE_UNREACHABLE: u32 = 2;
+
+/// The hosts with a connection check running now.
+#[derive(Default)]
+struct Probing(std::sync::Mutex<std::collections::BTreeSet<String>>);
+
+/// Held while one connection check of a host runs.
+struct ProbeClaim<'a> {
+    probing: &'a Probing,
+    host: String,
+}
+
+impl Probing {
+    fn claim(&self, host: &str) -> Option<ProbeClaim<'_>> {
+        let mut hosts = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        hosts.insert(host.into()).then(|| ProbeClaim {
+            probing: self,
+            host: host.into(),
+        })
+    }
+}
+
+impl Drop for ProbeClaim<'_> {
+    fn drop(&mut self) {
+        let mut hosts = self.probing.0.lock().unwrap_or_else(|e| e.into_inner());
+        hosts.remove(&self.host);
+    }
+}
+
 const REATTACH_FOR: Duration = Duration::from_secs(if cfg!(test) { 2 } else { 600 });
 const REATTACHING: &str = "Coordinator restarted; re-attaching to the running deploy";
 
@@ -355,6 +389,7 @@ impl FarmManager {
             accepting: AtomicBool::new(true),
             vault,
             host_gate: Semaphore::new(2),
+            probing: Default::default(),
             guest_agent: Default::default(),
             artifacts,
             published: Default::default(),
@@ -1249,6 +1284,8 @@ impl FarmManager {
         let mut listener = self.0.relay_listener.lock().await;
         if let Some(task) = listener.task.take() {
             task.abort();
+            // The socket closes only once the task has ended, so the address can be bound again.
+            let _ = task.await;
         }
         listener.tunnel = None;
         *lock_unpoisoned(&self.0.tunnel_url) = None;
@@ -1371,8 +1408,16 @@ impl FarmManager {
             .relay_tls
             .write()
             .map_err(|_| anyhow!("relay lock poisoned"))? = tls;
-        let serving = self.0.relay_listener.lock().await.serving;
-        if serving {
+        let (serving, running) = {
+            let listener = self.0.relay_listener.lock().await;
+            (
+                listener.serving,
+                listener.addr.is_some() && listener.error.is_none(),
+            )
+        };
+        // Saving the settings already in place keeps the listener and its tunnel, so a quick
+        // tunnel keeps its address. A listener that failed to start is tried again.
+        if serving && !(running && current == settings) {
             self.start_relay().await;
         }
         self.relay_status().await
@@ -2838,6 +2883,16 @@ impl FarmManager {
     }
     pub async fn reconcile(&self) -> Result<()> {
         use futures::StreamExt;
+        /// One attempt to reach a host: its inventory scan, or a plain connection check.
+        enum Attempt {
+            Scan(Result<std::collections::BTreeMap<String, Vec<crate::farm::FarmNode>>>),
+            /// `None` when another check of the host is still running.
+            Connect(Option<Result<()>>),
+        }
+        enum Target {
+            Scan(String, Option<String>),
+            Connect(String),
+        }
         let (revision, targets) = {
             let store = self
                 .0
@@ -2845,7 +2900,7 @@ impl FarmManager {
                 .lock()
                 .map_err(|_| anyhow!("state mutex poisoned"))?;
             // Each host is scanned through its own agent, with a farm's pinned agent on remote hosts.
-            let targets: std::collections::BTreeMap<String, Option<String>> = store
+            let scans: std::collections::BTreeMap<String, Option<String>> = store
                 .state
                 .farms
                 .values()
@@ -2862,45 +2917,127 @@ impl FarmManager {
                         )
                 })
                 .collect();
+            // An SSH host that runs no farm gets a plain connection check, unless a job is on it.
+            let connects = store.state.hosts.values().filter(|h| {
+                h.host.kind == HostKind::Ssh
+                    && h.host.active_job.is_none()
+                    && !scans.contains_key(&h.host.id)
+            });
+            let targets: Vec<Target> = scans
+                .iter()
+                .map(|(id, digest)| Target::Scan(id.clone(), digest.clone()))
+                .chain(connects.map(|h| Target::Connect(h.host.id.clone())))
+                .collect();
             (store.revision, targets)
         };
-        let observations =
-            futures::stream::iter(targets.into_iter().map(|(id, digest)| async move {
-                let result = match self.agent_backend(&id, digest.as_deref(), "") {
-                    Ok(backend) => backend.scan().await,
-                    Err(error) => Err(error),
-                };
-                (id, result)
-            }))
-            .buffer_unordered(4)
-            .collect::<Vec<_>>()
-            .await;
+        let observations = futures::stream::iter(targets.into_iter().map(|target| async move {
+            match target {
+                Target::Scan(id, digest) => {
+                    let result = match self.agent_backend(&id, digest.as_deref(), "") {
+                        Ok(backend) => backend.scan().await,
+                        Err(error) => Err(error),
+                    };
+                    (id, Attempt::Scan(result))
+                }
+                Target::Connect(id) => {
+                    let result = self.probe_ssh_host(&id).await;
+                    (id, Attempt::Connect(result))
+                }
+            }
+        }))
+        .buffer_unordered(4)
+        .collect::<Vec<_>>()
+        .await;
         let mut store = self
             .0
             .store
             .lock()
             .map_err(|_| anyhow!("state mutex poisoned"))?;
-        if store.revision != revision {
-            return Ok(());
-        }
+        // The reachability of a host is evidence about the host, so it is kept even when the
+        // state changed during the attempts. The inventory is only applied to the state it saw.
+        let stale = store.revision != revision;
         store.update(|state| {
-            for (host_id, observation) in observations {
-                match observation {
-                    Ok(observed) => apply_inventory(state, observed, &host_id),
-                    Err(error) => {
+            for (host_id, attempt) in observations {
+                let (outcome, scan) = match attempt {
+                    Attempt::Scan(Ok(observed)) => (Ok(()), Some(Ok(observed))),
+                    Attempt::Scan(Err(error)) => (Err(error.to_string()), Some(Err(error))),
+                    Attempt::Connect(Some(Ok(()))) => (Ok(()), None),
+                    Attempt::Connect(Some(Err(error))) => (Err(error.to_string()), None),
+                    Attempt::Connect(None) => continue,
+                };
+                record_reachability(state, &host_id, outcome);
+                if stale {
+                    continue;
+                }
+                match scan {
+                    Some(Ok(observed)) => apply_inventory(state, observed, &host_id),
+                    Some(Err(error)) => {
                         for farm in state.farms.values_mut().filter(|f| {
-                            f.hosts().contains(&host_id.as_str())
-                                && f.status != FarmStatus::Deleted
-                                && f.active_job.is_none()
+                            f.hosts().contains(&host_id.as_str()) && f.status != FarmStatus::Deleted
                         }) {
                             farm.observation_error =
                                 Some(format!("host inventory unavailable: {error}"));
                         }
                     }
+                    None => {}
                 }
             }
             Ok(())
         })
+    }
+    /// A plain SSH connection check of a host (handshake and authentication, no command),
+    /// bounded by [`PROBE_TIMEOUT`]. `None` when another check of the host is still running.
+    async fn probe_ssh_host(&self, host_id: &str) -> Option<Result<()>> {
+        let _claim = self.0.probing.claim(host_id)?;
+        let connect = async {
+            let stored = self.stored_host(host_id)?;
+            let credentials = self.0.vault.unseal(
+                stored
+                    .credentials
+                    .as_ref()
+                    .context("remote host has no credentials")?,
+                &stored.aad(),
+            )?;
+            crate::remote::ssh::Session::connect(&stored.host, credentials)
+                .await
+                .map(drop)
+        };
+        Some(
+            tokio::time::timeout(PROBE_TIMEOUT, connect)
+                .await
+                .unwrap_or_else(|_| {
+                    Err(anyhow!("no SSH answer within {}s", PROBE_TIMEOUT.as_secs()))
+                }),
+        )
+    }
+}
+
+/// Record one attempt to reach a host. One failure leaves it reachable; the second in a row
+/// does not.
+fn record_reachability(state: &mut State, host_id: &str, outcome: std::result::Result<(), String>) {
+    let Some(stored) = state.hosts.get_mut(host_id) else {
+        return;
+    };
+    let at = now();
+    let reach = stored
+        .host
+        .reachability
+        .get_or_insert_with(Default::default);
+    reach.checked_at = at;
+    match outcome {
+        Ok(()) => {
+            reach.reachable = true;
+            reach.last_ok_at = Some(at);
+            reach.error = None;
+            reach.consecutive_failures = 0;
+        }
+        Err(error) => {
+            reach.consecutive_failures = reach.consecutive_failures.saturating_add(1);
+            reach.error = Some(error);
+            if reach.consecutive_failures >= FAILURES_BEFORE_UNREACHABLE {
+                reach.reachable = false;
+            }
+        }
     }
 }
 /// A host's agent reports only the farms this coordinator reserved there.
@@ -2915,7 +3052,11 @@ fn apply_inventory(
         .filter(|f| f.hosts().contains(&host_id))
     {
         if farm.active_job.is_some() {
+            // A job owns the farm's status, phase and VMs. The host's answer still says whether
+            // the farm's host is reachable, so it is recorded.
             observed.remove(&farm.id);
+            farm.observation_error = None;
+            farm.last_seen_at = Some(now());
             continue;
         }
         let mut nodes = observed.remove(&farm.id).unwrap_or_default();

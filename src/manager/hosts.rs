@@ -47,7 +47,7 @@ impl FarmManager {
             })
             .collect())
     }
-    fn stored_host(&self, id: &str) -> Result<StoredHost> {
+    pub(super) fn stored_host(&self, id: &str) -> Result<StoredHost> {
         self.0
             .store
             .lock()
@@ -86,6 +86,7 @@ impl FarmManager {
                 active_job: None,
                 error: None,
                 connected: false,
+                reachability: None,
                 created_at: now(),
                 updated_at: now(),
             },
@@ -129,6 +130,7 @@ impl FarmManager {
             active_job: None,
             error: None,
             connected: false,
+            reachability: None,
             created_at: now(),
             updated_at: now(),
         };
@@ -177,6 +179,7 @@ impl FarmManager {
             active_job: None,
             error: None,
             connected: false,
+            reachability: None,
             created_at: now(),
             updated_at: now(),
         };

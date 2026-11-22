@@ -21,6 +21,8 @@ type Expansion = (String, Vec<String>, Vec<String>);
 #[derive(Default)]
 pub(crate) struct Fake {
     pub(crate) fail_create: AtomicBool,
+    /// Make the inventory scan fail, as an unreachable host's scan does.
+    pub(crate) fail_scan: AtomicBool,
     pub(crate) farms: Mutex<BTreeMap<String, Vec<FarmNode>>>,
     /// msb snapshot references and their labels.
     snapshots: Mutex<BTreeMap<String, BTreeMap<String, String>>>,
@@ -234,6 +236,9 @@ impl Backend for Fake {
     }
     fn scan(&self) -> BoxFuture<'_, Result<BTreeMap<String, Vec<FarmNode>>>> {
         Box::pin(async {
+            if self.fail_scan.load(Ordering::SeqCst) {
+                bail!("scan failed: connection timed out");
+            }
             let snapshot = self.farms.lock().unwrap().clone();
             let delay = self.scan_delay.lock().unwrap().take();
             if let Some((started, release)) = delay {
@@ -2470,6 +2475,111 @@ async fn stale_inventory_scan_does_not_break_a_newly_created_farm() {
     let farm = manager.get("racing").unwrap();
     assert_eq!(farm.status, FarmStatus::Created);
     assert_eq!(farm.nodes.len(), 1);
+    settle(&manager).await;
+}
+
+#[tokio::test]
+async fn a_running_job_still_lets_inventory_clear_or_record_the_host_observation() {
+    let dir = tempfile::tempdir().unwrap();
+    let backend = Arc::new(Fake::default());
+    let manager = open_with(options(dir.path()), backend.clone()).await;
+    done(&manager, &manager.create(request("busy")).unwrap()).await;
+    // Stand in for a job that is still running on the farm.
+    manager
+        .update(|state| {
+            let farm = state.farms.get_mut("busy").unwrap();
+            farm.active_job = Some("running-job".into());
+            farm.observation_error = Some("host inventory unavailable: old".into());
+            farm.last_seen_at = None;
+            Ok(())
+        })
+        .unwrap();
+    manager.reconcile().await.unwrap();
+    let farm = manager.get("busy").unwrap();
+    assert!(
+        farm.observation_error.is_none(),
+        "{:?}",
+        farm.observation_error
+    );
+    assert!(farm.last_seen_at.is_some());
+    backend.fail_scan.store(true, Ordering::SeqCst);
+    manager.reconcile().await.unwrap();
+    let farm = manager.get("busy").unwrap();
+    assert!(
+        farm.observation_error
+            .as_deref()
+            .is_some_and(|e| e.starts_with("host inventory unavailable")),
+        "{:?}",
+        farm.observation_error
+    );
+    backend.fail_scan.store(false, Ordering::SeqCst);
+    manager
+        .update(|state| {
+            state.farms.get_mut("busy").unwrap().active_job = None;
+            Ok(())
+        })
+        .unwrap();
+    settle(&manager).await;
+}
+
+#[tokio::test]
+async fn host_reachability_needs_two_failed_scans_to_go_offline() {
+    let dir = tempfile::tempdir().unwrap();
+    let backend = Arc::new(Fake::default());
+    let manager = open_with(options(dir.path()), backend.clone()).await;
+    done(&manager, &manager.create(request("one")).unwrap()).await;
+    backend.fail_scan.store(true, Ordering::SeqCst);
+    manager.reconcile().await.unwrap();
+    let reach = manager.host("local").unwrap().reachability.unwrap();
+    assert!(reach.reachable, "one failed attempt is not enough");
+    assert_eq!(reach.consecutive_failures, 1);
+    assert!(reach.error.as_deref().unwrap().contains("scan failed"));
+    manager.reconcile().await.unwrap();
+    let reach = manager.host("local").unwrap().reachability.unwrap();
+    assert!(!reach.reachable);
+    assert_eq!(reach.consecutive_failures, 2);
+    backend.fail_scan.store(false, Ordering::SeqCst);
+    manager.reconcile().await.unwrap();
+    let reach = manager.host("local").unwrap().reachability.unwrap();
+    assert!(reach.reachable);
+    assert_eq!(reach.consecutive_failures, 0);
+    assert!(reach.error.is_none());
+    assert!(reach.last_ok_at.is_some());
+    settle(&manager).await;
+}
+
+#[tokio::test]
+async fn ssh_hosts_without_farms_get_a_plain_connection_check_each_reconcile() {
+    use crate::remote::test_server::Fixture;
+    let fixture = Fixture::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let backend = Arc::new(Fake::default());
+    let manager = open_with(options(dir.path()), backend.clone()).await;
+    manager.register_host(fixture.registration("idle")).unwrap();
+    // A port nothing listens on refuses the connection at once.
+    let closed = {
+        let socket = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        socket.local_addr().unwrap().port()
+    };
+    let mut gone = fixture.registration("gone");
+    gone.port = closed;
+    manager.register_host(gone).unwrap();
+    manager.reconcile().await.unwrap();
+    let idle = manager.host("idle").unwrap().reachability.unwrap();
+    assert!(idle.reachable);
+    assert!(idle.last_ok_at.is_some());
+    assert!(idle.checked_at > 0);
+    assert_eq!(fixture.observed.auth_attempts.load(Ordering::SeqCst), 1);
+    let gone = manager.host("gone").unwrap().reachability.unwrap();
+    assert!(gone.reachable);
+    assert_eq!(gone.consecutive_failures, 1);
+    manager.reconcile().await.unwrap();
+    let gone = manager.host("gone").unwrap().reachability.unwrap();
+    assert!(!gone.reachable);
+    assert_eq!(gone.consecutive_failures, 2);
+    assert!(gone.error.is_some());
+    manager.unregister_host("gone").unwrap();
+    manager.unregister_host("idle").unwrap();
     settle(&manager).await;
 }
 
@@ -5747,6 +5857,108 @@ async fn a_farm_spans_hosts_with_its_computes_placed_elsewhere() {
     }
     let delete = manager.delete("px").unwrap();
     assert_eq!(done(&manager, &delete).await.status, JobStatus::Succeeded);
+    settle(&manager).await;
+}
+
+/// A stand-in for cloudflared: it logs each start to `starts`, reports `address` and its
+/// registration like a quick tunnel, and runs until stopped. It is installed as a release newer
+/// than any real one, so the update check neither replaces nor restarts it.
+#[cfg(unix)]
+fn fake_cloudflared(state_dir: &Path, starts: &Path, address: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    let bin = state_dir.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let name = "cloudflared-9999.0.0";
+    let script = bin.join(name);
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\necho start >> '{}'\necho 'INF |  {address}  |' >&2\necho 'INF Registered tunnel connection connIndex=0' >&2\nexec sleep 600\n",
+            starts.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::os::unix::fs::symlink(name, bin.join("cloudflared")).unwrap();
+}
+
+/// Saving the relay with settings it already has keeps its running quick tunnel: cloudflared is
+/// not started again, so the address stays.
+#[cfg(unix)]
+#[tokio::test]
+async fn saving_unchanged_relay_settings_keeps_the_running_quick_tunnel() {
+    use crate::link::relay::{RelaySettings, RelayTlsMode};
+    let dir = tempfile::tempdir().unwrap();
+    let starts = dir.path().join("starts");
+    fake_cloudflared(
+        dir.path(),
+        &starts,
+        "https://calm-river-1234.trycloudflare.com",
+    );
+    let backend = Arc::new(Fake::default());
+    let manager = open_with(options(dir.path()), backend).await;
+    let quick = RelaySettings {
+        url: String::new(),
+        mode: RelayTlsMode::QuickTunnel,
+        bind: Some("127.0.0.1:0".parse().unwrap()),
+    };
+    manager.set_relay(Some(quick.clone())).await.unwrap();
+    manager.start_relay().await;
+    let mut first = manager.relay_status().await.unwrap();
+    for _ in 0..300 {
+        if first.tunnel.as_ref().is_some_and(|t| t.url.is_some()) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        first = manager.relay_status().await.unwrap();
+    }
+    let address = first.tunnel.as_ref().and_then(|t| t.url.clone());
+    assert!(address.is_some(), "{first:?}");
+    let listening = first.listening.clone();
+
+    let saved = manager.set_relay(Some(quick)).await.unwrap();
+    assert_eq!(
+        saved.tunnel.as_ref().and_then(|t| t.url.clone()),
+        address,
+        "an unchanged save restarted the tunnel: {saved:?}"
+    );
+    assert_eq!(saved.listening, listening);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let lines = std::fs::read_to_string(&starts).unwrap();
+    assert_eq!(
+        lines.lines().count(),
+        1,
+        "cloudflared started again: {lines:?}"
+    );
+    settle(&manager).await;
+}
+
+/// Each change of the relay's settings rebinds its listen address at once, so the new listener
+/// must find the address free again.
+#[tokio::test]
+async fn the_relay_rebinds_its_listen_address_on_each_change() {
+    use crate::link::relay::{RelaySettings, RelayTlsMode};
+    let dir = tempfile::tempdir().unwrap();
+    let backend = Arc::new(Fake::default());
+    let manager = open_with(options(dir.path()), backend).await;
+    // Serve, as the daemon does, so each change restarts the listener.
+    manager.start_relay().await;
+    let port = {
+        let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        probe.local_addr().unwrap()
+    };
+    for n in 0..8 {
+        let status = manager
+            .set_relay(Some(RelaySettings {
+                url: format!("https://relay{n}.example"),
+                mode: RelayTlsMode::Proxy,
+                bind: Some(port),
+            }))
+            .await
+            .unwrap();
+        assert_eq!(status.error, None, "change {n}");
+        assert_eq!(status.listening, Some(port.to_string()), "change {n}");
+    }
     settle(&manager).await;
 }
 

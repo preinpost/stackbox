@@ -189,6 +189,26 @@ export const componentInfo: Record<
     label: "Nova",
     description: "Compute · KVM이 없으면 TCG로 작은 인스턴스",
   },
+  heat: {
+    label: "Heat",
+    description: "Orchestration · 템플릿으로 리소스 스택 생성",
+  },
+  barbican: {
+    label: "Barbican",
+    description: "Key Manager · 비밀·인증서 저장",
+  },
+  designate: {
+    label: "Designate",
+    description: "DNS · 존과 레코드 관리",
+  },
+  magnum: {
+    label: "Magnum",
+    description: "Container Infra · Kubernetes 클러스터 생성",
+  },
+  skyline: {
+    label: "Skyline",
+    description: "Dashboard · 새 웹 콘솔",
+  },
 };
 export const componentLabel = (id: string) => componentInfo[id]?.label ?? id;
 /** What a bucket archive holds, from the metadata file its export wrote next to it.
@@ -212,7 +232,7 @@ export function archiveSummary(metadata?: ArchiveMetadata | null) {
 // Mirrors `model::COMPONENTS` public ports: each service is published at port_base + offset.
 export const publicServices: Record<
   string,
-  { offset: number; path: string; type: string }
+  { offset: number; path: string; type: string; label?: string }
 > = {
   keystone: { offset: 0, path: "/v3", type: "Identity API · v3" },
   glance: { offset: 1, path: "", type: "Image API" },
@@ -220,7 +240,53 @@ export const publicServices: Record<
   horizon: { offset: 3, path: "/", type: "Dashboard" },
   neutron: { offset: 4, path: "", type: "Network API" },
   nova: { offset: 5, path: "/v2.1", type: "Compute API" },
+  heat: { offset: 9, path: "", type: "Orchestration API" },
+  "heat-cfn": {
+    offset: 10,
+    path: "",
+    type: "CFN 호환 API",
+    label: "Heat CloudFormation",
+  },
+  barbican: { offset: 11, path: "", type: "Key Manager API" },
+  designate: { offset: 12, path: "", type: "DNS API" },
+  magnum: { offset: 13, path: "", type: "Container Infra API" },
+  skyline: { offset: 14, path: "", type: "Dashboard API" },
+  "skyline-console": {
+    offset: 15,
+    path: "",
+    type: "Dashboard",
+    label: "Skyline Console",
+  },
 };
+/** The public ports each service publishes, by port id: Heat also serves CloudFormation and
+ * Skyline its console, each at its own offset. */
+export const componentPorts: Record<string, string[]> = {
+  keystone: ["keystone"],
+  glance: ["glance"],
+  placement: ["placement"],
+  horizon: ["horizon"],
+  neutron: ["neutron"],
+  nova: ["nova"],
+  heat: ["heat", "heat-cfn"],
+  barbican: ["barbican"],
+  designate: ["designate"],
+  magnum: ["magnum"],
+  skyline: ["skyline", "skyline-console"],
+};
+/** Offsets of the data stores every farm publishes in its block (`model::INFRA_PORTS`). */
+export const dataStoreOffsets = [6, 7, 8];
+/** The public ports a service list publishes, in offset order, each with its component. */
+export function farmPublicPorts(components: string[]) {
+  return components
+    .flatMap((component) =>
+      (componentPorts[component] ?? []).map((id) => ({
+        component,
+        id,
+        ...publicServices[id],
+      })),
+    )
+    .sort((a, b) => a.offset - b.offset);
+}
 /** Farms without a recorded plan run the original Keystone and Glance pair. */
 export const farmComponents = (farm: Farm) =>
   farm.plan?.components ?? ["keystone", "glance"];
@@ -248,12 +314,29 @@ export const remoteAgentNeedsUpdate = (host: RemoteHost) =>
  * from this coordinator's build; the farm's job re-inspects it if the last check is old. */
 export function hostReady(host: RemoteHost, coordinatorBuildId?: string) {
   if (host.status !== "ready" || host.active_job) return false;
+  if (host.reachability?.reachable === false) return false;
   if (host.kind === "local") return true;
   if (host.kind === "agent") return host.connected;
   return (
     host.agent?.artifact?.supports_single_vm === true &&
     !agentBuildMismatch(host.agent?.artifact, coordinatorBuildId)
   );
+}
+/** Seconds after which the coordinator's last attempt to reach a host is too old to rely on. */
+export const REACHABILITY_STALE_SECONDS = 90;
+/** What the coordinator's last attempt to reach a host says, for display.
+ * `stale` means the check is too old to say anything; it never claims the host is down. */
+export type HostLink = "unchecked" | "stale" | "disconnected" | "reachable";
+export function hostLink(
+  host: RemoteHost,
+  nowSeconds = Date.now() / 1000,
+): HostLink {
+  const reach = host.reachability;
+  if (!reach) return "unchecked";
+  // A check time the coordinator never wrote reads as the oldest possible.
+  if (nowSeconds - (reach.checked_at ?? 0) > REACHABILITY_STALE_SECONDS)
+    return "stale";
+  return reach.reachable ? "reachable" : "disconnected";
 }
 /** What still stands between the host and a new farm. Preparation installs the runner,
  * the farm kernel and the verification VM in one job, so there is one button to press. */

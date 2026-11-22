@@ -197,7 +197,13 @@ worker도 전체 예약과 물리 가용 메모리·KVM을 확인한다. 같은 
 
 원격 조회는 해당 Coordinator의 Farm만 반환한다. SSH/agent 조회 실패 시 Farm 상태·VM 목록·예약을 유지하고
 `observation_error`와 `last_seen_at`으로 마지막 관측임을 표시한다. 실패를 빈 inventory로 취급해 예약을 풀지 않는다.
-연결이 회복되면 다시 관측한다. 배포/생성은 중앙에서 각각 하나씩, 타겟에서도 충돌을 검사한다.
+연결이 회복되면 다시 관측한다. 작업(배포 등)이 진행 중인 Farm도 관측 결과로 `observation_error`를 지우거나 기록하며,
+작업이 소유한 status·phase·VM 값은 그대로 둔다. 배포/생성은 중앙에서 각각 하나씩, 타겟에서도 충돌을 검사한다.
+
+호스트의 연결 상태는 `reachability`(`reachable`, `checked_at`, `last_ok_at`, `error`, `consecutive_failures`)에 남는다.
+30초마다 Farm이 있는 호스트는 inventory 스캔 결과로, Farm이 없는 SSH 호스트는 5초 제한의 SSH 접속 확인(인증까지, 명령 없음)으로 갱신한다.
+연속 2회 실패해야 `reachable=false`가 되고, 1회 성공하면 즉시 `true`로 돌아간다. 같은 호스트의 확인이 진행 중이면 건너뛰며,
+호스트 작업이 진행 중이면 접속 확인만 건너뛴다. `checked_at`이 90초보다 오래되면 웹은 연결 끊김도 Ready도 단정하지 않고 "확인 지연"으로 표시한다.
 강제 종료한 작업은 interrupted가 되며 자동 재실행하지 않는다. SSH 연결이 끊겨도 원격 작업은 timeout까지 남을 수 있다.
 실행기는 create 10분, deploy 2시간, delete 3분으로 제한하며 agent의 파일 잠금과 registry를 확인한 뒤 재시도한다.
 

@@ -31,6 +31,11 @@ memcached_max_memory: 64
 rabbitmq_server_additional_erl_args: "+S 1:1 +sbwt none +sbwtdcpu none +sbwtdio none"
 
 enable_openstack_core: false
+enable_heat: false
+enable_barbican: false
+enable_designate: false
+enable_magnum: false
+enable_skyline: false
 enable_mariadb: true
 enable_memcached: true
 enable_rabbitmq: true

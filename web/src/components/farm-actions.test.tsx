@@ -76,7 +76,7 @@ test("defaults to a ready host and sends its ID and public hostname", async () =
   vi.stubGlobal(
     "fetch",
     vi.fn(async (path: string, options?: RequestInit) => {
-      if (path.endsWith("/catalog"))
+      if (path.includes("/catalog"))
         return Response.json({
           components: [{ id: "keystone" }, { id: "glance" }],
         });
@@ -199,7 +199,7 @@ test("opens on the host it was launched from and refuses hosts that are not read
   vi.stubGlobal(
     "fetch",
     vi.fn(async (path: string, options?: RequestInit) => {
-      if (path.endsWith("/catalog"))
+      if (path.includes("/catalog"))
         return Response.json({
           components: [{ id: "keystone" }, { id: "glance" }],
         });
@@ -293,7 +293,7 @@ test("adds optional services with their dependencies and keeps unavailable ones 
   vi.stubGlobal(
     "fetch",
     vi.fn(async (path: string, options?: RequestInit) => {
-      if (path.endsWith("/catalog"))
+      if (path.includes("/catalog"))
         return Response.json({
           constraints: [],
           components: [
@@ -406,7 +406,7 @@ test("a new farm carries one compute by default so a template can join it", asyn
   vi.stubGlobal(
     "fetch",
     vi.fn(async (path: string, options?: RequestInit) => {
-      if (path.endsWith("/catalog"))
+      if (path.includes("/catalog"))
         return Response.json({
           constraints: [],
           components: [
@@ -473,7 +473,7 @@ test("asks to register a host when there is none", async () => {
   vi.stubGlobal(
     "fetch",
     vi.fn(async (path: string, options?: RequestInit) => {
-      if (path.endsWith("/catalog"))
+      if (path.includes("/catalog"))
         return Response.json({ components: [{ id: "keystone" }] });
       if (path.endsWith("/plans")) return Response.json(singleVmPlan());
       if (path.endsWith("/host")) return Response.json({ build_id: "x" });
@@ -518,6 +518,37 @@ function singleVmPlan(memory_mib = 3072): Plan {
     ],
   };
 }
+
+test("the deploy dialog says a changed configuration resumes from configure", async () => {
+  const user = userEvent.setup();
+  const client = new QueryClient();
+  const farm: Farm = {
+    id: "single",
+    created_at: 0,
+    updated_at: 0,
+    status: "failed",
+    active_job: null,
+    plan: singleVmPlan(),
+    nodes: [
+      {
+        name: "single-all-in-one",
+        role: "all-in-one",
+        status: "running",
+        memory_mib: 3072,
+      },
+    ],
+  };
+  render(
+    <QueryClientProvider client={client}>
+      <DeployFarmDialog farm={farm} />
+    </QueryClientProvider>,
+  );
+  await user.click(screen.getByRole("button", { name: /OpenStack 배포/ }));
+  expect(
+    await screen.findByText(/설정을 바꿨다면 configure부터\s*재개하세요/),
+  ).toBeTruthy();
+  cleanup();
+});
 
 test("allows deployment only for a running all-in-one VM and preserves legacy farms", () => {
   const client = new QueryClient();
@@ -1267,7 +1298,7 @@ test("places compute VMs on other hosts when the coordinator has a relay", async
   vi.stubGlobal(
     "fetch",
     vi.fn(async (path: string, options?: RequestInit) => {
-      if (path.endsWith("/catalog"))
+      if (path.includes("/catalog"))
         return Response.json({
           components: [{ id: "keystone" }, { id: "nova" }],
         });

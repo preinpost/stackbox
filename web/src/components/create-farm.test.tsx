@@ -141,7 +141,7 @@ test("previews each VM's source for the chosen release and starts the plan", asy
           status: "queued",
         });
       }
-      if (path.endsWith("/catalog")) return Response.json(catalog);
+      if (path.includes("/catalog")) return Response.json(catalog);
       if (path.endsWith("/plans")) return Response.json(resourcePlan);
       if (path.endsWith("/host"))
         return Response.json({
@@ -276,7 +276,7 @@ test("a new farm is a control VM with one compute by default", async () => {
           notes: [],
         });
       }
-      if (path.endsWith("/catalog")) return Response.json(catalog);
+      if (path.includes("/catalog")) return Response.json(catalog);
       if (path.endsWith("/plans")) return Response.json(resourcePlan);
       if (path.endsWith("/host")) return Response.json({ build_id: "b" });
       if (path.endsWith("/hosts")) return Response.json(hosts);
@@ -338,7 +338,7 @@ test("a release this coordinator cannot install without templates is refused in 
           },
           { status: 409 },
         );
-      if (path.endsWith("/catalog")) return Response.json(catalog);
+      if (path.includes("/catalog")) return Response.json(catalog);
       if (path.endsWith("/plans")) return Response.json(resourcePlan);
       if (path.endsWith("/host"))
         return Response.json({
@@ -458,7 +458,7 @@ test("disables a release whose images miss the chosen host's architecture", asyn
           unreachable: [],
         });
       }
-      if (path.endsWith("/catalog")) return Response.json(catalog);
+      if (path.includes("/catalog")) return Response.json(catalog);
       if (path.endsWith("/plans")) return Response.json(resourcePlan);
       if (path.endsWith("/host"))
         return Response.json({
@@ -661,7 +661,7 @@ const releasePlan = (previews: Record<string, unknown>[], offered: string[]) =>
         release: body.release,
       });
     }
-    if (path.endsWith("/catalog")) return Response.json(catalog);
+    if (path.includes("/catalog")) return Response.json(catalog);
     if (path.endsWith("/plans")) return Response.json(resourcePlan);
     if (path.endsWith("/host"))
       return Response.json({
@@ -820,5 +820,150 @@ test("a simulated GPU carries the fake cards and traits the form names", async (
       gpu: { mode: "mtty", count: 4 },
     }),
   );
+  client.clear();
+});
+
+/** The catalog a release asks for: services of 2025.1 or newer are unavailable before it. */
+const servicesFor = (release?: string) => {
+  const old = release !== undefined && release < "2025.1";
+  const service = (
+    id: string,
+    extra: Partial<{
+      required: boolean;
+      depends_on: string[];
+      min_release: string | null;
+      estimated: boolean;
+      footprint_mib: number;
+    }> = {},
+  ) => ({
+    id,
+    required: false,
+    depends_on: [],
+    requires_data_plane: false,
+    available: true,
+    min_release: null,
+    footprint_mib: 0,
+    estimated: false,
+    reason: null,
+    ...extra,
+  });
+  const gated = (id: string, extra: Parameters<typeof service>[1]) =>
+    service(id, {
+      min_release: "2025.1",
+      estimated: true,
+      ...extra,
+    });
+  return {
+    constraints: [],
+    components: [
+      service("keystone", { required: true }),
+      service("glance", { required: true, depends_on: ["keystone"] }),
+      service("nova", {
+        depends_on: ["keystone", "glance"],
+        footprint_mib: 2048,
+      }),
+      {
+        ...gated("heat", { depends_on: ["keystone"], footprint_mib: 512 }),
+        available: !old,
+        reason: old
+          ? `OpenStack ${release} cannot run 'heat'; it needs 2025.1 or newer`
+          : null,
+      },
+      {
+        ...gated("magnum", {
+          depends_on: ["keystone", "glance", "heat", "nova"],
+          footprint_mib: 512,
+        }),
+        available: !old,
+        reason: old
+          ? `OpenStack ${release} cannot run 'magnum'; it needs 2025.1 or newer`
+          : null,
+      },
+    ],
+  };
+};
+
+/** `releasePlan`, with the catalog each release asks for. */
+const servicesFetch = (
+  previews: Record<string, unknown>[],
+  offered: string[],
+) => {
+  const inner = releasePlan(previews, offered);
+  return vi.fn(async (path: string, options?: RequestInit) => {
+    if (path.includes("/catalog")) {
+      const release = new URL(path, "http://portal").searchParams.get(
+        "release",
+      );
+      return Response.json(servicesFor(release ?? undefined));
+    }
+    return inner(path, options);
+  });
+};
+
+const serviceOption = (name: string) =>
+  screen.getByText(name, { selector: "strong" }).closest("label")!;
+const serviceBox = (name: string) =>
+  serviceOption(name).querySelector("[role=checkbox]")!;
+
+test("a service the chosen release cannot run is locked with the release it needs", async () => {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+  });
+  const previews: Record<string, unknown>[] = [];
+  vi.stubGlobal("fetch", servicesFetch(previews, ["2025.2", "2024.2"]));
+  renderForm(client);
+  const user = userEvent.setup();
+  // 2025.2 runs Heat, so it can be picked.
+  await screen.findByText("Heat", { selector: "strong" });
+  expect(serviceBox("Heat").getAttribute("aria-disabled")).not.toBe("true");
+  expect(serviceOption("Heat").textContent).not.toContain("2025.1+");
+  await user.click(combo("OpenStack 릴리스"));
+  await user.click(await screen.findByRole("option", { name: /2024\.2/ }));
+  await waitFor(() =>
+    expect(serviceOption("Heat").textContent).toContain("2025.1+"),
+  );
+  expect(serviceBox("Heat").getAttribute("aria-disabled")).toBe("true");
+  expect(serviceBox("Heat").getAttribute("aria-checked")).toBe("false");
+  expect(serviceBox("Magnum").getAttribute("aria-disabled")).toBe("true");
+  client.clear();
+});
+
+test("choosing Magnum checks Heat, locks it, and marks the plan's memory as estimated", async () => {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+  });
+  const previews: Record<string, unknown>[] = [];
+  vi.stubGlobal("fetch", servicesFetch(previews, ["2025.2"]));
+  renderForm(client);
+  const user = userEvent.setup();
+  await screen.findByText("Magnum", { selector: "strong" });
+  expect(screen.queryByText(/추정 포함/)).toBeNull();
+  await user.click(serviceBox("Magnum"));
+  expect(serviceBox("Magnum").getAttribute("aria-checked")).toBe("true");
+  expect(serviceBox("Heat").getAttribute("aria-checked")).toBe("true");
+  expect(serviceBox("Heat").getAttribute("aria-disabled")).toBe("true");
+  expect(serviceOption("Heat").textContent).toContain("Magnum에 필요");
+  expect(await screen.findByText(/추정 포함/)).toBeTruthy();
+  client.clear();
+});
+
+test("switching to a release that cannot run a selected service unselects it", async () => {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+  });
+  const previews: Record<string, unknown>[] = [];
+  vi.stubGlobal("fetch", servicesFetch(previews, ["2025.2", "2024.2"]));
+  renderForm(client);
+  const user = userEvent.setup();
+  await screen.findByText("Magnum", { selector: "strong" });
+  await user.click(serviceBox("Magnum"));
+  expect(serviceBox("Heat").getAttribute("aria-checked")).toBe("true");
+  await user.click(combo("OpenStack 릴리스"));
+  await user.click(await screen.findByRole("option", { name: /2024\.2/ }));
+  await waitFor(() =>
+    expect(serviceBox("Magnum").getAttribute("aria-checked")).toBe("false"),
+  );
+  expect(serviceBox("Heat").getAttribute("aria-checked")).toBe("false");
+  expect(screen.queryByText(/추정 포함/)).toBeNull();
   client.clear();
 });

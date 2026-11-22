@@ -190,10 +190,15 @@ export const gpuInstancesQuery = (id: string) =>
       request<FarmInstance[]>(`/farms/${encode(id)}/instances`, { signal }),
     refetchInterval: 15_000,
   });
-export const catalogQuery = () =>
+/** With a release, each service says whether that release can run it. */
+export const catalogQuery = (release?: string) =>
   queryOptions({
-    queryKey: ["catalog"],
-    queryFn: ({ signal }) => request<Catalog>("/catalog", { signal }),
+    queryKey: ["catalog", release ?? null],
+    queryFn: ({ signal }) =>
+      request<Catalog>(
+        release ? `/catalog?release=${encode(release)}` : "/catalog",
+        { signal },
+      ),
     staleTime: Infinity,
   });
 export const farmQuery = (id: string) =>
