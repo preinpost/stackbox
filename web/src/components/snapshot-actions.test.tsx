@@ -74,3 +74,64 @@ test("lists bucket archives by what their metadata files say", async () => {
     expect(submitted).toEqual({ bucket: "minio", key: "snapshots/old.msb" }),
   );
 });
+
+test("enables export for multi-node snapshots and shows compute count in bucket list", async () => {
+  const { ExportSnapshotDialog } = await import("./snapshot-actions");
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+  });
+  let exportedBody: unknown;
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (path: string, options?: RequestInit) => {
+      if (path.endsWith("/host"))
+        return Response.json({ state_dir: "/tmp/farm", arch: "x86_64" });
+      if (path.endsWith("/buckets"))
+        return Response.json([
+          { id: "s3", name: "farm-snapshots", prefix: "", region: "us-east-1" },
+        ]);
+      if (options?.method === "POST" && path.endsWith("/snapshots/mn-snap/export")) {
+        exportedBody = JSON.parse(String(options.body));
+        return Response.json({ id: "mn-snap", status: "exporting" });
+      }
+      return Response.json([]);
+    }),
+  );
+  const snapshot = {
+    id: "mn-snap",
+    status: "ready" as const,
+    arch: "x86_64",
+    host_id: "dev-01",
+    plan: {
+      components: ["keystone", "nova"],
+      computes: 1,
+      nodes: [],
+      memory_mib: 12544,
+      disk_mib: 100000,
+      warnings: [],
+    },
+    deployed: true,
+    source_exposure: { host: "127.0.0.1", bind: "0.0.0.0", port_base: 15000 },
+    nodes: [
+      { node: "control", reference: "ref-ctl", size_bytes: 100 },
+      { node: "compute-1", reference: "ref-cmp", size_bytes: 100 },
+    ],
+    created_at: 1,
+    updated_at: 2,
+  };
+  render(
+    <QueryClientProvider client={client}>
+      <ExportSnapshotDialog snapshot={snapshot} />
+    </QueryClientProvider>,
+  );
+  const trigger = await screen.findByRole("button", { name: /내보내기/ });
+  expect((trigger as HTMLButtonElement).disabled).toBe(false);
+  await userEvent.click(trigger);
+  expect(
+    await screen.findByText(/2개 VM의 \.msb 아카이브를 하나의 파일로 묶어/),
+  ).toBeTruthy();
+  await userEvent.click(screen.getByRole("button", { name: /내보내기 시작/ }));
+  await vi.waitFor(() =>
+    expect(exportedBody).toEqual({ bucket: "s3", key: "mn-snap.msb" }),
+  );
+});

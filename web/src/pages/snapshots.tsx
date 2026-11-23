@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { Cloud, HardDrive, LoaderCircle, Snowflake } from "lucide-react";
+import { useEffect, useState } from "react";
 import {
   activeJob,
   farmsQuery,
@@ -31,9 +32,11 @@ import {
   bytes,
   componentLabel,
   dateTime,
+  duration,
   memory,
   snapshotHost,
   snapshotOrigin,
+  transferRate,
 } from "../lib";
 
 /** The mock shows four services and folds the rest into a count. */
@@ -107,15 +110,86 @@ export function SnapshotsPage() {
   );
 }
 
+/** Sliding window of observed `(done_bytes, time_ms)` samples for one transfer. */
+type TransferSample = { done: number; at: number };
+type TransferTracker = { id: string; samples: TransferSample[] };
+
+/** Average speed (bytes/sec) across the observed window, or `null` until progress advances. */
+export function transferSpeed(samples: TransferSample[]): number | null {
+  if (samples.length < 2) return null;
+  const first = samples[0];
+  const last = samples[samples.length - 1];
+  const deltaBytes = last.done - first.done;
+  const deltaSec = (last.at - first.at) / 1000;
+  if (deltaBytes <= 0 || deltaSec <= 0) return null;
+  return deltaBytes / deltaSec;
+}
+
 /** Progress of an export to, or import from, a bucket. */
-function TransferProgress({ snapshot }: { snapshot: Snapshot }) {
+export function TransferProgress({ snapshot }: { snapshot: Snapshot }) {
   const transfer = snapshot.transfer;
+  const transferKey = transfer
+    ? `${snapshot.status}:${transfer.bucket}:${transfer.key}`
+    : "";
+  const doneBytes = transfer?.done_bytes ?? 0;
+  const totalBytes = transfer?.total_bytes ?? null;
+  const [tracker, setTracker] = useState<TransferTracker>({
+    id: transferKey,
+    samples: [],
+  });
+  useEffect(() => {
+    if (!transferKey || totalBytes == null) {
+      setTracker({ id: "", samples: [] });
+      return;
+    }
+    const now = Date.now();
+    // Keep roughly the last 60s of samples so speed reacts smoothly to bursts and slowdowns.
+    const windowMs = 60_000;
+    setTracker((prev) => {
+      if (prev.id !== transferKey) {
+        return {
+          id: transferKey,
+          samples: [{ done: doneBytes, at: now }],
+        };
+      }
+      const last = prev.samples[prev.samples.length - 1];
+      if (last && last.done === doneBytes) return prev;
+      if (last && doneBytes < last.done) {
+        return {
+          id: transferKey,
+          samples: [{ done: doneBytes, at: now }],
+        };
+      }
+      const next = [...prev.samples, { done: doneBytes, at: now }];
+      // Retain at least two points even when a single 64 MiB part takes over a minute.
+      const trimmed = next.filter(
+        (sample, idx) =>
+          idx >= next.length - 2 || now - sample.at <= windowMs,
+      );
+      return { id: transferKey, samples: trimmed };
+    });
+  }, [transferKey, doneBytes, totalBytes]);
+
   if (!transfer) return null;
   const exporting = snapshot.status === "exporting";
   const total = transfer.total_bytes;
   const percent = total ? Math.floor((transfer.done_bytes / total) * 100) : 0;
   // No byte count yet, or the bytes are in and the host is still registering them.
   const waiting = total == null || (transfer.done_bytes >= total && !exporting);
+  const speed =
+    tracker.id === transferKey ? transferSpeed(tracker.samples) : null;
+  const remainingBytes = total != null ? Math.max(0, total - transfer.done_bytes) : 0;
+  const eta =
+    speed && remainingBytes > 0
+      ? duration(Math.ceil(remainingBytes / speed))
+      : null;
+  const stats = [
+    `${bytes(transfer.done_bytes)} / ${bytes(total ?? 0)}`,
+    speed ? transferRate(speed) : null,
+    eta ? `약 ${eta} 남음` : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
   const label =
     total == null
       ? exporting
@@ -123,7 +197,7 @@ function TransferProgress({ snapshot }: { snapshot: Snapshot }) {
         : "S3에 연결하는 중"
       : transfer.done_bytes >= total && !exporting
         ? "내려받음 · 스냅샷 등록 중"
-        : `${exporting ? "S3에 올리는 중" : "S3에서 내려받는 중"} · ${percent}% (${bytes(transfer.done_bytes)} / ${bytes(total)})`;
+        : `${exporting ? "S3에 올리는 중" : "S3에서 내려받는 중"} · ${percent}% (${stats})`;
   return (
     <div className="snap-progress">
       <span className="cap">

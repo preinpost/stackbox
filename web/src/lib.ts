@@ -76,6 +76,12 @@ export const bytes = (value: number) =>
   value >= 1024 ** 3
     ? `${Number((value / 1024 ** 3).toFixed(1))} GiB`
     : `${Number((value / 1024 ** 2).toFixed(1))} MiB`;
+export const transferRate = (bytesPerSecond: number) =>
+  bytesPerSecond >= 1024 ** 3
+    ? `${Number((bytesPerSecond / 1024 ** 3).toFixed(1))} GiB/s`
+    : bytesPerSecond >= 1024 ** 2
+      ? `${Number((bytesPerSecond / 1024 ** 2).toFixed(1))} MiB/s`
+      : `${Math.max(1, Math.round(bytesPerSecond / 1024))} KiB/s`;
 const osLabels: Record<string, string> = { macos: "macOS", linux: "Linux" };
 export const platform = (os: string, arch: string) =>
   `${osLabels[os] ?? os} / ${arch}`;
@@ -217,7 +223,9 @@ export function archiveSummary(metadata?: ArchiveMetadata | null) {
   if (!metadata) return { title: "메타데이터 없음", detail: "" };
   const role = metadata.role
     ? `${metadata.role === "control" ? "Control" : "Compute"} 템플릿`
-    : "farm 스냅샷";
+    : (metadata.computes ?? 0) > 0
+      ? `멀티노드 farm 스냅샷 (compute ${metadata.computes}대)`
+      : "farm 스냅샷";
   return {
     title: [
       metadata.release ? `OpenStack ${metadata.release}` : "릴리스 미상",

@@ -261,7 +261,41 @@ struct Imported {
     node: Option<String>,
     release: Option<String>,
 }
-fn parse_labels(labels: &BTreeMap<String, String>) -> Result<Imported> {
+
+/// Result of loading an exported archive (single-VM `.msb` or multi-node bundle) into msb.
+struct LoadedArchive {
+    meta: Imported,
+    reference: String,
+    nodes: Vec<crate::farm::NodeSnapshot>,
+    size_bytes: Option<u64>,
+}
+
+/// Remove every msb snapshot loaded by a rejected or partial import, computes before control
+/// so the group head goes last.
+async fn remove_loaded(
+    backend: &Arc<dyn super::Backend>,
+    reference: &str,
+    nodes: &[crate::farm::NodeSnapshot],
+    id: &str,
+) {
+    let refs: Vec<String> = if nodes.is_empty() {
+        (!reference.is_empty())
+            .then(|| reference.to_owned())
+            .into_iter()
+            .collect()
+    } else {
+        nodes.iter().rev().map(|n| n.reference.clone()).collect()
+    };
+    for r in refs {
+        if let Err(cleanup) = backend.remove_snapshot(r).await {
+            eprintln!("cannot remove rejected import {id}: {cleanup:#}");
+        }
+    }
+}
+fn parse_labels(
+    labels: &BTreeMap<String, String>,
+    bundle: Option<(u8, Option<ComputeSize>, Option<GpuConfig>)>,
+) -> Result<Imported> {
     let get = |key: &str| {
         labels
             .get(key)
@@ -283,13 +317,25 @@ fn parse_labels(labels: &BTreeMap<String, String>) -> Result<Imported> {
         Some("compute") => Some(TemplateRole::Compute),
         Some(role) => anyhow::bail!("archive holds a {role} VM, which farm cannot use"),
     };
-    // Snapshots are of all-in-one VMs, Nova included from before plan() split it off.
-    // A compute template's farm had at least one compute; a control template's farm starts
-    // with none. Archives do not record the computes' size.
+    // Single-VM archives are all-in-one farms or templates; a multi-node bundle supplies the
+    // compute count, compute size and GPU config from its manifest.
     let release = labels.get(label::RELEASE).cloned();
-    let plan = match template {
-        Some(TemplateRole::Control) => control_layout(&components, None, release.as_deref())?,
-        _ => layout(&PlanRequest {
+    let plan = match (template, bundle) {
+        (Some(_), Some(_)) => {
+            anyhow::bail!("a multi-node bundle cannot hold a single-VM template")
+        }
+        (None, Some((computes, compute, gpu))) => layout(&PlanRequest {
+            components,
+            computes,
+            compute,
+            layout: None,
+            release,
+            gpu,
+        })?,
+        (Some(TemplateRole::Control), None) => {
+            control_layout(&components, None, release.as_deref())?
+        }
+        (_, None) => layout(&PlanRequest {
             components,
             computes: u8::from(template.is_some()),
             compute: None,
@@ -773,9 +819,6 @@ impl FarmManager {
                 (SnapshotStatus::Ready, Some(reference)) => reference.clone(),
                 _ => return Err(conflict(format!("snapshot '{id}' is not ready"))),
             };
-            if !snapshot.nodes.is_empty() {
-                return Err(conflict("multi-node snapshots cannot be exported yet"));
-            }
             if origin_host(state, snapshot).is_none() {
                 return Err(origin_missing(snapshot));
             }
@@ -1084,22 +1127,23 @@ impl FarmManager {
             let saved = manager.update_snapshot(&id, |s| {
                 s.transfer = None;
                 match result {
-                    Ok(((imported, reference, size_bytes), archive)) => {
+                    Ok((imported, archive)) => {
                         s.status = SnapshotStatus::Ready;
                         // Other hosts can download a template from where it came from.
                         s.archive = archive;
-                        s.arch = imported.arch;
-                        s.platform = imported.platform;
-                        s.plan = imported.plan;
-                        s.deployed = imported.deployed;
-                        s.source_exposure = imported.source_exposure;
-                        s.source_farm = imported.source_farm;
-                        s.note = imported.note;
-                        s.template = imported.template;
-                        s.node = imported.node;
-                        s.release = imported.release;
-                        s.reference = Some(reference);
-                        s.size_bytes = size_bytes;
+                        s.arch = imported.meta.arch;
+                        s.platform = imported.meta.platform;
+                        s.plan = imported.meta.plan;
+                        s.deployed = imported.meta.deployed;
+                        s.source_exposure = imported.meta.source_exposure;
+                        s.source_farm = imported.meta.source_farm;
+                        s.note = imported.meta.note;
+                        s.template = imported.meta.template;
+                        s.node = imported.meta.node;
+                        s.release = imported.meta.release;
+                        s.reference = Some(imported.reference);
+                        s.nodes = imported.nodes;
+                        s.size_bytes = imported.size_bytes;
                     }
                     Err(error) => {
                         s.status = SnapshotStatus::Failed;
@@ -1113,7 +1157,7 @@ impl FarmManager {
         });
         Ok(snapshot)
     }
-    async fn run_import(&self, path: &Path, id: &str) -> Result<(Imported, String, Option<u64>)> {
+    async fn run_import(&self, path: &Path, id: &str) -> Result<LoadedArchive> {
         let _permit = self.0.snapshot_gate.acquire().await?;
         self.import_archive(path, id).await
     }
@@ -1125,7 +1169,7 @@ impl FarmManager {
         id: &str,
         bucket: &str,
         key: &str,
-    ) -> Result<((Imported, String, Option<u64>), Option<SnapshotArchive>)> {
+    ) -> Result<(LoadedArchive, Option<SnapshotArchive>)> {
         let _permit = self.0.snapshot_gate.acquire().await?;
         // Fail before a long download that could not be imported.
         self.local_backend()?;
@@ -1151,10 +1195,10 @@ impl FarmManager {
             let imported = self.import_archive(&archive, id).await?;
             if let Some(metadata) = &metadata
                 && let Err(error) =
-                    metadata.agrees(imported.0.release.as_deref(), imported.0.template)
+                    metadata.agrees(imported.meta.release.as_deref(), imported.meta.template)
             {
-                if let Err(cleanup) = self.local_backend()?.remove_snapshot(imported.1).await {
-                    eprintln!("cannot remove rejected import {id}: {cleanup:#}");
+                if let Ok(backend) = self.local_backend() {
+                    remove_loaded(&backend, &imported.reference, &imported.nodes, id).await;
                 }
                 return Err(error.context(format!("{key} does not match its metadata file")));
             }
@@ -1173,17 +1217,25 @@ impl FarmManager {
         let _ = std::fs::remove_file(&archive);
         imported
     }
-    async fn import_archive(
-        &self,
-        path: &Path,
-        id: &str,
-    ) -> Result<(Imported, String, Option<u64>)> {
+    async fn import_archive(&self, path: &Path, id: &str) -> Result<LoadedArchive> {
+        let is_bundle = {
+            let path = path.to_owned();
+            tokio::task::spawn_blocking(move || super::bundle::is_bundle(&path)).await??
+        };
+        if is_bundle {
+            return self.import_bundle(path, id).await;
+        }
         let backend = self.local_backend()?;
         let imported = backend
             .import_snapshot(path.to_owned(), id.to_owned())
             .await?;
-        match parse_labels(&imported.labels) {
-            Ok(parsed) => Ok((parsed, imported.reference, imported.size_bytes)),
+        match parse_labels(&imported.labels, None) {
+            Ok(meta) => Ok(LoadedArchive {
+                meta,
+                reference: imported.reference,
+                nodes: Vec::new(),
+                size_bytes: imported.size_bytes,
+            }),
             Err(error) => {
                 // Do not keep an msb snapshot no farm can be restored from.
                 if let Err(cleanup) = backend.remove_snapshot(imported.reference).await {
@@ -1192,6 +1244,122 @@ impl FarmManager {
                 Err(error)
             }
         }
+    }
+    async fn import_bundle(&self, path: &Path, id: &str) -> Result<LoadedArchive> {
+        let backend = self.local_backend()?;
+        let stage_dir = self
+            .state_dir()
+            .join("transfers")
+            .join(format!("{id}.bundle-import"));
+        let _ = std::fs::remove_dir_all(&stage_dir);
+        let result = async {
+            let extracted = {
+                let archive = path.to_owned();
+                let dest = stage_dir.clone();
+                tokio::task::spawn_blocking(move || super::bundle::unpack(&archive, &dest)).await??
+            };
+            let mut loaded_nodes: Vec<crate::farm::NodeSnapshot> =
+                Vec::with_capacity(extracted.nodes.len());
+            let mut control_labels: Option<BTreeMap<String, String>> = None;
+            let mut compute_count: u8 = 0;
+            for (node, node_path) in &extracted.nodes {
+                let imported = backend
+                    .import_snapshot(node_path.clone(), id.to_owned())
+                    .await
+                    .with_context(|| format!("import VM '{node}' of bundle {id}"));
+                let imported = match imported {
+                    Ok(imported) => imported,
+                    Err(error) => {
+                        remove_loaded(&backend, "", &loaded_nodes, id).await;
+                        return Err(error);
+                    }
+                };
+                if let Some(labeled_node) = imported.labels.get(label::NODE)
+                    && labeled_node != node
+                {
+                    loaded_nodes.push(crate::farm::NodeSnapshot {
+                        node: node.clone(),
+                        reference: imported.reference,
+                        size_bytes: imported.size_bytes,
+                    });
+                    remove_loaded(&backend, "", &loaded_nodes, id).await;
+                    return Err(anyhow!(
+                        "bundle entry '{node}' holds disks labeled for '{labeled_node}'"
+                    ));
+                }
+                if node == "control" {
+                    control_labels = Some(imported.labels);
+                } else {
+                    compute_count = compute_count.saturating_add(1);
+                }
+                loaded_nodes.push(crate::farm::NodeSnapshot {
+                    node: node.clone(),
+                    reference: imported.reference,
+                    size_bytes: imported.size_bytes,
+                });
+            }
+            let Some(labels) = control_labels else {
+                remove_loaded(&backend, "", &loaded_nodes, id).await;
+                return Err(anyhow!("multi-node bundle has no control VM snapshot"));
+            };
+            if compute_count == 0 {
+                remove_loaded(&backend, "", &loaded_nodes, id).await;
+                return Err(anyhow!(
+                    "multi-node bundle must contain at least one compute VM snapshot"
+                ));
+            }
+            let expected_computes: Vec<String> = (1..=compute_count)
+                .map(|index| format!("compute-{index}"))
+                .collect();
+            let actual_computes: Vec<&str> = loaded_nodes
+                .iter()
+                .filter(|n| n.node != "control")
+                .map(|n| n.node.as_str())
+                .collect();
+            if actual_computes.len() != expected_computes.len()
+                || !expected_computes
+                    .iter()
+                    .all(|expected| actual_computes.contains(&expected.as_str()))
+            {
+                remove_loaded(&backend, "", &loaded_nodes, id).await;
+                return Err(anyhow!(
+                    "multi-node bundle compute VMs must be numbered compute-1..compute-{compute_count}"
+                ));
+            }
+            // Control first, then compute-1, compute-2, ...
+            loaded_nodes.sort_by_key(|n| {
+                let index = n
+                    .node
+                    .strip_prefix("compute-")
+                    .and_then(|s| s.parse::<u8>().ok())
+                    .unwrap_or(0);
+                (n.node != "control", index)
+            });
+            let reference = loaded_nodes[0].reference.clone();
+            let size_bytes = loaded_nodes.iter().map(|n| n.size_bytes).sum();
+            match parse_labels(
+                &labels,
+                Some((
+                    compute_count,
+                    extracted.manifest.compute,
+                    extracted.manifest.gpu,
+                )),
+            ) {
+                Ok(meta) => Ok(LoadedArchive {
+                    meta,
+                    reference,
+                    nodes: loaded_nodes,
+                    size_bytes,
+                }),
+                Err(error) => {
+                    remove_loaded(&backend, &reference, &loaded_nodes, id).await;
+                    Err(error)
+                }
+            }
+        }
+        .await;
+        let _ = std::fs::remove_dir_all(&stage_dir);
+        result
     }
 
     /// Removes the snapshot from the host that keeps it, then its copies on other hosts as

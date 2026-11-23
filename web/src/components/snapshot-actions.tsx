@@ -590,25 +590,18 @@ export function ExportSnapshotDialog({ snapshot }: { snapshot: Snapshot }) {
   return (
     <Dialog.Root open={dialog.open} onOpenChange={dialog.onOpenChange}>
       <Dialog.Trigger
-        render={
-          <Button
-            disabled={
-              snapshot.status !== "ready" || Boolean(snapshot.nodes?.length)
-            }
-          />
-        }
-        title={
-          snapshot.nodes?.length
-            ? "여러 VM 스냅샷은 아직 내보낼 수 없습니다."
-            : undefined
-        }
+        render={<Button disabled={snapshot.status !== "ready"} />}
       >
         <Download size={16} />
         내보내기
       </Dialog.Trigger>
       <Modal
         title="스냅샷 내보내기"
-        description="golden image까지 포함한 .msb 아카이브 하나로 저장합니다. 다른 호스트에서 가져오기로 불러올 수 있습니다."
+        description={
+          snapshot.nodes?.length
+            ? `control과 compute를 포함한 ${snapshot.nodes.length}개 VM의 .msb 아카이브를 하나의 파일로 묶어 저장합니다. 다른 호스트에서 가져오기로 불러올 수 있습니다.`
+            : "golden image까지 포함한 .msb 아카이브 하나로 저장합니다. 다른 호스트에서 가져오기로 불러올 수 있습니다."
+        }
         closeDisabled={mutation.isPending}
       >
         <form

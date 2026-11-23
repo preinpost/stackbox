@@ -1046,3 +1046,145 @@ async fn a_snapshot_restored_on_a_host_another_coordinator_publishes_on_takes_a_
     );
     settle(&manager).await;
 }
+
+#[tokio::test]
+async fn multi_node_snapshot_on_remote_host_exports_to_s3_and_imports_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let backend = Arc::new(Fake::default());
+    let manager = open_with(options(dir.path()), backend.clone()).await;
+    let edge = dial_in(&manager, dir.path()).await;
+    let s3 = Arc::new(crate::s3::fake::FakeS3::default());
+    let endpoint = s3.start().await;
+    manager
+        .register_bucket(crate::s3::RegisterBucket {
+            id: "minio".into(),
+            endpoint: Some(endpoint),
+            region: None,
+            name: "farm".into(),
+            prefix: Some("snapshots".into()),
+            path_style: None,
+            ca_pem: None,
+            access_key_id: "admin".into(),
+            secret_access_key: Some("secret".into()),
+        })
+        .unwrap();
+
+    let mut create_req = request("mn-edge");
+    create_req.host_id = Some("edge".into());
+    create_req.components = vec!["keystone".into(), "nova".into()];
+    create_req.computes = 1;
+    create_req.compute = Some(ComputeSize {
+        cpus: 4,
+        memory_mib: 4096,
+        disk_mib: 32768,
+    });
+    create_req.gpu = Some(GpuConfig {
+        mode: GpuMode::Simulated,
+        count: 2,
+        traits: None,
+        devices: None,
+        resource_class: None,
+    });
+    let created = done(&manager, &manager.create(create_req).unwrap()).await;
+    assert_eq!(created.status, JobStatus::Succeeded, "{:?}", created.error);
+    let deployed = done(
+        &manager,
+        &manager.deploy("mn-edge", DeployRequest::default()).unwrap(),
+    )
+    .await;
+    assert_eq!(
+        deployed.status,
+        JobStatus::Succeeded,
+        "{:?}",
+        deployed.error
+    );
+
+    let freeze = manager
+        .freeze(
+            "mn-edge",
+            SnapshotRequest {
+                id: "mn-remote".into(),
+                note: Some("multi-node s3".into()),
+                node: None,
+            },
+        )
+        .unwrap();
+    assert_eq!(done(&manager, &freeze).await.status, JobStatus::Succeeded);
+    let original = manager.snapshot("mn-remote").unwrap();
+    assert_eq!(original.host_id.as_deref(), Some("edge"));
+    assert_eq!(original.nodes.len(), 2);
+
+    // Export the remote multi-node snapshot to S3.
+    manager
+        .export_snapshot(
+            "mn-remote",
+            ExportRequest {
+                bucket: Some("minio".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let exported = manager.wait_snapshot("mn-remote").await.unwrap();
+    assert_eq!(exported.error, None);
+    let archive = exported.archive.unwrap();
+    assert_eq!(archive.bucket.as_deref(), Some("minio"));
+    assert_eq!(archive.key.as_deref(), Some("snapshots/mn-remote.msb"));
+    assert!(archive.sha256.is_some());
+
+    // Metadata file and bucket listing record computes > 0.
+    let objects = manager.bucket_objects("minio").await.unwrap();
+    assert_eq!(objects.len(), 1);
+    let metadata = objects[0].metadata.as_ref().unwrap();
+    assert_eq!(metadata.computes, 1);
+    assert_eq!(metadata.role, None);
+
+    // Staging directories are cleaned up on both coordinator and agent.
+    assert_eq!(
+        std::fs::read_dir(dir.path().join("transfers"))
+            .unwrap()
+            .count(),
+        0
+    );
+    assert_eq!(
+        std::fs::read_dir(dir.path().join("edge-agent/transfers"))
+            .unwrap()
+            .count(),
+        0
+    );
+
+    // Import back from S3 onto the local host and check compute size, GPU config and VM list.
+    manager
+        .import_snapshot(ImportRequest {
+            bucket: Some("minio".into()),
+            key: Some("snapshots/mn-remote.msb".into()),
+            id: Some("mn-from-s3".into()),
+            ..Default::default()
+        })
+        .unwrap();
+    let imported = manager.wait_snapshot("mn-from-s3").await.unwrap();
+    assert_eq!(
+        imported.status,
+        SnapshotStatus::Ready,
+        "{:?}",
+        imported.error
+    );
+    assert_eq!(imported.plan.computes, 1);
+    assert_eq!(imported.plan.compute, original.plan.compute);
+    assert_eq!(imported.plan.gpu, original.plan.gpu);
+    assert_eq!(imported.note.as_deref(), Some("multi-node s3"));
+    assert_eq!(
+        imported
+            .nodes
+            .iter()
+            .map(|n| n.node.as_str())
+            .collect::<Vec<_>>(),
+        ["control", "compute-1"]
+    );
+    assert_eq!(
+        imported.archive.as_ref().and_then(|a| a.sha256.as_deref()),
+        archive.sha256.as_deref()
+    );
+
+    drop(edge);
+    settle(&manager).await;
+}

@@ -400,7 +400,12 @@ impl Backend for Fake {
                 .collect();
             let mut snapshots = self.snapshots.lock().unwrap();
             for node in &nodes {
-                snapshots.insert(node.reference.clone(), labels.clone());
+                let mut node_labels = labels.clone();
+                node_labels.insert(
+                    crate::model::snapshot_labels::NODE.into(),
+                    node.node.clone(),
+                );
+                snapshots.insert(node.reference.clone(), node_labels);
             }
             let reference = match nodes.first() {
                 Some(control) => control.reference.clone(),
@@ -494,7 +499,14 @@ impl Backend for Fake {
         Box::pin(async move {
             let labels: BTreeMap<String, String> =
                 serde_json::from_slice(&std::fs::read(&archive)?).unwrap_or_default();
-            let reference = format!("fake/imported/{snapshot_id}");
+            // Multi-node imports load each VM archive into the same snapshot group, so
+            // include the node suffix when present to match msb's distinct references per VM.
+            let reference = match labels.get(crate::model::snapshot_labels::NODE) {
+                Some(node) if !labels.contains_key(crate::model::snapshot_labels::ROLE) => {
+                    format!("fake/imported/{snapshot_id}-{node}")
+                }
+                _ => format!("fake/imported/{snapshot_id}"),
+            };
             self.snapshots
                 .lock()
                 .unwrap()
@@ -2077,12 +2089,59 @@ async fn multi_node_farms_are_created_deployed_and_faulted_per_vm() {
             [crate::model::snapshot_labels::COMPUTES],
         "2"
     );
-    assert!(
-        manager
-            .export_snapshot("mn-snap", ExportRequest::default())
-            .unwrap_err()
-            .is::<Conflict>()
+    // Multi-node snapshots export as a bundle archive and import back with all VMs intact.
+    let bundle_path = dir.path().join("exports/mn-snap.msb");
+    manager
+        .export_snapshot("mn-snap", ExportRequest::default())
+        .unwrap();
+    let exported = manager.wait_snapshot("mn-snap").await.unwrap();
+    assert_eq!(exported.error, None);
+    assert_eq!(exported.status, SnapshotStatus::Ready);
+    assert!(bundle_path.is_file());
+    assert!(super::bundle::is_bundle(&bundle_path).unwrap());
+
+    manager
+        .import_snapshot(ImportRequest {
+            path: Some(bundle_path.display().to_string()),
+            id: Some("mn-imported".into()),
+            ..Default::default()
+        })
+        .unwrap();
+    let imported = manager.wait_snapshot("mn-imported").await.unwrap();
+    assert_eq!(
+        imported.status,
+        SnapshotStatus::Ready,
+        "{:?}",
+        imported.error
     );
+    assert_eq!(imported.plan.computes, 2);
+    assert_eq!(imported.nodes.len(), 3);
+    assert_eq!(
+        imported
+            .nodes
+            .iter()
+            .map(|n| n.node.as_str())
+            .collect::<Vec<_>>(),
+        ["control", "compute-1", "compute-2"]
+    );
+    assert_eq!(
+        imported.reference.as_deref(),
+        Some("fake/imported/mn-imported-control")
+    );
+    // Restoring the imported multi-node snapshot starts all 3 VMs.
+    let job = manager
+        .create(CreateRequest {
+            snapshot_id: Some("mn-imported".into()),
+            ..request("mn-from-import")
+        })
+        .unwrap();
+    assert_eq!(done(&manager, &job).await.status, JobStatus::Succeeded);
+    let restored_import = manager.get("mn-from-import").unwrap();
+    assert_eq!(restored_import.nodes.len(), 3);
+    let job = manager.delete("mn-from-import").unwrap();
+    assert_eq!(done(&manager, &job).await.status, JobStatus::Succeeded);
+    manager.delete_snapshot("mn-imported").await.unwrap();
+
     let job = manager
         .create(CreateRequest {
             snapshot_id: Some("mn-snap".into()),

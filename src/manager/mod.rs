@@ -1,5 +1,6 @@
 mod backend;
 mod buckets;
+mod bundle;
 mod gpu;
 pub(crate) mod hosts;
 mod logs;

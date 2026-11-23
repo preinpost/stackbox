@@ -305,9 +305,54 @@ impl FarmManager {
             .ok_or_else(|| origin_missing(snapshot))?;
         Ok(Arc::new(self.host_agent(&host_id)?))
     }
-    /// Write the archive of a snapshot's original to `path` on this machine. The local host
-    /// exports it there itself; another host exports it on its side and streams it over.
+    /// Write the archive of a snapshot's original to `path` on this machine. A single-VM
+    /// snapshot is exported directly; a multi-node snapshot exports each VM's archive and
+    /// packs them into a bundle tar.
     pub(super) async fn export_original(
+        &self,
+        snapshot: &SnapshotRecord,
+        reference: String,
+        path: &Path,
+        sink: &Option<EventSink>,
+    ) -> Result<()> {
+        if snapshot.nodes.is_empty() {
+            return self.export_one(snapshot, reference, path, sink).await;
+        }
+        let stage_dir = self
+            .state_dir()
+            .join("transfers")
+            .join(format!("{}.bundle-export", snapshot.id));
+        let _ = std::fs::remove_dir_all(&stage_dir);
+        std::fs::create_dir_all(&stage_dir)?;
+        let packed = async {
+            let mut entries = Vec::with_capacity(snapshot.nodes.len());
+            for node in &snapshot.nodes {
+                let node_path = stage_dir.join(format!("{}.msb", node.node));
+                self.export_one(snapshot, node.reference.clone(), &node_path, sink)
+                    .await
+                    .with_context(|| {
+                        format!("export VM '{}' of snapshot {}", node.node, snapshot.id)
+                    })?;
+                entries.push((node.node.clone(), node_path));
+            }
+            let output = path.to_owned();
+            let compute = snapshot.plan.compute;
+            let gpu = snapshot.plan.gpu.clone();
+            tokio::task::spawn_blocking(move || {
+                super::bundle::pack(&output, &entries, compute, gpu)
+            })
+            .await??;
+            Ok::<_, anyhow::Error>(())
+        }
+        .await;
+        let _ = std::fs::remove_dir_all(&stage_dir);
+        packed
+    }
+
+    /// Write one msb snapshot reference of `snapshot`'s original to `path` on this machine.
+    /// The local host exports it there itself; another host exports it on its side and
+    /// streams it over.
+    async fn export_one(
         &self,
         snapshot: &SnapshotRecord,
         reference: String,

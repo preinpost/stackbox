@@ -4823,7 +4823,7 @@ html[data-theme="dark"] .phase-current .phase-marker {
 .snap-progress {
   display: grid;
   gap: 4px;
-  max-width: 500px;
+  max-width: 680px;
   margin-top: 2px;
 }
 .snap-progress .cap {
