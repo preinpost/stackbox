@@ -68,7 +68,7 @@ export function SnapshotsPage() {
       <section className="panel" aria-label="스냅샷 목록">
         <div className="panel-toolbar">
           <div className="flex items-center gap-2.5">
-            <h2>
+            <h2 className="flex items-center gap-2">
               <Snowflake size={16} />
               모든 스냅샷
             </h2>
