@@ -23,6 +23,7 @@ import {
   type Bucket,
   type RegisterBucket,
 } from "../api/client";
+import { CreateFromBucketDialog } from "./snapshot-actions";
 import {
   Button,
   CopyText,
@@ -165,6 +166,11 @@ function BucketRow({ bucket }: { bucket: Bucket }) {
         )}
       </div>
       <div className="bucket-actions">
+        <CreateFromBucketDialog
+          initialBucket={bucket.id}
+          triggerVariant="ghost"
+          triggerLabel="Farm 만들기"
+        />
         <Button
           variant="ghost"
           disabled={check.isPending}

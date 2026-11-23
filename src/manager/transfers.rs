@@ -104,14 +104,22 @@ impl FarmManager {
                 host_arch(state, host_id),
             ))
         })??;
+        let has_bucket = snapshot.archive.as_ref().is_some_and(|a| {
+            a.bucket.as_ref().is_some_and(|b| self.bucket(b).is_ok())
+                && a.key.is_some()
+                && a.sha256.is_some()
+        });
         let reference = match (&snapshot.status, &snapshot.reference) {
             (SnapshotStatus::Ready | SnapshotStatus::Exporting, Some(reference)) => {
-                reference.clone()
+                Some(reference.clone())
             }
+            (SnapshotStatus::Ready | SnapshotStatus::Exporting, None) if has_bucket => None,
             _ => return Err(conflict(format!("snapshot '{snapshot_id}' is not ready"))),
         };
-        if origin.as_deref() == Some(host_id) {
-            return Ok((reference, snapshot.nodes));
+        if let Some(reference) = &reference
+            && origin.as_deref() == Some(host_id)
+        {
+            return Ok((reference.clone(), snapshot.nodes));
         }
         if let Some(arch) = arch
             && arch != snapshot.arch
@@ -143,17 +151,38 @@ impl FarmManager {
                 }
             )));
         }
+        let expected_nodes = if !snapshot.nodes.is_empty() {
+            snapshot.nodes.len()
+        } else if snapshot.plan.computes > 0 && snapshot.template.is_none() {
+            usize::from(snapshot.plan.computes) + 1
+        } else {
+            0
+        };
         if let Some((found, nodes)) = agent.find_snapshot(snapshot_id.into()).await?
-            && (snapshot.nodes.is_empty() || nodes.len() == snapshot.nodes.len())
+            && (expected_nodes == 0 || nodes.len() == expected_nodes)
         {
-            self.record_copy(
-                snapshot_id,
-                host_id,
-                &found,
-                &nodes,
-                CopySource::Found,
-                None,
-            )?;
+            if snapshot.reference.is_none() {
+                if let Some(labels) = agent.snapshot_labels(found.clone()).await? {
+                    self.hydrate_bucket_snapshot(
+                        snapshot_id,
+                        host_id,
+                        kind.kind == HostKind::Local,
+                        &found,
+                        &nodes,
+                        &labels,
+                        None,
+                    )?;
+                }
+            } else {
+                self.record_copy(
+                    snapshot_id,
+                    host_id,
+                    &found,
+                    &nodes,
+                    CopySource::Found,
+                    None,
+                )?;
+            }
             return Ok((found, nodes));
         }
         if let Some(sink) = &sink {
@@ -190,15 +219,28 @@ impl FarmManager {
             .await;
             match fetched {
                 Ok(()) => via = Some(CopySource::Bucket),
-                Err(error) => say(
-                    &sink,
-                    format!(
-                        "host {host_id} could not download it from the bucket ({error:#}); streaming it from this coordinator instead\n"
-                    ),
-                ),
+                Err(error) => {
+                    if reference.is_none() {
+                        return Err(error.context(format!(
+                            "host {host_id} could not download {} from bucket {}",
+                            archive.key, archive.bucket
+                        )));
+                    }
+                    say(
+                        &sink,
+                        format!(
+                            "host {host_id} could not download it from the bucket ({error:#}); streaming it from this coordinator instead\n"
+                        ),
+                    );
+                }
             }
         }
         if via.is_none() {
+            let Some(reference) = reference else {
+                return Err(conflict(format!(
+                    "snapshot '{snapshot_id}' is backed by a bucket archive that is no longer available"
+                )));
+            };
             // Only now is the original needed; a host down keeps other hosts' copies usable.
             if origin.is_none() {
                 return Err(origin_missing(&snapshot));
@@ -215,21 +257,33 @@ impl FarmManager {
             .import_archive(transfer_id, snapshot_id.into())
             .await
             .with_context(|| format!("load snapshot {snapshot_id} on host {host_id}"))?;
-        if !snapshot.nodes.is_empty() && imported.nodes.len() != snapshot.nodes.len() {
+        if expected_nodes > 0 && imported.nodes.len() != expected_nodes {
             return Err(anyhow!(
                 "host {host_id} loaded {} VM(s) for multi-node snapshot {snapshot_id}, expected {}; reinstall farm-agent on that host",
                 imported.nodes.len(),
-                snapshot.nodes.len()
+                expected_nodes
             ));
         }
-        self.record_copy(
-            snapshot_id,
-            host_id,
-            &imported.reference,
-            &imported.nodes,
-            via.unwrap_or(CopySource::Stream),
-            imported.size_bytes,
-        )?;
+        if snapshot.reference.is_none() {
+            self.hydrate_bucket_snapshot(
+                snapshot_id,
+                host_id,
+                kind.kind == HostKind::Local,
+                &imported.reference,
+                &imported.nodes,
+                &imported.labels,
+                imported.size_bytes,
+            )?;
+        } else {
+            self.record_copy(
+                snapshot_id,
+                host_id,
+                &imported.reference,
+                &imported.nodes,
+                via.unwrap_or(CopySource::Stream),
+                imported.size_bytes,
+            )?;
+        }
         say(
             &sink,
             format!("snapshot {snapshot_id} is on host {host_id}\n"),
@@ -440,6 +494,58 @@ impl FarmManager {
                 .map(|agent| agent.artifact.sha256.clone())
         })?;
         self.agent(host_id, digest.as_deref(), "")
+    }
+
+    /// Fill in a bucket-backed snapshot record once a host loads its archive and reads the
+    /// labels inside it, turning that host into the snapshot's origin.
+    #[allow(clippy::too_many_arguments)]
+    fn hydrate_bucket_snapshot(
+        &self,
+        snapshot_id: &str,
+        host_id: &str,
+        local: bool,
+        reference: &str,
+        nodes: &[crate::farm::NodeSnapshot],
+        labels: &std::collections::BTreeMap<String, String>,
+        size_bytes: Option<u64>,
+    ) -> Result<()> {
+        use crate::model::snapshot_labels as label;
+        let exposure_host = labels.get(label::EXPOSURE_HOST).cloned();
+        let exposure_port_base = labels
+            .get(label::EXPOSURE_PORT_BASE)
+            .and_then(|v| v.parse::<u16>().ok());
+        self.update(|state| {
+            let snapshot = state
+                .snapshots
+                .get_mut(snapshot_id)
+                .context("snapshot disappeared during bucket load")?;
+            snapshot.host_id = (!local).then(|| host_id.into());
+            snapshot.reference = Some(reference.into());
+            snapshot.nodes = nodes.to_vec();
+            if let Some(size) = size_bytes {
+                snapshot.size_bytes = Some(size);
+            }
+            if let Some(host) = exposure_host {
+                snapshot.source_exposure.host = host;
+            }
+            if let Some(port_base) = exposure_port_base {
+                snapshot.source_exposure.port_base = port_base;
+            }
+            if snapshot.source_farm.is_none() {
+                snapshot.source_farm = labels.get(label::SOURCE).cloned();
+            }
+            if snapshot.note.is_none() {
+                snapshot.note = labels.get(label::NOTE).cloned();
+            }
+            if snapshot.platform.is_none() {
+                snapshot.platform = labels.get(label::PLATFORM).cloned();
+            }
+            if snapshot.release.is_none() {
+                snapshot.release = labels.get(label::RELEASE).cloned();
+            }
+            snapshot.updated_at = now();
+            Ok(())
+        })
     }
 
     fn record_copy(

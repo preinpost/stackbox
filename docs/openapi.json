@@ -2699,6 +2699,17 @@
               "type": "string"
             }
           },
+          "compute": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ComputeSize",
+                "description": "Compute VM size when it differs from the default."
+              }
+            ]
+          },
           "computes": {
             "type": "integer",
             "format": "int32",
@@ -2718,6 +2729,17 @@
             "type": "integer",
             "format": "int64",
             "minimum": 0
+          },
+          "gpu": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/GpuConfig",
+                "description": "Virtual GPU configuration of the frozen farm, if any."
+              }
+            ]
           },
           "key": {
             "type": "string",
@@ -3145,6 +3167,13 @@
           "id"
         ],
         "properties": {
+          "bucket": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Start directly from an archive in a registered S3 bucket (requires `key`; mutually\nexclusive with `snapshot_id`). The archive must have a metadata file and cannot be a\ncompute template."
+          },
           "components": {
             "type": "array",
             "items": {
@@ -3200,6 +3229,13 @@
           },
           "id": {
             "type": "string"
+          },
+          "key": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Object key in `bucket` to restore from."
           },
           "layout": {
             "oneOf": [

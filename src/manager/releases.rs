@@ -822,6 +822,8 @@ impl FarmManager {
             owner: request.owner.clone(),
             expires_at: request.expires_at,
             snapshot_id: None,
+            bucket: None,
+            key: None,
             placement,
             gpu: None,
         }

@@ -14,6 +14,7 @@ import {
 import { BucketsPanel } from "../components/bucket-actions";
 import { StepProgress } from "../components/job-steps";
 import {
+  CreateFromBucketDialog,
   DeleteSnapshotDialog,
   ExportSnapshotDialog,
   ImportSnapshotDialog,
@@ -55,7 +56,12 @@ export function SnapshotsPage() {
         eyebrow="FROZEN ENVIRONMENTS"
         title="Snapshots"
         description="설치가 끝난 farm을 얼려두고, 같은 환경을 다시 설치하지 않고 새 farm으로 불러오세요. S3 버킷으로 올려 다른 호스트로 옮길 수도 있습니다."
-        actions={<ImportSnapshotDialog />}
+        actions={
+          <div className="flex items-center gap-2">
+            <CreateFromBucketDialog triggerVariant="primary" />
+            <ImportSnapshotDialog />
+          </div>
+        }
       />
       {snapshots.error && (
         <ErrorNotice

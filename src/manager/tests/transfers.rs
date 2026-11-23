@@ -1286,6 +1286,40 @@ async fn multi_node_snapshot_on_remote_host_exports_to_s3_and_imports_back() {
             .any(|k| k.contains("mn-remote"))
     );
 
+    // Delete both existing snapshot records on the coordinator so only the S3 bucket holds it,
+    // then start a farm directly from the bucket onto edge-2 without importing first.
+    manager.forget_snapshot("mn-remote").await.unwrap();
+    manager.forget_snapshot("mn-from-s3").await.unwrap();
+    assert!(manager.snapshot("mn-remote").is_err());
+
+    let direct_job = manager
+        .create_from_bucket(CreateRequest {
+            host_id: Some("edge-2".into()),
+            bucket: Some("minio".into()),
+            key: Some("snapshots/mn-remote.msb".into()),
+            ..request("mn-direct")
+        })
+        .await
+        .unwrap();
+    let direct = done(&manager, &direct_job).await;
+    assert_eq!(direct.status, JobStatus::Succeeded, "{:?}", direct.error);
+    let direct_farm = manager.get("mn-direct").unwrap();
+    assert_eq!(direct_farm.host_id.as_deref(), Some("edge-2"));
+    assert_eq!(direct_farm.nodes.len(), 2);
+    assert_eq!(direct_farm.status, FarmStatus::Ready);
+    assert_eq!(
+        direct_farm.plan.as_ref().unwrap().compute,
+        original.plan.compute
+    );
+    assert_eq!(direct_farm.plan.as_ref().unwrap().gpu, original.plan.gpu);
+    // The hydrated snapshot record stays registered with edge-2 as its origin.
+    let hydrated = manager
+        .snapshot(direct_farm.snapshot_id.as_deref().unwrap())
+        .unwrap();
+    assert_eq!(hydrated.host_id.as_deref(), Some("edge-2"));
+    assert_eq!(hydrated.nodes.len(), 2);
+
+    done(&manager, &manager.delete("mn-direct").unwrap()).await;
     dialling2.abort();
     server2.abort();
     drop(edge);

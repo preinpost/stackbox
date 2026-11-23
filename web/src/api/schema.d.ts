@@ -786,6 +786,7 @@ export interface components {
     ArchiveMetadata: {
       arch: string;
       components: string[];
+      compute?: null | components["schemas"]["ComputeSize"];
       /**
        * Format: int32
        * @description Compute VMs of the farm the snapshot restores; 0 for all-in-one and templates.
@@ -799,6 +800,7 @@ export interface components {
       deployed: boolean;
       /** Format: int64 */
       exported_at: number;
+      gpu?: null | components["schemas"]["GpuConfig"];
       /** @description Object key of the archive this describes. */
       key: string;
       /** @description The VM a template was frozen from (`control`, `compute-1`, ...). */
@@ -941,6 +943,12 @@ export interface components {
     /** @enum {string} */
     CopySource: "bucket" | "stream" | "found";
     CreateRequest: {
+      /**
+       * @description Start directly from an archive in a registered S3 bucket (requires `key`; mutually
+       *     exclusive with `snapshot_id`). The archive must have a metadata file and cannot be a
+       *     compute template.
+       */
+      bucket?: string | null;
       components?: string[];
       compute?: null | components["schemas"]["ComputeSize"];
       /**
@@ -961,6 +969,8 @@ export interface components {
        */
       host_id?: string | null;
       id: string;
+      /** @description Object key in `bucket` to restore from. */
+      key?: string | null;
       layout?: null | components["schemas"]["FarmLayout"];
       owner?: string | null;
       /**

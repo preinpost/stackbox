@@ -1180,6 +1180,14 @@ pub struct CreateRequest {
     /// computes to be added; a compute template cannot start a farm.
     #[serde(default)]
     pub snapshot_id: Option<String>,
+    /// Start directly from an archive in a registered S3 bucket (requires `key`; mutually
+    /// exclusive with `snapshot_id`). The archive must have a metadata file and cannot be a
+    /// compute template.
+    #[serde(default)]
+    pub bucket: Option<String>,
+    /// Object key in `bucket` to restore from.
+    #[serde(default)]
+    pub key: Option<String>,
     /// Compute VMs that run on another host than `host_id`, by VM (`compute-2` → host id).
     /// Their links reach the control VM's host through the coordinator's relay.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -1221,8 +1229,22 @@ impl CreateRequest {
                 );
             }
         }
+        if self.bucket.is_some() != self.key.is_some() {
+            bail!("restoring from a bucket requires both bucket and key");
+        }
+        if self.snapshot_id.is_some() && self.bucket.is_some() {
+            bail!("restore from either snapshot_id or bucket/key, not both");
+        }
+        if let Some(bucket) = &self.bucket {
+            validate_id(bucket)?;
+        }
+        if let Some(key) = &self.key {
+            crate::s3::validate_key(key)?;
+        }
         if let Some(snapshot) = &self.snapshot_id {
             validate_id(snapshot)?;
+        }
+        if self.snapshot_id.is_some() || self.bucket.is_some() {
             if !self.placement.is_empty() {
                 bail!("a farm restored from a snapshot runs on one host; omit placement");
             }
@@ -2086,6 +2108,8 @@ mod tests {
             owner: None,
             expires_at: None,
             snapshot_id: None,
+            bucket: None,
+            key: None,
             placement: Default::default(),
             gpu: None,
         };
@@ -2213,6 +2237,8 @@ mod tests {
             owner: None,
             expires_at: None,
             snapshot_id: Some("snap".into()),
+            bucket: None,
+            key: None,
             placement: Default::default(),
             gpu: None,
         };

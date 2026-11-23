@@ -645,6 +645,8 @@ fn request(id: &str) -> CreateRequest {
         owner: Some("test".into()),
         expires_at: None,
         snapshot_id: None,
+        bucket: None,
+        key: None,
         placement: Default::default(),
         gpu: None,
     }

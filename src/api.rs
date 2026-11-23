@@ -606,12 +606,17 @@ async fn create(
     value: Result<Json<CreateRequest>, JsonRejection>,
 ) -> Result<Response, ApiError> {
     let request = body(value)?;
-    // A snapshot restore keeps the layout it was frozen with, including the legacy ones.
-    if request.snapshot_id.is_none() {
+    // A snapshot or bucket restore keeps the layout it was frozen with, including legacy ones.
+    if request.snapshot_id.is_none() && request.bucket.is_none() {
         require_multi_node(request.computes, request.layout).map_err(bad)?;
     }
     request.validate().map_err(bad)?;
-    Ok(accepted(app.manager.create(request)?))
+    let job = if request.bucket.is_some() {
+        app.manager.create_from_bucket(request).await?
+    } else {
+        app.manager.create(request)?
+    };
+    Ok(accepted(job))
 }
 #[derive(Deserialize, utoipa::IntoParams)]
 struct ReleaseQuery {

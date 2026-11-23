@@ -309,6 +309,8 @@ impl Agent {
             owner: None,
             expires_at: None,
             snapshot_id: None,
+            bucket: None,
+            key: None,
             placement: Default::default(),
             gpu: None,
         }

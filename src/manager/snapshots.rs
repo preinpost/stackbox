@@ -29,6 +29,8 @@ pub(super) fn busy(status: SnapshotStatus) -> bool {
 }
 
 /// A snapshot a new farm on `host_id` can start from. Exporting only reads it.
+/// A snapshot backed by a bucket archive (`archive.bucket` set) may have no local `reference`
+/// yet; the target host fetches and loads it when the restore starts.
 pub(super) fn restorable<'a>(
     state: &'a State,
     id: &str,
@@ -38,10 +40,17 @@ pub(super) fn restorable<'a>(
         .snapshots
         .get(id)
         .ok_or_else(|| NotFound(format!("snapshot '{id}'")))?;
+    let has_bucket = snapshot.archive.as_ref().is_some_and(|a| {
+        a.bucket
+            .as_ref()
+            .is_some_and(|b| state.buckets.contains_key(b))
+            && a.key.is_some()
+            && a.sha256.is_some()
+    });
     if !matches!(
         snapshot.status,
         SnapshotStatus::Ready | SnapshotStatus::Exporting
-    ) || snapshot.reference.is_none()
+    ) || (snapshot.reference.is_none() && !has_bucket)
     {
         return Err(conflict(format!("snapshot '{id}' is not ready")));
     }
@@ -53,6 +62,88 @@ pub(super) fn restorable<'a>(
     }
     ensure_compatible(state, snapshot, host_id)?;
     Ok(snapshot)
+}
+
+/// Build the plan described by a bucket archive's metadata file.
+pub(super) fn plan_from_metadata(metadata: &crate::s3::catalog::ArchiveMetadata) -> Result<Plan> {
+    match metadata.role {
+        Some(TemplateRole::Control) => control_layout(
+            &metadata.components,
+            metadata.compute,
+            metadata.release.as_deref(),
+        ),
+        Some(TemplateRole::Compute) => Err(conflict(format!(
+            "{} is a compute template and cannot start a farm",
+            metadata.key
+        ))),
+        None => layout(&PlanRequest {
+            components: metadata.components.clone(),
+            computes: metadata.computes,
+            compute: metadata.compute,
+            layout: None,
+            release: metadata.release.clone(),
+            gpu: metadata.gpu.clone(),
+        }),
+    }
+}
+
+/// Pick a snapshot ID for a bucket archive that does not collide with an existing record.
+pub(super) fn bucket_snapshot_id(
+    state: &State,
+    metadata: &crate::s3::catalog::ArchiveMetadata,
+    bucket_id: &str,
+    key: &str,
+) -> String {
+    // Reuse an existing snapshot record that already points at this exact bucket archive.
+    if let Some((id, _)) = state.snapshots.iter().find(|(_, s)| {
+        s.status == SnapshotStatus::Ready
+            && s.archive.as_ref().is_some_and(|a| {
+                a.bucket.as_deref() == Some(bucket_id)
+                    && a.key.as_deref() == Some(key)
+                    && a.sha256.as_deref() == Some(metadata.sha256.as_str())
+            })
+    }) {
+        return id.clone();
+    }
+    let base = if validate_snapshot_id(&metadata.snapshot_id).is_ok() {
+        metadata.snapshot_id.clone()
+    } else {
+        let stem = key
+            .rsplit('/')
+            .next()
+            .unwrap_or("bucket-snap")
+            .strip_suffix(".msb")
+            .unwrap_or("bucket-snap")
+            .to_ascii_lowercase()
+            .chars()
+            .map(|c| {
+                if c.is_ascii_lowercase() || c.is_ascii_digit() {
+                    c
+                } else {
+                    '-'
+                }
+            })
+            .collect::<String>()
+            .trim_matches('-')
+            .to_owned();
+        if validate_snapshot_id(&stem).is_ok() {
+            stem
+        } else {
+            "bucket-snap".to_owned()
+        }
+    };
+    if !state.snapshots.contains_key(&base) {
+        return base;
+    }
+    for n in 2..=999 {
+        let suffix = format!("-{n}");
+        let prefix = base[..base.len().min(48 - suffix.len())].trim_end_matches('-');
+        let candidate = format!("{prefix}{suffix}");
+        if !state.snapshots.contains_key(&candidate) {
+            return candidate;
+        }
+    }
+    format!("snap-{}", &uuid::Uuid::new_v4().simple().to_string()[..12])
 }
 
 /// A compute template a new compute of `farm` on `host_id` can boot from: Kolla only
@@ -222,6 +313,8 @@ fn archive_metadata(
         } else {
             snapshot.plan.computes
         },
+        compute: snapshot.plan.compute,
+        gpu: snapshot.plan.gpu.clone(),
         arch: labels[label::ARCH].clone(),
         platform: labels.get(label::PLATFORM).cloned(),
         deployed: snapshot.deployed,
@@ -689,26 +782,20 @@ impl FarmManager {
     }
 
     pub(super) async fn restore_job(&self, job: &Job, farm: FarmRecord) -> Result<()> {
-        let id = farm
-            .snapshot_id
-            .clone()
-            .context("restored farm has no snapshot")?;
-        let snapshot = self.snapshot(&id)?;
-        // On a host other than the original's, from a copy there.
         let host_id = farm.host_id.clone().context("restored farm has no host")?;
-        self.read(|state| ensure_compatible(state, &snapshot, &host_id))??;
         self.avoid_foreign_ports(job, &farm).await?;
         let farm = self.get(&farm.id)?;
-        let (reference, snapshot_nodes) = self
-            .ensure_snapshot_on_host_nodes(&id, &host_id, Some(self.event_sink(job, None)))
-            .await?;
-        let plan = farm.plan.clone().context("farm has no plan")?;
+        let (reference, snapshot_nodes, source_exposure, template, deployed, plan) =
+            self.prepare_restore_source(job, &farm, &host_id).await?;
         let exposure = farm.exposure.clone().context("farm has no exposure")?;
         self.log(
             &farm.id,
             &job.id,
             None,
-            format!("starting a copy of snapshot {id}\n"),
+            format!(
+                "starting a copy of {}\n",
+                job.snapshot_id.as_deref().unwrap_or("bucket archive")
+            ),
         )?;
         let backend = self.backend_for(&farm)?;
         let nodes = backend
@@ -724,7 +811,7 @@ impl FarmManager {
             state.farms.get_mut(&farm.id).context("farm missing")?.nodes = nodes;
             Ok(())
         })?;
-        if snapshot.template == Some(TemplateRole::Control) {
+        if template == Some(TemplateRole::Control) {
             self.log(
                 &farm.id,
                 &job.id,
@@ -743,7 +830,7 @@ impl FarmManager {
                     "the control VM started, but its source farm's computes are still registered",
                 )?;
         }
-        if snapshot.deployed {
+        if deployed {
             self.log(
                 &farm.id,
                 &job.id,
@@ -753,13 +840,55 @@ impl FarmManager {
             backend
                 .settle(
                     farm.id.clone(),
-                    Some((snapshot.source_exposure.clone(), exposure)),
+                    Some((source_exposure, exposure)),
                     plan.components.clone(),
                     self.event_sink(job, None),
                 )
                 .await?;
         }
         Ok(())
+    }
+
+    async fn prepare_restore_source(
+        &self,
+        job: &Job,
+        farm: &FarmRecord,
+        host_id: &str,
+    ) -> Result<(
+        String,
+        Vec<crate::farm::NodeSnapshot>,
+        Exposure,
+        Option<TemplateRole>,
+        bool,
+        Plan,
+    )> {
+        let id = farm
+            .snapshot_id
+            .clone()
+            .context("restored farm has no snapshot")?;
+        let snapshot = self.snapshot(&id)?;
+        self.read(|state| ensure_compatible(state, &snapshot, host_id))??;
+        let (reference, snapshot_nodes) = self
+            .ensure_snapshot_on_host_nodes(&id, host_id, Some(self.event_sink(job, None)))
+            .await?;
+        // A bucket-backed snapshot may learn its exact source_exposure and labels when first
+        // loaded on the host; re-read it after ensure_snapshot_on_host_nodes.
+        let snapshot = self.snapshot(&id)?;
+        let plan = snapshot.plan.clone();
+        self.update(|state| {
+            if let Some(record) = state.farms.get_mut(&farm.id) {
+                record.plan = Some(plan.clone());
+            }
+            Ok(())
+        })?;
+        Ok((
+            reference,
+            snapshot_nodes,
+            snapshot.source_exposure,
+            snapshot.template,
+            snapshot.deployed,
+            plan,
+        ))
     }
 
     /// Write the snapshot to an archive in the background, as a file or an object in a

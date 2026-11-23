@@ -742,6 +742,8 @@ async fn main() -> Result<()> {
                 owner,
                 expires_at,
                 snapshot_id: snapshot,
+                bucket: None,
+                key: None,
                 placement: placement.into_iter().collect(),
                 // The GPU flags ride in the release options, which plain creates share.
                 gpu: by_release.gpu.config(),

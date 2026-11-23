@@ -1501,6 +1501,91 @@ impl FarmManager {
     pub fn relay(&self) -> Arc<crate::link::relay::Relay> {
         self.0.relay.clone()
     }
+    /// Create a farm directly from a registered S3 bucket archive that carries a metadata
+    /// file. The metadata determines the plan, architecture and GPU requirements up front;
+    /// the restore job has the target host download the archive via presigned URL and boot it.
+    pub async fn create_from_bucket(&self, mut request: CreateRequest) -> Result<Job> {
+        request.validate()?;
+        let (bucket_id, key) = match (request.bucket.take(), request.key.take()) {
+            (Some(bucket), Some(key)) => (bucket, key),
+            _ => return Err(bad_request("bucket and key are required")),
+        };
+        let (bucket, client) = self.s3_client(&bucket_id)?;
+        let metadata = buckets::read_metadata(&client.interactive(), &key)
+            .await
+            .map_err(|e| bad_request(format!("cannot read archive metadata: {e:#}")))?
+            .ok_or_else(|| {
+                bad_request(format!(
+                    "{key} has no metadata file; only archives with metadata can start a farm directly from a bucket"
+                ))
+            })?;
+        let plan = snapshots::plan_from_metadata(&metadata)?;
+        let snapshot_id = self.update(|state| {
+            self.ensure_accepting()?;
+            let id = snapshots::bucket_snapshot_id(state, &metadata, &bucket_id, &key);
+            if !state.snapshots.contains_key(&id) {
+                state.snapshots.insert(
+                    id.clone(),
+                    SnapshotRecord {
+                        id: id.clone(),
+                        status: SnapshotStatus::Ready,
+                        arch: metadata.arch.clone(),
+                        platform: metadata.platform.clone(),
+                        host_id: None,
+                        source_farm: metadata.source_farm.clone(),
+                        plan: plan.clone(),
+                        deployed: metadata.deployed,
+                        source_exposure: Exposure {
+                            host: "localhost".into(),
+                            bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
+                            port_base: 0,
+                        },
+                        note: metadata.note.clone(),
+                        reference: None,
+                        nodes: Vec::new(),
+                        template: metadata.role,
+                        node: metadata.node.clone(),
+                        legacy_compute_template: false,
+                        release: metadata.release.clone(),
+                        size_bytes: Some(metadata.size_bytes),
+                        archive: Some(SnapshotArchive {
+                            path: format!("s3://{}/{key}", bucket.name),
+                            size_bytes: metadata.size_bytes,
+                            exported_at: metadata.exported_at,
+                            bucket: Some(bucket_id.clone()),
+                            key: Some(key.clone()),
+                            sha256: Some(metadata.sha256.clone()),
+                        }),
+                        transfer: None,
+                        copies: Vec::new(),
+                        error: None,
+                        created_at: metadata.created_at,
+                        updated_at: now(),
+                    },
+                );
+            }
+            Ok(id)
+        })?;
+        request.snapshot_id = Some(snapshot_id.clone());
+        match self.create(request) {
+            Ok(job) => Ok(job),
+            Err(error) => {
+                // Do not leave behind an unloaded bucket stub if create() rejected the request.
+                let _ = self.update(|state| {
+                    if state
+                        .snapshots
+                        .get(&snapshot_id)
+                        .is_some_and(|s| s.reference.is_none() && s.copies.is_empty())
+                    {
+                        state.snapshots.remove(&snapshot_id);
+                    }
+                    Ok(())
+                });
+                Err(error)
+            }
+        }
+    }
+
     pub fn create(&self, request: CreateRequest) -> Result<Job> {
         let mut plan = request.validate()?;
         let id = request.id.clone();

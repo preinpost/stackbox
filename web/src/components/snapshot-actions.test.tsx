@@ -275,3 +275,147 @@ test("lets RestoreSnapshotDialog choose any compatible ready host and updates ex
     }),
   );
 });
+
+test("CreateFromBucketDialog shows only usable images with metadata matching registered hosts", async () => {
+  const { CreateFromBucketDialog } = await import("./snapshot-actions");
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+  });
+  let createdBody: unknown;
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (path: string, options?: RequestInit) => {
+      if (path.endsWith("/host"))
+        return Response.json({ state_dir: "/tmp/farm", arch: "aarch64", build_id: "b1" });
+      if (path.endsWith("/farms") && options?.method === "POST") {
+        createdBody = JSON.parse(String(options.body));
+        return Response.json({ id: "job-2", farm_id: "from-s3", status: "queued" });
+      }
+      if (path.endsWith("/farms")) return Response.json([]);
+      if (path.endsWith("/buckets"))
+        return Response.json([
+          { id: "s3", name: "farm-snapshots", prefix: "", region: "us-east-1" },
+        ]);
+      if (path.endsWith("/hosts"))
+        return Response.json([
+          {
+            id: "dev-01",
+            kind: "ssh",
+            status: "ready",
+            address: "10.0.0.21",
+            port: 22,
+            username: "dev",
+            fingerprint: "SHA256:aaa",
+            connected: false,
+            inspection: { arch: "x86_64", os: "linux", mtty_available: true },
+            agent: {
+              artifact: {
+                sha256: "abc",
+                arch: "x86_64",
+                protocol: 1,
+                supports_single_vm: true,
+                build_id: "b1",
+              },
+            },
+            capacity: { memory_budget_mib: 32768, memory_reserved_mib: 0 },
+          },
+        ]);
+      if (path.endsWith("/buckets/s3/objects"))
+        return Response.json([
+          {
+            key: "dev-farm-001-clean.msb",
+            size_bytes: 9_000_000_000,
+            metadata: {
+              schema: 1,
+              key: "dev-farm-001-clean.msb",
+              size_bytes: 9_000_000_000,
+              sha256: "ab",
+              snapshot_id: "dev-farm-001-clean",
+              release: "2026.2",
+              role: null,
+              components: ["keystone", "nova"],
+              computes: 1,
+              arch: "x86_64",
+              deployed: true,
+              created_at: 1,
+              exported_at: 2,
+            },
+          },
+          {
+            // Compute template: excluded
+            key: "cmp.msb",
+            size_bytes: 2048,
+            metadata: {
+              schema: 1,
+              key: "cmp.msb",
+              size_bytes: 2048,
+              sha256: "cd",
+              snapshot_id: "cmp",
+              release: "2026.2",
+              role: "compute",
+              components: ["keystone", "nova"],
+              computes: 0,
+              arch: "x86_64",
+              deployed: true,
+              created_at: 1,
+              exported_at: 2,
+            },
+          },
+          {
+            // Different arch: excluded
+            key: "arm.msb",
+            size_bytes: 2048,
+            metadata: {
+              schema: 1,
+              key: "arm.msb",
+              size_bytes: 2048,
+              sha256: "ef",
+              snapshot_id: "arm",
+              release: "2026.2",
+              role: null,
+              components: ["keystone", "nova"],
+              computes: 1,
+              arch: "aarch64",
+              deployed: true,
+              created_at: 1,
+              exported_at: 2,
+            },
+          },
+          {
+            // No metadata: excluded
+            key: "legacy.msb",
+            size_bytes: 1024,
+            metadata: null,
+          },
+        ]);
+      return Response.json([]);
+    }),
+  );
+  const user = userEvent.setup();
+  render(
+    <QueryClientProvider client={client}>
+      <CreateFromBucketDialog />
+    </QueryClientProvider>,
+  );
+  const trigger = await screen.findByRole("button", { name: /버킷에서 Farm 만들기/ });
+  await vi.waitFor(() => expect((trigger as HTMLButtonElement).disabled).toBe(false));
+  await user.click(trigger);
+
+  expect(await screen.findByText("dev-farm-001-clean.msb")).toBeTruthy();
+  expect(screen.queryByText("cmp.msb")).toBeNull();
+  expect(screen.queryByText("arm.msb")).toBeNull();
+  expect(screen.queryByText("legacy.msb")).toBeNull();
+
+  await user.type(screen.getByPlaceholderText("dev-openstack"), "from-s3");
+  const submit = screen.getByRole("button", { name: "Farm 만들기" });
+  await user.click(submit);
+  await vi.waitFor(() =>
+    expect(createdBody).toEqual({
+      id: "from-s3",
+      host_id: "dev-01",
+      bucket: "s3",
+      key: "dev-farm-001-clean.msb",
+      external_host: "10.0.0.21",
+    }),
+  );
+});

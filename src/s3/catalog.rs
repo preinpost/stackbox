@@ -4,7 +4,7 @@
 //! index. The index is a cache that can always be rebuilt from the metadata files, and
 //! the labels inside an archive stay the source of truth for what it holds.
 
-use crate::model::TemplateRole;
+use crate::model::{ComputeSize, GpuConfig, TemplateRole};
 use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -37,6 +37,12 @@ pub struct ArchiveMetadata {
     /// Compute VMs of the farm the snapshot restores; 0 for all-in-one and templates.
     #[serde(default)]
     pub computes: u8,
+    /// Compute VM size when it differs from the default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compute: Option<ComputeSize>,
+    /// Virtual GPU configuration of the frozen farm, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gpu: Option<GpuConfig>,
     pub arch: String,
     #[serde(default)]
     pub platform: Option<String>,
@@ -172,6 +178,8 @@ mod tests {
             node: None,
             components: vec!["keystone".into(), "nova".into()],
             computes: 0,
+            compute: None,
+            gpu: None,
             arch: crate::model::current_arch(),
             platform: None,
             deployed: true,

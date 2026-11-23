@@ -824,6 +824,369 @@ export function ExportSnapshotDialog({ snapshot }: { snapshot: Snapshot }) {
   );
 }
 
+export function CreateFromBucketDialog({
+  initialBucket,
+  triggerVariant = "default",
+  triggerLabel = "버킷에서 Farm 만들기",
+}: {
+  initialBucket?: string;
+  triggerVariant?: "default" | "primary" | "ghost";
+  triggerLabel?: string;
+}) {
+  const client = useQueryClient();
+  const navigate = useNavigate();
+  const buckets = useQuery(bucketsQuery()).data ?? [];
+  const hosts = useQuery(hostsQuery()).data ?? [];
+  const farms = useQuery(farmsQuery());
+  const coordinator = useQuery(hostQuery());
+  const buildId = coordinator.data?.build_id;
+  const hostArchOf = (h: (typeof hosts)[number]) =>
+    h.inspection?.arch ?? (h.kind === "local" ? coordinator.data?.arch : undefined);
+  const [bucketId, setBucketId] = useState(initialBucket ?? "");
+  const [key, setKey] = useState("");
+  const [pickedHost, setPickedHost] = useState<string>();
+  const [id, setId] = useState("");
+  const [owner, setOwner] = useState("");
+  const [editedHostName, setEditedHostName] = useState<string>();
+
+  const activeBucketId = bucketId || initialBucket || buckets[0]?.id || "";
+  const dialog = useDialog(false, () => {
+    setBucketId(initialBucket ?? buckets[0]?.id ?? "");
+    setKey("");
+    setPickedHost(undefined);
+    setId("");
+    setOwner("");
+    setEditedHostName(undefined);
+    mutation.reset();
+  });
+  const objects = useQuery({
+    ...bucketObjectsQuery(activeBucketId),
+    enabled: dialog.open && Boolean(activeBucketId),
+  });
+  // Only archives with metadata that can boot a farm (not compute templates) and match at
+  // least one registered host's architecture are shown.
+  const registeredArches = new Set(
+    hosts.map(hostArchOf).filter((a): a is string => Boolean(a)),
+  );
+  const usableObjects = (objects.data ?? []).filter((o) => {
+    const meta = o.metadata;
+    if (!meta || meta.role === "compute") return false;
+    if (registeredArches.size > 0 && !registeredArches.has(meta.arch))
+      return false;
+    return true;
+  });
+  const selectedObject =
+    usableObjects.find((o) => o.key === key) ?? usableObjects[0];
+  const selectedMeta = selectedObject?.metadata;
+  const compatibleHosts = selectedMeta
+    ? hosts.filter((h) => {
+        const arch = hostArchOf(h);
+        return !arch || arch === selectedMeta.arch;
+      })
+    : hosts;
+  const defaultHost =
+    compatibleHosts.find((h) => hostReady(h, buildId)) ?? compatibleHosts[0];
+  const target = hosts.find((h) => h.id === pickedHost) ?? defaultHost;
+  const defaultExternalHost = (h?: (typeof hosts)[number]) => {
+    if (!h || h.kind === "local") return "localhost";
+    return /^[a-z0-9.-]+$/i.test(h.address) ? h.address : "localhost";
+  };
+  const hostName = editedHostName ?? defaultExternalHost(target);
+
+  const mutation = useMutation({
+    mutationFn: () =>
+      api.create({
+        id,
+        host_id: target?.id,
+        bucket: activeBucketId,
+        key: selectedObject?.key,
+        external_host: hostName,
+        ...(owner.trim() ? { owner: owner.trim() } : {}),
+      }),
+    onSuccess: async (job) => {
+      await refresh(client);
+      dialog.setOpen(false);
+      await navigate({ to: "/farms/$farmId", params: { farmId: job.farm_id } });
+    },
+  });
+
+  const duplicate = farms.data?.some((f) => f.id === id);
+  const targetArch = target ? hostArchOf(target) : undefined;
+  const targetWrongArch = Boolean(
+    selectedMeta && targetArch && targetArch !== selectedMeta.arch,
+  );
+  const needsMtty = selectedMeta?.gpu?.mode === "mtty";
+  const mttyMissing = Boolean(
+    needsMtty && target && target.inspection?.mtty_available !== true,
+  );
+  const hostMissing = !target || !hostReady(target, buildId);
+  const capacity = target?.capacity;
+  const remaining = capacity
+    ? capacity.memory_budget_mib - capacity.memory_reserved_mib
+    : null;
+  const bucket = buckets.find((b) => b.id === activeBucketId);
+  const canSubmit =
+    Boolean(activeBucketId && selectedObject && id.trim()) &&
+    !duplicate &&
+    !hostMissing &&
+    !targetWrongArch &&
+    !mttyMissing;
+
+  return (
+    <Dialog.Root
+      open={dialog.open}
+      onOpenChange={(next) => {
+        if (mutation.isPending) return;
+        dialog.onOpenChange(next);
+      }}
+    >
+      <Dialog.Trigger
+        render={
+          <Button variant={triggerVariant} disabled={!buckets.length} />
+        }
+        title={
+          !buckets.length
+            ? "Snapshots 화면 아래에서 S3 버킷을 먼저 등록하세요."
+            : undefined
+        }
+      >
+        <CloudDownload size={16} />
+        {triggerLabel}
+      </Dialog.Trigger>
+      <Modal
+        title="S3 버킷에서 farm 만들기"
+        description="메타데이터가 있는 버킷 이미지를 골라 대상 호스트로 바로 내려받고 새 farm으로 시작합니다."
+        closeDisabled={mutation.isPending}
+      >
+        <form
+          onSubmit={(event) => {
+            event.preventDefault();
+            if (canSubmit) mutation.mutate();
+          }}
+        >
+          <div className="modal-body space-y-5">
+            {!initialBucket && buckets.length > 1 && (
+              <div className="field">
+                <span>버킷</span>
+                <SelectInput
+                  label="버킷"
+                  value={activeBucketId}
+                  onChange={(next) => {
+                    setBucketId(next);
+                    setKey("");
+                    setPickedHost(undefined);
+                    setEditedHostName(undefined);
+                  }}
+                  disabled={mutation.isPending}
+                  items={buckets.map((b) => ({
+                    value: b.id,
+                    label: `${b.id} · ${bucketLocation(b)}`,
+                  }))}
+                />
+              </div>
+            )}
+            <div className="field">
+              <span className="flex items-center justify-between gap-2">
+                사용 가능한 이미지
+                <button
+                  type="button"
+                  className="text-link"
+                  disabled={objects.isFetching}
+                  onClick={() => void objects.refetch()}
+                >
+                  <RefreshCw size={15} />
+                  새로 고침
+                </button>
+              </span>
+              {objects.isPending ? (
+                <Loading label="버킷을 읽는 중" />
+              ) : objects.error ? (
+                <ErrorNotice error={objects.error} />
+              ) : !usableObjects.length ? (
+                <p className="field-hint">
+                  {bucket && bucketLocation(bucket)}에 현재 호스트에서 바로
+                  실행할 수 있는 이미지가 없습니다. (메타데이터가 있고 등록된
+                  호스트와 아키텍처가 같은 farm 스냅샷 또는 Control 템플릿만
+                  표시됩니다.)
+                </p>
+              ) : (
+                <div
+                  className="bucket-objects"
+                  role="radiogroup"
+                  aria-label="사용 가능한 이미지"
+                >
+                  {usableObjects.map((object) => {
+                    const summary = archiveSummary(object.metadata);
+                    const checked = selectedObject?.key === object.key;
+                    return (
+                      <button
+                        type="button"
+                        role="radio"
+                        aria-checked={checked}
+                        key={object.key}
+                        className={checked ? "selected" : ""}
+                        disabled={mutation.isPending}
+                        onClick={() => {
+                          setKey(object.key);
+                          setPickedHost(undefined);
+                          setEditedHostName(undefined);
+                        }}
+                      >
+                        <span className="font-mono">{object.key}</span>
+                        <span>{summary.title}</span>
+                        <small>
+                          {[
+                            summary.detail,
+                            bytes(object.size_bytes),
+                            object.modified_at && dateTime(object.modified_at),
+                          ]
+                            .filter(Boolean)
+                            .join(" · ")}
+                        </small>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+            <div className="field">
+              <span>실행 호스트</span>
+              {hosts.length ? (
+                <>
+                  <SelectInput
+                    label="실행 호스트"
+                    value={target?.id ?? ""}
+                    onChange={(value) => {
+                      setPickedHost(value);
+                      setEditedHostName(undefined);
+                    }}
+                    disabled={mutation.isPending}
+                    items={hosts.map((h) => {
+                      const readyHost = hostReady(h, buildId);
+                      const arch = hostArchOf(h);
+                      const compatible =
+                        !selectedMeta || !arch || arch === selectedMeta.arch;
+                      const note = !compatible
+                        ? `${arch} · 아키텍처 다름`
+                        : !readyHost
+                          ? remoteAgentNeedsUpdate(h)
+                            ? "실행기 업데이트 필요"
+                            : "준비 필요"
+                          : "버킷에서 내려받아 복원";
+                      return {
+                        value: h.id,
+                        label: `${hostLabel(h)} · ${note}`,
+                        disabled:
+                          (!readyHost || !compatible) && h.id !== target?.id,
+                      };
+                    })}
+                  />
+                  {remaining !== null && (
+                    <small>여유 메모리 {memory(Math.max(0, remaining))}</small>
+                  )}
+                </>
+              ) : (
+                <div className="warning-notice">
+                  등록된 호스트가 없습니다. Hosts에서 호스트를 먼저 등록하고
+                  환경 준비를 마치세요.
+                </div>
+              )}
+            </div>
+            <div className="grid gap-4 sm:grid-cols-2">
+              <label className="field">
+                <span>
+                  Farm ID <span className="field-required">*</span>
+                </span>
+                <Input
+                  autoFocus
+                  value={id}
+                  onValueChange={setId}
+                  className="input font-mono"
+                  placeholder="dev-openstack"
+                  required
+                  maxLength={48}
+                  pattern={idPattern}
+                  disabled={mutation.isPending}
+                />
+                {duplicate && (
+                  <small className="field-error">
+                    이미 사용 중인 Farm ID입니다.
+                  </small>
+                )}
+              </label>
+              <label className="field">
+                <span>
+                  담당자 <span className="optional">선택</span>
+                </span>
+                <Input
+                  value={owner}
+                  onValueChange={setOwner}
+                  className="input"
+                  placeholder="이름 또는 팀"
+                  maxLength={256}
+                  disabled={mutation.isPending}
+                />
+              </label>
+            </div>
+            <label className="field">
+              <span>외부 접속 호스트</span>
+              <Input
+                value={hostName}
+                onValueChange={setEditedHostName}
+                className="input font-mono"
+                required
+                maxLength={253}
+                disabled={mutation.isPending}
+              />
+              <small>
+                새 farm의 public 포트로 OpenStack 서비스 카탈로그를 다시
+                등록합니다.
+              </small>
+            </label>
+            {targetWrongArch && selectedMeta && (
+              <div className="warning-notice">
+                선택한 이미지는 {selectedMeta.arch}용입니다. 선택한 호스트(
+                {target?.id}, {targetArch})에서는 실행할 수 없습니다.
+              </div>
+            )}
+            {mttyMissing && (
+              <div className="warning-notice">
+                선택한 이미지는 mtty GPU를 사용합니다. 선택한 호스트(
+                {target?.id})는 mtty 커널 검증을 마치지 않았습니다.
+              </div>
+            )}
+            {hostMissing && (
+              <div className="warning-notice">
+                {target
+                  ? hostNotice(target, buildId)
+                  : "Hosts에서 호스트를 등록하고 환경 준비를 마치세요."}
+              </div>
+            )}
+            {mutation.error && <ErrorNotice error={mutation.error} />}
+          </div>
+          <div className="modal-footer justify-end">
+            <Dialog.Close render={<Button disabled={mutation.isPending} />}>
+              취소
+            </Dialog.Close>
+            <Button
+              type="submit"
+              variant="primary"
+              disabled={mutation.isPending || !canSubmit}
+            >
+              {mutation.isPending ? (
+                <LoaderCircle size={16} className="animate-spin" />
+              ) : (
+                <CopyPlus size={16} />
+              )}
+              Farm 만들기
+            </Button>
+          </div>
+        </form>
+      </Modal>
+    </Dialog.Root>
+  );
+}
+
 export function ImportSnapshotDialog() {
   const client = useQueryClient();
   const buckets = useQuery(bucketsQuery()).data ?? [];
