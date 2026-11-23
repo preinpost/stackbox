@@ -20,7 +20,7 @@ use utoipa::ToSchema;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// The msb release hosts run. The `microsandbox` crate in Cargo.toml is pinned to the same version.
-pub const MSB_VERSION: &str = "0.7.13";
+pub const MSB_VERSION: &str = "0.8.1";
 
 /// Whether an installed msb predates [`MSB_VERSION`], so preparation upgrades it in place.
 pub fn msb_outdated(version: &str) -> bool {
@@ -258,8 +258,81 @@ pub struct HostInspection {
     /// Absent until a preparation from a coordinator that probes them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gpu_kernel: Option<GpuKernel>,
+    /// PCI devices on this host bound to `vfio-pci`: the only ones a farm may pass through.
+    /// Only devices in such a state are listed, so a host's chipset devices stay out of its
+    /// inspection and `state.json`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pci_devices: Vec<HostPciDevice>,
+    /// Whether this host's `msb` takes `--pci` and `--iommu` on `msb run`. The upstream and
+    /// fork builds share one version string, so the version cannot tell them apart; the
+    /// inspection asks the binary's own help. Absent from older inspections, which read false.
+    #[serde(default)]
+    pub msb_pci_capable: bool,
+    /// Whether this host can take a PCI passthrough farm now: the farm kernel is installed,
+    /// `msb` supports `--pci`/`--iommu` (`msb_pci_capable`), `/dev/vfio/vfio` exists and at
+    /// least one of `pci_devices` is `vfio_ready`. The guest kernel is the farm's, so the
+    /// stock kernel answers no.
+    #[serde(default)]
+    pub pci_passthrough_available: bool,
     pub vm_boot_verified: bool,
     pub checked_at: u64,
+}
+
+/// A host PCI device a farm may pass through. Only `vfio-pci`-bound devices are reported.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct HostPciDevice {
+    /// Lowercase `DDDD:BB:DD.F`, such as `0000:04:00.3`.
+    pub bdf: String,
+    /// Four lowercase hex digits.
+    pub vendor_id: String,
+    /// Four lowercase hex digits.
+    pub product_id: String,
+    /// Six lowercase hex digits: base class, subclass and programming interface.
+    pub class: String,
+    /// The IOMMU group, or absent when the device has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub iommu_group: Option<u32>,
+    /// The bound driver; `vfio-pci` for every listed device.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub driver: Option<String>,
+    /// Every device in the IOMMU group is either unbound or bound to `vfio-pci`, so the group
+    /// can be handed to a guest without taking a device another driver uses.
+    #[serde(default)]
+    pub group_exclusive: bool,
+    /// `driver` is `vfio-pci`, the group is exclusive and `/dev/vfio/<group>` is readable and
+    /// writable by the agent. Only such a device is accepted for passthrough.
+    #[serde(default)]
+    pub vfio_ready: bool,
+}
+
+/// Whether an IOMMU group can be handed to a guest: every member is unbound or bound to
+/// `vfio-pci`. `members` holds each member's bound driver, `None` when unbound.
+pub fn group_exclusive(members: &[Option<&str>]) -> bool {
+    members
+        .iter()
+        .all(|driver| driver.is_none() || *driver == Some("vfio-pci"))
+}
+
+/// Whether a host can take a PCI passthrough farm now (`pci_passthrough_available`): the farm
+/// kernel is installed (its guest kernel carries `vfio-pci`), the host's `msb` takes
+/// `--pci`/`--iommu`, `/dev/vfio/vfio` exists, and at least one `vfio-pci` device is
+/// `vfio_ready`. The stock kernel answers no.
+pub fn pci_passthrough_ready(
+    custom_kernel: bool,
+    msb_pci_capable: bool,
+    vfio_device: bool,
+    devices: &[HostPciDevice],
+) -> bool {
+    custom_kernel
+        && msb_pci_capable
+        && vfio_device
+        && devices.iter().any(|device| device.vfio_ready)
+}
+
+/// Whether `msb run --help` mentions both `--pci` and `--iommu`, the flags a PCI farm's VMs
+/// need. `inspect.sh` makes the same check on the same text.
+pub fn msb_help_supports_pci(help: &str) -> bool {
+    help.contains("--pci") && help.contains("--iommu")
 }
 /// The kernel a verification VM booted: farm's installed kernel, or microsandbox's stock one.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -540,6 +613,29 @@ pub struct HostJob {
 }
 
 #[cfg(test)]
+mod msb_pci_tests {
+    use super::msb_help_supports_pci;
+
+    #[test]
+    fn only_a_run_help_with_both_flags_counts_as_pci_capable() {
+        let fork = "Usage: msb run [OPTIONS]\n  --pci <BDF>\n  --iommu\n";
+        assert!(msb_help_supports_pci(fork));
+        assert!(
+            !msb_help_supports_pci("Usage: msb run\n  --pci <BDF>\n"),
+            "no --iommu"
+        );
+        assert!(
+            !msb_help_supports_pci("Usage: msb run\n  --iommu\n"),
+            "no --pci"
+        );
+        assert!(
+            !msb_help_supports_pci(""),
+            "a failed help run reads as upstream"
+        );
+    }
+}
+
+#[cfg(test)]
 mod msb_version_tests {
     use super::*;
 
@@ -548,7 +644,8 @@ mod msb_version_tests {
         assert!(msb_outdated("0.7.8"));
         assert!(msb_outdated("0.6.99"));
         assert!(!msb_outdated(MSB_VERSION));
-        assert!(!msb_outdated("0.7.14"));
+        assert!(msb_outdated("0.7.14"));
+        assert!(!msb_outdated("0.8.2"));
         assert!(!msb_outdated("1.0.0"));
         assert!(!msb_outdated("0.7.x"));
     }
@@ -655,9 +752,11 @@ mod msb_version_tests {
 
     #[test]
     fn hosts_run_the_msb_the_crate_is_built_against() {
-        assert!(
-            include_str!("../../Cargo.toml")
-                .contains(&format!("microsandbox = {{ version = \"={MSB_VERSION}\""))
-        );
+        // The crate is the fork's pinned git revision; its msb is the fork's build of MSB_VERSION.
+        let cargo = include_str!("../../Cargo.toml");
+        assert!(cargo.contains("microsandbox = { git = \"https://github.com/preinpost/microsandbox.git\", rev = \"da3aa7956d34bd29bcea69140be642b2d00156a2\""));
+        assert!(cargo.contains("msb_krun = { git = \"https://github.com/preinpost/libkrun.git\", rev = \"97f7accd2f6cf78d04b34f1c8badf6624ef83e5d\""));
+        assert!(cargo.contains("msb_krun_utils = { git = \"https://github.com/preinpost/libkrun.git\", rev = \"97f7accd2f6cf78d04b34f1c8badf6624ef83e5d\""));
+        assert_eq!(MSB_VERSION, "0.8.1");
     }
 }

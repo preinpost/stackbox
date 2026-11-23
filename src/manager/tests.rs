@@ -210,6 +210,7 @@ impl Backend for Fake {
         release: String,
         reference: Option<String>,
         gpu: Option<crate::model::GpuConfig>,
+        pci_devices: Vec<String>,
         remote: Vec<u8>,
         key: String,
         sink: EventSink,
@@ -218,7 +219,15 @@ impl Backend for Fake {
             assert!(key.starts_with("-----BEGIN OPENSSH PRIVATE KEY-----"));
             self.spanning.lock().unwrap().push(remote);
             self.deploy(
-                id, from, exposure, components, release, reference, gpu, sink,
+                id,
+                from,
+                exposure,
+                components,
+                release,
+                reference,
+                gpu,
+                pci_devices,
+                sink,
             )
             .await
         })
@@ -279,6 +288,7 @@ impl Backend for Fake {
         _: String,
         reference: Option<String>,
         gpu: Option<crate::model::GpuConfig>,
+        _pci_devices: Vec<String>,
         sink: EventSink,
     ) -> BoxFuture<'_, Result<()>> {
         Box::pin(async move {
@@ -592,6 +602,9 @@ fn local_host(manager: &FarmManager) {
             let host = &mut state.hosts.get_mut("local").unwrap().host;
             host.status = crate::remote::HostStatus::Ready;
             host.inspection = Some(crate::remote::HostInspection {
+                pci_devices: Vec::new(),
+                msb_pci_capable: true,
+                pci_passthrough_available: false,
                 os: "linux".into(),
                 arch: std::env::consts::ARCH.into(),
                 compatible: true,
@@ -600,7 +613,7 @@ fn local_host(manager: &FarmManager) {
                 memory_total_mib: 65536,
                 memory_available_mib: 65536,
                 disk_available_mib: 500_000,
-                msb_version: Some("0.7.13".into()),
+                msb_version: Some(crate::remote::MSB_VERSION.into()),
                 msb_compatible: true,
                 docker_available: true,
                 golden_image_available: true,
@@ -634,6 +647,7 @@ async fn open_with(options: ManagerOptions, backend: Arc<Fake>) -> FarmManager {
 }
 fn request(id: &str) -> CreateRequest {
     CreateRequest {
+        pci_devices: Vec::new(),
         id: id.into(),
         host_id: Some("local".into()),
         components: vec![],
@@ -1420,12 +1434,17 @@ struct MsbLink {
     /// Answer `VerifyVm` with a plain `Done`, as an agent built before its reply carried the
     /// inspection does.
     legacy_verify: std::sync::atomic::AtomicBool,
+    /// The host's PCI devices bound to `vfio-pci`, as its inspection lists them.
+    pci: std::sync::Mutex<Vec<crate::remote::HostPciDevice>>,
 }
 impl MsbLink {
     /// A reply from this fake: `gpu` is what its verification VM read, and `None` for a
     /// plain inspection, which cannot boot a guest.
     fn inspection(&self, gpu: Option<crate::remote::GpuKernel>) -> crate::remote::HostInspection {
         let msb_version = self.msb.lock().unwrap().clone();
+        // Read each lock on its own: a guard alive in the same expression would block the next.
+        let custom_kernel = self.custom_kernel.lock().unwrap().clone();
+        let pci = self.pci.lock().unwrap().clone();
         crate::remote::HostInspection {
             os: "macos".into(),
             arch: "aarch64".into(),
@@ -1439,10 +1458,18 @@ impl MsbLink {
             msb_version,
             docker_available: true,
             golden_image_available: true,
-            custom_kernel: self.custom_kernel.lock().unwrap().clone(),
+            custom_kernel: custom_kernel.clone(),
             custom_kernel_reason: None,
             mtty_available: gpu.as_ref().is_some_and(|gpu| gpu.mtty_available()),
             gpu_kernel: gpu,
+            msb_pci_capable: true,
+            pci_passthrough_available: crate::remote::pci_passthrough_ready(
+                custom_kernel.is_some(),
+                true,
+                true,
+                &pci,
+            ),
+            pci_devices: pci,
             vm_boot_verified: false,
             checked_at: now(),
         }
@@ -1644,6 +1671,49 @@ async fn agent_host_preparation_keeps_the_verification_replys_mtty_result() {
     assert!(!inspection.mtty_available);
     assert!(inspection.gpu_kernel.is_none());
     assert!(inspection.vm_boot_verified);
+    settle(&manager).await;
+}
+
+#[tokio::test]
+async fn agent_host_preparation_keeps_the_pci_devices_the_reply_carried() {
+    use crate::remote::HostJobKind;
+    let dir = tempfile::tempdir().unwrap();
+    let link = Arc::new(MsbLink::default());
+    *link.msb.lock().unwrap() = Some(crate::remote::MSB_VERSION.into());
+    *link.custom_kernel.lock().unwrap() = Some("/opt/farm/libkrunfw.so.5".into());
+    *link.pci.lock().unwrap() = vec![crate::remote::HostPciDevice {
+        bdf: "0000:04:00.3".into(),
+        vendor_id: "1022".into(),
+        product_id: "1639".into(),
+        class: "0c0330".into(),
+        iommu_group: Some(12),
+        driver: Some("vfio-pci".into()),
+        group_exclusive: true,
+        vfio_ready: true,
+    }];
+    let manager = FarmManager::with_link(options(dir.path()), link.clone())
+        .await
+        .unwrap();
+    manager
+        .register_local_host(crate::remote::RegisterLocalHost { id: "local".into() })
+        .unwrap();
+    let job = manager
+        .start_host_job("local", HostJobKind::Prepare)
+        .unwrap();
+    let finished = host_done(&manager, &job.id).await;
+    assert_eq!(
+        finished.status,
+        JobStatus::Succeeded,
+        "{:?}",
+        finished.error
+    );
+    // The coordinator stores the device list and the passthrough verdict the reply carried,
+    // so the placement check reads them from `state.json`, not from a new inspection.
+    let inspection = manager.host("local").unwrap().inspection.unwrap();
+    assert_eq!(inspection.pci_devices.len(), 1);
+    assert_eq!(inspection.pci_devices[0].bdf, "0000:04:00.3");
+    assert!(inspection.pci_devices[0].vfio_ready);
+    assert!(inspection.pci_passthrough_available);
     settle(&manager).await;
 }
 
@@ -7083,6 +7153,9 @@ async fn release_routes_preview_and_start_farms() {
 /// kernel's mediated device.
 fn prepared_inspection(mtty: bool, custom_kernel: Option<&str>) -> crate::remote::HostInspection {
     crate::remote::HostInspection {
+        pci_devices: Vec::new(),
+        msb_pci_capable: true,
+        pci_passthrough_available: false,
         os: "linux".into(),
         arch: std::env::consts::ARCH.into(),
         compatible: true,
@@ -7091,7 +7164,7 @@ fn prepared_inspection(mtty: bool, custom_kernel: Option<&str>) -> crate::remote
         memory_total_mib: 65536,
         memory_available_mib: 65536,
         disk_available_mib: 500_000,
-        msb_version: Some("0.7.13".into()),
+        msb_version: Some(crate::remote::MSB_VERSION.into()),
         msb_compatible: true,
         docker_available: true,
         golden_image_available: true,
@@ -7476,6 +7549,7 @@ async fn mtty_farm_probe_without_a_coordinator_kernel() {
         ..Default::default()
     };
     let planned = crate::model::plan(&crate::model::PlanRequest {
+        pci_devices: Vec::new(),
         components: vec!["nova".into()],
         computes: 1,
         compute: None,
@@ -7832,4 +7906,168 @@ async fn a_state_write_still_works_on_a_current_thread_runtime() {
     let dir = tempfile::tempdir().unwrap();
     let manager = open_with(options(dir.path()), Arc::new(Fake::default())).await;
     assert_eq!(manager.update(|_| Ok(7)).unwrap(), 7);
+}
+
+/// A PCI farm needs an msb that takes `--pci`/`--iommu`. The upstream msb reports the same
+/// version as the fork, so the inspection's own flag decides: without it the create is refused
+/// by name, and with it the same device is accepted.
+#[tokio::test]
+async fn a_pci_farm_needs_an_msb_with_the_pci_flags() {
+    let dir = tempfile::tempdir().unwrap();
+    let backend = Arc::new(Fake::default());
+    let manager = open_with(options(dir.path()), backend.clone()).await;
+    if !cfg!(target_os = "linux") {
+        *manager.0.guest_agent.write().unwrap() = Some(dir.path().join("farm-agent"));
+    }
+    let kernel = "/home/user/.local/share/farm/libkrunfw/0123456789abcdef/libkrunfw.so.5.6.1";
+    let set_msb = |capable: bool| {
+        manager
+            .update(|state| {
+                let host = &mut state.hosts.get_mut("local").unwrap().host;
+                let mut inspection = prepared_inspection(false, Some(kernel));
+                inspection.pci_devices = vec![pci_device("0000:04:00.3", true)];
+                inspection.msb_pci_capable = capable;
+                inspection.pci_passthrough_available = capable;
+                host.inspection = Some(inspection);
+                Ok(())
+            })
+            .unwrap();
+    };
+    set_msb(false);
+    let why = manager
+        .create(CreateRequest {
+            computes: 1,
+            pci_devices: vec!["0000:04:00.3".into()],
+            ..request("upstream")
+        })
+        .unwrap_err();
+    assert!(
+        why.to_string()
+            .contains("host 'local' msb binary does not support PCI passthrough (--pci/--iommu)"),
+        "{why:#}"
+    );
+
+    set_msb(true);
+    let made = manager
+        .create(CreateRequest {
+            computes: 1,
+            pci_devices: vec!["0000:04:00.3".into()],
+            ..request("fork")
+        })
+        .expect("a msb with the PCI flags and a ready device is accepted");
+    done(&manager, &made).await;
+    settle(&manager).await;
+}
+
+/// A host PCI device as its inspection lists it: bound to `vfio-pci` and ready, or left
+/// unbound by a `vfio_ready: false` device with no driver.
+fn pci_device(bdf: &str, ready: bool) -> crate::remote::HostPciDevice {
+    crate::remote::HostPciDevice {
+        bdf: bdf.into(),
+        vendor_id: "1022".into(),
+        product_id: "1639".into(),
+        class: "0c0330".into(),
+        iommu_group: Some(12),
+        driver: ready.then(|| "vfio-pci".into()),
+        group_exclusive: ready,
+        vfio_ready: ready,
+    }
+}
+
+/// A PCI farm needs its device on the compute host, bound to vfio-pci and ready; one device
+/// serves one live farm; a deleted farm gives its device back; a farm without a compute
+/// cannot hold one.
+#[tokio::test]
+async fn a_pci_farm_needs_a_vfio_ready_device_that_no_live_farm_holds() {
+    let dir = tempfile::tempdir().unwrap();
+    let backend = Arc::new(Fake::default());
+    let manager = open_with(options(dir.path()), backend.clone()).await;
+    if !cfg!(target_os = "linux") {
+        *manager.0.guest_agent.write().unwrap() = Some(dir.path().join("farm-agent"));
+    }
+    let kernel = "/home/user/.local/share/farm/libkrunfw/0123456789abcdef/libkrunfw.so.5.6.1";
+    manager
+        .update(|state| {
+            let host = &mut state.hosts.get_mut("local").unwrap().host;
+            let mut inspection = prepared_inspection(false, Some(kernel));
+            inspection.pci_devices = vec![
+                pci_device("0000:04:00.3", true),
+                pci_device("0000:05:00.0", false),
+            ];
+            inspection.pci_passthrough_available = true;
+            host.inspection = Some(inspection);
+            Ok(())
+        })
+        .unwrap();
+
+    // Passthrough is offered by compute VMs only.
+    let why = manager
+        .create(CreateRequest {
+            pci_devices: vec!["0000:04:00.3".into()],
+            ..request("control-only")
+        })
+        .unwrap_err();
+    assert!(
+        why.to_string().contains("offered by compute VMs"),
+        "{why:#}"
+    );
+
+    // A device bound to another driver, or absent from the host, is refused by name.
+    for bdf in ["0000:05:00.0", "0000:06:00.0"] {
+        let why = manager
+            .create(CreateRequest {
+                computes: 1,
+                pci_devices: vec![bdf.into()],
+                ..request("unready")
+            })
+            .unwrap_err();
+        assert!(
+            why.to_string().contains(&format!(
+                "host 'local' does not have vfio-ready PCI device '{bdf}'"
+            )),
+            "{why:#}"
+        );
+    }
+
+    // The first farm takes the device; the address is matched in its normalized form.
+    let first = manager
+        .create(CreateRequest {
+            computes: 1,
+            pci_devices: vec!["0000:04:00.3".into()],
+            ..request("first")
+        })
+        .expect("a vfio-ready device on the compute host is accepted");
+    done(&manager, &first).await;
+
+    // A second farm asking for the same device is in conflict.
+    let why = manager
+        .create(CreateRequest {
+            computes: 1,
+            pci_devices: vec!["0000:04:00.3".into()],
+            ..request("second")
+        })
+        .unwrap_err();
+    assert!(
+        why.to_string()
+            .contains("already passed through to farm 'first'"),
+        "{why:#}"
+    );
+    assert!(why.downcast_ref::<Conflict>().is_some(), "{why:#}");
+
+    // Deleting the holder frees the device for the next farm.
+    manager
+        .update(|state| {
+            state.farms.get_mut("first").unwrap().status = FarmStatus::Deleted;
+            Ok(())
+        })
+        .unwrap();
+    let third = manager
+        .create(CreateRequest {
+            computes: 1,
+            pci_devices: vec!["0000:04:00.3".into()],
+            ..request("third")
+        })
+        .expect("a deleted farm releases its device");
+    done(&manager, &third).await;
+    settle(&manager).await;
 }

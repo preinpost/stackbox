@@ -10,7 +10,7 @@
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, ensure};
-use farm::farm::{ALL_IN_ONE, NodeSetup, NodeSpec, connect, create_node, delete_farm};
+use farm::farm::{ALL_IN_ONE, NodeSetup, NodeSpec, connect, create_node, delete_farm, detach};
 use farm::link::{Impair, guest::LinkConf, host::Switch};
 
 const VMS: [(&str, &str, &str); 3] = [
@@ -28,7 +28,7 @@ fn address(i: usize) -> String {
 async fn sh(vm: &str, script: &str) -> Result<String> {
     let sandbox = connect(vm).await?;
     let out = sandbox.exec("bash", ["-c", script]).await;
-    sandbox.detach().await;
+    detach(&sandbox).await;
     let out = out?;
     ensure!(
         out.status().success,
@@ -215,7 +215,7 @@ async fn vms_share_a_segment_through_the_switch() {
         ensure!(status.success());
         let sandbox = connect(a).await?;
         farm::farm::wait_until_booted(&sandbox).await?;
-        sandbox.detach().await;
+        detach(&sandbox).await;
         println!(
             "VM restart: back after {:?}",
             reaches_within(a, 1, 60).await?

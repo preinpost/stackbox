@@ -6,11 +6,11 @@
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use microsandbox::snapshot::{Snapshot, SnapshotReference};
+use microsandbox::snapshot::{Checkpoint, SnapshotReference};
 use microsandbox::{MicrosandboxError, NetworkPolicy, NetworkProfile, Sandbox};
 use sha2::{Digest, Sha256};
 
-use super::node::destroy_node;
+use super::node::{destroy_node, detach};
 use super::template::{ALL_IN_ONE, NodeSpec};
 use crate::shell::run;
 
@@ -67,7 +67,7 @@ pub fn current() -> String {
 }
 
 pub async fn available(reference: &str) -> Result<bool> {
-    match Snapshot::open_ref(SnapshotReference::auto(reference)).await {
+    match Checkpoint::open_ref(SnapshotReference::auto(reference)).await {
         Ok(_) => Ok(true),
         Err(MicrosandboxError::SnapshotNotFound(_)) => Ok(false),
         Err(error) => Err(error).with_context(|| format!("look up {reference}")),
@@ -115,13 +115,13 @@ async fn build(os: &GuestOs, spec: &NodeSpec, reference: &str) -> Result<()> {
         let sandbox = builder.create().await.context("boot the base image")?;
         let setup = run(&sandbox, &format!("{}\nsync", os.setup)).await;
         let stopped = sandbox.stop_with_timeout(BUILD_STOP_TIMEOUT).await;
-        sandbox.detach().await;
+        detach(&sandbox).await;
         setup.context("run the setup script")?;
         stopped.context("stop the golden VM")?;
         let (group, snapshot) = reference
             .split_once(':')
             .context("golden reference has no group")?;
-        Snapshot::builder(snapshot)
+        Checkpoint::builder(snapshot)
             .group(group)
             .from_sandbox(&name)
             .label("farm.golden.os", os.id)

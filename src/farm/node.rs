@@ -1,5 +1,7 @@
 use anyhow::{Context, Result};
-use microsandbox::sandbox::{DestroyOptions, SandboxBuilder, SandboxHandle};
+use std::collections::BTreeMap;
+
+use microsandbox::sandbox::{DestroyOptions, SandboxBuilder, SandboxInspectedSettings};
 use microsandbox::{
     MicrosandboxError, MicrosandboxResult, NetworkPolicy, NetworkProfile, Operation, Sandbox,
     UnsupportedReason,
@@ -65,6 +67,9 @@ pub struct NodeSetup<'a> {
     pub links: Vec<LinkConf>,
     /// msb snapshot to boot from instead of the golden image, as when restoring a farm.
     pub source: Option<String>,
+    /// Host PCI devices (`DDDD:BB:DD.F`) passed through to this VM with VFIO; only compute-1
+    /// of a farm that has them gets any. A VM with devices also gets the `farm-vfio` unit.
+    pub pci_devices: Vec<String>,
 }
 
 // msb's default root is an overlay; Docker's overlayfs cannot nest on it,
@@ -115,6 +120,43 @@ const GUEST_FILES: &[(&str, &str, &str)] = &[
     ),
 ];
 const GUEST_UNITS: &str = "disable-ipv6 farm-identity farm-hostname farm-external";
+
+/// Files of a compute VM that has passed-through PCI devices: the helper that binds them to
+/// `vfio-pci` before the guest's own drivers claim them, and the unit that runs it at boot.
+const VFIO_FILES: &[(&str, &str, &str)] = &[
+    (
+        "/usr/local/sbin/farm-vfio-prepare",
+        include_str!("../../guest/farm/farm-vfio-prepare"),
+        "755",
+    ),
+    (
+        "/etc/systemd/system/farm-vfio.service",
+        include_str!("../../guest/farm/farm-vfio.service"),
+        "644",
+    ),
+];
+
+/// Write the VFIO helper and enable its unit in a compute VM that has passed-through devices.
+/// The unit runs before Docker, so nova-compute's container finds the devices bound to
+/// `vfio-pci`; starting it now binds the devices already present in this boot.
+pub async fn install_vfio_files(sandbox: &Sandbox) -> Result<()> {
+    let fs = sandbox.fs();
+    for (path, contents, _) in VFIO_FILES {
+        fs.write(path, *contents).await?;
+    }
+    let modes: String = VFIO_FILES
+        .iter()
+        .map(|(path, _, mode)| format!("chmod {mode} {path}\n"))
+        .collect();
+    run(
+        sandbox,
+        &format!(
+            "set -e\n{modes}systemctl daemon-reload\nsystemctl enable farm-vfio.service\nsystemctl start farm-vfio.service"
+        ),
+    )
+    .await?;
+    Ok(())
+}
 
 /// Write the farm's files and enable their units. Farm VMs get them when created and again
 /// when deployed, so a redeploy also upgrades a farm made by an older build.
@@ -167,8 +209,15 @@ pub fn is_node_name(farm_id: &str, role: Role, index: Option<u8>, name: &str) ->
         || (role == Role::AllInOne && name.strip_suffix(LEGACY_ALL_IN_ONE_SUFFIX) == Some(farm_id))
 }
 
-pub fn label(handle: &SandboxHandle, key: &str) -> Option<String> {
-    handle.config().ok()?.spec.labels.get(key).cloned()
+/// A VM's persisted labels and memory (MiB). msb cannot describe a VM it fails to read, so
+/// that reads as no labels and no memory, as it did before the SDK moved to live lookups.
+pub async fn settings(sandbox: &Sandbox) -> (BTreeMap<String, String>, u32) {
+    match sandbox.config().await.map(|config| config.settings) {
+        Ok(SandboxInspectedSettings::Local(spec)) => {
+            (spec.labels.clone(), spec.resources.memory_mib)
+        }
+        _ => (BTreeMap::new(), 0),
+    }
 }
 
 /// The link binary guests run (see [`crate::link::guest`]).
@@ -261,6 +310,14 @@ pub async fn create_node(farm_id: &str, spec: NodeSpec, setup: &NodeSetup<'_>) -
             Some(index) => builder.label(INDEX_LABEL, index.to_string()),
             None => builder,
         };
+        // Passed-through devices need the virtio IOMMU so the guest can isolate them by group.
+        let builder = if setup.pci_devices.is_empty() {
+            builder
+        } else {
+            builder
+                .pci_devices(setup.pci_devices.iter().cloned())
+                .virtio_iommu(true)
+        };
         builder.detached(true)
     };
     let sandbox = create_nested(build)
@@ -272,6 +329,9 @@ pub async fn create_node(farm_id: &str, spec: NodeSpec, setup: &NodeSetup<'_>) -
         let identity = identity_conf(&spec, !setup.public_ports.is_empty(), &setup.peers);
         sandbox.fs().write(IDENTITY_CONF, identity).await?;
         install_guest_files(&sandbox).await?;
+        if !setup.pci_devices.is_empty() {
+            install_vfio_files(&sandbox).await?;
+        }
         if let Some(binary) = &guest_agent {
             install_links(&sandbox, binary, &setup.links).await?;
         }
@@ -280,7 +340,7 @@ pub async fn create_node(farm_id: &str, spec: NodeSpec, setup: &NodeSetup<'_>) -
         let ip = ip.trim().parse::<std::net::Ipv4Addr>().context("eth0 has no valid IPv4 address")?;
         Ok::<_, anyhow::Error>(ip.to_string())
     }.await;
-    sandbox.detach().await;
+    detach(&sandbox).await;
     let ip = boot.with_context(|| {
         format!("{name} boot failed; VM is left running for inspection and explicit deletion")
     })?;
@@ -307,38 +367,51 @@ pub async fn create_nested(build: impl Fn() -> SandboxBuilder) -> MicrosandboxRe
     }
 }
 
-pub fn describe_node(handle: &SandboxHandle) -> FarmNode {
+pub async fn describe_node(sandbox: &Sandbox) -> FarmNode {
+    let (labels, memory_mib) = settings(sandbox).await;
+    let status = match sandbox.status().await {
+        Ok(status) => format!("{status:?}").to_lowercase(),
+        Err(_) => "unknown".into(),
+    };
     FarmNode {
-        name: handle.name().to_owned(),
-        role: label(handle, ROLE_LABEL).and_then(|r| r.parse().ok()),
-        index: label(handle, INDEX_LABEL).and_then(|i| i.parse().ok()),
-        status: format!("{:?}", handle.status_snapshot()).to_lowercase(),
-        memory_mib: handle
-            .config()
-            .map(|c| c.spec.resources.memory_mib)
-            .unwrap_or(0),
-        ip: label(handle, OVERLAY_IP_LABEL),
+        name: sandbox.name().to_owned(),
+        role: labels.get(ROLE_LABEL).and_then(|r| r.parse().ok()),
+        index: labels.get(INDEX_LABEL).and_then(|i| i.parse().ok()),
+        status,
+        memory_mib,
+        ip: labels.get(OVERLAY_IP_LABEL).cloned(),
     }
 }
 
-pub async fn destroy_node(handle: &SandboxHandle) -> Result<()> {
-    handle
+pub async fn destroy_node(sandbox: &Sandbox) -> Result<()> {
+    sandbox
         .destroy_with(DestroyOptions {
             force: true,
             ..Default::default()
         })
         .await
-        .with_context(|| format!("destroy {}", handle.name()))
+        .with_context(|| format!("destroy {}", sandbox.name()))
 }
 
+/// Let go of a VM this process only looked at or created. Its cleanup stays armed until then,
+/// so a failure is reported and the VM is left as it is.
+pub async fn detach(sandbox: &Sandbox) {
+    if let Err(error) = sandbox.detach().await {
+        eprintln!("{}: detach: {error}", sandbox.name());
+    }
+}
+
+/// A VM by name, prepared for guest commands. msb prepares the agent connection on first
+/// use; `ping` does it now, so a VM that cannot be reached fails here.
 pub async fn connect(name: &str) -> Result<Sandbox> {
-    let handle = Sandbox::get(name)
+    let sandbox = Sandbox::get(name)
         .await
         .with_context(|| format!("find {name}"))?;
-    handle
-        .connect()
+    sandbox
+        .ping()
         .await
-        .with_context(|| format!("connect {name}"))
+        .with_context(|| format!("connect {name}"))?;
+    Ok(sandbox)
 }
 
 pub async fn wait_until_booted(sandbox: &Sandbox) -> Result<()> {

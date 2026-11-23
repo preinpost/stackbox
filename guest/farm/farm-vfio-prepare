@@ -1,0 +1,49 @@
+#!/bin/sh
+# Prepares this VM's passed-through PCI devices for Nova's VFIO passthrough. Runs at boot,
+# before Docker (farm-vfio.service). Devices bound to a driver other than vfio-pci are moved to
+# vfio-pci first, so no guest driver such as xhci_hcd keeps the device that libvirt has to take.
+set -eu
+
+# Nova's passthrough runs without interrupt remapping in this guest; the VFIO module must allow
+# unsafe interrupts for the devices to be handed to the container. The parameter exists only
+# when the module is built in or loaded.
+param=/sys/module/vfio_iommu_type1/parameters/allow_unsafe_interrupts
+if [ -e "$param" ]; then
+    echo Y > "$param"
+fi
+
+# Containers and libvirt open the VFIO container file as uid/gid 42427 (nova_libvirt), so the
+# node belongs to that group and no one else may open it.
+if [ -e /dev/vfio/vfio ]; then
+    chown root:42427 /dev/vfio/vfio
+    chmod 0660 /dev/vfio/vfio
+fi
+
+# libkrun puts only passed-through devices on PCI bus 0; virtio devices are on virtio-mmio. Any
+# device here is a passthrough device, so each is re-bound to vfio-pci unless it already is.
+if [ ! -d /sys/bus/pci/drivers/vfio-pci ]; then
+    modprobe vfio-pci 2>/dev/null || true
+fi
+for dev in /sys/bus/pci/devices/0000:00:*; do
+    [ -e "$dev/vendor" ] || continue
+    bdf=$(basename "$dev")
+    driver=
+    if [ -L "$dev/driver" ]; then
+        driver=$(basename "$(readlink "$dev/driver")")
+    fi
+    if [ "$driver" = vfio-pci ]; then
+        continue
+    fi
+    if [ -n "$driver" ]; then
+        echo "$bdf" > "$dev/driver/unbind"
+    fi
+    echo vfio-pci > "$dev/driver_override"
+    echo "$bdf" > /sys/bus/pci/drivers_probe
+done
+
+# The VFIO group files Nova and libvirt open as uid/gid 42427.
+for node in /dev/vfio/[0-9]*; do
+    [ -e "$node" ] || continue
+    chown root:42427 "$node"
+    chmod 0660 "$node"
+done

@@ -3254,6 +3254,13 @@
               "null"
             ]
           },
+          "pci_devices": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Host PCI devices passed through to compute-1 (see [`PlanRequest::pci_devices`])."
+          },
           "placement": {
             "type": "object",
             "description": "Compute VMs that run on another host than `host_id`, by VM (`compute-2` → host id).\nTheir links reach the control VM's host through the coordinator's relay.",
@@ -4282,6 +4289,10 @@
           "msb_compatible": {
             "type": "boolean"
           },
+          "msb_pci_capable": {
+            "type": "boolean",
+            "description": "Whether this host's `msb` takes `--pci` and `--iommu` on `msb run`. The upstream and\nfork builds share one version string, so the version cannot tell them apart; the\ninspection asks the binary's own help. Absent from older inspections, which read false."
+          },
           "msb_version": {
             "type": [
               "string",
@@ -4294,6 +4305,17 @@
           },
           "os": {
             "type": "string"
+          },
+          "pci_devices": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/HostPciDevice"
+            },
+            "description": "PCI devices on this host bound to `vfio-pci`: the only ones a farm may pass through.\nOnly devices in such a state are listed, so a host's chipset devices stay out of its\ninspection and `state.json`."
+          },
+          "pci_passthrough_available": {
+            "type": "boolean",
+            "description": "Whether this host can take a PCI passthrough farm now: the farm kernel is installed,\n`msb` supports `--pci`/`--iommu` (`msb_pci_capable`), `/dev/vfio/vfio` exists and at\nleast one of `pci_devices` is `vfio_ready`. The guest kernel is the farm's, so the\nstock kernel answers no."
           },
           "sudo_available": {
             "type": "boolean"
@@ -4406,6 +4428,58 @@
           "local",
           "agent"
         ]
+      },
+      "HostPciDevice": {
+        "type": "object",
+        "description": "A host PCI device a farm may pass through. Only `vfio-pci`-bound devices are reported.",
+        "required": [
+          "bdf",
+          "vendor_id",
+          "product_id",
+          "class"
+        ],
+        "properties": {
+          "bdf": {
+            "type": "string",
+            "description": "Lowercase `DDDD:BB:DD.F`, such as `0000:04:00.3`."
+          },
+          "class": {
+            "type": "string",
+            "description": "Six lowercase hex digits: base class, subclass and programming interface."
+          },
+          "driver": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The bound driver; `vfio-pci` for every listed device."
+          },
+          "group_exclusive": {
+            "type": "boolean",
+            "description": "Every device in the IOMMU group is either unbound or bound to `vfio-pci`, so the group\ncan be handed to a guest without taking a device another driver uses."
+          },
+          "iommu_group": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The IOMMU group, or absent when the device has none.",
+            "minimum": 0
+          },
+          "product_id": {
+            "type": "string",
+            "description": "Four lowercase hex digits."
+          },
+          "vendor_id": {
+            "type": "string",
+            "description": "Four lowercase hex digits."
+          },
+          "vfio_ready": {
+            "type": "boolean",
+            "description": "`driver` is `vfio-pci`, the group is exclusive and `/dev/vfio/<group>` is readable and\nwritable by the agent. Only such a device is accepted for passthrough."
+          }
+        }
       },
       "HostReachability": {
         "type": "object",
@@ -4949,6 +5023,13 @@
               "$ref": "#/components/schemas/NodeSpec"
             }
           },
+          "pci_devices": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Host PCI devices compute-1 receives through VFIO; absent on plans recorded before\nthe option existed."
+          },
           "release": {
             "type": [
               "string",
@@ -5016,6 +5097,14 @@
               }
             ],
             "default": null
+          },
+          "pci_devices": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Host PCI devices passed through to compute-1 (`DDDD:BB:DD.F`). Each must already be\nbound to `vfio-pci` on the farm's host; see [`normalize_pci_devices`].",
+            "default": []
           },
           "release": {
             "type": [
@@ -5431,6 +5520,13 @@
               "string",
               "null"
             ]
+          },
+          "pci_devices": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "PCI devices passed through to compute-1 (see [`PlanRequest::pci_devices`]); like a GPU,\nonly a clean install can take them."
           },
           "release": {
             "type": "string",

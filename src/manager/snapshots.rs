@@ -77,6 +77,7 @@ pub(super) fn plan_from_metadata(metadata: &crate::s3::catalog::ArchiveMetadata)
             metadata.key
         ))),
         None => layout(&PlanRequest {
+            pci_devices: Vec::new(),
             components: metadata.components.clone(),
             computes: metadata.computes,
             compute: metadata.compute,
@@ -418,6 +419,7 @@ fn parse_labels(
             anyhow::bail!("a multi-node bundle cannot hold a single-VM template")
         }
         (None, Some((computes, compute, gpu))) => layout(&PlanRequest {
+            pci_devices: Vec::new(),
             components,
             computes,
             compute,
@@ -429,6 +431,7 @@ fn parse_labels(
             control_layout(&components, None, release.as_deref())?
         }
         (_, None) => layout(&PlanRequest {
+            pci_devices: Vec::new(),
             components,
             computes: u8::from(template.is_some()),
             compute: None,
@@ -550,6 +553,13 @@ impl FarmManager {
                     "farms imported from older versions cannot be frozen",
                 ));
             };
+            // A passed-through device is bound to the compute VM that boots with it; a template
+            // or snapshot would not carry the binding, so restoring it would lose the device.
+            if !plan.pci_devices.is_empty() {
+                return Err(conflict(
+                    "this farm passes PCI devices through to compute-1, and a template or snapshot does not carry that binding; create a PCI farm clean instead",
+                ));
+            }
             if request.node.as_deref() == Some("control") {
                 if !plan.multinode() {
                     return Err(conflict(

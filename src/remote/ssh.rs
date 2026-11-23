@@ -1,4 +1,6 @@
-use super::{Credentials, GpuKernel, HostInspection, HostKey, RemoteHost, SshTarget};
+use super::{
+    Credentials, GpuKernel, HostInspection, HostKey, HostPciDevice, RemoteHost, SshTarget,
+};
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use russh::{
@@ -711,6 +713,41 @@ fn drain_frames(buffer: &mut Vec<u8>) -> Result<Vec<super::protocol::Frame>> {
     Ok(frames)
 }
 
+/// The `FARM\tpci_device\t<bdf>,<vendor>,<product>,<class>,<group>,<driver>,<exclusive>,<ready>`
+/// lines of an inspection. A malformed line is skipped rather than failing the whole inspection.
+pub(crate) fn parse_pci_devices(output: &str) -> Vec<HostPciDevice> {
+    output
+        .lines()
+        .filter_map(|line| line.strip_prefix("FARM\tpci_device\t"))
+        .filter_map(parse_pci_device)
+        .collect()
+}
+
+fn parse_pci_device(value: &str) -> Option<HostPciDevice> {
+    let fields: Vec<&str> = value.split(',').collect();
+    let [bdf, vendor, product, class, group, driver, exclusive, ready] = fields[..] else {
+        return None;
+    };
+    let hex = |text: &str, len: usize| {
+        (text.len() == len && text.bytes().all(|b| b.is_ascii_hexdigit()))
+            .then(|| text.to_ascii_lowercase())
+    };
+    let iommu_group = match group {
+        "" => None,
+        group => Some(group.parse::<u32>().ok()?),
+    };
+    Some(HostPciDevice {
+        bdf: crate::model::normalize_pci_bdf(bdf).ok()?,
+        vendor_id: hex(vendor, 4)?,
+        product_id: hex(product, 4)?,
+        class: hex(class, 6)?,
+        iommu_group,
+        driver: (!driver.is_empty()).then(|| driver.to_owned()),
+        group_exclusive: exclusive == "1",
+        vfio_ready: ready == "1" && driver == "vfio-pci" && exclusive == "1",
+    })
+}
+
 fn parse_inspection(output: &str) -> Result<HostInspection> {
     let mut values = BTreeMap::new();
     for line in output.lines() {
@@ -750,6 +787,14 @@ fn parse_inspection(output: &str) -> Result<HostInspection> {
             .parse()
             .map_err(|_| anyhow!("invalid resource values in host inspection"))
     };
+    let custom_kernel = values
+        .get("libkrunfw")
+        .copied()
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    let pci_devices = parse_pci_devices(output);
+    let vfio_device = values.get("vfio").copied() == Some("1");
+    let msb_pci_capable = values.get("msb_pci").copied() == Some("1");
     Ok(HostInspection {
         compatible: os == "linux" && matches!(arch.as_str(), "aarch64" | "x86_64"),
         os,
@@ -765,11 +810,15 @@ fn parse_inspection(output: &str) -> Result<HostInspection> {
         golden_image_available: field("golden")? == "1",
         // A kernel the host's agent boots from, installed by preparation or named by
         // FARM_LIBKRUNFW_PATH; absent when the stock one boots.
-        custom_kernel: values
-            .get("libkrunfw")
-            .copied()
-            .filter(|value| !value.is_empty())
-            .map(str::to_owned),
+        msb_pci_capable,
+        pci_passthrough_available: crate::remote::pci_passthrough_ready(
+            custom_kernel.is_some(),
+            msb_pci_capable,
+            vfio_device,
+            &pci_devices,
+        ),
+        pci_devices,
+        custom_kernel,
         // An installed kernel the host cannot use, such as one built for another msb.
         custom_kernel_reason: values
             .get("libkrunfw_note")
@@ -874,6 +923,34 @@ mod tests {
         // Without a kernel the stock one boots: no pair is exported.
         let stock = smoke_script(&uuid::Uuid::new_v4().to_string(), None).unwrap();
         assert!(!stock.contains("MSB_LIBKRUNFW_PATH"));
+    }
+
+    #[test]
+    fn the_install_script_is_shell_and_takes_a_fork_msb_without_downloading() {
+        let script = install_script();
+        assert!(
+            script.contains(&format!("want={}", crate::remote::MSB_VERSION)),
+            "{script}"
+        );
+        assert!(!script.contains("@MSB_VERSION@"));
+        // The fork hook: a custom binary is installed as it is, before any release download.
+        let fork = script.find("FARM_MSB_BIN").expect("FARM_MSB_BIN hook");
+        let download = script.find("work=$(mktemp -d)").expect("download step");
+        assert!(
+            fork < download,
+            "the fork hook must run before the release download"
+        );
+        assert!(script.contains("${FARM_MSB_RELEASE_BASE:-"), "{script}");
+        // The script runs under `sh -c` on hosts; a syntax error would fail every prepare.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("install.sh");
+        std::fs::write(&path, &script).unwrap();
+        let status = std::process::Command::new("sh")
+            .arg("-n")
+            .arg(&path)
+            .status()
+            .unwrap();
+        assert!(status.success(), "{script}");
     }
 
     #[test]
@@ -1134,5 +1211,103 @@ mod tests {
     fn rejects_incomplete_untrusted_inspection_output() {
         assert!(parse_inspection("FARM\tos\tLinux").is_err());
         assert!(parse_inspection("random shell startup output").is_err());
+    }
+}
+
+#[cfg(test)]
+mod pci_inspection_tests {
+    use super::*;
+    use crate::remote::{group_exclusive, pci_passthrough_ready};
+
+    const DEVICE: &str = "FARM\tpci_device\t0000:04:00.3,1022,1639,0c0330,12,vfio-pci,1,1";
+
+    #[test]
+    fn the_inspection_reads_each_vfio_device_and_skips_a_malformed_line() {
+        let output = format!(
+            "FARM\tos\tLinux\n{DEVICE}\n\
+             FARM\tpci_device\t0000:05:00.0,10DE,1B06,030000,13,vfio-pci,0,0\n\
+             FARM\tpci_device\tnot-a-device,1022,1639,0c0330,,vfio-pci,1,1\n\
+             FARM\tpci_device\t0000:06:00.0,1022,1639\n"
+        );
+        let devices = parse_pci_devices(&output);
+        assert_eq!(devices.len(), 2);
+        let ready = &devices[0];
+        assert_eq!(ready.bdf, "0000:04:00.3");
+        assert_eq!(ready.vendor_id, "1022");
+        assert_eq!(ready.product_id, "1639");
+        assert_eq!(ready.class, "0c0330");
+        assert_eq!(ready.iommu_group, Some(12));
+        assert_eq!(ready.driver.as_deref(), Some("vfio-pci"));
+        assert!(ready.group_exclusive && ready.vfio_ready);
+        // Another driver in the group, or an unreadable group file, is not ready.
+        let shared = &devices[1];
+        assert_eq!(shared.vendor_id, "10de");
+        assert!(!shared.group_exclusive && !shared.vfio_ready);
+    }
+
+    #[test]
+    fn a_device_without_an_iommu_group_is_never_ready() {
+        let output = "FARM\tpci_device\t0000:04:00.3,1022,1639,0c0330,,vfio-pci,0,0\n";
+        let device = &parse_pci_devices(output)[0];
+        assert_eq!(device.iommu_group, None);
+        assert!(!device.vfio_ready);
+    }
+
+    #[test]
+    fn a_group_is_exclusive_when_no_member_has_another_driver() {
+        assert!(group_exclusive(&[None, Some("vfio-pci")]));
+        assert!(!group_exclusive(&[Some("vfio-pci"), Some("xhci_hcd")]));
+    }
+
+    #[test]
+    fn passthrough_needs_the_farm_kernel_vfio_and_a_ready_device() {
+        let ready = parse_pci_devices(DEVICE);
+        assert!(pci_passthrough_ready(true, true, true, &ready));
+        assert!(
+            !pci_passthrough_ready(false, true, true, &ready),
+            "the stock kernel has no guest vfio-pci"
+        );
+        assert!(
+            !pci_passthrough_ready(true, true, false, &ready),
+            "/dev/vfio/vfio is missing"
+        );
+        assert!(
+            !pci_passthrough_ready(true, true, true, &[]),
+            "no ready device"
+        );
+    }
+
+    /// An inspection whose `msb` lacks `--pci`/`--iommu` cannot pass a device through, even
+    /// on the farm kernel with a ready device, and its reply says so.
+    #[test]
+    fn msb_without_pci_flags_is_reported_and_blocks_passthrough() {
+        let output = |msb_pci: &str| {
+            format!(
+                "FARM\tos\tLinux\nFARM\tarch\tx86_64\nFARM\tkvm\t1\nFARM\tsudo\t1\n\
+                 FARM\tmemory_total\t1\nFARM\tmemory_available\t1\nFARM\tdisk_available\t1\n\
+                 FARM\tmsb\tmsb 0.8.1\nFARM\tdocker\t1\nFARM\tgolden\t1\n\
+                 FARM\tlibkrunfw\t/k/libkrunfw.so\nFARM\tvfio\t1\n\
+                 FARM\tmsb_pci\t{msb_pci}\n{DEVICE}\n"
+            )
+        };
+        let upstream = parse_inspection(&output("0")).unwrap();
+        assert!(!upstream.msb_pci_capable);
+        assert!(
+            !upstream.pci_passthrough_available,
+            "upstream msb cannot do PCI"
+        );
+        assert_eq!(upstream.pci_devices.len(), 1, "the device is still listed");
+        let fork = parse_inspection(&output("1")).unwrap();
+        assert!(fork.msb_pci_capable);
+        assert!(fork.pci_passthrough_available);
+    }
+
+    #[test]
+    fn the_inspection_script_avoids_early_closing_pipes() {
+        let script = include_str!("inspect.sh");
+        for banned in ["| grep -q", "| grep -m", "| head"] {
+            assert!(!script.contains(banned), "inspect.sh pipes into {banned}");
+        }
+        assert!(script.contains("/sys/bus/pci/devices"));
     }
 }

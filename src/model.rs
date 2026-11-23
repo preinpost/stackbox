@@ -38,6 +38,48 @@ pub struct PlanRequest {
     /// A virtual GPU on every compute VM; omitted for none. Not hardware: see [`GpuConfig`].
     #[serde(skip_serializing_if = "Option::is_none")]
     pub gpu: Option<GpuConfig>,
+    /// Host PCI devices passed through to compute-1 (`DDDD:BB:DD.F`). Each must already be
+    /// bound to `vfio-pci` on the farm's host; see [`normalize_pci_devices`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pci_devices: Vec<String>,
+}
+
+/// Normalizes one PCI address to `DDDD:BB:DD.F` in lowercase. The device number must be at
+/// most `0x1f` and the function at most `7`, as the PCI configuration space allows.
+pub fn normalize_pci_bdf(bdf: &str) -> Result<String> {
+    let text = bdf.trim().to_ascii_lowercase();
+    let bytes = text.as_bytes();
+    let shape_ok = bytes.len() == 12
+        && bytes[4] == b':'
+        && bytes[7] == b':'
+        && bytes[10] == b'.'
+        && bytes
+            .iter()
+            .enumerate()
+            .all(|(i, b)| matches!(i, 4 | 7 | 10) || b.is_ascii_hexdigit());
+    if !shape_ok {
+        bail!("PCI address '{bdf}' must look like 0000:04:00.3 (DDDD:BB:DD.F in hex)");
+    }
+    let device = u8::from_str_radix(&text[8..10], 16)?;
+    let function = u8::from_str_radix(&text[11..12], 16)?;
+    if device > 0x1f || function > 7 {
+        bail!("PCI address '{bdf}' has a device above 0x1f or a function above 7");
+    }
+    Ok(text)
+}
+
+/// Normalizes a list of PCI addresses, refusing a duplicate. The order is the request's.
+pub fn normalize_pci_devices(devices: &[String]) -> Result<Vec<String>> {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut out = Vec::with_capacity(devices.len());
+    for device in devices {
+        let bdf = normalize_pci_bdf(device)?;
+        if !seen.insert(bdf.clone()) {
+            bail!("PCI device '{bdf}' is listed more than once");
+        }
+        out.push(bdf);
+    }
+    Ok(out)
 }
 
 impl PlanRequest {
@@ -558,6 +600,10 @@ pub struct Plan {
     /// recorded before the option existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gpu: Option<GpuConfig>,
+    /// Host PCI devices compute-1 receives through VFIO; absent on plans recorded before
+    /// the option existed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pci_devices: Vec<String>,
     pub nodes: Vec<NodeSpec>,
     pub memory_mib: u64,
     /// Includes both container disks for each container host. Sparse disks consume less initially.
@@ -1005,6 +1051,7 @@ pub fn control_layout(
     release: Option<&str>,
 ) -> Result<Plan> {
     layout(&PlanRequest {
+        pci_devices: Vec::new(),
         components: components.to_vec(),
         computes: 0,
         compute,
@@ -1068,6 +1115,11 @@ pub fn layout(request: &PlanRequest) -> Result<Plan> {
         }
         None => None,
     };
+    // Passed-through devices belong to compute-1, so they need a compute VM too.
+    let pci_devices = normalize_pci_devices(&request.pci_devices)?;
+    if !pci_devices.is_empty() && computes == 0 {
+        bail!("PCI passthrough is offered by compute VMs; add one or leave pci_devices out");
+    }
     let size = compute.unwrap_or_default();
     let footprint = components.iter().map(|c| c.footprint_mib).sum::<u32>();
     let nodes = if computes > 0 {
@@ -1133,6 +1185,7 @@ pub fn layout(request: &PlanRequest) -> Result<Plan> {
         computes,
         compute,
         gpu,
+        pci_devices,
         memory_mib: nodes.iter().map(|n| u64::from(n.memory_mib)).sum(),
         disk_mib: nodes
             .iter()
@@ -1168,6 +1221,9 @@ pub struct CreateRequest {
     /// A virtual GPU on every compute VM (see [`GpuConfig`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gpu: Option<GpuConfig>,
+    /// Host PCI devices passed through to compute-1 (see [`PlanRequest::pci_devices`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pci_devices: Vec<String>,
     #[serde(default = "default_host")]
     pub external_host: String,
     #[serde(default)]
@@ -1253,9 +1309,10 @@ impl CreateRequest {
                 || self.compute.is_some()
                 || self.layout.is_some()
                 || self.gpu.is_some()
+                || !self.pci_devices.is_empty()
             {
                 bail!(
-                    "a farm restored from a snapshot runs the snapshot's services and layout; omit components, computes, compute, layout and gpu"
+                    "a farm restored from a snapshot runs the snapshot's services and layout; omit components, computes, compute, layout, gpu and pci_devices"
                 );
             }
         }
@@ -1278,6 +1335,7 @@ impl CreateRequest {
             release: self.release.clone(),
             layout: self.layout,
             gpu: self.gpu.clone(),
+            pci_devices: self.pci_devices.clone(),
         };
         request.check_release()?;
         plan(&request)
@@ -1706,6 +1764,10 @@ pub struct ReleaseCreateRequest {
     /// one, because a template's VMs boot with the plan they were frozen with.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gpu: Option<GpuConfig>,
+    /// PCI devices passed through to compute-1 (see [`PlanRequest::pci_devices`]); like a GPU,
+    /// only a clean install can take them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pci_devices: Vec<String>,
     /// Control template to use instead of the newest matching one.
     #[serde(default)]
     pub control_template: Option<String>,
@@ -2097,6 +2159,7 @@ mod tests {
             assert!(validate_id(id).is_err());
         }
         let legacy = CreateRequest {
+            pci_devices: Vec::new(),
             id: "dev-all-in-one".into(),
             host_id: None,
             components: vec![],
@@ -2117,6 +2180,7 @@ mod tests {
         for unsupported in ["swift", "cinder"] {
             assert!(
                 plan(&PlanRequest {
+                    pci_devices: Vec::new(),
                     components: vec![unsupported.into()],
                     computes: 0,
                     compute: None,
@@ -2137,6 +2201,7 @@ mod tests {
     #[test]
     fn optional_services_share_the_single_guest_and_public_ports_stay_stable() {
         let request = |components: &[&str]| PlanRequest {
+            pci_devices: Vec::new(),
             components: components.iter().map(|c| (*c).into()).collect(),
             computes: 0,
             compute: None,
@@ -2189,6 +2254,7 @@ mod tests {
     #[test]
     fn multi_node_farms_split_nova_between_control_and_computes() {
         let request = |components: &[&str], computes| PlanRequest {
+            pci_devices: Vec::new(),
             components: components.iter().map(|c| (*c).into()).collect(),
             computes,
             compute: None,
@@ -2226,6 +2292,7 @@ mod tests {
         old.as_object_mut().unwrap().remove("computes");
         assert_eq!(serde_json::from_value::<Plan>(old).unwrap().computes, 0);
         let restore = CreateRequest {
+            pci_devices: Vec::new(),
             id: "dev".into(),
             host_id: None,
             components: vec![],
@@ -2253,6 +2320,7 @@ mod tests {
             disk_mib: 32768,
         };
         let farm = layout(&PlanRequest {
+            pci_devices: Vec::new(),
             components: vec!["horizon".into()],
             computes: 2,
             compute: Some(size),
@@ -2274,6 +2342,7 @@ mod tests {
         crate::farm::layout(&alone.nodes).unwrap();
         // Its first compute comes back as the farm's had it.
         let next = layout(&PlanRequest {
+            pci_devices: Vec::new(),
             components: alone.components.clone(),
             computes: 1,
             compute: alone.compute,
@@ -2323,6 +2392,7 @@ mod tests {
     fn a_control_layout_is_not_an_all_in_one_farm() {
         let alone = |form: FarmLayout| {
             crate::model::layout(&PlanRequest {
+                pci_devices: Vec::new(),
                 components: vec![],
                 computes: 0,
                 compute: None,
@@ -2347,6 +2417,7 @@ mod tests {
         assert!(control.components.contains(&"nova".to_string()));
         assert!(control.memory_mib > one.memory_mib);
         let with_compute = layout(&PlanRequest {
+            pci_devices: Vec::new(),
             components: vec![],
             computes: 1,
             compute: None,
@@ -2361,6 +2432,7 @@ mod tests {
         );
         // Its first compute joins without changing the control VM.
         let next = layout(&PlanRequest {
+            pci_devices: Vec::new(),
             components: control.components.clone(),
             computes: 1,
             compute: None,
@@ -2376,6 +2448,7 @@ mod tests {
         // A layout never rides along with computes.
         assert!(
             layout(&PlanRequest {
+                pci_devices: Vec::new(),
                 components: vec![],
                 computes: 1,
                 compute: None,
@@ -2388,6 +2461,7 @@ mod tests {
         // Nova cannot run on one all-in-one VM.
         assert!(
             layout(&PlanRequest {
+                pci_devices: Vec::new(),
                 components: vec!["nova".into()],
                 computes: 0,
                 compute: None,
@@ -2403,6 +2477,7 @@ mod tests {
     fn compute_vms_take_the_requested_size() {
         let sized = |computes, compute| {
             plan(&PlanRequest {
+                pci_devices: Vec::new(),
                 components: vec![],
                 computes,
                 compute,
@@ -2453,6 +2528,7 @@ mod tests {
         // Only compute VMs have a compute size.
         assert!(
             layout(&PlanRequest {
+                pci_devices: Vec::new(),
                 components: vec![],
                 computes: 0,
                 compute: Some(size),
@@ -2515,6 +2591,7 @@ mod tests {
             last_seen_at: None,
             status: FarmStatus::Created,
             plan: Some(Plan {
+                pci_devices: Vec::new(),
                 components: vec!["keystone".into()],
                 release: release.map(str::to_owned),
                 computes: 0,
@@ -2666,6 +2743,7 @@ mod tests {
 
         // A plan without a compute VM has no resource provider to hold the device.
         let why = plan(&PlanRequest {
+            pci_devices: Vec::new(),
             components: vec![],
             computes: 0,
             compute: None,
@@ -2839,6 +2917,7 @@ mod tests {
         // target host's inspection decides when the farm is created or expanded
         // (`ensure_mtty_host` in src/manager/mod.rs); this process's kernel never does.
         let planned = plan(&PlanRequest {
+            pci_devices: Vec::new(),
             components: vec!["nova".into()],
             computes: 1,
             compute: None,
@@ -2864,6 +2943,7 @@ mod tests {
     #[test]
     fn a_plan_keeps_the_gpu_it_validated() {
         let planned = plan(&PlanRequest {
+            pci_devices: Vec::new(),
             components: vec!["nova".into()],
             computes: 1,
             compute: None,
@@ -2884,6 +2964,7 @@ mod tests {
             serde_json::json!({"mode": "simulated", "count": 4})
         );
         let plain = plan(&PlanRequest {
+            pci_devices: Vec::new(),
             components: vec!["nova".into()],
             computes: 1,
             compute: None,
@@ -3113,5 +3194,90 @@ mod tests {
         assert_eq!(ids.len(), published, "port ids must be unique");
         // Heat publishes two ports; the new services add seven ports in all.
         assert_eq!(published, 6 + 7);
+    }
+}
+
+#[cfg(test)]
+mod pci_tests {
+    use super::*;
+
+    #[test]
+    fn a_pci_address_is_normalized_to_lowercase_and_bounded() {
+        assert_eq!(normalize_pci_bdf("0000:04:00.3").unwrap(), "0000:04:00.3");
+        assert_eq!(normalize_pci_bdf(" 0000:0A:1F.7 ").unwrap(), "0000:0a:1f.7");
+        for bad in [
+            "04:00.3",      // no domain
+            "0000:04:00:3", // wrong separator
+            "0000:04:20.0", // device above 0x1f
+            "0000:04:00.8", // function above 7
+            "0000:0g:00.0", // not hex
+        ] {
+            assert!(normalize_pci_bdf(bad).is_err(), "{bad} was accepted");
+        }
+    }
+
+    #[test]
+    fn a_duplicate_pci_device_is_refused_whatever_its_case() {
+        let why =
+            normalize_pci_devices(&["0000:04:00.3".into(), "0000:04:00.3".into()]).unwrap_err();
+        assert!(why.to_string().contains("more than once"), "{why:#}");
+        let why =
+            normalize_pci_devices(&["0000:0A:00.0".into(), "0000:0a:00.0".into()]).unwrap_err();
+        assert!(why.to_string().contains("more than once"), "{why:#}");
+    }
+
+    fn with_pci(computes: u8, devices: &[&str]) -> PlanRequest {
+        PlanRequest {
+            components: vec!["keystone".into(), "glance".into()],
+            computes,
+            pci_devices: devices.iter().map(|d| (*d).to_owned()).collect(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn passthrough_needs_a_compute_and_lands_in_the_plan_normalized() {
+        let why = layout(&with_pci(0, &["0000:04:00.3"])).unwrap_err();
+        assert!(
+            why.to_string().contains("offered by compute VMs"),
+            "{why:#}"
+        );
+        let planned = layout(&with_pci(1, &["0000:04:00.3"])).unwrap();
+        assert_eq!(planned.pci_devices, vec!["0000:04:00.3".to_owned()]);
+        let planned = layout(&with_pci(1, &["0000:0A:00.3"])).unwrap();
+        assert_eq!(planned.pci_devices, vec!["0000:0a:00.3".to_owned()]);
+        assert!(layout(&with_pci(1, &[])).unwrap().pci_devices.is_empty());
+    }
+
+    #[test]
+    fn a_restored_farm_refuses_passthrough() {
+        let request: CreateRequest =
+            serde_json::from_str(r#"{"id":"restored","host_id":"local","snapshot_id":"snap-1","pci_devices":["0000:04:00.3"]}"#)
+                .unwrap();
+        let why = request.validate().unwrap_err();
+        assert!(why.to_string().contains("pci_devices"), "{why:#}");
+    }
+
+    #[test]
+    fn a_state_file_without_pci_fields_still_reads_and_stays_unchanged() {
+        // A plan recorded before passthrough existed: no `pci_devices` key at all.
+        let planned = plan(&PlanRequest {
+            components: vec!["keystone".into(), "glance".into()],
+            computes: 1,
+            ..Default::default()
+        })
+        .unwrap();
+        let mut value = serde_json::to_value(&planned).unwrap();
+        assert!(
+            value.get("pci_devices").is_none(),
+            "an empty list must not be written: {value}"
+        );
+        value.as_object_mut().unwrap().remove("pci_devices");
+        let read: Plan = serde_json::from_value(value).unwrap();
+        assert!(read.pci_devices.is_empty());
+        // And a plan that does carry devices round-trips them.
+        let with = layout(&with_pci(1, &["0000:04:00.3"])).unwrap();
+        let back: Plan = serde_json::from_value(serde_json::to_value(&with).unwrap()).unwrap();
+        assert_eq!(back.pci_devices, with.pci_devices);
     }
 }

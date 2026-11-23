@@ -1,6 +1,6 @@
 //! This machine as a farm host: what the coordinator's own agent runs on.
 
-use super::{GpuKernel, HostInspection};
+use super::{GpuKernel, HostInspection, HostPciDevice};
 use anyhow::{Context, Result, ensure};
 use std::{ffi::OsString, path::Path, sync::Mutex, time::Duration};
 
@@ -17,6 +17,85 @@ pub fn gpu_kernel() -> Option<GpuKernel> {
 /// Whether this host's last verification VM saw the custom kernel's `mtty` mdev type.
 pub fn mtty_available() -> bool {
     gpu_kernel().is_some_and(|gpu| gpu.mtty_available())
+}
+
+/// The PCI devices on this machine bound to `vfio-pci`, read from sysfs the way the inspection
+/// script reads them. Other devices are not listed. Off Linux there is no sysfs, so none.
+pub fn pci_devices() -> Vec<HostPciDevice> {
+    let Ok(entries) = std::fs::read_dir("/sys/bus/pci/devices") else {
+        return Vec::new();
+    };
+    let mut devices: Vec<_> = entries.flatten().map(|entry| entry.path()).collect();
+    devices.sort();
+    devices
+        .into_iter()
+        .filter(|dev| sysfs_driver(dev).as_deref() == Some("vfio-pci"))
+        .map(|dev| {
+            let group = std::fs::read_link(dev.join("iommu_group"))
+                .ok()
+                .and_then(|link| link.file_name()?.to_str()?.parse::<u32>().ok());
+            let members: Vec<Option<String>> = group
+                .and_then(|group| {
+                    std::fs::read_dir(format!("/sys/kernel/iommu_groups/{group}/devices")).ok()
+                })
+                .map(|members| {
+                    members
+                        .flatten()
+                        .map(|member| sysfs_driver(&member.path()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let drivers: Vec<Option<&str>> = members.iter().map(|d| d.as_deref()).collect();
+            let exclusive = group.is_some() && super::group_exclusive(&drivers);
+            let ready = exclusive && group.is_some_and(vfio_group_accessible);
+            HostPciDevice {
+                bdf: dev
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_ascii_lowercase(),
+                vendor_id: sysfs_hex(&dev, "vendor", 4),
+                product_id: sysfs_hex(&dev, "device", 4),
+                class: sysfs_hex(&dev, "class", 6),
+                iommu_group: group,
+                driver: Some("vfio-pci".into()),
+                group_exclusive: exclusive,
+                vfio_ready: ready,
+            }
+        })
+        .collect()
+}
+
+/// Whether this user can read and write `/dev/vfio/<group>`, checked with `access(2)` as
+/// inspect.sh checks it. Opening the node instead would take a descriptor on a group that a
+/// running VM may already hold.
+#[cfg(unix)]
+pub fn vfio_group_accessible(group: u32) -> bool {
+    let Ok(node) = std::ffi::CString::new(format!("/dev/vfio/{group}")) else {
+        return false;
+    };
+    // SAFETY: `node` is a valid NUL-terminated path that outlives the call.
+    unsafe { libc::access(node.as_ptr(), libc::R_OK | libc::W_OK) == 0 }
+}
+
+#[cfg(not(unix))]
+pub fn vfio_group_accessible(_group: u32) -> bool {
+    false
+}
+
+/// The name of the driver bound to a sysfs device, if one is bound.
+fn sysfs_driver(dev: &Path) -> Option<String> {
+    let link = std::fs::read_link(dev.join("driver")).ok()?;
+    link.file_name()?.to_str().map(str::to_owned)
+}
+
+/// A sysfs attribute such as `vendor` (`0x1022`), as lowercase hex without `0x`.
+fn sysfs_hex(dev: &Path, attribute: &str, digits: usize) -> String {
+    std::fs::read_to_string(dev.join(attribute))
+        .map(|text| text.trim().trim_start_matches("0x").to_ascii_lowercase())
+        .ok()
+        .filter(|text| text.len() == digits)
+        .unwrap_or_default()
 }
 
 pub fn hypervisor() -> &'static str {
@@ -92,6 +171,9 @@ pub async fn inspect() -> HostInspection {
             .filter(|v| v.len() < 32 && v.bytes().all(|b| b.is_ascii_digit() || b == b'.'))
             .map(str::to_owned)
     });
+    // The upstream and fork msb share one version string; the run help tells them apart.
+    let msb_pci_capable =
+        super::msb_help_supports_pci(&output("msb", &["run", "--help"]).await.unwrap_or_default());
     let golden = crate::farm::golden::available(&crate::farm::golden::current())
         .await
         .unwrap_or(false);
@@ -109,6 +191,8 @@ pub async fn inspect() -> HostInspection {
         _ => "unsupported",
     };
     let kernel = crate::kernel::select_in_process();
+    let pci = pci_devices();
+    let vfio_device = Path::new("/dev/vfio/vfio").exists();
     HostInspection {
         compatible: os != "unsupported" && arch != "unsupported",
         os: os.into(),
@@ -126,6 +210,14 @@ pub async fn inspect() -> HostInspection {
         custom_kernel_reason: kernel.reason,
         mtty_available: mtty_available(),
         gpu_kernel: gpu_kernel(),
+        msb_pci_capable,
+        pci_passthrough_available: super::pci_passthrough_ready(
+            kernel.path.is_some(),
+            msb_pci_capable,
+            vfio_device,
+            &pci,
+        ),
+        pci_devices: pci,
         vm_boot_verified: false,
         checked_at: crate::model::now(),
     }

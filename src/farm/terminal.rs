@@ -7,7 +7,7 @@ use microsandbox::{ExecEvent, Sandbox};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 
-use super::node::connect;
+use super::node::{connect, detach};
 
 /// How long a hung-up shell may take to exit before it is killed.
 const HANGUP_GRACE: Duration = Duration::from_secs(2);
@@ -70,7 +70,7 @@ pub async fn attach(
     };
     let sandbox = connect(&name).await?;
     let result = session(&sandbox, size, io).await;
-    sandbox.detach().await;
+    detach(&sandbox).await;
     result
 }
 

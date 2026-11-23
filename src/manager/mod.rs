@@ -215,6 +215,64 @@ fn ensure_mtty_host(state: &State, host_id: &str) -> Result<()> {
     };
     Err(mtty_host_error(host_id, why))
 }
+/// Checks that `host_id` can pass `pci_devices` through to a compute VM: every address is a
+/// device on the host that is `vfio_ready` (bound to `vfio-pci` in an exclusive IOMMU group).
+/// farm never unbinds a host driver itself, so a device bound to anything else is refused.
+/// A device a live farm already passes through on the same host is refused too, since one
+/// physical device cannot sit in two VMs. A deleted farm releases its devices.
+fn ensure_pci_host(state: &State, host_id: &str, pci_devices: &[String]) -> Result<()> {
+    if pci_devices.is_empty() {
+        return Ok(());
+    }
+    let stored = state
+        .hosts
+        .get(host_id)
+        .ok_or_else(|| NotFound(format!("host '{host_id}'")))?;
+    let Some(inspection) = stored.host.inspection.as_ref() else {
+        return Err(bad_request(format!(
+            "host '{host_id}' has not been inspected yet, so its PCI devices are unknown; check it under Hosts"
+        )));
+    };
+    // The upstream msb shares the fork's version string, so only the inspection's flag tells
+    // whether this host's msb can start a VM with the PCI and IOMMU flags a farm needs.
+    if !inspection.msb_pci_capable {
+        return Err(bad_request(format!(
+            "host '{host_id}' msb binary does not support PCI passthrough (--pci/--iommu)"
+        )));
+    }
+    for bdf in pci_devices {
+        let ready = inspection
+            .pci_devices
+            .iter()
+            .any(|device| &device.bdf == bdf && device.vfio_ready);
+        if !ready {
+            return Err(bad_request(format!(
+                "host '{host_id}' does not have vfio-ready PCI device '{bdf}'; bind it to vfio-pci on that host (its IOMMU group must be otherwise unbound or vfio-pci) and check the host again"
+            )));
+        }
+    }
+    for farm in state.farms.values() {
+        if farm.status == FarmStatus::Deleted {
+            continue;
+        }
+        let Some(plan) = farm.plan.as_ref() else {
+            continue;
+        };
+        if plan.pci_devices.is_empty() || farm.host_of("compute-1") != Some(host_id) {
+            continue;
+        }
+        if let Some(bdf) = pci_devices
+            .iter()
+            .find(|bdf| plan.pci_devices.contains(bdf))
+        {
+            return Err(conflict(format!(
+                "PCI device '{bdf}' on host '{host_id}' is already passed through to farm '{}'; choose another device or delete that farm first",
+                farm.id
+            )));
+        }
+    }
+    Ok(())
+}
 /// Why `host_id` cannot take an `mtty` farm yet, and what fixes it on that host.
 fn mtty_host_error(host_id: &str, why: String) -> anyhow::Error {
     bad_request(format!(
@@ -1078,6 +1136,8 @@ impl FarmManager {
             release: plan.release.clone(),
             layout: None,
             gpu: plan.gpu.clone(),
+            // compute-1 already exists on a farm with devices, so an expansion adds none.
+            pci_devices: plan.pci_devices.clone(),
         })?;
         if serde_json::to_value(&expanded.nodes[..plan.nodes.len()])?
             != serde_json::to_value(&plan.nodes)?
@@ -1648,6 +1708,14 @@ impl FarmManager {
                 for host in compute_hosts {
                     ensure_mtty_host(state, host)?;
                 }
+            }
+            // Passed-through devices belong to compute-1, on whichever host runs it.
+            if !plan.pci_devices.is_empty() {
+                let compute_host = request
+                    .placement
+                    .get("compute-1")
+                    .map_or(host_id.as_str(), String::as_str);
+                ensure_pci_host(state, compute_host, &plan.pci_devices)?;
             }
             let mut relay_url = None;
             if !placed.is_empty() {

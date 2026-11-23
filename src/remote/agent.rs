@@ -275,6 +275,7 @@ impl Agent {
             )?
         } else {
             layout(&PlanRequest {
+                pci_devices: requested.pci_devices.clone(),
                 components: requested.components.clone(),
                 computes: requested.computes,
                 compute: requested.compute,
@@ -297,6 +298,7 @@ impl Agent {
         );
         // Reuse public-host validation.
         crate::model::CreateRequest {
+            pci_devices: Vec::new(),
             id: id.into(),
             host_id: None,
             components: requested.components.clone(),
@@ -676,6 +678,7 @@ impl Agent {
                     release,
                     reference.clone(),
                     entry.plan.gpu,
+                    entry.plan.pci_devices.clone(),
                     remote,
                     share
                         .ssh_private_key
@@ -699,6 +702,7 @@ impl Agent {
                     .unwrap_or_else(|| crate::kolla::OPENSTACK_RELEASE.to_owned()),
                 reference,
                 entry.plan.gpu,
+                entry.plan.pci_devices.clone(),
                 progress(emit),
             )
             .await?;
@@ -1018,6 +1022,7 @@ impl Agent {
                 // The coordinator applies plan()'s policy; expansion must keep every
                 // existing VM's spec and only append compute VMs.
                 let canonical = layout(&PlanRequest {
+                    pci_devices: requested.pci_devices.clone(),
                     components: requested.components.clone(),
                     computes: requested.computes,
                     compute: requested.compute,
@@ -1717,6 +1722,130 @@ mod tests {
     }
 
     type Frames = Arc<std::sync::Mutex<Vec<Frame>>>;
+    /// Runs a reserve and an expansion through the agent's `execute` boundary, the path the
+    /// coordinator's link takes, and checks the stored plan keeps its passthrough devices.
+    #[tokio::test]
+    async fn reserve_and_expand_keep_the_pci_devices_across_the_agent_boundary() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent = Agent {
+            dir: dir.path().into(),
+            backend: Arc::new(Fake::default()),
+            limits: Limits {
+                memory_budget_mib: 50000,
+                available_mib: 100000,
+                virtualization: true,
+                probe_ports: false,
+            },
+            runner: Runner::Inline,
+        };
+        let owner = uuid::Uuid::new_v4().to_string();
+        let generation = uuid::Uuid::new_v4().to_string();
+        let emit: Emitter = Arc::new(|_| Ok(()));
+        let with_pci = |computes: u8, devices: &[&str]| PlanRequest {
+            computes,
+            pci_devices: devices.iter().map(|d| (*d).to_owned()).collect(),
+            ..Default::default()
+        };
+        let plan = layout(&with_pci(1, &["0000:04:00.3"])).unwrap();
+        assert_eq!(plan.pci_devices, vec!["0000:04:00.3".to_owned()]);
+        agent
+            .execute(
+                request(
+                    &owner,
+                    Operation::Create {
+                        farm_id: "pci-farm".into(),
+                        generation: generation.clone(),
+                        plan,
+                        exposure: Exposure {
+                            host: "target.example".into(),
+                            bind: "0.0.0.0".parse().unwrap(),
+                            port_base: 15000,
+                        },
+                        share: None,
+                        source: None,
+                    },
+                ),
+                emit.clone(),
+            )
+            .await
+            .expect("a PCI plan the layout accepts must reserve");
+        let stored = LockedRegistry::open(dir.path()).unwrap();
+        assert_eq!(
+            stored.state.farms["pci-farm"].plan.pci_devices,
+            vec!["0000:04:00.3".to_owned()]
+        );
+        drop(stored);
+
+        // Expansion to two computes keeps the device on compute-1 and adds compute-2.
+        let grown = layout(&with_pci(2, &["0000:04:00.3"])).unwrap();
+        let suffixes: Vec<String> = grown
+            .nodes
+            .iter()
+            .filter_map(|spec| crate::farm::suffix(spec.role, spec.index))
+            .collect();
+        let added: Vec<String> = grown
+            .nodes
+            .iter()
+            .filter(|spec| spec.index == Some(2))
+            .filter_map(|spec| crate::farm::suffix(spec.role, spec.index))
+            .collect();
+        assert!(!added.is_empty());
+        agent
+            .execute(
+                request(
+                    &owner,
+                    Operation::Expand {
+                        farm_id: "pci-farm".into(),
+                        generation: generation.clone(),
+                        plan: grown,
+                        nodes: suffixes,
+                        add: added,
+                        uplink: None,
+                        source: None,
+                    },
+                ),
+                emit.clone(),
+            )
+            .await
+            .expect("an expansion keeps the PCI plan it was reserved with");
+        let stored = LockedRegistry::open(dir.path()).unwrap();
+        assert_eq!(
+            stored.state.farms["pci-farm"].plan.pci_devices,
+            vec!["0000:04:00.3".to_owned()]
+        );
+        assert_eq!(stored.state.farms["pci-farm"].plan.computes, 2);
+        drop(stored);
+
+        // A malformed address is refused at the agent too, not only by the coordinator.
+        let mut forged = layout(&with_pci(1, &[])).unwrap();
+        forged.pci_devices = vec!["0000:04:20.3".into()];
+        let refused = agent
+            .execute(
+                request(
+                    &owner,
+                    Operation::Create {
+                        farm_id: "bad-pci-2".into(),
+                        generation: generation.clone(),
+                        plan: forged,
+                        exposure: Exposure {
+                            host: "target.example".into(),
+                            bind: "0.0.0.0".parse().unwrap(),
+                            port_base: 15020,
+                        },
+                        share: None,
+                        source: None,
+                    },
+                ),
+                emit,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            refused.to_string().contains("0000:04:20.3")
+                || refused.to_string().contains("supported layout"),
+            "{refused:#}"
+        );
+    }
     fn collector() -> (Frames, Emitter) {
         let frames = Frames::default();
         let collect: Emitter = {
@@ -1880,6 +2009,7 @@ mod tests {
             _: String,
             _: Option<String>,
             _: Option<crate::model::GpuConfig>,
+            _: Vec<String>,
             sink: crate::kolla::EventSink,
         ) -> futures::future::BoxFuture<'_, Result<()>> {
             use crate::kolla::DeployEvent;

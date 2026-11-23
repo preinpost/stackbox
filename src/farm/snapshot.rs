@@ -4,12 +4,12 @@ use std::{collections::BTreeMap, path::Path, time::Duration};
 
 use anyhow::{Context, Result, bail};
 use futures::future::{join_all, try_join_all};
-use microsandbox::snapshot::{LoadOpts, SaveOpts, Snapshot, SnapshotReference};
+use microsandbox::snapshot::{Checkpoint, LoadOpts, SaveOpts, SnapshotReference};
 use microsandbox::{NetworkPolicy, NetworkProfile, Sandbox};
 
 use super::node::{
     FARM_LABEL, FarmNode, GUEST_HOSTNAME, IDENTITY_CONF, ROLE_LABEL, connect, create_nested,
-    node_name, wait_until_booted,
+    detach, node_name, wait_until_booted,
 };
 use super::template::{NodeSpec, Role, suffix};
 use crate::kolla::{DeployEvent, EventSink, StepProgress};
@@ -102,7 +102,7 @@ pub async fn freeze_farm(
         &format!("if [ -f {IDENTITY_CONF} ]; then echo yes; fi"),
     )
     .await;
-    sandbox.detach().await;
+    detach(&sandbox).await;
     if identity?.trim() != "yes" {
         bail!(
             "{name} was created before farms had a fixed guest identity, so its OpenStack is bound to an address a restored copy cannot keep; create and deploy a new farm, then freeze that one"
@@ -118,7 +118,7 @@ pub async fn freeze_farm(
         .with_context(|| format!("stop {name}"))?;
     steps.next(format!("capture {name}"));
     let captured = async {
-        let mut builder = Snapshot::builder(snapshot_id)
+        let mut builder = Checkpoint::builder(snapshot_id)
             .group(group(snapshot_id))
             .from_sandbox(&name);
         for (key, value) in labels {
@@ -160,7 +160,7 @@ fn link_units() -> String {
 async fn run_in(name: &str, script: &str) -> Result<()> {
     let sandbox = connect(name).await?;
     let result = run(&sandbox, script).await;
-    sandbox.detach().await;
+    detach(&sandbox).await;
     result
         .map(drop)
         .with_context(|| format!("{name}: {script}"))
@@ -326,7 +326,7 @@ async fn capture_one(
     name: &str,
     node: &str,
 ) -> Result<NodeSnapshot> {
-    let mut builder = Snapshot::builder(snapshot_id)
+    let mut builder = Checkpoint::builder(snapshot_id)
         .group(group(snapshot_id))
         .from_sandbox(name)
         .label(snapshot_labels::NODE, node);
@@ -450,7 +450,7 @@ async fn capture_nodes(
     let mut nodes = Vec::new();
     for (i, (name, suffix)) in vms.iter().enumerate() {
         steps.next(format!("capture {name} ({}/{})", i + 1, vms.len()));
-        let mut builder = Snapshot::builder(format!("{snapshot_id}-{suffix}"))
+        let mut builder = Checkpoint::builder(format!("{snapshot_id}-{suffix}"))
             .group(group(snapshot_id))
             .from_sandbox(name)
             .label(snapshot_labels::NODE, suffix);
@@ -489,7 +489,7 @@ async fn start(name: &str) -> Result<()> {
         .await
         .with_context(|| format!("start {name}"))?;
     let booted = wait_until_booted(&sandbox).await;
-    sandbox.detach().await;
+    detach(&sandbox).await;
     booted
 }
 
@@ -538,7 +538,7 @@ pub async fn restore_farm(
         Ok::<_, anyhow::Error>(ip.trim().to_owned())
     }
     .await;
-    sandbox.detach().await;
+    detach(&sandbox).await;
     let ip = boot.with_context(|| {
         format!("{name} restore failed; VM is left for inspection and explicit deletion")
     })?;
@@ -554,7 +554,7 @@ pub async fn restore_farm(
 
 /// Write a self-contained `.msb` archive, including the golden image so it boots on another host.
 pub async fn export_snapshot(reference: &str, output: &Path) -> Result<()> {
-    Snapshot::save(
+    Checkpoint::save_by_reference(
         reference,
         output,
         SaveOpts {
@@ -567,7 +567,7 @@ pub async fn export_snapshot(reference: &str, output: &Path) -> Result<()> {
 }
 
 pub async fn import_snapshot(archive: &Path, snapshot_id: &str) -> Result<ImportedSnapshot> {
-    let handle = Snapshot::load_with_options(
+    let handle = Checkpoint::load_with_options(
         archive,
         LoadOpts {
             group: Some(group(snapshot_id)),
@@ -577,10 +577,10 @@ pub async fn import_snapshot(archive: &Path, snapshot_id: &str) -> Result<Import
     .await
     .with_context(|| format!("import {}", archive.display()))?;
     let reference = handle.reference();
-    let snapshot = Snapshot::open_ref(reference.clone()).await?;
+    let labels = handle.labels().await?;
     Ok(ImportedSnapshot {
         reference: reference.value().to_owned(),
-        labels: snapshot.labels().clone(),
+        labels,
         size_bytes: handle.size_bytes(),
         nodes: Vec::new(),
     })
@@ -588,15 +588,19 @@ pub async fn import_snapshot(archive: &Path, snapshot_id: &str) -> Result<Import
 
 /// The labels of the snapshot at `reference`, or `None` when msb no longer has it.
 pub async fn snapshot_labels(reference: &str) -> Result<Option<BTreeMap<String, String>>> {
-    match Snapshot::open_ref(SnapshotReference::auto(reference)).await {
-        Ok(snapshot) => Ok(Some(snapshot.labels().clone())),
+    match Checkpoint::open_ref(SnapshotReference::auto(reference)).await {
+        Ok(snapshot) => {
+            Ok(Some(snapshot.labels().await.with_context(|| {
+                format!("read the labels of snapshot {reference}")
+            })?))
+        }
         Err(microsandbox::MicrosandboxError::SnapshotNotFound(_)) => Ok(None),
         Err(error) => Err(error).with_context(|| format!("look up snapshot {reference}")),
     }
 }
 
 pub async fn remove_snapshot(reference: &str) -> Result<()> {
-    match Snapshot::remove_ref(SnapshotReference::auto(reference), false).await {
+    match Checkpoint::remove_ref(SnapshotReference::auto(reference), false).await {
         // Already removed, e.g. with `msb snapshot rm`: only the coordinator's record is left.
         Err(microsandbox::MicrosandboxError::SnapshotNotFound(_)) => Ok(()),
         result => result.with_context(|| format!("remove snapshot {reference}")),

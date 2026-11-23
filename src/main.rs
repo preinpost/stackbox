@@ -104,6 +104,16 @@ impl GpuArgs {
     }
 }
 
+/// PCI passthrough, shared by `plan` and `create`: host devices given to compute-1.
+#[derive(Args)]
+struct PciArgs {
+    /// Host PCI device to pass through to compute-1, as DDDD:BB:DD.F (repeatable). It must
+    /// already be bound to vfio-pci on that host, in an IOMMU group with no other driver; farm
+    /// never unbinds a host driver. Needs a compute VM and a clean install.
+    #[arg(long = "pci", value_name = "BDF")]
+    pci: Vec<String>,
+}
+
 /// Options of `create --release`.
 #[derive(Args)]
 struct ReleaseArgs {
@@ -134,6 +144,8 @@ struct ReleaseArgs {
     /// installs clean, so with --release they mean a clean install of every VM.
     #[command(flatten)]
     gpu: GpuArgs,
+    #[command(flatten)]
+    pci: PciArgs,
 }
 
 #[derive(Subcommand)]
@@ -163,6 +175,8 @@ enum Command {
         compute: ComputeArgs,
         #[command(flatten)]
         gpu: GpuArgs,
+        #[command(flatten)]
+        pci: PciArgs,
         #[arg(long)]
         json: bool,
     },
@@ -530,6 +544,7 @@ async fn main() -> Result<()> {
             computes,
             compute,
             gpu,
+            pci,
             json,
         } => {
             model::require_multi_node(*computes, None)?;
@@ -540,6 +555,7 @@ async fn main() -> Result<()> {
                 release: None,
                 layout: None,
                 gpu: gpu.config(),
+                pci_devices: pci.pci.clone(),
             })?;
             if *json {
                 return print_json(&p);
@@ -677,6 +693,7 @@ async fn main() -> Result<()> {
                 bucket,
                 dry_run,
                 gpu,
+                pci,
             } = *by_release;
             let request = model::ReleaseCreateRequest {
                 id: id.clone(),
@@ -694,6 +711,7 @@ async fn main() -> Result<()> {
                 owner,
                 expires_at,
                 gpu: gpu.config(),
+                pci_devices: pci.pci,
             };
             if compute.size().is_some() {
                 bail!("a farm made by release takes its compute size from its templates");
@@ -745,8 +763,9 @@ async fn main() -> Result<()> {
                 bucket: None,
                 key: None,
                 placement: placement.into_iter().collect(),
-                // The GPU flags ride in the release options, which plain creates share.
+                // The GPU and PCI flags ride in the release options, which plain creates share.
                 gpu: by_release.gpu.config(),
+                pci_devices: by_release.pci.pci.clone(),
             })?;
             wait(&manager, job).await?;
             print_json(&manager.get(&id)?)?;

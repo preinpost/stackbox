@@ -547,6 +547,7 @@ pub fn install_would_replace(library: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::remote::MSB_VERSION as MSB;
 
     fn manifest(msb: &str, arch: &str, artifact: &str, sha256: &str) -> String {
         format!(
@@ -594,21 +595,15 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let root = install_root(home.path());
         std::fs::create_dir_all(&root).unwrap();
-        let id = install_fake(&root, "aarch64", "macos", "0.7.13", "kernel");
-        let installed = choose(None, &root, "macos", "aarch64", Some("0.7.13"));
+        let id = install_fake(&root, "aarch64", "macos", MSB, "kernel");
+        let installed = choose(None, &root, "macos", "aarch64", Some(MSB));
         assert_eq!(installed.source, KernelSource::Installed);
         assert_eq!(installed.id.as_deref(), Some(id.as_str()));
         assert!(installed.path.unwrap().is_file());
 
         // An explicitly named kernel is what the process boots, installed or not.
         let override_path = Path::new("/srv/kernels/libkrunfw.5.dylib");
-        let chosen = choose(
-            Some(override_path),
-            &root,
-            "macos",
-            "aarch64",
-            Some("0.7.13"),
-        );
+        let chosen = choose(Some(override_path), &root, "macos", "aarch64", Some(MSB));
         assert_eq!(chosen.source, KernelSource::Override);
         assert_eq!(chosen.path.as_deref(), Some(override_path));
 
@@ -619,7 +614,7 @@ mod tests {
             &install_root(empty.path()),
             "macos",
             "aarch64",
-            Some("0.7.13"),
+            Some(MSB),
         );
         assert_eq!(stock.source, KernelSource::Stock);
         assert!(stock.path.is_none());
@@ -632,12 +627,12 @@ mod tests {
         let root = install_root(home.path());
         std::fs::create_dir_all(&root).unwrap();
         install_fake(&root, "aarch64", "macos", "0.7.12", "older");
-        let chosen = choose(None, &root, "macos", "aarch64", Some("0.7.13"));
+        let chosen = choose(None, &root, "macos", "aarch64", Some(MSB));
         assert_eq!(chosen.source, KernelSource::Stock);
         assert!(chosen.path.is_none());
         let reason = chosen.reason.unwrap();
         assert!(reason.contains("built for msb 0.7.12"), "{reason}");
-        assert!(reason.contains("runs 0.7.13"), "{reason}");
+        assert!(reason.contains(&format!("runs {MSB}")), "{reason}");
         // The same installation is used as soon as the host runs the msb it was built for.
         assert_eq!(
             choose(None, &root, "macos", "aarch64", Some("0.7.12")).source,
@@ -674,7 +669,7 @@ mod tests {
     #[test]
     fn installing_puts_the_manifest_hash_under_the_farm_data_directory() {
         let dir = tempfile::tempdir().unwrap();
-        let artifact = build(dir.path(), "aarch64", "macos", "0.7.13", b"first kernel");
+        let artifact = build(dir.path(), "aarch64", "macos", MSB, b"first kernel");
         assert!(artifact.id.len() == 16);
         validate_id(&artifact.id).unwrap();
         validate_filename(&artifact.filename).unwrap();
@@ -697,7 +692,7 @@ mod tests {
 
         // A second build supersedes the first, but the first stays: a VM that is booting from
         // it may be opening the library right now, and the install races that boot.
-        let mut newer = build(dir.path(), "aarch64", "macos", "0.7.13", b"second kernel");
+        let mut newer = build(dir.path(), "aarch64", "macos", MSB, b"second kernel");
         newer.manifest = newer.manifest.replace("linux-6.12.113", "linux-6.12.114");
         newer.id = id_for(&newer.manifest);
         let newer_library = install(&newer, home.path()).unwrap();
@@ -712,7 +707,7 @@ mod tests {
         assert_eq!(installed_ids(&root), both);
         // The newest is what a host boots.
         assert_eq!(
-            choose(None, &root, "macos", "aarch64", Some("0.7.13"))
+            choose(None, &root, "macos", "aarch64", Some(MSB))
                 .id
                 .as_deref(),
             Some(newer.id.as_str())
@@ -720,7 +715,7 @@ mod tests {
 
         // The next install removes the one two installs ago, so a host keeps two at most.
         age(&root, &newer.id, 1800);
-        let mut third = build(dir.path(), "aarch64", "macos", "0.7.13", b"third kernel");
+        let mut third = build(dir.path(), "aarch64", "macos", MSB, b"third kernel");
         third.manifest = third.manifest.replace("linux-6.12.113", "linux-6.12.115");
         third.id = id_for(&third.manifest);
         install(&third, home.path()).unwrap();
@@ -729,7 +724,7 @@ mod tests {
         remaining.sort();
         assert_eq!(installed_ids(&root), remaining);
         assert_eq!(
-            choose(None, &root, "macos", "aarch64", Some("0.7.13"))
+            choose(None, &root, "macos", "aarch64", Some(MSB))
                 .id
                 .as_deref(),
             Some(third.id.as_str())
@@ -744,10 +739,10 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("built for msb 0.7.12"), "{error}");
-        assert!(error.contains("0.7.13"), "{error}");
+        assert!(error.contains(MSB), "{error}");
 
         let dir = tempfile::tempdir().unwrap();
-        let artifact = build(dir.path(), "x86_64", "linux", "0.7.13", b"kernel");
+        let artifact = build(dir.path(), "x86_64", "linux", MSB, b"kernel");
         std::fs::write(&artifact.library, b"tampered").unwrap();
         let error = artifact_for(dir.path(), "linux", "x86_64")
             .unwrap_err()
@@ -763,8 +758,8 @@ mod tests {
 
     #[test]
     fn a_manifest_without_an_msb_is_not_installed_by_default() {
-        let text = manifest("0.7.13", "aarch64", "aarch64/libkrunfw.5.dylib", "a")
-            .replace("msb 0.7.13\n", "");
+        let text = manifest(MSB, "aarch64", "aarch64/libkrunfw.5.dylib", "a")
+            .replace(&format!("msb {MSB}\n"), "");
         let parsed = Manifest::parse(&text).unwrap();
         assert_eq!(parsed.msb, None);
         assert_eq!(parsed.arch, "aarch64");

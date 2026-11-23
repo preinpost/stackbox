@@ -434,6 +434,8 @@ impl Backend for AgentBackend {
         _: String,
         reference: Option<String>,
         _: Option<crate::model::GpuConfig>,
+        // The agent deploys the PCI devices recorded with its own reservation, too.
+        _: Vec<String>,
         sink: EventSink,
     ) -> BoxFuture<'_, Result<()>> {
         Box::pin(self.deploy_job(id, from, uuid::Uuid::new_v4().to_string(), reference, sink))

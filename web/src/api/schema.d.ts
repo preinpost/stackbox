@@ -973,6 +973,8 @@ export interface components {
       key?: string | null;
       layout?: null | components["schemas"]["FarmLayout"];
       owner?: string | null;
+      /** @description Host PCI devices passed through to compute-1 (see [`PlanRequest::pci_devices`]). */
+      pci_devices?: string[];
       /**
        * @description Compute VMs that run on another host than `host_id`, by VM (`compute-2` → host id).
        *     Their links reach the control VM's host through the coordinator's relay.
@@ -1385,6 +1387,12 @@ export interface components {
       /** Format: int64 */
       memory_total_mib: number;
       msb_compatible: boolean;
+      /**
+       * @description Whether this host's `msb` takes `--pci` and `--iommu` on `msb run`. The upstream and
+       *     fork builds share one version string, so the version cannot tell them apart; the
+       *     inspection asks the binary's own help. Absent from older inspections, which read false.
+       */
+      msb_pci_capable?: boolean;
       msb_version?: string | null;
       /**
        * @description The farm kernel ran the host's verification VM and exposed the `mtty` mediated
@@ -1392,6 +1400,19 @@ export interface components {
        */
       mtty_available?: boolean;
       os: string;
+      /**
+       * @description PCI devices on this host bound to `vfio-pci`: the only ones a farm may pass through.
+       *     Only devices in such a state are listed, so a host's chipset devices stay out of its
+       *     inspection and `state.json`.
+       */
+      pci_devices?: components["schemas"]["HostPciDevice"][];
+      /**
+       * @description Whether this host can take a PCI passthrough farm now: the farm kernel is installed,
+       *     `msb` supports `--pci`/`--iommu` (`msb_pci_capable`), `/dev/vfio/vfio` exists and at
+       *     least one of `pci_devices` is `vfio_ready`. The guest kernel is the farm's, so the
+       *     stock kernel answers no.
+       */
+      pci_passthrough_available?: boolean;
       sudo_available: boolean;
       vm_boot_verified: boolean;
     };
@@ -1425,6 +1446,34 @@ export interface components {
      * @enum {string}
      */
     HostKind: "ssh" | "local" | "agent";
+    /** @description A host PCI device a farm may pass through. Only `vfio-pci`-bound devices are reported. */
+    HostPciDevice: {
+      /** @description Lowercase `DDDD:BB:DD.F`, such as `0000:04:00.3`. */
+      bdf: string;
+      /** @description Six lowercase hex digits: base class, subclass and programming interface. */
+      class: string;
+      /** @description The bound driver; `vfio-pci` for every listed device. */
+      driver?: string | null;
+      /**
+       * @description Every device in the IOMMU group is either unbound or bound to `vfio-pci`, so the group
+       *     can be handed to a guest without taking a device another driver uses.
+       */
+      group_exclusive?: boolean;
+      /**
+       * Format: int32
+       * @description The IOMMU group, or absent when the device has none.
+       */
+      iommu_group?: number | null;
+      /** @description Four lowercase hex digits. */
+      product_id: string;
+      /** @description Four lowercase hex digits. */
+      vendor_id: string;
+      /**
+       * @description `driver` is `vfio-pci`, the group is exclusive and `/dev/vfio/<group>` is readable and
+       *     writable by the agent. Only such a device is accepted for passthrough.
+       */
+      vfio_ready?: boolean;
+    };
     /**
      * @description What the coordinator's last attempts to reach an SSH host found: its inventory scan, or a
      *     plain connection check for a host that runs no farm.
@@ -1639,6 +1688,11 @@ export interface components {
       memory_mib: number;
       nodes: components["schemas"]["NodeSpec"][];
       /**
+       * @description Host PCI devices compute-1 receives through VFIO; absent on plans recorded before
+       *     the option existed.
+       */
+      pci_devices?: string[];
+      /**
        * @description OpenStack release the VMs install. Absent on plans recorded before it was kept, which
        *     read as [`crate::kolla::OPENSTACK_RELEASE`].
        */
@@ -1661,6 +1715,12 @@ export interface components {
       gpu: null | components["schemas"]["GpuConfig"];
       /** @default null */
       layout: null | components["schemas"]["FarmLayout"];
+      /**
+       * @description Host PCI devices passed through to compute-1 (`DDDD:BB:DD.F`). Each must already be
+       *     bound to `vfio-pci` on the farm's host; see [`normalize_pci_devices`].
+       * @default []
+       */
+      pci_devices: string[];
       /**
        * @description OpenStack release to install; omitted installs this coordinator's own release.
        * @default null
@@ -1794,6 +1854,11 @@ export interface components {
       id: string;
       layout?: null | components["schemas"]["FarmLayout"];
       owner?: string | null;
+      /**
+       * @description PCI devices passed through to compute-1 (see [`PlanRequest::pci_devices`]); like a GPU,
+       *     only a clean install can take them.
+       */
+      pci_devices?: string[];
       /** @description OpenStack release, such as `2026.2`. */
       release: string;
     };

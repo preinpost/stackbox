@@ -289,13 +289,98 @@ pub const MDEV_NOVA_COMPUTE_CONF: &str =
 /// leaves each instance SHUTOFF when its compute VM comes back from a snapshot.
 pub const NOVA_COMPUTE_BASE_CONF: &str = "[DEFAULT]\nresume_guests_state_on_host_boot = True\n";
 
-/// The whole nova-compute.conf: the base section, then the mtty sections when `mdev`.
-pub fn nova_compute_conf(mdev: bool) -> String {
-    if mdev {
-        format!("{NOVA_COMPUTE_BASE_CONF}\n{MDEV_NOVA_COMPUTE_CONF}")
-    } else {
-        NOVA_COMPUTE_BASE_CONF.to_owned()
+/// A PCI device the compute-1 guest shows after `farm-vfio-prepare` bound it to `vfio-pci`.
+/// `bdf` is the guest's address, which is what Nova's `device_spec` names.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GuestPciDevice {
+    pub bdf: String,
+    pub vendor_id: String,
+    pub product_id: String,
+    pub iommu_group: u32,
+}
+
+/// One `[pci] alias`: a flavor asks for it by name, and Nova matches it to a device by ids.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PciAlias {
+    pub name: String,
+    pub vendor_id: String,
+    pub product_id: String,
+}
+
+/// The filters the scheduler runs. OpenStack 2025.1 to 2026.2 leave `PciPassthroughFilter`
+/// out of their default list, so farm names the whole list.
+pub const NOVA_ENABLED_FILTERS: &str = "ComputeFilter, ComputeCapabilitiesFilter, ImagePropertiesFilter, ServerGroupAntiAffinityFilter, ServerGroupAffinityFilter, PciPassthroughFilter";
+
+/// One alias per distinct `(vendor_id, product_id)`, in the order the devices are listed: the
+/// first pair is `farm-pci`, the next `farm-pci-2`, and so on.
+pub fn pci_aliases(devices: &[GuestPciDevice]) -> Vec<PciAlias> {
+    let mut pairs: Vec<(String, String)> = Vec::new();
+    for device in devices {
+        let pair = (device.vendor_id.clone(), device.product_id.clone());
+        if !pairs.contains(&pair) {
+            pairs.push(pair);
+        }
     }
+    pairs
+        .into_iter()
+        .enumerate()
+        .map(|(index, (vendor_id, product_id))| PciAlias {
+            name: pci_alias_name(index),
+            vendor_id,
+            product_id,
+        })
+        .collect()
+}
+
+/// The alias of the `index`th distinct device pair (zero-based).
+pub fn pci_alias_name(index: usize) -> String {
+    if index == 0 {
+        "farm-pci".to_owned()
+    } else {
+        format!("farm-pci-{}", index + 1)
+    }
+}
+
+/// The first line of every `nova.conf` farm writes. Removal checks for it, so a file an operator
+/// wrote by hand is never deleted.
+pub const NOVA_GLOBAL_MARKER: &str = "# Managed by farm";
+
+/// The nova.conf that every Nova service merges (`/etc/kolla/config/nova.conf`): the scheduler's
+/// filters and the `[pci]` aliases. `None` when the farm has no passthrough device.
+pub fn nova_global_conf(pci_devices: &[GuestPciDevice]) -> Option<String> {
+    if pci_devices.is_empty() {
+        return None;
+    }
+    let mut conf = format!(
+        "{NOVA_GLOBAL_MARKER}\n[filter_scheduler]\nenabled_filters = {NOVA_ENABLED_FILTERS}\n\n[pci]\n"
+    );
+    for alias in pci_aliases(pci_devices) {
+        conf.push_str(&format!(
+            "alias = {{\"name\": \"{}\", \"vendor_id\": \"{}\", \"product_id\": \"{}\", \"device_type\": \"type-PCI\"}}\n",
+            alias.name, alias.vendor_id, alias.product_id
+        ));
+    }
+    Some(conf)
+}
+
+/// The whole nova-compute.conf: the base section, then the mtty sections when `mdev`, then one
+/// `device_spec` per passthrough device (named by its guest address).
+pub fn nova_compute_conf(mdev: bool, pci_devices: &[GuestPciDevice]) -> String {
+    let mut conf = NOVA_COMPUTE_BASE_CONF.to_owned();
+    if mdev {
+        conf.push('\n');
+        conf.push_str(MDEV_NOVA_COMPUTE_CONF);
+    }
+    if !pci_devices.is_empty() {
+        conf.push_str("\n[pci]\n");
+        for device in pci_devices {
+            conf.push_str(&format!(
+                "device_spec = {{\"vendor_id\": \"{}\", \"product_id\": \"{}\", \"address\": \"{}\"}}\n",
+                device.vendor_id, device.product_id, device.bdf
+            ));
+        }
+    }
+    conf
 }
 
 /// Where each host keeps the Nova files farm's mtty backport mounts into nova_compute, as
@@ -1050,12 +1135,12 @@ mod tests {
 
     #[test]
     fn nova_compute_resumes_its_guests_on_host_boot_with_or_without_mtty() {
-        let plain = nova_compute_conf(false);
+        let plain = nova_compute_conf(false, &[]);
         assert_eq!(
             plain,
             "[DEFAULT]\nresume_guests_state_on_host_boot = True\n"
         );
-        let mdev = nova_compute_conf(true);
+        let mdev = nova_compute_conf(true, &[]);
         assert!(
             mdev.starts_with("[DEFAULT]\nresume_guests_state_on_host_boot = True\n\n"),
             "{mdev}"
@@ -1537,5 +1622,135 @@ print("hunks matched")
         assert!(selected.starts_with("# Written by farm"));
         assert!(skyline_override(&["keystone".into(), "horizon".into()]).is_none());
         assert!(skyline_override(&[]).is_none());
+    }
+
+    fn guest_pci(bdf: &str, vendor: &str, product: &str, group: u32) -> GuestPciDevice {
+        GuestPciDevice {
+            bdf: bdf.to_owned(),
+            vendor_id: vendor.to_owned(),
+            product_id: product.to_owned(),
+            iommu_group: group,
+        }
+    }
+
+    /// The `key = value` lines of a nova.conf section, with the JSON of each `alias`/`device_spec`.
+    fn json_values(conf: &str, key: &str) -> Vec<serde_json::Value> {
+        conf.lines()
+            .filter_map(|line| line.strip_prefix(&format!("{key} = ")))
+            .map(|value| serde_json::from_str(value).unwrap_or_else(|e| panic!("{value}: {e}")))
+            .collect()
+    }
+
+    #[test]
+    fn nova_global_conf_is_absent_without_passthrough() {
+        assert_eq!(nova_global_conf(&[]), None);
+    }
+
+    #[test]
+    fn nova_global_conf_starts_with_the_farm_marker() {
+        let devices = [guest_pci("0000:00:05.0", "10de", "1eb8", 3)];
+        let conf = nova_global_conf(&devices).unwrap();
+        assert_eq!(conf.lines().next(), Some(NOVA_GLOBAL_MARKER));
+    }
+
+    #[test]
+    fn nova_global_conf_names_every_default_filter_and_the_pci_filter() {
+        let devices = [guest_pci("0000:00:05.0", "10de", "1eb8", 3)];
+        let conf = nova_global_conf(&devices).unwrap();
+        let filters = conf
+            .lines()
+            .find_map(|line| line.strip_prefix("enabled_filters = "))
+            .unwrap();
+        let names: Vec<&str> = filters.split(", ").collect();
+        assert_eq!(
+            names,
+            [
+                "ComputeFilter",
+                "ComputeCapabilitiesFilter",
+                "ImagePropertiesFilter",
+                "ServerGroupAntiAffinityFilter",
+                "ServerGroupAffinityFilter",
+                "PciPassthroughFilter",
+            ]
+        );
+        assert!(
+            conf.starts_with(&format!("{NOVA_GLOBAL_MARKER}\n[filter_scheduler]\n")),
+            "{conf}"
+        );
+        assert!(conf.contains("\n[pci]\n"), "{conf}");
+    }
+
+    #[test]
+    fn nova_global_conf_aliases_parse_and_dedup_repeated_pairs() {
+        let devices = [
+            guest_pci("0000:00:05.0", "10de", "1eb8", 3),
+            guest_pci("0000:00:06.0", "10de", "1eb8", 4),
+            guest_pci("0000:00:07.0", "8086", "1521", 5),
+        ];
+        let conf = nova_global_conf(&devices).unwrap();
+        let aliases = json_values(&conf, "alias");
+        assert_eq!(aliases.len(), 2, "{conf}");
+        assert_eq!(aliases[0]["name"], "farm-pci");
+        assert_eq!(aliases[0]["vendor_id"], "10de");
+        assert_eq!(aliases[0]["product_id"], "1eb8");
+        assert_eq!(aliases[0]["device_type"], "type-PCI");
+        assert_eq!(aliases[1]["name"], "farm-pci-2");
+        assert_eq!(aliases[1]["vendor_id"], "8086");
+        assert_eq!(aliases[1]["product_id"], "1521");
+    }
+
+    #[test]
+    fn pci_aliases_keep_the_order_of_first_appearance() {
+        let devices = [
+            guest_pci("0000:00:05.0", "8086", "1521", 1),
+            guest_pci("0000:00:06.0", "10de", "1eb8", 2),
+            guest_pci("0000:00:07.0", "8086", "1521", 3),
+            guest_pci("0000:00:08.0", "1002", "73bf", 4),
+        ];
+        let names: Vec<(String, String, String)> = pci_aliases(&devices)
+            .into_iter()
+            .map(|a| (a.name, a.vendor_id, a.product_id))
+            .collect();
+        assert_eq!(
+            names,
+            [
+                ("farm-pci".into(), "8086".into(), "1521".into()),
+                ("farm-pci-2".into(), "10de".into(), "1eb8".into()),
+                ("farm-pci-3".into(), "1002".into(), "73bf".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn nova_compute_conf_declares_each_device_by_its_guest_address() {
+        let devices = [
+            guest_pci("0000:00:05.0", "10de", "1eb8", 3),
+            guest_pci("0000:00:06.0", "10de", "1eb8", 4),
+        ];
+        let conf = nova_compute_conf(false, &devices);
+        assert!(conf.starts_with(NOVA_COMPUTE_BASE_CONF), "{conf}");
+        assert!(!conf.contains("[devices]"), "{conf}");
+        let specs = json_values(&conf, "device_spec");
+        assert_eq!(specs.len(), 2, "{conf}");
+        assert_eq!(specs[0]["vendor_id"], "10de");
+        assert_eq!(specs[0]["product_id"], "1eb8");
+        assert_eq!(specs[0]["address"], "0000:00:05.0");
+        assert_eq!(specs[1]["address"], "0000:00:06.0");
+        assert_eq!(conf.matches("[pci]").count(), 1, "{conf}");
+    }
+
+    #[test]
+    fn nova_compute_conf_keeps_the_mtty_sections_beside_the_pci_ones() {
+        let devices = [guest_pci("0000:00:05.0", "10de", "1eb8", 3)];
+        let conf = nova_compute_conf(true, &devices);
+        assert!(conf.starts_with(NOVA_COMPUTE_BASE_CONF), "{conf}");
+        assert!(conf.contains(MDEV_NOVA_COMPUTE_CONF), "{conf}");
+        assert_eq!(conf.matches("[DEFAULT]").count(), 1, "{conf}");
+        assert_eq!(conf.matches("[devices]").count(), 1, "{conf}");
+        assert_eq!(json_values(&conf, "device_spec").len(), 1, "{conf}");
+        assert!(
+            conf.find("[devices]").unwrap() < conf.find("[pci]").unwrap(),
+            "{conf}"
+        );
     }
 }

@@ -40,6 +40,7 @@ pub trait Backend: Send + Sync + 'static {
         release: String,
         reference: Option<String>,
         gpu: Option<crate::model::GpuConfig>,
+        pci_devices: Vec<String>,
         sink: EventSink,
     ) -> BoxFuture<'_, Result<()>>;
     fn delete(&self, id: String) -> BoxFuture<'_, Result<()>>;
@@ -126,6 +127,7 @@ pub trait Backend: Send + Sync + 'static {
         _release: String,
         _reference: Option<String>,
         _gpu: Option<crate::model::GpuConfig>,
+        _pci_devices: Vec<String>,
         _remote: Vec<u8>,
         _ssh_private_key: String,
         _sink: EventSink,
@@ -257,6 +259,7 @@ impl Backend for MicrosandboxBackend {
                 Some(&self.switch),
                 &[],
                 None,
+                &plan.pci_devices,
             )
             .await
         })
@@ -277,6 +280,7 @@ impl Backend for MicrosandboxBackend {
                 Some(&self.switch),
                 &[],
                 Some(&share),
+                &plan.pci_devices,
             )
             .await
         })
@@ -304,6 +308,7 @@ impl Backend for MicrosandboxBackend {
                 Some(&self.switch),
                 &sources,
                 Some(&share),
+                &plan.pci_devices,
             )
             .await
         })
@@ -321,7 +326,15 @@ impl Backend for MicrosandboxBackend {
             if let Some(uplink) = uplink {
                 self.switch.set_uplink(&id, uplink)?;
             }
-            farm::add_nodes(&id, &plan.nodes, &add, &self.switch, source.as_deref()).await
+            farm::add_nodes(
+                &id,
+                &plan.nodes,
+                &add,
+                &self.switch,
+                source.as_deref(),
+                &plan.pci_devices,
+            )
+            .await
         })
     }
     fn ssh_keys(&self, id: String) -> BoxFuture<'_, Result<(String, String)>> {
@@ -358,7 +371,7 @@ impl Backend for MicrosandboxBackend {
                 Ok((public, private))
             }
             .await;
-            sandbox.detach().await;
+            farm::detach(&sandbox).await;
             result
         })
     }
@@ -400,6 +413,7 @@ impl Backend for MicrosandboxBackend {
         release: String,
         reference: Option<String>,
         gpu: Option<crate::model::GpuConfig>,
+        pci_devices: Vec<String>,
         remote: Vec<u8>,
         ssh_private_key: String,
         sink: EventSink,
@@ -413,6 +427,7 @@ impl Backend for MicrosandboxBackend {
                 &release,
                 reference.as_deref(),
                 gpu,
+                &pci_devices,
                 &remote,
                 &ssh_private_key,
                 sink,
@@ -430,6 +445,7 @@ impl Backend for MicrosandboxBackend {
         release: String,
         reference: Option<String>,
         gpu: Option<crate::model::GpuConfig>,
+        pci_devices: Vec<String>,
         sink: EventSink,
     ) -> BoxFuture<'_, Result<()>> {
         Box::pin(async move {
@@ -441,6 +457,7 @@ impl Backend for MicrosandboxBackend {
                 &release,
                 reference.as_deref(),
                 gpu,
+                &pci_devices,
                 sink,
             )
             .await
@@ -490,7 +507,7 @@ print(json.dumps({k: os.environ[k] for k in keys if k in os.environ}))
 PY"#).await;
             // The data stores report their own credentials and live schemas.
             let stores = crate::shell::run(&sandbox, DATASTORES_SCRIPT).await;
-            sandbox.detach().await;
+            farm::detach(&sandbox).await;
             let mut credentials: BTreeMap<String, String> = serde_json::from_str(&result?)?;
             let datastores = exposure
                 .as_ref()
@@ -555,6 +572,7 @@ PY"#).await;
                     Some(&self.switch),
                     &[reference],
                     None,
+                    &plan.pci_devices,
                 )
                 .await;
             }
@@ -580,6 +598,7 @@ PY"#).await;
                     Some(&self.switch),
                     &sources,
                     None,
+                    &plan.pci_devices,
                 )
                 .await;
             }

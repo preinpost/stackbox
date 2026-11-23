@@ -12,7 +12,7 @@ use crate::shell::{run, stream};
 pub use config::OPENSTACK_RELEASE;
 /// Python the golden image ships, which the releases that still have a branch run on.
 pub const GUEST_PYTHON: &str = "3.12";
-use config::{Compute, Topology};
+use config::{Compute, GuestPciDevice, Topology};
 use std::{collections::BTreeMap, sync::Arc};
 
 #[derive(Clone, Debug)]
@@ -124,6 +124,7 @@ pub async fn deploy(farm_id: &str, from: Phase, components: &[String]) -> Result
         OPENSTACK_RELEASE,
         None,
         None,
+        &[],
         Arc::new(|_| Ok(())),
     )
     .await
@@ -140,6 +141,7 @@ pub async fn deploy_with(
     release: &str,
     reference: Option<&str>,
     gpu: Option<crate::model::GpuConfig>,
+    pci_devices: &[String],
     sink: EventSink,
 ) -> Result<()> {
     deploy_on(
@@ -150,6 +152,7 @@ pub async fn deploy_with(
         release,
         reference,
         gpu,
+        pci_devices,
         &[],
         None,
         sink,
@@ -169,6 +172,7 @@ pub async fn deploy_spanning(
     release: &str,
     reference: Option<&str>,
     gpu: Option<crate::model::GpuConfig>,
+    pci_devices: &[String],
     remote: &[u8],
     ssh_private_key: &str,
     sink: EventSink,
@@ -181,6 +185,7 @@ pub async fn deploy_spanning(
         release,
         reference,
         gpu,
+        pci_devices,
         remote,
         Some(ssh_private_key),
         sink,
@@ -197,6 +202,7 @@ async fn deploy_on(
     release: &str,
     reference: Option<&str>,
     gpu: Option<crate::model::GpuConfig>,
+    pci_devices: &[String],
     remote: &[u8],
     ssh_private_key: Option<&str>,
     sink: EventSink,
@@ -246,14 +252,15 @@ async fn deploy_on(
             release,
             reference,
             gpu.as_ref(),
+            pci_devices,
             &sink,
         )
         .await
     }
     .await;
-    deployer.detach().await;
+    farm::detach(&deployer).await;
     for (_, sandbox) in computes.into_iter().filter_map(|(c, s)| Some((c, s?))) {
-        sandbox.detach().await;
+        farm::detach(&sandbox).await;
     }
     result
 }
@@ -470,9 +477,9 @@ pub async fn deploy_compute(
         Ok::<_, anyhow::Error>(())
     }
     .await;
-    control.detach().await;
+    farm::detach(&control).await;
     for sandbox in sandboxes {
-        sandbox.detach().await;
+        farm::detach(&sandbox).await;
     }
     result
 }
@@ -508,7 +515,7 @@ pub async fn forget_computes(farm_id: &str, components: &[String], sink: EventSi
         .await
     }
     .await;
-    control.detach().await;
+    farm::detach(&control).await;
     result
 }
 
@@ -783,7 +790,7 @@ pub async fn prepare_share(
             authorize_key(&sandbox, ssh_public_key).await
         }
         .await;
-        sandbox.detach().await;
+        farm::detach(&sandbox).await;
         result.with_context(|| format!("prepare {}", node.name))?;
     }
     Ok(())
@@ -806,6 +813,7 @@ async fn deploy_phases(
     release: &str,
     reference: Option<&str>,
     gpu: Option<&crate::model::GpuConfig>,
+    pci_devices: &[String],
     sink: &EventSink,
 ) -> Result<()> {
     // The coordinator resolved the kolla-ansible ref against the catalog; this process has
@@ -820,7 +828,15 @@ async fn deploy_phases(
             Phase::Install => stream(deployer, &install_script(&info), &log, sink).await,
             Phase::Configure => {
                 configure(
-                    deployer, computes, topology, exposure, components, release, gpu, sink,
+                    deployer,
+                    computes,
+                    topology,
+                    exposure,
+                    components,
+                    release,
+                    gpu,
+                    pci_devices,
+                    sink,
                 )
                 .await
             }
@@ -866,7 +882,15 @@ async fn deploy_phases(
                 } else {
                     1
                 };
-                let script = verify_script(components, hosts, release, gpu);
+                let mut script = verify_script(components, hosts, release, gpu);
+                if !pci_devices.is_empty() {
+                    step(
+                        sink,
+                        "PCI passthrough 확인 (compute-1 장치와 farm.pci 인스턴스)",
+                    )?;
+                    let guest = probe_guest_pci(deployer, computes, pci_devices.len()).await?;
+                    script.push_str(&pci_verify_script(PCI_COMPUTE, &guest));
+                }
                 stream(deployer, &script, &log, sink).await
             }
         }
@@ -1001,6 +1025,11 @@ ExecStartPre=/usr/bin/sh -c 'if [ -c /dev/kvm ]; then chown root:42427 /dev/kvm 
 EOF
 mount --make-shared /run
 if [ -c /dev/kvm ]; then chown root:42427 /dev/kvm && chmod 0666 /dev/kvm; fi
+# A compute with passed-through devices: nova_libvirt opens the VFIO container and the group
+# files as uid 42427, a group only, so other users cannot open them. farm-vfio.service sets the
+# same owner and modes at each boot; this covers the first.
+if [ -e /dev/vfio/vfio ]; then chown root:42427 /dev/vfio/vfio && chmod 0660 /dev/vfio/vfio; fi
+for node in /dev/vfio/[0-9]*; do [ -e "$node" ] || continue; chown root:42427 "$node" && chmod 0660 "$node"; done
 systemctl daemon-reload"#,
     )
     .await?;
@@ -1617,6 +1646,7 @@ async fn configure(
     components: &[String],
     release: &str,
     gpu: Option<&crate::model::GpuConfig>,
+    pci_devices: &[String],
     sink: &EventSink,
 ) -> Result<()> {
     step(sink, "passwords.yml 생성 (kolla-genpwd)")?;
@@ -1776,9 +1806,33 @@ async fn configure(
         step(sink, "compute VM의 mtty mdev 장치 확인")?;
         check_mdev(deployer, computes, gpu.count).await?;
     }
+    // A passthrough farm's devices are declared by the guest address that compute-1 shows
+    // after farm-vfio-prepare bound them, so they are read from the VM before Nova hears of them.
+    let guest_pci = if pci_devices.is_empty() {
+        Vec::new()
+    } else {
+        step(
+            sink,
+            "compute-1의 PCI passthrough 장치(vfio-pci, IOMMU 그룹, VFIO 노드) 확인",
+        )?;
+        probe_guest_pci(deployer, computes, pci_devices.len()).await?
+    };
     run(deployer, &format!("mkdir -p {CONFIG_DIR}/config/nova")).await?;
-    fs.write(&nova_compute_conf, &config::nova_compute_conf(mtty))
-        .await?;
+    fs.write(
+        &nova_compute_conf,
+        &config::nova_compute_conf(mtty, &guest_pci),
+    )
+    .await?;
+    // The scheduler filters and the aliases every Nova service reads from nova.conf.
+    let nova_global = format!("{CONFIG_DIR}/config/nova.conf");
+    match config::nova_global_conf(&guest_pci) {
+        Some(conf) => {
+            fs.write(&nova_global, &conf).await?;
+        }
+        None => {
+            run(deployer, &remove_managed_nova_global(&nova_global)).await?;
+        }
+    }
     // A GPU farm installs the fake nvidia-smi on every instance through Nova's static
     // vendor data: cloud-init merges this cloud-config without user-data. Images that are
     // not cloud-init (CirrOS) ignore it and use the user-data installer the API serves.
@@ -1916,6 +1970,142 @@ async fn check_mdev(
         }
     }
     Ok(())
+}
+
+/// The compute that receives the farm's PCI devices (`plan.pci_devices` reach compute-1 only).
+const PCI_COMPUTE: &str = "farm-compute-1";
+
+/// The command that removes the farm's `nova.conf` once no device needs it. A file whose first
+/// line is not the farm's marker was written by an operator and stays.
+fn remove_managed_nova_global(path: &str) -> String {
+    format!(
+        "if [ -f {path} ] && [ \"$(sed -n 1p {path})\" = \"{}\" ]; then rm -f {path}; fi",
+        config::NOVA_GLOBAL_MARKER
+    )
+}
+
+/// Runs on compute-1 once `farm-vfio.service` has bound the devices. Prints one `device` line
+/// per `0000:00:*` function (BDF, vendor, product, driver, IOMMU group, whether the group node is
+/// there), then the module parameter and the VFIO container. No single quotes: it crosses ssh.
+const PCI_PROBE: &str = r#"set -eu
+systemctl start farm-vfio.service
+for dev in /sys/bus/pci/devices/0000:00:*; do
+  [ -e "$dev/vendor" ] || continue
+  bdf=$(basename "$dev")
+  vendor=$(cut -c3- "$dev/vendor")
+  product=$(cut -c3- "$dev/device")
+  driver=-
+  if [ -L "$dev/driver" ]; then driver=$(basename "$(readlink "$dev/driver")"); fi
+  group=-
+  if [ -L "$dev/iommu_group" ]; then group=$(basename "$(readlink "$dev/iommu_group")"); fi
+  access=no
+  if [ "$group" != - ] && [ -e "/dev/vfio/$group" ]; then access=yes; fi
+  echo "device $bdf $vendor $product $driver $group $access"
+done
+echo "allow_unsafe_interrupts $(cat /sys/module/vfio_iommu_type1/parameters/allow_unsafe_interrupts 2>/dev/null || echo missing)"
+if [ -e /dev/vfio/vfio ]; then echo "vfio_container yes"; else echo "vfio_container no"; fi
+"#;
+
+fn is_pci_id(id: &str) -> bool {
+    id.len() == 4 && id.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// Checks the compute's answer to [`PCI_PROBE`]: unsafe interrupts allowed, the VFIO container
+/// present, and at least `expected` devices, each bound to `vfio-pci` with an IOMMU group whose
+/// node is accessible. Returns the devices with their guest addresses.
+fn parse_guest_pci_probe(output: &str, expected: usize) -> Result<Vec<GuestPciDevice>> {
+    let mut devices = Vec::new();
+    let mut unsafe_interrupts = "absent";
+    let mut container = false;
+    for line in output.lines() {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        match fields.as_slice() {
+            ["device", bdf, vendor, product, driver, group, access] => {
+                if !is_pci_id(vendor) || !is_pci_id(product) {
+                    bail!("guest device {bdf} reports ids {vendor}:{product}, not 4-digit hex ids");
+                }
+                if *driver != "vfio-pci" {
+                    bail!(
+                        "guest device {bdf} is bound to {driver}, not vfio-pci; the passthrough cannot take it"
+                    );
+                }
+                if *group == "-" {
+                    bail!("guest device {bdf} has no IOMMU group");
+                }
+                let iommu_group: u32 = group
+                    .parse()
+                    .with_context(|| format!("guest device {bdf} has IOMMU group '{group}'"))?;
+                if *access != "yes" {
+                    bail!(
+                        "guest device {bdf} is in IOMMU group {group}, but /dev/vfio/{group} is missing"
+                    );
+                }
+                devices.push(GuestPciDevice {
+                    bdf: bdf.to_string(),
+                    vendor_id: vendor.to_string(),
+                    product_id: product.to_string(),
+                    iommu_group,
+                });
+            }
+            ["device", ..] => bail!("malformed guest PCI probe line: {line}"),
+            ["allow_unsafe_interrupts", value] => unsafe_interrupts = value,
+            ["vfio_container", value] => container = *value == "yes",
+            _ => {}
+        }
+    }
+    if unsafe_interrupts != "Y" {
+        bail!(
+            "the guest's vfio_iommu_type1 allow_unsafe_interrupts is {unsafe_interrupts}, not Y; the passthrough would fail"
+        );
+    }
+    if !container {
+        bail!("the guest has no /dev/vfio/vfio container node");
+    }
+    if devices.len() < expected {
+        bail!(
+            "the guest shows {} PCI devices bound to vfio-pci, fewer than the {expected} passed through",
+            devices.len()
+        );
+    }
+    Ok(devices)
+}
+
+/// Reads compute-1's passthrough devices (see [`PCI_PROBE`]) and checks them against the farm's
+/// `expected` count. A compute on another host answers over the control VM's SSH key.
+async fn probe_guest_pci(
+    deployer: &Sandbox,
+    computes: &[(Compute, Option<Sandbox>)],
+    expected: usize,
+) -> Result<Vec<GuestPciDevice>> {
+    let (compute, sandbox) = computes
+        .iter()
+        .find(|(compute, _)| compute.hostname == PCI_COMPUTE)
+        .with_context(|| format!("the farm has no {PCI_COMPUTE} to pass PCI devices to"))?;
+    let output = match sandbox {
+        Some(sandbox) => run(sandbox, PCI_PROBE).await,
+        None => {
+            run(
+                deployer,
+                &format!(
+                    "ssh -o BatchMode=yes -o ConnectTimeout=10 {} '{PCI_PROBE}'",
+                    ssh_target(compute)?
+                ),
+            )
+            .await
+        }
+    }
+    .with_context(|| {
+        format!(
+            "cannot read {}'s PCI passthrough devices: the compute VM did not answer",
+            compute.hostname
+        )
+    })?;
+    parse_guest_pci_probe(&output, expected).with_context(|| {
+        format!(
+            "{}'s PCI passthrough devices are not ready",
+            compute.hostname
+        )
+    })
 }
 
 /// Builds the patched Nova files on every host that runs nova_compute: the deployer when the
@@ -2061,7 +2251,7 @@ pub async fn settle(
         .await
     }
     .await;
-    sandbox.detach().await;
+    farm::detach(&sandbox).await;
     result
 }
 
@@ -2923,6 +3113,67 @@ echo "GPU OK: {mode} flavor {flavor} booted an instance with {class}"
     )
 }
 
+/// The PCI half of the verification: a `farm.pci` flavor per `[pci] alias` (the first is
+/// `farm.pci`, the rest `farm.pci-2`, ...), one instance of `farm.pci` that must reach ACTIVE, and
+/// its libvirt domain on `host` must carry a `type='pci'` hostdev. The instance is deleted; the
+/// flavors stay for the user.
+fn pci_verify_script(host: &str, devices: &[GuestPciDevice]) -> String {
+    let mut flavors = String::new();
+    for alias in config::pci_aliases(devices) {
+        let flavor = format!("farm.{}", alias.name.trim_start_matches("farm-"));
+        flavors.push_str(&format!(
+            r#"step "PCI passthrough 플레이버 {flavor} (alias {name})"
+$os flavor show {flavor} >/dev/null 2>&1 || $os flavor create --ram 512 --disk 1 --vcpus 1 {flavor} >/dev/null
+$os flavor set {flavor} --property "pci_passthrough:alias={name}:1" >/dev/null
+"#,
+            name = alias.name,
+        ));
+    }
+    format!(
+        r#"{flavors}
+step "PCI passthrough 검증 인스턴스 (farm.pci)와 libvirt hostdev 확인 ({host})"
+pci_net=''; pci_subnet=''; pci_router=''; pci_server=''
+pci_cleanup() {{
+  if [ -n "$pci_server" ]; then $os server delete --wait "$pci_server" >/dev/null 2>&1 || true; fi
+  if [ -n "$pci_router" ]; then
+    if [ -n "$pci_subnet" ]; then $os router remove subnet "$pci_router" "$pci_subnet" >/dev/null 2>&1 || true; fi
+    $os router delete "$pci_router" >/dev/null 2>&1 || true
+  fi
+  if [ -n "$pci_net" ]; then $os network delete "$pci_net" >/dev/null 2>&1 || true; fi
+}}
+trap 'pci_cleanup; cleanup' EXIT
+pci_name="farm-pci-verify-$(cut -c1-8 /proc/sys/kernel/random/uuid)"
+pci_net=$($os network create "$pci_name" -f value -c id)
+pci_subnet=$($os subnet create --network "$pci_net" --subnet-range 10.196.0.0/24 "$pci_name" -f value -c id)
+pci_router=$($os router create --external-gateway public "$pci_name" -f value -c id)
+$os router add subnet "$pci_router" "$pci_subnet" >/dev/null
+pci_server=$($os server create --flavor farm.pci --image cirros-farm --network "$pci_net" "$pci_name" -f value -c id)
+status=''
+for _ in $(seq 90); do
+  status=$($os server show "$pci_server" -f value -c status)
+  case "$status" in
+    ACTIVE) break ;;
+    ERROR) echo "PCI instance entered ERROR" >&2; $os server show "$pci_server" -f value -c fault >&2; exit 1 ;;
+  esac
+  sleep 10
+done
+[ "$status" = ACTIVE ] || {{ echo "PCI instance status: ${{status:-missing}}" >&2; exit 1; }}
+inst=$($os server show "$pci_server" -f value -c OS-EXT-SRV-ATTR:instance_name)
+pci_host={host}
+# The whole XML is read into a variable before it is matched: no reader leaves a pipe early.
+xml=$(ssh -o BatchMode=yes -o ConnectTimeout=10 "$pci_host" "docker exec nova_libvirt virsh dumpxml $inst" 2>/dev/null) || {{ echo "cannot read libvirt domain $inst on $pci_host" >&2; exit 1; }}
+case "$xml" in
+  *"<hostdev mode='subsystem' type='pci'"*) ;;
+  *) echo "libvirt domain $inst on $pci_host has no PCI hostdev" >&2; exit 1 ;;
+esac
+echo "PCI hostdev is bound to the instance's libvirt domain on $pci_host"
+$os server delete --wait "$pci_server" >/dev/null
+pci_server=''
+echo "farm.pci flavor kept for use"
+"#
+    )
+}
+
 /// The child-provider half of [`gpu_verify_script`] for a `simulated` farm: every fake GPU of
 /// every compute is a child of that compute's own provider, carrying exactly the inventory
 /// and the traits the plan asked for, and no compute's root provider carries the class (Nova
@@ -3107,6 +3358,67 @@ mod tests {
     use super::*;
     use std::io::Write;
     use std::process::{Command, Stdio};
+
+    /// Runs the removal the farm sends for `nova.conf` through a real shell, so the test sees
+    /// what the guest's shell does with a managed file, an operator's file and no file.
+    #[test]
+    fn nova_global_is_removed_only_when_the_farm_wrote_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nova.conf");
+        let path = path.to_str().unwrap();
+        let remove = |path: &str| {
+            let status = Command::new("sh")
+                .args(["-c", &remove_managed_nova_global(path)])
+                .status()
+                .unwrap();
+            assert!(status.success(), "{status}");
+        };
+
+        // A file the farm wrote carries the marker on its first line and goes.
+        let device = GuestPciDevice {
+            bdf: "0000:00:05.0".into(),
+            vendor_id: "10de".into(),
+            product_id: "1eb8".into(),
+            iommu_group: 3,
+        };
+        let managed = config::nova_global_conf(&[device]).unwrap();
+        std::fs::write(path, managed).unwrap();
+        remove(path);
+        assert!(!std::path::Path::new(path).exists());
+
+        // An operator's own nova.conf stays, even though it is not empty.
+        std::fs::write(path, "[DEFAULT]\ndebug = true\n").unwrap();
+        remove(path);
+        assert_eq!(
+            std::fs::read_to_string(path).unwrap(),
+            "[DEFAULT]\ndebug = true\n"
+        );
+
+        // A marker that is not on the first line does not count.
+        std::fs::write(path, format!("[DEFAULT]\n{}\n", config::NOVA_GLOBAL_MARKER)).unwrap();
+        remove(path);
+        assert!(std::path::Path::new(path).exists());
+
+        // With no file at all the removal succeeds.
+        std::fs::remove_file(path).unwrap();
+        remove(path);
+    }
+
+    /// The guest's VFIO nodes belong to the nova_libvirt group, 42427, and no one else may
+    /// open them: the prepare script and the one Kolla runs at deploy both set `0660`.
+    #[test]
+    fn the_guest_vfio_nodes_are_group_42427_and_0660() {
+        let script = include_str!("../../guest/farm/farm-vfio-prepare");
+        assert!(script.contains("chown root:42427"), "{script}");
+        assert!(script.contains("chmod 0660"), "{script}");
+        assert!(!script.contains("0666"), "{script}");
+        let deploy = include_str!("mod.rs");
+        let vfio_line = deploy
+            .lines()
+            .find(|line| line.starts_with("if [ -e /dev/vfio/vfio ]; then chown root:42427"))
+            .unwrap_or_default();
+        assert!(vfio_line.contains("chmod 0660"), "{vfio_line}");
+    }
 
     /// Walks `<<'PY'` blocks and rejects an opener inside another block.
     fn assert_heredocs_do_not_nest(script: &str) {
@@ -4957,6 +5269,230 @@ for _ in $(seq 200); do printf '%s\n' "  <interface type='network'/>"; done
         assert!(!output.status.success());
         assert!(
             String::from_utf8_lossy(&output.stderr).contains("lacks trait(s) CUSTOM_EXTRA_2"),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn guest_line(bdf: &str, driver: &str, group: &str, access: &str) -> String {
+        format!("device {bdf} 8086 1521 {driver} {group} {access}\n")
+    }
+
+    fn healthy_probe(devices: &str) -> String {
+        format!("{devices}allow_unsafe_interrupts Y\nvfio_container yes\n")
+    }
+
+    #[test]
+    fn the_guest_pci_probe_accepts_bound_devices_with_their_groups() {
+        let output = healthy_probe(&format!(
+            "{}{}",
+            guest_line("0000:00:05.0", "vfio-pci", "3", "yes"),
+            guest_line("0000:00:06.0", "vfio-pci", "4", "yes"),
+        ));
+        let devices = parse_guest_pci_probe(&output, 2).unwrap();
+        assert_eq!(devices.len(), 2);
+        assert_eq!(devices[0].bdf, "0000:00:05.0");
+        assert_eq!(devices[0].vendor_id, "8086");
+        assert_eq!(devices[0].product_id, "1521");
+        assert_eq!(devices[0].iommu_group, 3);
+        assert_eq!(devices[1].iommu_group, 4);
+        // More devices than the farm asked for is fine.
+        assert_eq!(parse_guest_pci_probe(&output, 1).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn the_guest_pci_probe_names_a_device_not_bound_to_vfio_pci() {
+        let output = healthy_probe(&guest_line("0000:00:05.0", "xhci_hcd", "3", "yes"));
+        let error = parse_guest_pci_probe(&output, 1).unwrap_err().to_string();
+        assert!(error.contains("0000:00:05.0"), "{error}");
+        assert!(error.contains("xhci_hcd"), "{error}");
+        assert!(error.contains("vfio-pci"), "{error}");
+        // Not bound at all is the same refusal.
+        let unbound = healthy_probe(&guest_line("0000:00:05.0", "-", "3", "yes"));
+        assert!(parse_guest_pci_probe(&unbound, 1).is_err());
+    }
+
+    #[test]
+    fn the_guest_pci_probe_names_a_device_without_an_iommu_group() {
+        let output = healthy_probe(&guest_line("0000:00:05.0", "vfio-pci", "-", "no"));
+        let error = parse_guest_pci_probe(&output, 1).unwrap_err().to_string();
+        assert!(error.contains("0000:00:05.0"), "{error}");
+        assert!(error.contains("no IOMMU group"), "{error}");
+    }
+
+    #[test]
+    fn the_guest_pci_probe_names_a_group_without_its_vfio_node() {
+        let output = healthy_probe(&guest_line("0000:00:05.0", "vfio-pci", "3", "no"));
+        let error = parse_guest_pci_probe(&output, 1).unwrap_err().to_string();
+        assert!(error.contains("/dev/vfio/3"), "{error}");
+    }
+
+    #[test]
+    fn the_guest_pci_probe_refuses_interrupts_not_allowed_and_a_missing_container() {
+        let line = guest_line("0000:00:05.0", "vfio-pci", "3", "yes");
+        let closed = format!("{line}allow_unsafe_interrupts N\nvfio_container yes\n");
+        let error = parse_guest_pci_probe(&closed, 1).unwrap_err().to_string();
+        assert!(error.contains("allow_unsafe_interrupts"), "{error}");
+        let absent = format!("{line}allow_unsafe_interrupts missing\nvfio_container yes\n");
+        assert!(parse_guest_pci_probe(&absent, 1).is_err());
+        let no_container = format!("{line}allow_unsafe_interrupts Y\nvfio_container no\n");
+        let error = parse_guest_pci_probe(&no_container, 1)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("/dev/vfio/vfio"), "{error}");
+    }
+
+    #[test]
+    fn the_guest_pci_probe_refuses_fewer_devices_than_the_farm_passes_through() {
+        let output = healthy_probe(&guest_line("0000:00:05.0", "vfio-pci", "3", "yes"));
+        let error = parse_guest_pci_probe(&output, 2).unwrap_err().to_string();
+        assert!(error.contains("1 PCI devices"), "{error}");
+        assert!(error.contains("2 passed through"), "{error}");
+        assert!(parse_guest_pci_probe(&healthy_probe(""), 1).is_err());
+    }
+
+    #[test]
+    fn the_guest_pci_probe_refuses_a_malformed_line() {
+        let output = healthy_probe("device 0000:00:05.0 8086\n");
+        assert!(parse_guest_pci_probe(&output, 0).is_err());
+    }
+
+    #[test]
+    fn the_pci_probe_is_valid_shell_without_single_quotes() {
+        // It crosses ssh inside single quotes when the compute is on another host.
+        assert!(!PCI_PROBE.contains('\''), "{PCI_PROBE}");
+        assert!(!PCI_PROBE.contains("grep -q"), "{PCI_PROBE}");
+        assert!(!PCI_PROBE.contains("| head"), "{PCI_PROBE}");
+        let Ok(output) = Command::new("bash").args(["-n", "-c", PCI_PROBE]).output() else {
+            eprintln!("bash unavailable, skipping the PCI probe syntax test");
+            return;
+        };
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn pci_devices_for_verify() -> Vec<GuestPciDevice> {
+        vec![
+            GuestPciDevice {
+                bdf: "0000:00:05.0".into(),
+                vendor_id: "10de".into(),
+                product_id: "1eb8".into(),
+                iommu_group: 3,
+            },
+            GuestPciDevice {
+                bdf: "0000:00:06.0".into(),
+                vendor_id: "8086".into(),
+                product_id: "1521".into(),
+                iommu_group: 4,
+            },
+        ]
+    }
+
+    #[test]
+    fn the_pci_verify_script_creates_the_flavors_and_reads_the_domain_xml() {
+        let script = pci_verify_script("farm-compute-1", &pci_devices_for_verify());
+        assert!(
+            script.contains("flavor create --ram 512 --disk 1 --vcpus 1 farm.pci "),
+            "{script}"
+        );
+        assert!(
+            script.contains("\"pci_passthrough:alias=farm-pci:1\""),
+            "{script}"
+        );
+        // A second device pair gets its own flavor and alias.
+        assert!(script.contains("farm.pci-2"), "{script}");
+        assert!(
+            script.contains("\"pci_passthrough:alias=farm-pci-2:1\""),
+            "{script}"
+        );
+        assert!(script.contains("--flavor farm.pci "), "{script}");
+        assert!(script.contains("virsh dumpxml $inst"), "{script}");
+        assert!(
+            script.contains("<hostdev mode='subsystem' type='pci'"),
+            "{script}"
+        );
+        assert!(script.contains("server delete --wait"), "{script}");
+        assert!(script.contains("farm-pci-verify-"), "{script}");
+        // One pair: no second flavor.
+        let single = pci_verify_script("farm-compute-1", &pci_devices_for_verify()[..1]);
+        assert!(!single.contains("farm.pci-2"), "{single}");
+    }
+
+    #[test]
+    fn the_pci_verify_script_is_safe_under_pipefail() {
+        let script = pci_verify_script("farm-compute-1", &pci_devices_for_verify());
+        assert!(!script.contains("grep -q"), "{script}");
+        assert!(!script.contains("| head"), "{script}");
+        assert!(!script.contains("grep -m"), "{script}");
+        let Ok(output) = Command::new("bash").args(["-n", "-c", &script]).output() else {
+            eprintln!("bash unavailable, skipping the PCI verify syntax test");
+            return;
+        };
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    /// The `pci_host=` to the success echo of the PCI check, which reads the domain's XML.
+    fn pci_check(script: &str) -> String {
+        let lines: Vec<&str> = script.lines().collect();
+        let start = lines
+            .iter()
+            .position(|line| line.starts_with("pci_host="))
+            .unwrap_or_else(|| panic!("no PCI check in {script}"));
+        let end = lines
+            .iter()
+            .position(|line| line.starts_with("echo \"PCI hostdev is bound"))
+            .unwrap_or_else(|| panic!("no PCI check in {script}"));
+        assert!(start < end, "{script}");
+        let mut check = String::from("inst=instance-00000001\n");
+        check.push_str(&lines[start..=end].join("\n"));
+        check
+    }
+
+    /// Like `the_mtty_check_reads_the_libvirt_xml_to_the_end`: a stand-in ssh writes the domain
+    /// with its hostdev and keeps writing the rest. The XML is read whole, so ssh ends 0.
+    #[test]
+    fn the_pci_check_reads_the_libvirt_xml_to_the_end() {
+        let script = pci_verify_script("farm-compute-1", &pci_devices_for_verify());
+        let check = pci_check(&script);
+        let output = run_mtty_check(
+            &check,
+            r#"trap 'exit 255' PIPE
+printf '%s\n' "<domain type='kvm'>" "<devices>"
+printf '%s\n' "  <hostdev mode='subsystem' type='pci' managed='yes'>"
+printf '%s\n' "    <source><address domain='0x0000' bus='0x01' slot='0x00' function='0x0'/></source>"
+printf '%s\n' "  </hostdev></devices></domain>"
+sleep 0.3
+for _ in $(seq 200); do printf '%s\n' "  <interface type='network'/>"; done
+"#,
+        );
+        assert!(
+            output.status.success(),
+            "the PCI check rejected a domain with a PCI hostdev: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            stdout.contains(
+                "PCI hostdev is bound to the instance's libvirt domain on farm-compute-1"
+            ),
+            "{stdout}"
+        );
+        // A domain with only a mdev or no hostdev fails the check.
+        let output = run_mtty_check(
+            &check,
+            "printf '%s\\n' \"<domain type='kvm'><devices><hostdev mode='subsystem' type='mdev'/></devices></domain>\"\n",
+        );
+        assert!(!output.status.success());
+        assert!(
+            String::from_utf8_lossy(&output.stderr)
+                .contains("libvirt domain instance-00000001 on farm-compute-1 has no PCI hostdev"),
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );

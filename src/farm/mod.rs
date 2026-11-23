@@ -9,13 +9,12 @@ use std::collections::BTreeMap;
 use anyhow::{Context, Result, bail};
 use futures::future::try_join_all;
 use microsandbox::Sandbox;
-use microsandbox::sandbox::SandboxHandle;
 
 use crate::shell::run;
-use node::{FARM_LABEL, describe_node, destroy_node, identity_conf, label};
+use node::{FARM_LABEL, describe_node, destroy_node, identity_conf, settings};
 pub use node::{
     FarmNode, GUEST_ADDRESS, GUEST_INTERFACE, IDENTITY_CONF, LEGACY_ALL_IN_ONE_SUFFIX, NodeSetup,
-    connect, create_node, install_guest_files, install_links, is_node_name, node_name,
+    connect, create_node, detach, install_guest_files, install_links, is_node_name, node_name,
     wait_until_booted,
 };
 pub use snapshot::{
@@ -36,14 +35,16 @@ pub const NETWORKS: [(&str, &str, bool); 2] = [("farm0", "mgmt", true), ("farm1"
 
 /// Create the farm's single all-in-one VM and confirm it boots.
 pub async fn create_farm(farm_id: &str, template: &[NodeSpec]) -> Result<Vec<FarmNode>> {
-    create_farm_with(farm_id, template, None, &[], None, &[], None).await
+    create_farm_with(farm_id, template, None, &[], None, &[], None, &[]).await
 }
 
 /// `components` selects which service ports the farm publishes. A multi-node farm needs
 /// `switch`, the host's link switch, to join its VMs. `sources` are msb snapshots to boot
 /// each VM of `template` from, in its order; empty boots them all from the golden image.
 /// With `share`, the farm spans hosts: only the share's VMs are created here, and the
-/// switch joins their networks to the other hosts through the relay.
+/// switch joins their networks to the other hosts through the relay. `pci_devices` go to
+/// compute-1 only, since one physical device cannot sit in two VMs.
+#[allow(clippy::too_many_arguments)] // Each argument is a distinct part of the farm's placement.
 pub async fn create_farm_with(
     farm_id: &str,
     template: &[NodeSpec],
@@ -52,6 +53,7 @@ pub async fn create_farm_with(
     switch: Option<&crate::link::host::Switch>,
     sources: &[String],
     share: Option<&crate::remote::protocol::Share>,
+    pci_devices: &[String],
 ) -> Result<Vec<FarmNode>> {
     layout(template)?;
     if !sources.is_empty() && sources.len() != template.len() {
@@ -106,6 +108,7 @@ pub async fn create_farm_with(
         // The control VM serves the farm's APIs; the computes publish nothing.
         let control = spec.role == Role::Control;
         setups.push(NodeSetup {
+            pci_devices: pci_devices_of(spec, pci_devices),
             exposure: exposure.filter(|_| control),
             public_ports: if control {
                 public_ports(components)
@@ -131,17 +134,28 @@ pub async fn create_farm_with(
     .await
 }
 
+/// The PCI devices a VM of the farm receives: compute-1's, and none for any other VM.
+fn pci_devices_of(spec: &NodeSpec, pci_devices: &[String]) -> Vec<String> {
+    if spec.role == Role::Compute && spec.index == Some(1) {
+        pci_devices.to_vec()
+    } else {
+        Vec::new()
+    }
+}
+
 /// Add compute VMs to an existing multi-node farm on this host. The switch is already
 /// running, and new ports are picked up from its configuration file. An existing VM with
 /// the requested suffix is adopted instead of created again, so a retried expansion
 /// continues where the last attempt stopped. `source` is a compute template snapshot to
-/// boot the new VMs from instead of the golden image.
+/// boot the new VMs from instead of the golden image. `pci_devices` reach compute-1 only,
+/// and a template cannot carry them, so compute-1 never boots from one.
 pub async fn add_nodes(
     farm_id: &str,
     template: &[NodeSpec],
     add: &[String],
     switch: &crate::link::host::Switch,
     source: Option<&str>,
+    pci_devices: &[String],
 ) -> Result<Vec<FarmNode>> {
     if add.is_empty() {
         return Ok(Vec::new());
@@ -183,6 +197,10 @@ pub async fn add_nodes(
                 address: addressed.then(|| format!("{}/24", spec.address())),
             });
         }
+        let pci = pci_devices_of(spec, pci_devices);
+        if !pci.is_empty() && source.is_some() {
+            bail!("{name} passes PCI devices through, so it cannot boot from a compute template");
+        }
         let setup = NodeSetup {
             peers: template
                 .iter()
@@ -191,6 +209,7 @@ pub async fn add_nodes(
                 .collect(),
             links,
             source: source.map(str::to_owned),
+            pci_devices: pci,
             ..Default::default()
         };
         created.push(create_node(farm_id, *spec, &setup).await?);
@@ -288,11 +307,11 @@ pub fn observed_layout(nodes: &[FarmNode]) -> Option<u8> {
 }
 
 pub async fn get_farm(farm_id: &str) -> Result<Vec<FarmNode>> {
-    Ok(farm_handles(farm_id)
-        .await?
-        .iter()
-        .map(describe_node)
-        .collect())
+    let mut nodes = Vec::new();
+    for sandbox in farm_handles(farm_id).await? {
+        nodes.push(describe_node(&sandbox).await);
+    }
+    Ok(nodes)
 }
 
 pub async fn delete_farm(farm_id: &str) -> Result<usize> {
@@ -321,7 +340,7 @@ pub async fn delete_farm(farm_id: &str) -> Result<usize> {
 pub async fn list_farms() -> Result<BTreeMap<String, usize>> {
     let mut farms = BTreeMap::new();
     for handle in all_handles().await? {
-        if let Some(farm_id) = farm_of(&handle) {
+        if let Some(farm_id) = farm_of(&handle).await {
             *farms.entry(farm_id).or_default() += 1;
         }
     }
@@ -331,8 +350,11 @@ pub async fn list_farms() -> Result<BTreeMap<String, usize>> {
 pub async fn scan_farms() -> Result<BTreeMap<String, Vec<FarmNode>>> {
     let mut farms: BTreeMap<String, Vec<FarmNode>> = BTreeMap::new();
     for handle in all_handles().await? {
-        if let Some(id) = farm_of(&handle) {
-            farms.entry(id).or_default().push(describe_node(&handle));
+        if let Some(id) = farm_of(&handle).await {
+            farms
+                .entry(id)
+                .or_default()
+                .push(describe_node(&handle).await);
         }
     }
     for nodes in farms.values_mut() {
@@ -344,19 +366,22 @@ pub async fn scan_farms() -> Result<BTreeMap<String, Vec<FarmNode>>> {
 /// Filters the same unfiltered listing that `scan_farms` observes. msb's label-filtered
 /// listing has returned nothing for a farm whose VM was still listed, so a delete
 /// "succeeded" without destroying it.
-async fn farm_handles(farm_id: &str) -> Result<Vec<SandboxHandle>> {
-    Ok(all_handles()
-        .await?
-        .into_iter()
-        .filter(|handle| farm_of(handle).as_deref() == Some(farm_id))
-        .collect())
+async fn farm_handles(farm_id: &str) -> Result<Vec<Sandbox>> {
+    let mut handles = Vec::new();
+    for handle in all_handles().await? {
+        if farm_of(&handle).await.as_deref() == Some(farm_id) {
+            handles.push(handle);
+        }
+    }
+    Ok(handles)
 }
 
-fn farm_of(handle: &SandboxHandle) -> Option<String> {
+async fn farm_of(handle: &Sandbox) -> Option<String> {
+    let (labels, _) = settings(handle).await;
     owning_farm(
         handle.name(),
-        label(handle, FARM_LABEL).as_deref(),
-        label(handle, node::ROLE_LABEL).as_deref(),
+        labels.get(FARM_LABEL).map(String::as_str),
+        labels.get(node::ROLE_LABEL).map(String::as_str),
     )
 }
 
@@ -387,7 +412,7 @@ fn owning_farm(name: &str, farm: Option<&str>, role: Option<&str>) -> Option<Str
         .then(|| farm.to_owned())
 }
 
-async fn all_handles() -> Result<Vec<SandboxHandle>> {
+async fn all_handles() -> Result<Vec<Sandbox>> {
     let mut handles = Vec::new();
     let mut cursor: Option<String> = None;
     loop {

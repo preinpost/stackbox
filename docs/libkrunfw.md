@@ -3,7 +3,7 @@
 farm이 쓰는 msb 게스트 커널(libkrunfw)에는 모듈 로딩이 없고 VFIO·mdev도 들어 있지 않다.
 그래서 Nova의 vGPU 경로(`[devices]/enabled_mdev_types = mtty-1`)를 GPU 없이 시험할 수 없다.
 이 문서는 커널 설정 조각(`scripts/libkrunfw/fragments/`)을 얹어 커널을 직접 빌드하는 방법과,
-새 기능이 필요할 때 조각을 하나 더하는 방법을 다룬다. 지금 들어 있는 조각은 둘이다.
+새 기능이 필요할 때 조각을 하나 더하는 방법을 다룬다. 지금 들어 있는 조각은 셋이다.
 
 - `vfio-mtty`: mdev 프레임워크와 커널 샘플 `mtty` 드라이버를 넣어 게스트 안에 `mtty` 부모
   장치와 `mtty-1` 타입을 만든다. libvirt가 mdev 장치를 만들 수 있는지까지 실제 GPU 없이 본다.
@@ -11,6 +11,8 @@ farm이 쓰는 msb 게스트 커널(libkrunfw)에는 모듈 로딩이 없고 VFI
   저장·복원)를 켠다. 없으면 `iptables-restore`가 그 규칙을 거부해 qrouter 네임스페이스가
   생겼다 사라지고, 테넌트 라우팅·플로팅 IP를 쓸 수 없다. 2025.1~2026.2의 레거시 L3가 같은
   규칙을 쓰므로 릴리스와 무관하게 필요하다.
+- `pci-passthrough` (x86_64만): ACPI VIOT, MSI, virtio IOMMU와 USB xHCI(PCI)를 켜고, PCIe 포트/capability 지원을 위한 커널 옵션(PCIEPORTBUS)을 켠다. libkrun은 PCIe 루트 포트를 만들지 않고 통과시키는 endpoint를 bus 0에 직접 배치한다.
+  PCI·IOMMU_SUPPORT·VFIO_PCI는 `vfio-mtty`가 이미 켜므로 이 조각은 그 밖의 설정만 담는다.
 
 이 커널은 **시험용**이다(실제 GPU 대신 vGPU 경로만 확인한다). farm은 이 커널을 기본 게스트
 커널로 쓴다. `task dev`가 커널을 빌드하고, 호스트를 준비할 때마다 그 호스트의

@@ -22,6 +22,7 @@ fn keep_snapshot(manager: &FarmManager, backend: &Fake, id: &str, template: Opti
         .insert(format!("fake/{id}"), labels);
     let plan = match template {
         Some(TemplateRole::Compute) => layout(&PlanRequest {
+            pci_devices: Vec::new(),
             components: vec![],
             computes: 1,
             compute: None,

@@ -346,6 +346,7 @@ impl FarmManager {
         } else {
             Some(
                 plan(&PlanRequest {
+                    pci_devices: Vec::new(),
                     components: request.components.clone(),
                     computes: 1,
                     compute: None,
@@ -529,6 +530,22 @@ impl FarmManager {
         // A GPU farm's settings go into the compute configuration Kolla writes at deploy
         // time; a template's VMs boot with the plan they were frozen with, so it installs
         // clean.
+        // Passed-through devices are installed clean for the same reason: a template's compute
+        // would boot without them.
+        if !request.pci_devices.is_empty() {
+            if !installable {
+                return Err(conflict(format!(
+                    "a PCI passthrough farm installs OpenStack {} clean, and this coordinator cannot install that release clean",
+                    request.release.trim()
+                )));
+            }
+            return self.clean_plan(
+                arch,
+                request,
+                "a PCI passthrough farm is installed clean so its devices reach compute-1".into(),
+                notes,
+            );
+        }
         if let Some(gpu) = &request.gpu {
             // The GPU's release window is about the release itself, so name it before this
             // coordinator's images: a 2025.1 farm with a GPU is refused for the GPU, not for
@@ -738,6 +755,7 @@ impl FarmManager {
             computes: request.computes,
             compute: request.compute,
             gpu: request.gpu.clone(),
+            pci_devices: request.pci_devices.clone(),
             ..self.clean_request(request)
         };
         let planned = farm.validate().map_err(|e| bad_request(e.to_string()))?;
@@ -826,6 +844,7 @@ impl FarmManager {
             key: None,
             placement,
             gpu: None,
+            pci_devices: request.pci_devices.clone(),
         }
     }
 
@@ -846,6 +865,17 @@ impl FarmManager {
                 }
                 Ok(())
             })??;
+        }
+        // Passed-through devices go to compute-1, which must sit on a host that has them ready.
+        if !request.pci_devices.is_empty() {
+            let host = plan
+                .computes
+                .iter()
+                .find(|node| node.node == "compute-1")
+                .map(|node| node.host_id.clone())
+                .context("a PCI farm needs compute-1")?;
+            let devices = crate::model::normalize_pci_devices(&request.pci_devices)?;
+            self.read(|state| super::ensure_pci_host(state, &host, &devices))??;
         }
         let steps = steps(&plan);
         let job = self.update(|state| {
@@ -987,6 +1017,7 @@ impl FarmManager {
                 components: plan.components.clone(),
                 computes: plan.computes.len() as u8,
                 gpu: request.gpu.clone(),
+                pci_devices: request.pci_devices.clone(),
                 ..self.clean_request(request)
             })?,
             "deploy" => self.deploy(farm, DeployRequest::default())?,
