@@ -9,7 +9,10 @@ use super::{
     agent::{Emitter, lock},
     protocol::{Frame, MAX_FRAME, TerminalFrame},
 };
-use crate::{farm::ImportedSnapshot, manager::Backend};
+use crate::{
+    farm::{ImportedSnapshot, NodeSnapshot},
+    manager::Backend,
+};
 use anyhow::{Context, Result, anyhow, ensure};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
@@ -23,6 +26,8 @@ use std::{
 #[serde(deny_unknown_fields)]
 struct Cached {
     reference: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    nodes: Vec<NodeSnapshot>,
     sha256: String,
     size_bytes: u64,
 }
@@ -115,14 +120,14 @@ fn progress(emit: &Emitter, what: &str, done: u64, total: u64, reported: &mut u6
     }
 }
 
-/// The reference of `coordinator`'s cached copy of `snapshot_id`, if msb still has it
-/// A copy msb lost is forgotten.
+/// The reference (and per-VM references for a multi-node copy) of `coordinator`'s cached
+/// copy of `snapshot_id`, if msb still has every member. A copy msb lost is forgotten.
 pub async fn find(
     dir: &Path,
     backend: &dyn Backend,
     coordinator: &str,
     snapshot_id: &str,
-) -> Result<Option<String>> {
+) -> Result<Option<(String, Vec<NodeSnapshot>)>> {
     crate::model::validate_snapshot_id(snapshot_id)?;
     let Some(cached) = read(dir)?
         .snapshots
@@ -132,12 +137,27 @@ pub async fn find(
     else {
         return Ok(None);
     };
-    if backend
-        .snapshot_labels(cached.reference.clone())
-        .await?
-        .is_some()
-    {
-        return Ok(Some(cached.reference));
+    let present = if cached.nodes.is_empty() {
+        backend
+            .snapshot_labels(cached.reference.clone())
+            .await?
+            .is_some()
+    } else {
+        let mut all = true;
+        for node in &cached.nodes {
+            if backend
+                .snapshot_labels(node.reference.clone())
+                .await?
+                .is_none()
+            {
+                all = false;
+                break;
+            }
+        }
+        all
+    };
+    if present {
+        return Ok(Some((cached.reference, cached.nodes)));
     }
     update(dir, |cache| {
         if let Some(snapshots) = cache.snapshots.get_mut(coordinator) {
@@ -269,9 +289,17 @@ pub async fn import(
         })
         .await??
     };
-    let imported = backend
-        .import_snapshot(archive.clone(), snapshot_id.into())
-        .await;
+    let is_bundle = {
+        let archive = archive.clone();
+        tokio::task::spawn_blocking(move || crate::manager::bundle::is_bundle(&archive)).await??
+    };
+    let imported = if is_bundle {
+        import_bundle(dir, backend, transfer_id, &archive, snapshot_id).await
+    } else {
+        backend
+            .import_snapshot(archive.clone(), snapshot_id.into())
+            .await
+    };
     let _ = std::fs::remove_file(&archive);
     let imported = imported?;
     update(dir, |cache| {
@@ -283,6 +311,7 @@ pub async fn import(
                 snapshot_id.into(),
                 Cached {
                     reference: imported.reference.clone(),
+                    nodes: imported.nodes.clone(),
                     sha256,
                     size_bytes,
                 },
@@ -291,6 +320,77 @@ pub async fn import(
     })
     .await?;
     Ok(imported)
+}
+
+async fn import_bundle(
+    dir: &Path,
+    backend: &dyn Backend,
+    transfer_id: &str,
+    archive: &Path,
+    snapshot_id: &str,
+) -> Result<ImportedSnapshot> {
+    let stage_dir = dir
+        .join("transfers")
+        .join(format!("{transfer_id}.bundle-import"));
+    let _ = std::fs::remove_dir_all(&stage_dir);
+    let loaded = async {
+        let extracted = {
+            let archive = archive.to_owned();
+            let dest = stage_dir.clone();
+            tokio::task::spawn_blocking(move || crate::manager::bundle::unpack(&archive, &dest))
+                .await??
+        };
+        let mut nodes: Vec<NodeSnapshot> = Vec::with_capacity(extracted.nodes.len());
+        let mut control_labels = None;
+        for (node, node_path) in &extracted.nodes {
+            let imported = match backend
+                .import_snapshot(node_path.clone(), snapshot_id.into())
+                .await
+                .with_context(|| format!("import VM '{node}' of bundle {snapshot_id}"))
+            {
+                Ok(imported) => imported,
+                Err(error) => {
+                    for loaded in nodes.iter().rev() {
+                        let _ = backend.remove_snapshot(loaded.reference.clone()).await;
+                    }
+                    return Err(error);
+                }
+            };
+            if node == "control" {
+                control_labels = Some(imported.labels);
+            }
+            nodes.push(NodeSnapshot {
+                node: node.clone(),
+                reference: imported.reference,
+                size_bytes: imported.size_bytes,
+            });
+        }
+        let Some(labels) = control_labels else {
+            for loaded in nodes.iter().rev() {
+                let _ = backend.remove_snapshot(loaded.reference.clone()).await;
+            }
+            anyhow::bail!("multi-node bundle has no control VM snapshot");
+        };
+        nodes.sort_by_key(|n| {
+            let index = n
+                .node
+                .strip_prefix("compute-")
+                .and_then(|s| s.parse::<u8>().ok())
+                .unwrap_or(0);
+            (n.node != "control", index)
+        });
+        let reference = nodes[0].reference.clone();
+        let size_bytes = nodes.iter().map(|n| n.size_bytes).sum();
+        Ok(ImportedSnapshot {
+            reference,
+            labels,
+            size_bytes,
+            nodes,
+        })
+    }
+    .await;
+    let _ = std::fs::remove_dir_all(&stage_dir);
+    loaded
 }
 
 /// Export the snapshot at `reference` into transfer `transfer_id`'s staging file, for
@@ -356,14 +456,17 @@ pub async fn send(dir: &Path, transfer_id: &str, emit: &Emitter) -> Result<()> {
     sent
 }
 
-/// Forget cached copies at `reference` after it was removed.
+/// Forget cached copies that reference `reference` after it was removed.
 pub async fn forget(dir: &Path, reference: &str) -> Result<()> {
     if !dir.join("cache.json").exists() {
         return Ok(());
     }
     update(dir, |cache| {
         for snapshots in cache.snapshots.values_mut() {
-            snapshots.retain(|_, cached| cached.reference != reference);
+            snapshots.retain(|_, cached| {
+                cached.reference != reference
+                    && !cached.nodes.iter().any(|n| n.reference == reference)
+            });
         }
         cache.snapshots.retain(|_, snapshots| !snapshots.is_empty());
         Ok(())

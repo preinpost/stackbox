@@ -492,9 +492,12 @@ pub enum Reply {
         size_bytes: u64,
     },
     /// The answer to `FindSnapshot`: the msb reference of the cached copy, if any.
+    /// For a multi-node snapshot, `nodes` holds every VM's reference on this host.
     Found {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reference: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        nodes: Vec<crate::farm::NodeSnapshot>,
     },
     SshKeys {
         public_key: String,

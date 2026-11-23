@@ -135,3 +135,143 @@ test("enables export for multi-node snapshots and shows compute count in bucket 
     expect(exportedBody).toEqual({ bucket: "s3", key: "mn-snap.msb" }),
   );
 });
+
+test("lets RestoreSnapshotDialog choose any compatible ready host and updates external host", async () => {
+  const { RestoreSnapshotDialog } = await import("./snapshot-actions");
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+  });
+  let createdBody: unknown;
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (path: string, options?: RequestInit) => {
+      if (path.endsWith("/host"))
+        return Response.json({ state_dir: "/tmp/farm", arch: "aarch64", build_id: "b1" });
+      if (path.endsWith("/farms") && options?.method === "POST") {
+        createdBody = JSON.parse(String(options.body));
+        return Response.json({ id: "job-1", farm_id: "restored-on-02", status: "queued" });
+      }
+      if (path.endsWith("/farms")) return Response.json([]);
+      if (path.endsWith("/hosts"))
+        return Response.json([
+          {
+            id: "dev-01",
+            kind: "ssh",
+            status: "ready",
+            address: "10.0.0.21",
+            port: 22,
+            username: "dev",
+            fingerprint: "SHA256:aaa",
+            connected: false,
+            inspection: { arch: "x86_64", os: "linux", mtty_available: true },
+            agent: {
+              artifact: {
+                sha256: "abc",
+                arch: "x86_64",
+                protocol: 1,
+                supports_single_vm: true,
+                build_id: "b1",
+              },
+            },
+            capacity: { memory_budget_mib: 32768, memory_reserved_mib: 0 },
+          },
+          {
+            id: "dev-02",
+            kind: "ssh",
+            status: "ready",
+            address: "10.0.0.21",
+            port: 22,
+            username: "dev",
+            fingerprint: "SHA256:bbb",
+            connected: false,
+            inspection: { arch: "x86_64", os: "linux", mtty_available: true },
+            agent: {
+              artifact: {
+                sha256: "def",
+                arch: "x86_64",
+                protocol: 1,
+                supports_single_vm: true,
+                build_id: "b1",
+              },
+            },
+            capacity: { memory_budget_mib: 32768, memory_reserved_mib: 0 },
+          },
+          {
+            id: "local",
+            kind: "local",
+            status: "ready",
+            address: "127.0.0.1",
+            port: 0,
+            username: "",
+            fingerprint: "",
+            connected: false,
+            inspection: { arch: "aarch64", os: "macos", mtty_available: false },
+            capacity: { memory_budget_mib: 32768, memory_reserved_mib: 0 },
+          },
+        ]);
+      if (options?.method === "POST" && path.endsWith("/farms")) {
+        createdBody = JSON.parse(String(options.body));
+        return Response.json({ id: "job-1", farm_id: "restored-on-02", status: "queued" });
+      }
+      return Response.json([]);
+    }),
+  );
+  const snapshot = {
+    id: "dev-farm-001-clean",
+    status: "ready" as const,
+    arch: "x86_64",
+    host_id: "dev-01",
+    plan: {
+      components: ["keystone", "nova"],
+      computes: 1,
+      nodes: [],
+      memory_mib: 12544,
+      disk_mib: 100000,
+      warnings: [],
+    },
+    deployed: true,
+    source_exposure: { host: "10.0.0.21", bind: "0.0.0.0", port_base: 15000 },
+    nodes: [
+      { node: "control", reference: "ref-ctl", size_bytes: 100 },
+      { node: "compute-1", reference: "ref-cmp", size_bytes: 100 },
+    ],
+    archive: {
+      path: "s3://farm-snapshots/dev-farm-001-clean.msb",
+      size_bytes: 9000,
+      exported_at: 10,
+      bucket: "s3",
+      key: "dev-farm-001-clean.msb",
+      sha256: "00",
+    },
+    created_at: 1,
+    updated_at: 2,
+  };
+  const user = userEvent.setup();
+  render(
+    <QueryClientProvider client={client}>
+      <RestoreSnapshotDialog snapshot={snapshot} />
+    </QueryClientProvider>,
+  );
+  await user.click(await screen.findByRole("button", { name: "Farm 만들기" }));
+  const hostSelect = await screen.findByRole("combobox", { name: "실행 호스트" });
+  expect(hostSelect.textContent).toContain("dev-01");
+  await user.click(hostSelect);
+  const option02 = await screen.findByRole("option", { name: /dev-02/ });
+  await user.click(option02);
+  expect(
+    await screen.findByText(/버킷\(s3\)에서 내려받은 뒤 복원합니다/),
+  ).toBeTruthy();
+  const extInput = screen.getByLabelText(/외부 접속 호스트/) as HTMLInputElement;
+  expect(extInput.value).toBe("10.0.0.21");
+  await user.type(screen.getByPlaceholderText("dev-openstack"), "restored-on-02");
+  const submit = screen.getAllByRole("button", { name: "Farm 만들기" }).at(-1)!;
+  await user.click(submit);
+  await vi.waitFor(() =>
+    expect(createdBody).toEqual({
+      id: "restored-on-02",
+      host_id: "dev-02",
+      snapshot_id: "dev-farm-001-clean",
+      external_host: "10.0.0.21",
+    }),
+  );
+});

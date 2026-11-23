@@ -442,7 +442,7 @@ async fn an_archive_with_other_bytes_than_announced_is_never_loaded() {
         .unwrap();
     assert!(matches!(
         found,
-        crate::remote::protocol::Reply::Found { reference: Some(ref r) } if *r == snapshot.reference
+        crate::remote::protocol::Reply::Found { reference: Some(ref r), .. } if *r == snapshot.reference
     ));
     // Another coordinator does not see it.
     let other = crate::remote::protocol::Request {
@@ -453,7 +453,10 @@ async fn an_archive_with_other_bytes_than_announced_is_never_loaded() {
     };
     assert!(matches!(
         agent.execute(other, emit).await.unwrap(),
-        crate::remote::protocol::Reply::Found { reference: None }
+        crate::remote::protocol::Reply::Found {
+            reference: None,
+            ..
+        }
     ));
 }
 
@@ -1185,6 +1188,106 @@ async fn multi_node_snapshot_on_remote_host_exports_to_s3_and_imports_back() {
         archive.sha256.as_deref()
     );
 
+    // Restore the multi-node snapshot directly onto a second remote host ("edge-2") without
+    // manual import: the coordinator copies the bundle there from the bucket, caches it, and
+    // boots both VMs.
+    let listener2 = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address2 = listener2.local_addr().unwrap();
+    let server2 =
+        tokio::spawn(axum::serve(listener2, api::router(manager.clone(), None)).into_future());
+    let registered2 = manager
+        .register_agent_host(RegisterAgentHost {
+            id: "edge-2".into(),
+        })
+        .unwrap();
+    let url2 = crate::remote::dial::connect_url(&format!("http://{address2}")).unwrap();
+    let remote2 = Arc::new(Fake::default());
+    let agent2 = Arc::new(crate::remote::agent::Agent::in_process(
+        dir.path().join("edge2-agent"),
+        remote2.clone(),
+    ));
+    let dialling2 =
+        tokio::spawn(
+            async move { crate::remote::dial::serve(&url2, &registered2.token, agent2).await },
+        );
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !manager.host("edge-2").unwrap().connected {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let check2 = manager
+        .start_host_job("edge-2", crate::remote::HostJobKind::Check)
+        .unwrap();
+    assert_eq!(
+        host_done(&manager, &check2.id).await.status,
+        JobStatus::Succeeded
+    );
+    manager
+        .update(|state| {
+            let host = &mut state.hosts.get_mut("edge-2").unwrap().host;
+            host.status = crate::remote::HostStatus::Ready;
+            let inspection = host.inspection.as_mut().unwrap();
+            inspection.memory_total_mib = 65536;
+            inspection.os = "linux".into();
+            Ok(())
+        })
+        .unwrap();
+
+    let restored_job = manager
+        .create(CreateRequest {
+            host_id: Some("edge-2".into()),
+            snapshot_id: Some("mn-remote".into()),
+            ..request("mn-copied")
+        })
+        .unwrap();
+    let restored = done(&manager, &restored_job).await;
+    assert_eq!(
+        restored.status,
+        JobStatus::Succeeded,
+        "{:?}",
+        restored.error
+    );
+    let copied_farm = manager.get("mn-copied").unwrap();
+    assert_eq!(copied_farm.host_id.as_deref(), Some("edge-2"));
+    assert_eq!(copied_farm.nodes.len(), 2);
+    let copies = manager.snapshot("mn-remote").unwrap().copies;
+    assert_eq!(copies.len(), 1);
+    assert_eq!(copies[0].host_id, "edge-2");
+    assert_eq!(copies[0].via, CopySource::Bucket);
+    assert_eq!(copies[0].nodes.len(), 2);
+
+    // A second restore on the same host reuses the cached multi-node copy.
+    let again_job = manager
+        .create(CreateRequest {
+            host_id: Some("edge-2".into()),
+            snapshot_id: Some("mn-remote".into()),
+            ..request("mn-copied-2")
+        })
+        .unwrap();
+    let again = done(&manager, &again_job).await;
+    assert_eq!(again.status, JobStatus::Succeeded, "{:?}", again.error);
+    done(&manager, &manager.delete("mn-copied").unwrap()).await;
+    done(&manager, &manager.delete("mn-copied-2").unwrap()).await;
+
+    // Removing the copy removes both VMs' msb snapshots from the target host.
+    manager
+        .remove_snapshot_copy("mn-remote", "edge-2")
+        .await
+        .unwrap();
+    assert!(manager.snapshot("mn-remote").unwrap().copies.is_empty());
+    assert!(
+        !remote2
+            .snapshots
+            .lock()
+            .unwrap()
+            .keys()
+            .any(|k| k.contains("mn-remote"))
+    );
+
+    dialling2.abort();
+    server2.abort();
     drop(edge);
     settle(&manager).await;
 }

@@ -1,6 +1,6 @@
 mod backend;
 mod buckets;
-mod bundle;
+pub mod bundle;
 mod gpu;
 pub(crate) mod hosts;
 mod logs;
@@ -1520,15 +1520,23 @@ impl FarmManager {
             if let Some(snapshot_id) = &request.snapshot_id {
                 let snapshot = snapshots::restorable(state, snapshot_id, &host_id)?;
                 plan = snapshot.plan.clone();
-                // A host other than the original's gets a copy when the restore starts, which
-                // needs the original unless the host has one already.
-                let origin = transfers::origin_host(state, snapshot);
-                if origin.as_deref() != Some(host_id.as_str()) {
-                    transfers::copyable(snapshot)?;
-                    if origin.is_none() && !snapshot.copies.iter().any(|c| c.host_id == host_id) {
-                        return Err(transfers::origin_missing(snapshot));
-                    }
-                }
+    // A host other than the original's gets a copy when the restore starts, which
+    // needs the original unless the host has a copy or the snapshot has a bucket archive.
+    let has_bucket_archive = snapshot.archive.as_ref().is_some_and(|a| {
+        a.bucket.as_ref().is_some_and(|b| state.buckets.contains_key(b))
+            && a.key.is_some()
+            && a.sha256.is_some()
+    });
+    let origin = transfers::origin_host(state, snapshot);
+    if origin.as_deref() != Some(host_id.as_str()) {
+        transfers::copyable(snapshot)?;
+        if origin.is_none()
+            && !has_bucket_archive
+            && !snapshot.copies.iter().any(|c| c.host_id == host_id)
+        {
+            return Err(transfers::origin_missing(snapshot));
+        }
+    }
             }
             // Computes placed on the control VM's host need no share of their own.
             let mut placed: std::collections::BTreeMap<String, Vec<String>> = Default::default();

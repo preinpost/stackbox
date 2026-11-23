@@ -1894,7 +1894,11 @@ export interface components {
       /** Format: int64 */
       copied_at: number;
       host_id: string;
-      /** @description msb snapshot reference on that host. */
+      nodes?: components["schemas"]["NodeSnapshot"][];
+      /**
+       * @description msb snapshot reference on that host. A multi-node copy's is its control VM's, and
+       *     `nodes` holds every VM's.
+       */
       reference: string;
       /** Format: int64 */
       size_bytes?: number | null;

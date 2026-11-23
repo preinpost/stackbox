@@ -80,16 +80,14 @@ pub(super) fn host_arch(state: &State, host_id: &str) -> Option<String> {
 
 impl FarmManager {
     /// Make sure host `host_id` keeps snapshot `snapshot_id`, copying it there if needed,
-    /// and return its msb reference on that host. On the host that keeps the original this
-    /// is the snapshot's own reference. Calls for the same snapshot and host wait for each other, and a copy
-    /// already there is reused, so this can be called before every use. Progress goes to
-    /// `sink`, such as a job's log.
-    pub async fn ensure_snapshot_on_host(
+    /// and return its msb reference (and per-VM references for a multi-node snapshot) on
+    /// that host. On the host that keeps the original these are the snapshot's own.
+    pub async fn ensure_snapshot_on_host_nodes(
         &self,
         snapshot_id: &str,
         host_id: &str,
         sink: Option<EventSink>,
-    ) -> Result<String> {
+    ) -> Result<(String, Vec<crate::farm::NodeSnapshot>)> {
         let (snapshot, kind, origin, arch) = self.read(|state| {
             let snapshot = state
                 .snapshots
@@ -113,12 +111,7 @@ impl FarmManager {
             _ => return Err(conflict(format!("snapshot '{snapshot_id}' is not ready"))),
         };
         if origin.as_deref() == Some(host_id) {
-            return Ok(reference);
-        }
-        if !snapshot.nodes.is_empty() {
-            return Err(conflict(format!(
-                "snapshot '{snapshot_id}' holds several VMs; only single-VM snapshots and templates can be copied to another host"
-            )));
+            return Ok((reference, snapshot.nodes));
         }
         if let Some(arch) = arch
             && arch != snapshot.arch
@@ -150,9 +143,18 @@ impl FarmManager {
                 }
             )));
         }
-        if let Some(found) = agent.find_snapshot(snapshot_id.into()).await? {
-            self.record_copy(snapshot_id, host_id, &found, CopySource::Found, None)?;
-            return Ok(found);
+        if let Some((found, nodes)) = agent.find_snapshot(snapshot_id.into()).await?
+            && (snapshot.nodes.is_empty() || nodes.len() == snapshot.nodes.len())
+        {
+            self.record_copy(
+                snapshot_id,
+                host_id,
+                &found,
+                &nodes,
+                CopySource::Found,
+                None,
+            )?;
+            return Ok((found, nodes));
         }
         if let Some(sink) = &sink {
             let _ = sink(DeployEvent::Step(format!(
@@ -213,10 +215,18 @@ impl FarmManager {
             .import_archive(transfer_id, snapshot_id.into())
             .await
             .with_context(|| format!("load snapshot {snapshot_id} on host {host_id}"))?;
+        if !snapshot.nodes.is_empty() && imported.nodes.len() != snapshot.nodes.len() {
+            return Err(anyhow!(
+                "host {host_id} loaded {} VM(s) for multi-node snapshot {snapshot_id}, expected {}; reinstall farm-agent on that host",
+                imported.nodes.len(),
+                snapshot.nodes.len()
+            ));
+        }
         self.record_copy(
             snapshot_id,
             host_id,
             &imported.reference,
+            &imported.nodes,
             via.unwrap_or(CopySource::Stream),
             imported.size_bytes,
         )?;
@@ -224,7 +234,21 @@ impl FarmManager {
             &sink,
             format!("snapshot {snapshot_id} is on host {host_id}\n"),
         );
-        Ok(imported.reference)
+        Ok((imported.reference, imported.nodes))
+    }
+
+    /// Make sure host `host_id` keeps single-VM snapshot `snapshot_id`, copying it there if
+    /// needed, and return its msb reference on that host.
+    pub async fn ensure_snapshot_on_host(
+        &self,
+        snapshot_id: &str,
+        host_id: &str,
+        sink: Option<EventSink>,
+    ) -> Result<String> {
+        Ok(self
+            .ensure_snapshot_on_host_nodes(snapshot_id, host_id, sink)
+            .await?
+            .0)
     }
 
     /// Remove the copy of a snapshot from `host_id`. A host that is no longer registered
@@ -261,10 +285,12 @@ impl FarmManager {
             Ok((copy, state.hosts.contains_key(host_id)))
         })??;
         if registered {
-            self.host_agent(host_id)?
-                .remove_snapshot(copy.reference.clone())
-                .await
-                .with_context(|| format!("remove snapshot {snapshot_id} from host {host_id}"))?;
+            let agent = self.host_agent(host_id)?;
+            for reference in copy_references(&copy) {
+                agent.remove_snapshot(reference).await.with_context(|| {
+                    format!("remove snapshot {snapshot_id} from host {host_id}")
+                })?;
+            }
         }
         self.update(|state| {
             let snapshot = state
@@ -286,9 +312,11 @@ impl FarmManager {
                 if !self.read(|state| state.hosts.contains_key(&copy.host_id))? {
                     return Ok(());
                 }
-                self.host_agent(&copy.host_id)?
-                    .remove_snapshot(copy.reference.clone())
-                    .await
+                let agent = self.host_agent(&copy.host_id)?;
+                for reference in copy_references(copy) {
+                    agent.remove_snapshot(reference).await?;
+                }
+                Ok::<_, anyhow::Error>(())
             }
             .await;
             if let Err(error) = removed {
@@ -419,6 +447,7 @@ impl FarmManager {
         snapshot_id: &str,
         host_id: &str,
         reference: &str,
+        nodes: &[crate::farm::NodeSnapshot],
         via: CopySource,
         size_bytes: Option<u64>,
     ) -> Result<()> {
@@ -440,6 +469,7 @@ impl FarmManager {
             snapshot.copies.push(SnapshotCopy {
                 host_id: host_id.into(),
                 reference: reference.into(),
+                nodes: nodes.to_vec(),
                 via,
                 size_bytes: size_bytes.or(snapshot.size_bytes),
                 copied_at: now(),
@@ -569,14 +599,21 @@ async fn digest(path: &Path) -> Result<(String, u64)> {
     .await?
 }
 
-/// Whether a snapshot can boot on a host other than the one keeping its original: a single
-/// VM, which is copied there first.
-pub(super) fn copyable(snapshot: &SnapshotRecord) -> Result<()> {
-    if !snapshot.nodes.is_empty() {
-        return Err(conflict(format!(
-            "snapshot '{}' holds several VMs, which start only on the host it was frozen on",
-            snapshot.id
-        )));
+/// References to remove for a snapshot copy, computes before control so the group head goes last.
+fn copy_references(copy: &SnapshotCopy) -> Vec<String> {
+    if copy.nodes.is_empty() {
+        vec![copy.reference.clone()]
+    } else {
+        copy.nodes
+            .iter()
+            .rev()
+            .map(|n| n.reference.clone())
+            .collect()
     }
+}
+
+/// Whether a snapshot can boot on a host other than the one keeping its original.
+/// Single-VM snapshots, templates and multi-node snapshots can all be copied over.
+pub(super) fn copyable(_snapshot: &SnapshotRecord) -> Result<()> {
     Ok(())
 }

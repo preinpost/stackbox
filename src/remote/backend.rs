@@ -75,12 +75,21 @@ impl AgentBackend {
         }
     }
     /// The reference of the copy of `snapshot_id` this coordinator left on the host.
-    pub async fn find_snapshot(&self, snapshot_id: String) -> Result<Option<String>> {
+    pub async fn find_snapshot(
+        &self,
+        snapshot_id: String,
+    ) -> Result<Option<(String, Vec<crate::farm::NodeSnapshot>)>> {
         match self
             .call(Operation::FindSnapshot { snapshot_id }, None)
             .await?
         {
-            Reply::Found { reference } => Ok(reference),
+            Reply::Found {
+                reference: Some(reference),
+                nodes,
+            } => Ok(Some((reference, nodes))),
+            Reply::Found {
+                reference: None, ..
+            } => Ok(None),
             _ => bail!("unexpected farm-agent response"),
         }
     }

@@ -1969,8 +1969,11 @@ pub struct SnapshotRecord {
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
 pub struct SnapshotCopy {
     pub host_id: String,
-    /// msb snapshot reference on that host.
+    /// msb snapshot reference on that host. A multi-node copy's is its control VM's, and
+    /// `nodes` holds every VM's.
     pub reference: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub nodes: Vec<crate::farm::NodeSnapshot>,
     /// How the archive got there.
     pub via: CopySource,
     pub size_bytes: Option<u64>,

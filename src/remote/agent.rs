@@ -828,15 +828,18 @@ impl Agent {
         }
         match &request.operation {
             Operation::FindSnapshot { snapshot_id } => {
-                return Ok(Reply::Found {
-                    reference: super::cache::find(
-                        &self.dir,
-                        self.backend.as_ref(),
-                        &request.coordinator_id,
-                        snapshot_id,
-                    )
-                    .await?,
-                });
+                let found = super::cache::find(
+                    &self.dir,
+                    self.backend.as_ref(),
+                    &request.coordinator_id,
+                    snapshot_id,
+                )
+                .await?;
+                let (reference, nodes) = match found {
+                    Some((reference, nodes)) => (Some(reference), nodes),
+                    None => (None, Vec::new()),
+                };
+                return Ok(Reply::Found { reference, nodes });
             }
             Operation::FetchArchive {
                 transfer_id,

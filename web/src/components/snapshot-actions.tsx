@@ -34,6 +34,7 @@ import {
   bytes,
   componentLabel,
   dateTime,
+  hostLabel,
   hostNotice,
   hostReady,
   awaitsCompute,
@@ -41,6 +42,7 @@ import {
   isDeployableFarm,
   isMultiNodeFarm,
   memory,
+  remoteAgentNeedsUpdate,
   snapshotHost,
   snapshotOrigin,
 } from "../lib";
@@ -325,13 +327,40 @@ export function RestoreSnapshotDialog({
   const client = useQueryClient();
   const navigate = useNavigate();
   const farms = useQuery(farmsQuery());
-  // A snapshot restores on the host that keeps its original.
+  const coordinator = useQuery(hostQuery());
+  const buildId = coordinator.data?.build_id;
   const hosts = useQuery(hostsQuery()).data;
   const originId = snapshotOrigin(snapshot, hosts);
-  const target = hosts?.find((h) => h.id === originId);
+  const hostArchOf = (h: NonNullable<typeof hosts>[number]) =>
+    h.inspection?.arch ?? (h.kind === "local" ? coordinator.data?.arch : undefined);
+  const archCompatible = (h: NonNullable<typeof hosts>[number]) => {
+    const arch = hostArchOf(h);
+    return !arch || arch === snapshot.arch;
+  };
+  const hasCopy = (h: NonNullable<typeof hosts>[number]) =>
+    Boolean(snapshot.copies?.some((c) => c.host_id === h.id));
+  const originRegistered = Boolean(
+    originId && hosts?.some((h) => h.id === originId),
+  );
+  // Default to the host keeping the original when registered and ready, else the first
+  // ready host of the same architecture (preferring one that already has a copy).
+  const defaultHost =
+    hosts?.find((h) => h.id === originId && hostReady(h, buildId) && archCompatible(h)) ??
+    hosts?.find((h) => hasCopy(h) && hostReady(h, buildId) && archCompatible(h)) ??
+    hosts?.find((h) => hostReady(h, buildId) && archCompatible(h)) ??
+    hosts?.find((h) => h.id === originId) ??
+    hosts?.find((h) => archCompatible(h)) ??
+    hosts?.[0];
+  const [pickedHost, setPickedHost] = useState<string>();
+  const target = hosts?.find((h) => h.id === pickedHost) ?? defaultHost;
   const [id, setId] = useState("");
   const [owner, setOwner] = useState("");
-  const [hostName, setHostName] = useState("localhost");
+  const [editedHostName, setEditedHostName] = useState<string>();
+  const defaultExternalHost = (h?: NonNullable<typeof hosts>[number]) => {
+    if (!h || h.kind === "local") return "localhost";
+    return /^[a-z0-9.-]+$/i.test(h.address) ? h.address : "localhost";
+  };
+  const hostName = editedHostName ?? defaultExternalHost(target);
   const mutation = useMutation({
     mutationFn: () =>
       api.create({
@@ -348,9 +377,10 @@ export function RestoreSnapshotDialog({
     },
   });
   const dialog = useDialog(mutation.isPending, () => {
+    setPickedHost(undefined);
     setId("");
     setOwner("");
-    setHostName("localhost");
+    setEditedHostName(undefined);
     mutation.reset();
   });
   const duplicate = farms.data?.some((f) => f.id === id);
@@ -358,11 +388,33 @@ export function RestoreSnapshotDialog({
   const remaining = capacity
     ? capacity.memory_budget_mib - capacity.memory_reserved_mib
     : null;
-  const hostMissing = !target || !hostReady(target);
+  const targetArch = target ? hostArchOf(target) : undefined;
+  const targetWrongArch = Boolean(targetArch && targetArch !== snapshot.arch);
+  const targetIsOrigin = Boolean(target && target.id === originId);
+  const targetHasCopy = Boolean(target && hasCopy(target));
+  const needsCopy = Boolean(target && !targetIsOrigin && !targetHasCopy);
+  const copyBlockedByOrigin = Boolean(
+    target && !targetIsOrigin && !targetHasCopy && !originRegistered && !snapshot.archive?.bucket,
+  );
+  const needsMtty = snapshot.plan.gpu?.mode === "mtty";
+  const mttyMissing = Boolean(
+    needsMtty && target && target.inspection?.mtty_available !== true,
+  );
+  const hostMissing = !target || !hostReady(target, buildId);
   const overBudget = remaining !== null && snapshot.plan.memory_mib > remaining;
+  const anyCompatibleHost = hosts
+    ? hosts.some((h) => archCompatible(h))
+    : !foreignArch;
   const ready =
-    ["ready", "exporting"].includes(snapshot.status) && !foreignArch;
+    ["ready", "exporting"].includes(snapshot.status) && anyCompatibleHost;
   const control = snapshot.template === "control";
+  const canSubmit =
+    !duplicate &&
+    !overBudget &&
+    !hostMissing &&
+    !targetWrongArch &&
+    !copyBlockedByOrigin &&
+    !mttyMissing;
   return (
     <Dialog.Root open={dialog.open} onOpenChange={dialog.onOpenChange}>
       <Dialog.Trigger render={<Button variant="primary" disabled={!ready} />}>
@@ -383,7 +435,7 @@ export function RestoreSnapshotDialog({
         <form
           onSubmit={(event) => {
             event.preventDefault();
-            if (!duplicate && !overBudget && !hostMissing) mutation.mutate();
+            if (canSubmit) mutation.mutate();
           }}
         >
           <div className="modal-body space-y-5">
@@ -404,9 +456,62 @@ export function RestoreSnapshotDialog({
                   {snapshotHost(snapshot)}에서 얼린 게스트 ·{" "}
                   {target
                     ? `${target.id}에 복원합니다`
-                    : "원본 호스트에 복원합니다"}
+                    : "복원할 호스트를 선택하세요"}
                 </p>
               </div>
+            </div>
+            <div className="field">
+              <span>실행 호스트</span>
+              {hosts?.length ? (
+                <>
+                  <SelectInput
+                    label="실행 호스트"
+                    value={target?.id ?? ""}
+                    onChange={(value) => {
+                      setPickedHost(value);
+                      setEditedHostName(undefined);
+                    }}
+                    disabled={mutation.isPending}
+                    items={hosts.map((h) => {
+                      const readyHost = hostReady(h, buildId);
+                      const compatible = archCompatible(h);
+                      const arch = hostArchOf(h);
+                      const note = !compatible
+                        ? `${arch} · 아키텍처 다름`
+                        : !readyHost
+                          ? remoteAgentNeedsUpdate(h)
+                            ? "실행기 업데이트 필요"
+                            : "준비 필요"
+                          : h.id === originId
+                            ? "원본 보관"
+                            : hasCopy(h)
+                              ? "사본 보관"
+                              : "복사 후 복원";
+                      return {
+                        value: h.id,
+                        label: `${hostLabel(h)} · ${note}`,
+                        disabled: (!readyHost || !compatible) && h.id !== target?.id,
+                      };
+                    })}
+                  />
+                  <small>
+                    {remaining !== null &&
+                      `여유 메모리 ${memory(Math.max(0, remaining))}`}
+                    {needsCopy
+                      ? `${remaining !== null ? " · " : ""}${
+                          snapshot.archive?.bucket
+                            ? `버킷(${snapshot.archive.bucket})에서 내려받은 뒤 복원합니다`
+                            : "원본 호스트에서 복사한 뒤 복원합니다"
+                        }`
+                      : ""}
+                  </small>
+                </>
+              ) : (
+                <div className="warning-notice">
+                  등록된 호스트가 없습니다. Hosts에서 호스트를 먼저 등록하고
+                  환경 준비를 마치세요.
+                </div>
+              )}
             </div>
             <div className="grid gap-4 sm:grid-cols-2">
               <label className="field">
@@ -448,7 +553,7 @@ export function RestoreSnapshotDialog({
               <span>외부 접속 호스트</span>
               <Input
                 value={hostName}
-                onValueChange={setHostName}
+                onValueChange={setEditedHostName}
                 className="input font-mono"
                 required
                 maxLength={253}
@@ -459,10 +564,23 @@ export function RestoreSnapshotDialog({
                 등록합니다.
               </small>
             </label>
-            {foreignArch && (
+            {targetWrongArch && (
               <div className="warning-notice">
-                이 스냅샷은 다른 아키텍처({snapshot.arch})에서 얼렸습니다. 이
-                호스트에서는 복원할 수 없습니다.
+                이 스냅샷은 {snapshot.arch}에서 얼렸습니다. 선택한 호스트(
+                {target?.id}, {targetArch})에서는 복원할 수 없습니다.
+              </div>
+            )}
+            {mttyMissing && (
+              <div className="warning-notice">
+                이 스냅샷은 mtty GPU를 사용합니다. 선택한 호스트({target?.id})는
+                mtty 커널 검증을 마치지 않았습니다.
+              </div>
+            )}
+            {copyBlockedByOrigin && (
+              <div className="warning-notice">
+                원본을 보관하던 호스트({snapshot.host_id ?? "로컬 호스트"})가
+                등록되어 있지 않아 복사할 수 없습니다. 원본 호스트를 다시
+                등록하거나 이미 사본이 있는 호스트를 선택하세요.
               </div>
             )}
             {overBudget && (
@@ -474,10 +592,10 @@ export function RestoreSnapshotDialog({
             {hostMissing && (
               <div className="warning-notice">
                 {target
-                  ? hostNotice(target)
+                  ? hostNotice(target, buildId)
                   : snapshot.host_id
                     ? `스냅샷 원본은 ${snapshot.host_id}에 있습니다. Hosts에서 이 호스트를 다시 등록하세요.`
-                    : "스냅샷은 로컬 호스트로 복원합니다. Hosts에서 로컬 호스트를 등록하고 환경 준비를 마치세요."}
+                    : "Hosts에서 호스트를 등록하고 환경 준비를 마치세요."}
               </div>
             )}
             {mutation.error && <ErrorNotice error={mutation.error} />}
@@ -489,9 +607,7 @@ export function RestoreSnapshotDialog({
             <Button
               type="submit"
               variant="primary"
-              disabled={
-                mutation.isPending || duplicate || overBudget || hostMissing
-              }
+              disabled={mutation.isPending || !canSubmit}
             >
               {mutation.isPending ? (
                 <LoaderCircle size={16} className="animate-spin" />

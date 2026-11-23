@@ -699,8 +699,8 @@ impl FarmManager {
         self.read(|state| ensure_compatible(state, &snapshot, &host_id))??;
         self.avoid_foreign_ports(job, &farm).await?;
         let farm = self.get(&farm.id)?;
-        let reference = self
-            .ensure_snapshot_on_host(&id, &host_id, Some(self.event_sink(job, None)))
+        let (reference, snapshot_nodes) = self
+            .ensure_snapshot_on_host_nodes(&id, &host_id, Some(self.event_sink(job, None)))
             .await?;
         let plan = farm.plan.clone().context("farm has no plan")?;
         let exposure = farm.exposure.clone().context("farm has no exposure")?;
@@ -715,7 +715,7 @@ impl FarmManager {
             .restore(
                 farm.id.clone(),
                 reference,
-                snapshot.nodes.clone(),
+                snapshot_nodes,
                 plan.clone(),
                 exposure.clone(),
             )

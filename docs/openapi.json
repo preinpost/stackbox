@@ -5738,9 +5738,15 @@
           "host_id": {
             "type": "string"
           },
+          "nodes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NodeSnapshot"
+            }
+          },
           "reference": {
             "type": "string",
-            "description": "msb snapshot reference on that host."
+            "description": "msb snapshot reference on that host. A multi-node copy's is its control VM's, and\n`nodes` holds every VM's."
           },
           "size_bytes": {
             "type": [

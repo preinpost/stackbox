@@ -274,6 +274,7 @@ impl server::Handler for Handler {
                 },
                 Operation::FindSnapshot { snapshot_id } => Reply::Found {
                     reference: self.observed.cached.lock().unwrap().get(&snapshot_id).cloned(),
+                    nodes: Vec::new(),
                 },
                 Operation::FetchArchive { url, .. } => {
                     self.observed
@@ -295,6 +296,7 @@ impl server::Handler for Handler {
                             reference,
                             labels: Default::default(),
                             size_bytes: Some(4096),
+                            nodes: Vec::new(),
                         },
                     }
                 }

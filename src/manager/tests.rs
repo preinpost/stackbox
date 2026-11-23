@@ -515,6 +515,7 @@ impl Backend for Fake {
                 reference,
                 labels,
                 size_bytes: Some(4096),
+                nodes: Vec::new(),
             })
         })
     }

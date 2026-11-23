@@ -42,6 +42,9 @@ pub struct ImportedSnapshot {
     pub reference: String,
     pub labels: BTreeMap<String, String>,
     pub size_bytes: Option<u64>,
+    /// A multi-node bundle's VMs, control first; empty for single-VM imports.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub nodes: Vec<NodeSnapshot>,
 }
 
 /// Reports a freeze's steps, numbered against the total known up front.
@@ -579,6 +582,7 @@ pub async fn import_snapshot(archive: &Path, snapshot_id: &str) -> Result<Import
         reference: reference.value().to_owned(),
         labels: snapshot.labels().clone(),
         size_bytes: handle.size_bytes(),
+        nodes: Vec::new(),
     })
 }
 
