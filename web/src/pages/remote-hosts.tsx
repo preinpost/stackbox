@@ -31,7 +31,9 @@ import {
   hostQuery,
   snapshotsQuery,
   type HostCapacity,
+  type HostInspection as Inspection,
   type HostJob,
+  type HostPciDevice,
   type RemoteHost,
 } from "../api/client";
 import { CreateFarmDialog } from "../components/farm-actions";
@@ -52,6 +54,7 @@ import {
   hostNotice,
   hostReady,
   memory,
+  MSB_REQUIRED_VERSION,
   platform,
   remoteAgentNeedsUpdate,
 } from "../lib";
@@ -753,6 +756,60 @@ function HostResources({
   );
 }
 
+/** Why a host cannot take a PCI passthrough farm yet, from the inspection's own fields. */
+function pciPassthroughNote(i: Inspection): string | undefined {
+  if (i.pci_passthrough_available) return undefined;
+  if (!i.msb_pci_capable) return "msb --pci/--iommu 미지원";
+  if (!i.custom_kernel) return "커스텀 커널 필요";
+  if (!i.pci_devices?.length) return "vfio-pci 바인딩 장치 없음";
+  if (!i.pci_devices.some((d) => d.vfio_ready)) return "vfio 준비된 장치 없음";
+  if (i.gpu_kernel && !i.gpu_kernel.vfio) return "/dev/vfio/vfio 없음";
+  return "환경 준비 후 다시 점검";
+}
+
+/** A device's passthrough state, most urgent first: ready, then the group, then the binding. */
+function pciDeviceState(device: HostPciDevice) {
+  if (device.vfio_ready) return { label: "vfio-pci 준비됨", tone: "ok" };
+  if (device.group_exclusive === false)
+    return { label: "그룹 미분리", tone: "warn" };
+  return { label: "권한/바인딩 필요", tone: "bad" };
+}
+
+function PciDevices({ devices }: { devices: HostPciDevice[] }) {
+  return (
+    <section className="remote-pci" aria-label="PCI 패스스루 장치">
+      <h4 className="remote-pci-title">PCI 패스스루 장치</h4>
+      {devices.length ? (
+        <ul className="remote-pci-list">
+          {devices.map((device) => {
+            const state = pciDeviceState(device);
+            return (
+              <li key={device.bdf} className="remote-pci-row">
+                <code className="remote-pci-bdf">{device.bdf}</code>
+                <code className="remote-pci-id">
+                  {device.vendor_id}:{device.product_id}
+                </code>
+                <span className="remote-pci-group">
+                  {device.iommu_group != null
+                    ? `IOMMU 그룹 ${device.iommu_group}`
+                    : "IOMMU 그룹 없음"}
+                </span>
+                <span className={`remote-pci-state tone-${state.tone}`}>
+                  {state.label}
+                </span>
+              </li>
+            );
+          })}
+        </ul>
+      ) : (
+        <p className="field-hint">
+          호스트에 <code>vfio-pci</code>로 바인딩된 PCI 장치가 없습니다.
+        </p>
+      )}
+    </section>
+  );
+}
+
 function HostInspection({
   host,
   farms,
@@ -776,7 +833,13 @@ function HostInspection({
       label: i.os === "macos" ? "HVF 가상화" : "KVM 접근",
       ready: i.kvm_available,
     },
-    { label: "msb 0.7.13", ready: i.msb_compatible },
+    { label: `msb ${MSB_REQUIRED_VERSION}`, ready: i.msb_compatible },
+    // PCI passthrough needs msb's --pci/--iommu, the farm kernel, and a vfio-pci device.
+    {
+      label: "PCI passthrough",
+      ready: Boolean(i.pci_passthrough_available),
+      note: pciPassthroughNote(i),
+    },
     // msb builds the golden image with the host's first farm, so a missing one is not a gap.
     {
       label: "Golden image",
@@ -968,6 +1031,14 @@ function HostInspection({
           <dt>msb</dt>
           <dd className={!i.msb_version ? "build-unknown" : ""}>
             {i.msb_version ?? "미설치"}
+            {i.msb_pci_capable && (
+              <span
+                className="build-chip pci-chip"
+                title="msb --pci/--iommu 지원"
+              >
+                PCI
+              </span>
+            )}
           </dd>
         </div>
         <div>
@@ -993,6 +1064,7 @@ function HostInspection({
           </div>
         )}
       </dl>
+      <PciDevices devices={i.pci_devices ?? []} />
       <p className="field-hint">
         최근 점검 {dateTime(i.checked_at)}
         {!i.kvm_available &&
@@ -1110,7 +1182,9 @@ function HostActionDialog({
             {prepare && local ? (
               <>
                 <ol className="remote-prepare-list">
-                  <li>msb 0.7.13 설치, 낮은 버전이면 업그레이드</li>
+                  <li>
+                    msb {MSB_REQUIRED_VERSION} 설치, 낮은 버전이면 업그레이드
+                  </li>
                   <li>
                     farm 게스트 커널(VFIO · mdev · mtty 내장) 설치, 이 호스트에
                     설치할 수 없으면 stock 커널로 진행
@@ -1130,7 +1204,9 @@ function HostActionDialog({
             ) : prepare ? (
               <>
                 <ol className="remote-prepare-list">
-                  <li>msb 0.7.13 설치, 낮은 버전이면 업그레이드</li>
+                  <li>
+                    msb {MSB_REQUIRED_VERSION} 설치, 낮은 버전이면 업그레이드
+                  </li>
                   <li>
                     farm 게스트 커널을 이 호스트의 아키텍처용으로 업로드하고
                     sha256 확인

@@ -40,14 +40,17 @@ keyboard-interactive/MFA, 호스트 인증서/CA, sudo 비밀번호 입력은 �
 준비 작업은 다음 순서다.
 
 1. 등록한 지문으로 SSH 인증 후 조건을 다시 점검한다.
-2. msb가 없거나 0.7.13보다 낮으면 공식 `v0.7.13` Linux 릴리스 번들과 `checksums.sha256`을 HTTPS로 내려받고,
+2. msb가 없거나 0.8.1보다 낮으면 공식 `v0.8.1` Linux 릴리스 번들과 `checksums.sha256`을 HTTPS로 내려받고,
    정확한 번들 항목의 SHA256을 확인한 후 msb와 libkrunfw를 사용자 홈의 `~/.microsandbox/bin`,
    `~/.microsandbox/lib`에 설치한다. 이후 명령은 해당 bin 경로를 사용한다.
-   이미 0.7.13이면 재사용한다. 낮은 버전은 msb 공식 설치기처럼 그 자리에서 교체하며,
+   이미 0.8.1이면 재사용한다. 낮은 버전은 msb 공식 설치기처럼 그 자리에서 교체하며,
    실행 중인 sandbox는 기존 런타임으로 계속 돈다. 더 높은 버전은 다운그레이드하지 않고 실패한다.
+   포크나 직접 빌드한 msb를 쓴다면 `FARM_MSB_BIN`에 실행 파일 경로를 주면 릴리스 번들을 받지 않고
+   그 파일을 그대로 `~/.microsandbox/bin/msb`에 설치한다. 이 경우 그 msb가 `--version`으로 0.8.1을
+   보고해야 하며, 아니면 설치가 실패한다.
 3. coordinator가 빌드한 farm 커널 중 대상 `linux-<arch>` 것을 `~/.local/share/farm/libkrunfw/<id>/`에
    업로드하고 SHA256을 확인한다. `~/.microsandbox`는 쓰지 않는다. 빌드된 커널이 없거나 manifest의
-   `msb`가 0.7.13과 다르면 이 단계를 건너뛰고 그 호스트는 stock 커널로 남는다(mtty 불가).
+   `msb`가 0.8.1과 다르면 이 단계를 건너뛰고 그 호스트는 stock 커널로 남는다(mtty 불가).
 4. golden image는 빌드하지 않는다. 그 호스트의 첫 farm이 msb로 빌드한다(README의 Golden image 참고).
    점검 결과의 `golden_image_available`은 이 빌드의 golden image가 이미 있는지만 알린다.
 5. UUID를 포함한 `farm-check-*` 시험 VM을 golden image의 기본 이미지로 512 MiB 부팅하고 `msb exec ... /bin/true`를 실행한 뒤 삭제한다.
@@ -121,7 +124,7 @@ Farm이 남아 있는 호스트의 등록 해제는 거절한다. 먼저 해당 
   실제 KVM 호스트를 제공하면 이 경로를 추가 확인해야 한다.
 
 참고: [microsandbox Quickstart](https://docs.microsandbox.dev/getting-started/quickstart),
-[공식 v0.7.13 릴리스](https://github.com/superradcompany/microsandbox/releases/tag/v0.7.13),
+[공식 v0.8.1 릴리스](https://github.com/superradcompany/microsandbox/releases/tag/v0.8.1),
 [russh](https://github.com/warp-tech/russh).
 
 
@@ -285,7 +288,7 @@ coordinator) 사용한다.
 2. 호스트에서 `FARM_AGENT_TOKEN=<token> farm agent connect https://<coordinator>`를 실행한다
    (Linux 실행기는 `farm-agent connect <url>`). 끊기면 1초부터 30초까지 늘려 가며 다시 접속한다.
 3. 연결되면 점검·환경 준비를 실행한다. 점검, msb 설치와 시험 VM 부팅은 그 호스트의 agent가 직접 한다.
-   msb가 없거나 0.7.13보다 낮으면 SSH 호스트와 같은 설치 스크립트로 공식 릴리스를 설치·업그레이드한다
+   msb가 없거나 0.8.1보다 낮으면 SSH 호스트와 같은 설치 스크립트로 공식 릴리스를 설치·업그레이드한다
    (Linux, Apple Silicon macOS. 그 외 플랫폼은 직접 설치). golden image는 첫 farm이 빌드한다.
 
 요청·진행·결과는 SSH 실행기와 같은 프로토콜을 세션 번호로 나눠 한 소켓에 싣는다. 접속에는 API token이 아니라

@@ -3931,6 +3931,73 @@ html[data-theme="dark"] .phase-current .phase-marker {
 .remote-kernel-detail .field-hint {
   padding-bottom: 8px;
 }
+/* PCI 패스스루: msb 행의 PCI 칩과 호스트의 vfio-pci 장치 목록. */
+.build-compare .pci-chip {
+  height: 22px;
+  margin-left: 8px;
+  vertical-align: middle;
+}
+.remote-pci {
+  margin: 0 0 12px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--line);
+}
+.remote-pci-title {
+  margin: 0 0 6px;
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  color: var(--ink-2);
+}
+.remote-pci-list {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.remote-pci-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 12px;
+  padding: 6px 0;
+  border-bottom: 1px dashed var(--line);
+  font-size: var(--fs-xs);
+  color: var(--ink-3);
+}
+.remote-pci-bdf,
+.remote-pci-id {
+  font-family: var(--font-mono);
+  color: var(--ink-1);
+  overflow-wrap: anywhere;
+}
+.remote-pci-group {
+  color: var(--ink-3);
+}
+.remote-pci-state {
+  margin-left: auto;
+  padding: 1px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-pill);
+  font-size: var(--fs-2xs);
+  white-space: nowrap;
+}
+.remote-pci-state.tone-ok {
+  color: var(--ok);
+  background: var(--ok-bg);
+  border-color: var(--ok-line);
+}
+.remote-pci-state.tone-warn {
+  color: var(--warn);
+  background: var(--warn-bg);
+  border-color: var(--warn-line);
+}
+.remote-pci-state.tone-bad {
+  color: var(--bad);
+  background: var(--bad-bg);
+  border-color: var(--bad-line);
+}
+
 /* stock 커널로 부팅한 호스트는 이유와 함께 경고한다. */
 .remote-kernel-stock {
   margin: -6px 0 10px;

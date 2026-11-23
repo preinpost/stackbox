@@ -11,7 +11,9 @@ import {
   FarmMeta,
   HorizonLogin,
   NodeTopology,
+  PciPassthroughStat,
 } from "./farm-detail";
+import { canFreeze } from "../components/snapshot-actions";
 
 afterEach(() => {
   cleanup();
@@ -406,4 +408,33 @@ test("lists every public endpoint of heat and skyline, not one per component", (
     expect(screen.getByText(name, { selector: "strong" })).toBeTruthy();
     expect(screen.getByText(url, { selector: "code" })).toBeTruthy();
   }
+});
+
+/** A PCI farm names the devices compute-1 holds and cannot be frozen into a snapshot. */
+test("names the PCI devices compute-1 holds and refuses a snapshot of that farm", () => {
+  const pci: Farm = {
+    ...farm,
+    host_id: "pci-01",
+    exposure: { host: "farm.test", bind: "0.0.0.0", port_base: 30000 },
+    plan: { ...farm.plan!, pci_devices: ["0000:04:00.3", "0000:06:00.0"] },
+  };
+  const { container } = render(
+    <PciPassthroughStat devices={pci.plan!.pci_devices!} />,
+  );
+  expect(container.textContent).toContain("PCI 패스스루");
+  expect(screen.getByText("0000:04:00.3, 0000:06:00.0").className).toContain(
+    "font-mono",
+  );
+  expect(canFreeze({ ...pci, status: "ready" }, ["pci-01"])).toBe(false);
+  expect(
+    canFreeze(
+      {
+        ...farm,
+        host_id: "pci-01",
+        exposure: { host: "farm.test", bind: "0.0.0.0", port_base: 30000 },
+        status: "ready",
+      },
+      ["pci-01"],
+    ),
+  ).toBe(true);
 });

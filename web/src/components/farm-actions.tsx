@@ -39,6 +39,7 @@ import {
   type ComputeSize,
   type Farm,
   type GpuMode,
+  type HostPciDevice,
   type Job,
   type Phase,
   type ReleaseCreateRequest,
@@ -272,6 +273,8 @@ export function CreateFarmForm({
   const [gpuTraits, setGpuTraits] = useState("CUSTOM_FARM_VGPU");
   // Compute VMs placed on another host than the control VM's (`compute-2` → host id).
   const [placed, setPlaced] = useState<Record<string, string>>({});
+  // Host PCI devices compute-1 receives through VFIO (`0000:04:00.3`).
+  const [selectedPci, setSelectedPci] = useState<string[]>([]);
   const compute = computeSizes[sizeIndex].size;
   // A compute VM runs Nova instances, so Nova always comes with it.
   const requested = selected.includes("nova")
@@ -403,6 +406,30 @@ export function CreateFarmForm({
     !!coordinator.data?.relay_url &&
     (hosts.data ?? []).filter((h) => hostReady(h, buildId)).length > 1;
   const farms = useQuery(farmsQuery());
+  // PCI passthrough belongs to compute-1, so its host's inspection lists the devices. A device
+  // an active farm on that host already passes through is taken, whatever its binding says.
+  const pciHostId = computeHostIds[0];
+  const pciInspection = hosts.data?.find((h) => h.id === pciHostId)?.inspection;
+  const pciDevices: HostPciDevice[] = pciInspection?.pci_devices ?? [];
+  const occupiedPci = new Map<string, string>();
+  for (const f of farms.data ?? []) {
+    if (f.host_id !== pciHostId || f.status === "deleted") continue;
+    for (const bdf of f.plan?.pci_devices ?? []) occupiedPci.set(bdf, f.id);
+  }
+  const pciUsable = (bdf: string) =>
+    computes > 0 &&
+    pciInspection?.msb_pci_capable === true &&
+    pciDevices.some((d) => d.bdf === bdf && d.vfio_ready === true) &&
+    !occupiedPci.has(bdf);
+  // Only devices still valid for this host and plan are sent; the effect drops the rest.
+  const pciPicked = selectedPci.filter(pciUsable);
+  const occupiedKey = Array.from(occupiedPci.keys()).join(",");
+  useEffect(() => {
+    setSelectedPci((current) => {
+      const kept = current.filter(pciUsable);
+      return kept.length === current.length ? current : kept;
+    });
+  }, [pciHostId, computes, pciInspection, occupiedKey]);
   const components = resolveComponents(
     catalog.data?.components ?? [],
     requested,
@@ -412,9 +439,9 @@ export function CreateFarmForm({
     (c) => c.estimated && components.includes(c.id),
   );
   const plan = useQuery({
-    queryKey: ["plan", components, computes, compute, gpu],
+    queryKey: ["plan", components, computes, compute, gpu, pciPicked],
     queryFn: ({ signal }) =>
-      api.plan(components, computes, signal, compute, gpu),
+      api.plan(components, computes, signal, compute, gpu, pciPicked),
     enabled: catalog.isSuccess,
     staleTime: Infinity,
   });
@@ -438,6 +465,7 @@ export function CreateFarmForm({
           ),
           ...(compute ? { compute } : {}),
           ...(gpu ? { gpu } : {}),
+          ...(pciPicked.length ? { pci_devices: pciPicked } : {}),
           external_host: hostName,
         }
       : undefined;
@@ -708,6 +736,76 @@ export function CreateFarmForm({
                 <div className="warning-notice mt-2">{gpuProblem}</div>
               )}
             </div>
+            {computes > 0 && pciInspection && (
+              <div>
+                {pciDevices.length > 0 &&
+                pciInspection.pci_passthrough_available ? (
+                  <>
+                    <span className="field-label">
+                      PCI 패스스루 (compute-1)
+                    </span>
+                    <div className="space-y-2">
+                      {pciDevices.map((device) => {
+                        const occupiedBy = occupiedPci.get(device.bdf);
+                        const reason = occupiedBy
+                          ? `사용 중(${occupiedBy})`
+                          : device.vfio_ready
+                            ? undefined
+                            : "준비 안 됨";
+                        const checked = pciPicked.includes(device.bdf);
+                        return (
+                          <label
+                            key={device.bdf}
+                            className="checkbox-row"
+                            title={reason}
+                            aria-disabled={reason ? true : undefined}
+                          >
+                            <Checkbox.Root
+                              checked={checked}
+                              disabled={!!reason || mutation.isPending}
+                              onCheckedChange={(next) =>
+                                setSelectedPci((current) =>
+                                  next
+                                    ? [...current, device.bdf]
+                                    : current.filter(
+                                        (bdf) => bdf !== device.bdf,
+                                      ),
+                                )
+                              }
+                              className="checkbox"
+                            >
+                              <Checkbox.Indicator>
+                                <Check size={14} strokeWidth={3} />
+                              </Checkbox.Indicator>
+                            </Checkbox.Root>
+                            <span>
+                              <code className="font-mono">{device.bdf}</code>{" "}
+                              <small className="font-mono">
+                                {device.vendor_id}:{device.product_id}
+                                {device.iommu_group != null &&
+                                  ` · 그룹 ${device.iommu_group}`}
+                              </small>
+                              <small>{reason ?? "vfio-pci 준비됨"}</small>
+                            </span>
+                          </label>
+                        );
+                      })}
+                    </div>
+                    <p className="field-hint mt-2">
+                      선택한 장치는 compute-1 VM에 직접 붙습니다. 장치 하나는
+                      farm 하나만 쓸 수 있고, PCI farm은 클린 설치하며 스냅샷을
+                      만들 수 없습니다.
+                    </p>
+                  </>
+                ) : (
+                  <p className="field-hint">
+                    {pciDevices.length === 0
+                      ? "compute-1 호스트에 vfio-pci로 바인딩된 PCI 장치가 없어 PCI 패스스루를 쓸 수 없습니다."
+                      : "compute-1 호스트가 PCI 패스스루를 준비하지 않아 장치를 고를 수 없습니다. Hosts에서 점검하세요."}
+                  </p>
+                )}
+              </div>
+            )}
             {canSpan && (
               <div>
                 <span className="field-label">VM 배치</span>

@@ -35,7 +35,7 @@ const inspection = {
   memory_total_mib: 37008,
   memory_available_mib: 30717,
   disk_available_mib: 259507,
-  msb_version: "0.7.13",
+  msb_version: "0.8.1",
   msb_compatible: true,
   docker_available: true,
   golden_image_available: true,
@@ -108,7 +108,7 @@ test("a host that booted the farm kernel shows its kernel, VFIO and mtty count",
 /** A host on the stock kernel says why, and the GPU checks fail with that evidence. */
 test("a host on the stock kernel shows the reason and no mtty devices", async () => {
   const reason =
-    "the installed kernel was built for msb 0.7.12, and preparing this host installs 0.7.13";
+    "the installed kernel was built for msb 0.8.0, and preparing this host installs 0.8.1";
   renderHosts([
     {
       ...host,
@@ -160,4 +160,73 @@ test("a host prepared before the GPU probe keeps its mtty result and asks for th
   expect(await screen.findByText("Farm 게스트 커널")).toBeTruthy();
   expect(screen.getByText("확인됨 · 상세는 환경 준비 후")).toBeTruthy();
   expect(screen.getAllByText("환경 준비 후 확인").length).toBe(1);
+});
+
+const pciDevices = [
+  {
+    bdf: "0000:04:00.3",
+    vendor_id: "1b21",
+    product_id: "2142",
+    class: "0c0330",
+    iommu_group: 17,
+    driver: "vfio-pci",
+    group_exclusive: true,
+    vfio_ready: true,
+  },
+  {
+    bdf: "0000:05:00.0",
+    vendor_id: "10de",
+    product_id: "2684",
+    class: "030000",
+    iommu_group: 18,
+    driver: "vfio-pci",
+    group_exclusive: true,
+    vfio_ready: false,
+  },
+];
+
+/** A host that can pass PCI devices says so, lists each device with its group and state. */
+test("a host with vfio-pci devices shows the PCI badge, checklist and device states", async () => {
+  renderHosts([
+    {
+      ...host,
+      inspection: {
+        ...custom,
+        msb_pci_capable: true,
+        pci_passthrough_available: true,
+        pci_devices: pciDevices,
+      },
+    },
+  ]);
+  expect(await screen.findByText("PCI passthrough")).toBeTruthy();
+  expect(screen.getByText("PCI")).toBeTruthy();
+  expect(screen.getByText("msb 0.8.1")).toBeTruthy();
+  expect(screen.getByText("PCI 패스스루 장치")).toBeTruthy();
+  expect(screen.getByText("0000:04:00.3")).toBeTruthy();
+  expect(screen.getByText("1b21:2142")).toBeTruthy();
+  expect(screen.getByText("IOMMU 그룹 17")).toBeTruthy();
+  expect(screen.getByText("vfio-pci 준비됨")).toBeTruthy();
+  expect(screen.getByText("0000:05:00.0")).toBeTruthy();
+  expect(screen.getByText("IOMMU 그룹 18")).toBeTruthy();
+  expect(screen.getByText("권한/바인딩 필요")).toBeTruthy();
+});
+
+/** Without msb's PCI flags or a bound device, the checklist names the missing piece. */
+test("a host without PCI support or devices says why passthrough is not ready", async () => {
+  renderHosts([
+    {
+      ...host,
+      inspection: {
+        ...custom,
+        msb_pci_capable: false,
+        pci_passthrough_available: false,
+      },
+    },
+  ]);
+  expect(await screen.findByText("PCI passthrough")).toBeTruthy();
+  expect(screen.getByText("msb --pci/--iommu 미지원")).toBeTruthy();
+  expect(screen.queryByText("PCI")).toBeNull();
+  expect(document.body.textContent).toContain(
+    "호스트에 vfio-pci로 바인딩된 PCI 장치가 없습니다.",
+  );
 });

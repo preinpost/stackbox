@@ -45,6 +45,9 @@ export const phases: { id: Phase; label: string; description: string }[] = [
   },
   { id: "verify", label: "Verify", description: "Token과 이미지 API 검증" },
 ];
+/** The msb release this coordinator installs on hosts and expects them to run. */
+export const MSB_REQUIRED_VERSION = "0.8.1";
+
 export const memory = (mib: number) => `${Number((mib / 1024).toFixed(1))} GiB`;
 /** Where a snapshot can be restored: its guest boots only on the same architecture. */
 /** A host agent built from other sources cannot parse this coordinator's requests. */
@@ -350,10 +353,10 @@ export function hostLink(
  * the farm kernel and the verification VM in one job, so there is one button to press. */
 export function hostNotice(host: RemoteHost, coordinatorBuildId?: string) {
   if (host.kind === "local")
-    return "Hosts에서 로컬 호스트를 점검하고 환경 준비를 마치세요. msb 0.7.13이 필요합니다.";
+    return `Hosts에서 로컬 호스트를 점검하고 환경 준비를 마치세요. msb ${MSB_REQUIRED_VERSION}이 필요합니다.`;
   if (host.kind === "agent")
     return host.connected
-      ? "Hosts에서 이 호스트를 점검하고 환경 준비를 마치세요. 호스트에 msb 0.7.13이 필요합니다."
+      ? `Hosts에서 이 호스트를 점검하고 환경 준비를 마치세요. 호스트에 msb ${MSB_REQUIRED_VERSION}이 필요합니다.`
       : "에이전트가 연결되어 있지 않습니다. 호스트에서 `farm agent connect`를 실행하세요.";
   if (agentBuildMismatch(host.agent?.artifact, coordinatorBuildId))
     return "설치된 Farm 실행기가 이 coordinator와 다른 소스에서 빌드되었습니다. 환경 준비를 다시 실행하면 이 빌드의 실행기로 바뀝니다. 그래도 실패하면 `task agent-build` 후 Coordinator를 재시작하세요.";

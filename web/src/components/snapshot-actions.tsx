@@ -100,8 +100,13 @@ export const templateNodes = (farm: Farm) =>
 const templateLabel = (node: string) =>
   node === "control" ? "control (control 템플릿)" : `${node} (compute 템플릿)`;
 
+/** A PCI farm's compute-1 holds a device the snapshot does not carry, so it is never frozen. */
+export const hasPciPassthrough = (farm: Farm) =>
+  (farm.plan?.pci_devices?.length ?? 0) > 0;
+
 /** The farm's host keeps the snapshot, so the farm must be on a registered host. */
 export const canFreeze = (farm: Farm, hostIds: string[] = []) =>
+  !hasPciPassthrough(farm) &&
   Boolean(farm.host_id && hostIds.includes(farm.host_id)) &&
   !farm.active_job &&
   Boolean(farm.plan && farm.exposure) &&
@@ -129,6 +134,7 @@ export function FreezeFarmDialog({ farm }: { farm: Farm }) {
   const [id, setId] = useState(suggested);
   const [note, setNote] = useState("");
   const templates = templateNodes(farm);
+  const pci = hasPciPassthrough(farm);
   const mutation = useMutation({
     mutationFn: () =>
       api.freeze(farm.id, {
@@ -162,16 +168,21 @@ export function FreezeFarmDialog({ farm }: { farm: Farm }) {
           />
         }
         title={
-          !farmHost
-            ? "farm의 호스트가 등록되어 있지 않아 얼릴 수 없습니다."
-            : local
-              ? "VM을 스냅샷으로 얼려둡니다."
-              : `VM을 스냅샷으로 얼려 ${farmHost.id}에 둡니다.`
+          pci
+            ? "PCI 패스스루 farm은 스냅샷을 지원하지 않습니다."
+            : !farmHost
+              ? "farm의 호스트가 등록되어 있지 않아 얼릴 수 없습니다."
+              : local
+                ? "VM을 스냅샷으로 얼려둡니다."
+                : `VM을 스냅샷으로 얼려 ${farmHost.id}에 둡니다.`
         }
       >
         <Snowflake size={16} />
         얼리기
       </Dialog.Trigger>
+      {pci && (
+        <p className="field-hint">PCI 패스스루 farm은 스냅샷을 지원하지 않습니다.</p>
+      )}
       <Modal
         title="Farm 얼리기"
         description="VM의 디스크를 스냅샷으로 저장합니다. 이 스냅샷으로 같은 환경의 farm을 빠르게 만들 수 있습니다."

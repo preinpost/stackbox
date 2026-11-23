@@ -994,3 +994,140 @@ test("the GPU mode select and the GPU count share a label row when a GPU is on",
   expect(countLabel.closest(".grid")).toBe(grid);
   expect(grid?.classList.contains("grid")).toBe(true);
 });
+
+/** The host that will run compute-1: two devices bound to vfio-pci, one not ready for it. */
+const pciHosts = () => [
+  {
+    id: "local",
+    kind: "local",
+    address: "localhost",
+    ...ready,
+    inspection: {
+      checked_at: Date.now() / 1000,
+      msb_pci_capable: true,
+      pci_passthrough_available: true,
+      pci_devices: [
+        {
+          bdf: "0000:04:00.3",
+          vendor_id: "1b21",
+          product_id: "2142",
+          class: "0c0330",
+          iommu_group: 17,
+          driver: "vfio-pci",
+          group_exclusive: true,
+          vfio_ready: true,
+        },
+        {
+          bdf: "0000:02:00.0",
+          vendor_id: "10de",
+          product_id: "2684",
+          class: "030000",
+          iommu_group: 9,
+          driver: "vfio-pci",
+          group_exclusive: true,
+          vfio_ready: false,
+        },
+      ],
+    },
+  },
+];
+
+/** The release and plan answers of `releasePlan`, with the host, farm list and sent bodies. */
+const pciFetch = (
+  sent: { plans: Record<string, unknown>[]; farms: Record<string, unknown>[] },
+  farmList: unknown[],
+  previews: Record<string, unknown>[],
+) => {
+  const base = releasePlan(previews, ["2026.2"]);
+  return vi.fn(async (path: string, options?: RequestInit) => {
+    if (path.endsWith("/plans"))
+      sent.plans.push(JSON.parse(String(options?.body)));
+    if (path.endsWith("/releases/farms")) {
+      sent.farms.push(JSON.parse(String(options?.body)));
+      return Response.json({ id: "job", farm_id: "pci", kind: "assemble" });
+    }
+    if (path.endsWith("/hosts")) return Response.json(pciHosts());
+    if (path.endsWith("/farms")) return Response.json(farmList);
+    return base(path, options);
+  });
+};
+
+test("a vfio-ready PCI device of compute-1 is picked and sent with the plan and the farm", async () => {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+  });
+  const previews: Record<string, unknown>[] = [];
+  const sent = {
+    plans: [] as Record<string, unknown>[],
+    farms: [] as Record<string, unknown>[],
+  };
+  vi.stubGlobal("fetch", pciFetch(sent, [], previews));
+  renderForm(client);
+  const user = userEvent.setup();
+  await user.type(screen.getByPlaceholderText("dev-openstack"), "pci");
+
+  const ready = (await screen.findByText("0000:04:00.3")).closest("label")!;
+  expect(ready.textContent).toContain("vfio-pci 준비됨");
+  const notReady = screen.getByText("0000:02:00.0").closest("label")!;
+  expect(notReady.textContent).toContain("준비 안 됨");
+  expect(disabledOption(notReady.querySelector("[role=checkbox]")!)).toBe(true);
+
+  await user.click(ready.querySelector("[role=checkbox]")!);
+  await waitFor(() =>
+    expect(sent.plans.at(-1)).toMatchObject({ pci_devices: ["0000:04:00.3"] }),
+  );
+  await waitFor(() =>
+    expect(previews.at(-1)).toMatchObject({ pci_devices: ["0000:04:00.3"] }),
+  );
+
+  const start = screen.getByRole("button", { name: "Farm 만들기" });
+  await waitFor(() =>
+    expect((start as HTMLButtonElement).disabled).toBe(false),
+  );
+  await user.click(start);
+  await waitFor(() =>
+    expect(sent.farms.at(-1)).toMatchObject({
+      id: "pci",
+      pci_devices: ["0000:04:00.3"],
+    }),
+  );
+  client.clear();
+});
+
+test("a PCI device another farm on the same host passes through is taken", async () => {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+  });
+  const previews: Record<string, unknown>[] = [];
+  const sent = {
+    plans: [] as Record<string, unknown>[],
+    farms: [] as Record<string, unknown>[],
+  };
+  const busy = {
+    id: "busy-farm",
+    status: "ready",
+    host_id: "local",
+    created_at: 0,
+    updated_at: 0,
+    plan: {
+      components: ["keystone"],
+      memory_mib: 1024,
+      disk_mib: 1024,
+      warnings: [],
+      nodes: [],
+      pci_devices: ["0000:04:00.3"],
+    },
+  };
+  vi.stubGlobal("fetch", pciFetch(sent, [busy], previews));
+  renderForm(client);
+  const user = userEvent.setup();
+  await user.type(screen.getByPlaceholderText("dev-openstack"), "second");
+
+  const taken = (await screen.findByText("0000:04:00.3")).closest("label")!;
+  expect(taken.textContent).toContain("사용 중(busy-farm)");
+  expect(disabledOption(taken.querySelector("[role=checkbox]")!)).toBe(true);
+  await waitFor(() => expect(previews.length).toBeGreaterThan(0));
+  // Nothing is picked, so no request names a device.
+  expect(sent.plans.every((body) => !("pci_devices" in body))).toBe(true);
+  client.clear();
+});

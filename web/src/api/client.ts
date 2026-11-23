@@ -27,6 +27,8 @@ export type ServiceEndpoints = Pick<
 >;
 export type Datastore = Schema["Datastore"];
 export type RemoteHost = Schema["RemoteHost"];
+export type HostInspection = Schema["HostInspection"];
+export type HostPciDevice = Schema["HostPciDevice"];
 export type HostCapacity = Schema["HostCapacity"];
 export type HostJob = Schema["HostJob"];
 export type HostKey = Schema["HostKey"];
@@ -318,6 +320,7 @@ export const api = {
     signal?: AbortSignal,
     compute?: ComputeSize,
     gpu?: GpuConfig,
+    pciDevices?: string[],
   ) =>
     request<Plan>("/plans", {
       method: "POST",
@@ -326,6 +329,7 @@ export const api = {
         computes,
         compute,
         ...(gpu ? { gpu } : {}),
+        ...(pciDevices?.length ? { pci_devices: pciDevices } : {}),
       }),
       signal,
     }),

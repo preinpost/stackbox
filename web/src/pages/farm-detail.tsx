@@ -337,6 +337,9 @@ export function FarmDetailPage({ id }: { id: string }) {
             </span>
           </div>
         )}
+        {farm.plan?.pci_devices && farm.plan.pci_devices.length > 0 && (
+          <PciPassthroughStat devices={farm.plan.pci_devices} />
+        )}
       </div>
       <Tabs.Root
         value={tab}
@@ -561,6 +564,20 @@ export function RecentLogs({
 
 /** The facts under a farm's name: its owner, where its VMs run, the OpenStack release it
  * installs and when it was made. */
+/** The host's own devices handed to compute-1 through VFIO, listed by their address. */
+export function PciPassthroughStat({ devices }: { devices: string[] }) {
+  return (
+    <div>
+      <Cpu size={16} />
+      <span>
+        PCI 패스스루
+        <strong className="font-mono">{devices.join(", ")}</strong>
+        <span className="tag">compute-1</span>
+      </span>
+    </div>
+  );
+}
+
 export function FarmMeta({ farm, host }: { farm: Farm; host?: RemoteHost }) {
   return (
     <p>
