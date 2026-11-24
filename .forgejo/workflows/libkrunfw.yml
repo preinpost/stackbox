@@ -1,0 +1,121 @@
+# Builds the guest kernel (libkrunfw with the scripts/libkrunfw fragments) for each OS and CPU
+# architecture farm runs on, and publishes it to the farm-libkrunfw bucket that src/kernel.rs
+# downloads from when a host has no kernel built locally.
+#
+# It is independent of release.yml: a kernel build takes far longer than an agent build, and
+# a kernel change moves no agent's build id, so a release does not wait for it. The two
+# architectures are separate jobs and can be run alone with workflow_dispatch.
+#
+# Bucket layout (what src/kernel.rs reads):
+#   farm-libkrunfw/<kid>/manifest.txt                  immutable: the manifest, hashed to <kid>
+#   farm-libkrunfw/<kid>/<os>-<arch>/<library>         immutable: the library the manifest names
+#   farm-libkrunfw/msb-<msb>/<os>-<arch>.json          max-age=60: the index for this msb
+# <kid> is the first 16 hex digits of the manifest's SHA-256 (src/kernel.rs::id_for).
+name: libkrunfw
+
+on:
+  workflow_dispatch:
+    inputs:
+      targets:
+        description: Which kernels to build
+        type: choice
+        options: [all, linux-x86_64, linux-aarch64]
+        default: all
+      msb_version:
+        description: msb version the kernel is for (recorded in the manifest and the index)
+        type: string
+        default: '0.8.1'
+      revision:
+        description: libkrunfw revision to build (msb 0.8.1 pins f0493b6f)
+        type: string
+        default: f0493b6f1873ed6031bc0bb87568db0095a6d3b6
+      publish:
+        description: Upload to the bucket (off to only build and keep the result as a log)
+        type: boolean
+        default: true
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/libkrunfw/**'
+      - 'scripts/build-libkrunfw.sh'
+      - 'scripts/libkrunfw-publish.sh'
+      - '.forgejo/workflows/libkrunfw.yml'
+
+concurrency:
+  group: libkrunfw-${{ github.ref }}-${{ inputs.targets || 'all' }}
+  cancel-in-progress: false
+
+jobs:
+  kernel:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-x86_64
+            arch: x86_64
+          - target: linux-aarch64
+            arch: aarch64
+    # Every target when started by a push or with `all`; otherwise only the one named.
+    if: ${{ (inputs.targets || 'all') == 'all' || (inputs.targets || 'all') == matrix.target }}
+    runs-on: docker
+    container:
+      # docker CLI, git, curl, node and jq; the runner's dind daemon runs the kernel build.
+      image: catthehacker/ubuntu:act-24.04
+    timeout-minutes: 240
+    env:
+      MSB_VERSION: ${{ inputs.msb_version || '0.8.1' }}
+      REVISION: ${{ inputs.revision || 'f0493b6f1873ed6031bc0bb87568db0095a6d3b6' }}
+      PUBLISH: ${{ inputs.publish == false && 'false' || 'true' }}
+      ARCH: ${{ matrix.arch }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      R2_BUCKET: public-bucket
+      R2_PREFIX: farm-libkrunfw
+    steps:
+      - uses: actions/checkout@v4
+
+      # The kid rule is src/kernel.rs::id_for: the first 16 hex digits of SHA-256. Checked
+      # against the value the Rust unit test pins before anything is uploaded.
+      - name: Check the kid rule
+        run: |
+          set -eu
+          got=$(printf 'abc' | sha256sum | cut -c1-16)
+          [ "$got" = ba7816bf8f01cfea ] || { echo "kid rule changed: $got" >&2; exit 1; }
+
+      # LIBKRUNFW_DOCKER_COPY: the daemon cannot see this job's workspace, so the sources go
+      # in and the kernel comes out with docker cp instead of bind mounts.
+      - name: Build the kernel
+        env:
+          LIBKRUNFW_DOCKER_COPY: '1'
+        run: |
+          set -eu
+          sh scripts/build-libkrunfw.sh --arch "$ARCH" --revision "$REVISION" --msb "$MSB_VERSION" \
+            --out dist/libkrunfw
+          test -s "dist/libkrunfw/$ARCH/manifest.txt"
+      - name: Describe the kernel
+        run: |
+          set -eu
+          dir=dist/libkrunfw/$ARCH
+          kid=$(sh scripts/libkrunfw-publish.sh kid "$dir/manifest.txt")
+          file=$(sh scripts/libkrunfw-publish.sh file-name "$dir/manifest.txt")
+          echo "KID=$kid" >>"$GITHUB_ENV"
+          echo "FILE=$file" >>"$GITHUB_ENV"
+          sh scripts/libkrunfw-publish.sh index "$dir/manifest.txt" linux "$ARCH" >"$RUNNER_TEMP/index.json"
+          cat "$RUNNER_TEMP/index.json"
+
+      # Only a published kernel reaches farm: the index is what a host reads to find it.
+      - name: Publish the kernel
+        if: ${{ env.PUBLISH == 'true' }}
+        run: |
+          set -eu
+          dir=dist/libkrunfw/$ARCH
+          index=$RUNNER_TEMP/index.json
+          put() {
+            npx -y wrangler@4 r2 object put "$R2_BUCKET/$1" --remote --file "$2" \
+              --content-type "$3" --cache-control "$4"
+          }
+          immutable='public, max-age=31536000, immutable'
+          put "$R2_PREFIX/$KID/manifest.txt" "$dir/manifest.txt" text/plain "$immutable"
+          put "$R2_PREFIX/$KID/linux-$ARCH/$FILE" "$dir/$FILE" application/octet-stream "$immutable"
+          put "$R2_PREFIX/msb-$MSB_VERSION/linux-$ARCH.json" "$index" application/json 'public, max-age=60'
+          echo "published $KID for linux-$ARCH under msb $MSB_VERSION"

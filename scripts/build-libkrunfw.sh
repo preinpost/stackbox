@@ -29,6 +29,10 @@ cd "$(dirname "$0")/.."
 
 fragments_dir=scripts/libkrunfw/fragments
 image=${LIBKRUNFW_IMAGE:-ubuntu:24.04}
+# LIBKRUNFW_DOCKER_COPY=1 copies the sources in and the kernel out with docker cp, for a docker
+# daemon that cannot see this filesystem (a CI job on a docker-in-docker runner). Bind mounts
+# are the default, since they keep the container's build tree on this machine.
+docker_copy=${LIBKRUNFW_DOCKER_COPY:-}
 remote=${LIBKRUNFW_REMOTE:-https://github.com/superradcompany/libkrunfw.git}
 tab=$(printf '\t')
 
@@ -582,13 +586,9 @@ for arch in $arches; do
         fi
         # No --platform here on purpose: the container runs natively and the cross toolchain
         # does the work, while docker --platform would emulate every compile step.
-        docker run --rm \
-            -e KERNEL="$kernel" -e KERNEL_REMOTE="$kernel_remote" \
-            -e GUEST_ARCH="$arch" -e KBUILD_ARCH="$guest_kbuild_arch" \
-            -e CROSS_COMPILE="$cross" -e CROSS_PACKAGE="$cross_package" \
-            -e CONFIG_KEY="$key" -e ABI="$abi" -e FULL="$full" \
-            -v "$src:/host:ro" -v "$work:/out" -v "farm-libkrunfw-$arch:/work" \
-            -w /work "$image" bash -eu -c '
+        # The container's script is the text below, run as one bash script with the same
+        # environment whichever way the sources reach the container.
+        cat >"$work/container.sh" <<'CONTAINER'
             set -o pipefail
             export DEBIAN_FRONTEND=noninteractive
             # The container is throwaway, so the toolchain is installed on every build; a
@@ -640,7 +640,29 @@ for arch in $arches; do
             "${CROSS_COMPILE}gcc" -fPIC -DABI_VERSION="$ABI" -shared \
                 "-Wl,-soname,libkrunfw.so.$ABI" -o "/out/libkrunfw.so.$FULL" /out/kernel.c
             "${CROSS_COMPILE}strip" "/out/libkrunfw.so.$FULL" 2>/dev/null || true
-        ' || die "the $arch kernel build failed"
+CONTAINER
+        build_script=$(cat "$work/container.sh")
+        set -- -e "KERNEL=$kernel" -e "KERNEL_REMOTE=$kernel_remote" \
+            -e "GUEST_ARCH=$arch" -e "KBUILD_ARCH=$guest_kbuild_arch" \
+            -e "CROSS_COMPILE=$cross" -e "CROSS_PACKAGE=$cross_package" \
+            -e "CONFIG_KEY=$key" -e "ABI=$abi" -e "FULL=$full"
+        if [ -n "$docker_copy" ]; then
+            cid=$(docker create "$@" -w /work "$image" bash -eu -c "$build_script") ||
+                die "cannot create the $arch build container"
+            docker cp "$work/." "$cid:/out" && docker cp "$src/." "$cid:/host" || {
+                docker rm -f "$cid" >/dev/null 2>&1
+                die "cannot copy the libkrunfw sources into the build container"
+            }
+            if ! docker start -a "$cid"; then
+                docker rm -f "$cid" >/dev/null 2>&1
+                die "the $arch kernel build failed"
+            fi
+            docker cp "$cid:/out/." "$work/" || die "cannot copy the $arch kernel out of the container"
+            docker rm -f "$cid" >/dev/null 2>&1 || true
+        else
+            docker run --rm "$@" -v "$src:/host:ro" -v "$work:/out" -v "farm-libkrunfw-$arch:/work" \
+                -w /work "$image" bash -eu -c "$build_script" || die "the $arch kernel build failed"
+        fi
 
         verify_fragments "$work/kernel.config" "$work/fragments.lines"
         head -n 1 "$work/kernel.c" | grep "kernel version: ${kernel#linux-}" >/dev/null ||

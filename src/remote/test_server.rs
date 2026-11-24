@@ -624,7 +624,9 @@ impl server::Handler for Handler {
                 .unwrap()
                 .push("kernel-manifest".into());
             String::new()
-        } else if script.contains("FARM_MSB_RELEASE_BASE:-https://github.com") {
+        } else if script
+            .contains("FARM_MSB_RELEASE_BASE:-https://github.com/preinpost/microsandbox")
+        {
             self.observed.calls.lock().unwrap().push("install".into());
             *self.observed.msb.lock().unwrap() = Some(MSB_VERSION.into());
             String::new()

@@ -3,6 +3,11 @@
 # tags it, builds the farm-agent for every platform a host can run, uploads them to
 # the public R2 bucket, publishes a release that links them, and merges the result
 # back into dev.
+#
+# The guest kernels are not part of this release: .forgejo/workflows/libkrunfw.yml builds and
+# publishes them to the farm-libkrunfw bucket for linux-x86_64 and linux-aarch64 on its own
+# schedule (push to main when the kernel scripts change, or workflow_dispatch). A release
+# therefore neither waits for a kernel build nor changes the kernel a host installs.
 name: release
 
 on:

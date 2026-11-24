@@ -18,7 +18,7 @@ if [ "$os" = linux ]; then
 fi
 # macOS has no flock(1); the farm-agent that runs this there holds the install lock.
 want=@MSB_VERSION@
-# msb 0.7.13 refuses a catalog under a group- or world-writable ancestor. Earlier installs
+# msb 0.8.1 refuses a catalog under a group- or world-writable ancestor. Earlier installs
 # could leave ~/.microsandbox that way, so fix it even when msb itself is already current.
 if [ -d "$HOME/.microsandbox" ]; then
     chmod go-w "$HOME/.microsandbox"
@@ -50,8 +50,9 @@ work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 cd "$work"
 bundle="microsandbox-$os-$arch.tar.gz"
-# FARM_MSB_RELEASE_BASE overrides where the release bundle and its checksums come from.
-base=${FARM_MSB_RELEASE_BASE:-https://github.com/superradcompany/microsandbox/releases/download/v$want}
+# FARM_MSB_RELEASE_BASE overrides where the release bundle and its checksums come from; the
+# default is the preinpost/microsandbox fork's release of the same version.
+base=${FARM_MSB_RELEASE_BASE:-https://github.com/preinpost/microsandbox/releases/download/v$want}
 curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 --max-time 300 "$base/$bundle" -o "$bundle"
 curl --fail --silent --show-error --location --proto '=https' --tlsv1.2 --max-time 60 "$base/checksums.sha256" -o checksums.sha256
 awk -v file="$bundle" '$2 == file || $2 == "*" file { print; found++ } END { if (found != 1) exit 1 }' checksums.sha256 > selected.sha256

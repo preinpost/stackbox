@@ -940,7 +940,15 @@ mod tests {
             fork < download,
             "the fork hook must run before the release download"
         );
-        assert!(script.contains("${FARM_MSB_RELEASE_BASE:-"), "{script}");
+        // The default release is the preinpost/microsandbox fork's, and FARM_MSB_RELEASE_BASE
+        // still replaces it.
+        assert!(
+            script.contains(
+                "base=${FARM_MSB_RELEASE_BASE:-https://github.com/preinpost/microsandbox/releases/download/v$want}"
+            ),
+            "{script}"
+        );
+        assert!(!script.contains("superradcompany/microsandbox"), "{script}");
         // The script runs under `sh -c` on hosts; a syntax error would fail every prepare.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("install.sh");

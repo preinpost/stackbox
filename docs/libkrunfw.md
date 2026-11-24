@@ -291,3 +291,22 @@ VM을 만드는 명령만 파일이 아니면 실패한다.
   쓸 수 있으며 `/dev/vfio`도 보인다. 다른 방식으로 배포한다면 그 컨테이너 마운트를 다시 확인한다.
 - mdev 인스턴스는 재부팅하면 사라진다. farm의 재배포·스냅샷 복원 뒤에 Nova가 다시 만드는지는
   이 커널만으로 정해지지 않는다.
+
+## 배포본 자동 다운로드
+
+로컬에 빌드 산출물(`<dir>/<arch>/manifest.txt`)이 없는 호스트는 farm이 배포한 커널을 받는다.
+대상 URL은 `FARM_LIBKRUNFW_URL`(기본 `https://public-bucket.preinpost.in/farm-libkrunfw`)이고,
+빈 값이면 끈다. 준비 순서는 로컬 산출물 → 배포본이며, 받은 커널은 SHA-256·크기·매니페스트 해시
+(`kernel::id_for`)·msb·arch를 모두 확인한 뒤 `<state-dir>/libkrunfw-cache/<kid>/`에 캐시하고
+기존 설치 경로로 호스트에 올린다. 같은 kid가 캐시에 있으면 매니페스트와 라이브러리는 다시 받지 않는다.
+
+```
+farm-libkrunfw/<kid>/manifest.txt                  immutable
+farm-libkrunfw/<kid>/<os>-<arch>/<library>         immutable (예: linux-x86_64/libkrunfw.so.5.6.1)
+farm-libkrunfw/msb-<msb>/<os>-<arch>.json          max-age=60 (인덱스: kid, sha256, size, 경로)
+```
+
+`<kid>`는 `manifest.txt` 바이트의 SHA-256 앞 16자리다. 업로드는
+`.forgejo/workflows/libkrunfw.yml`이 `linux-x86_64`(조각 3개)와 `linux-aarch64`(조각 2개)를 따로
+빌드해 올린다(`scripts/libkrunfw-publish.sh kid|index`로 키와 인덱스를 만든다). `darwin-aarch64`는
+같은 레이아웃을 쓰지만 macOS 링커가 필요해 Linux CI에서는 만들지 않는다.

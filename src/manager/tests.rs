@@ -587,6 +587,7 @@ fn options(dir: &Path) -> ManagerOptions {
         relay: None,
         // Unit tests must not install a developer's kernel into the real home.
         libkrunfw_dir: None,
+        kernel_release_url: None,
     }
 }
 /// Registers this machine as a prepared host, as its check and preparation leave it.
@@ -8069,5 +8070,107 @@ async fn a_pci_farm_needs_a_vfio_ready_device_that_no_live_farm_holds() {
         })
         .expect("a deleted farm releases its device");
     done(&manager, &third).await;
+    settle(&manager).await;
+}
+
+/// A host with no farm kernel built locally takes the one farm publishes for its platform:
+/// preparation downloads it from the bucket, verifies it, caches it, and uploads it over SSH.
+#[tokio::test]
+async fn ssh_host_preparation_downloads_the_published_farm_kernel_without_a_local_build() {
+    use crate::remote::{HostJobKind, MSB_VERSION, test_server::Fixture};
+    use sha2::{Digest, Sha256};
+    let fixture = Fixture::start().await;
+
+    // The bucket serves what `kernel_build` writes for this host's architecture, behind the
+    // index `fetch_published` reads.
+    let arch = std::env::consts::ARCH;
+    let build = tempfile::tempdir().unwrap();
+    kernel_build(build.path(), arch);
+    let library = std::fs::read(build.path().join(arch).join("libkrunfw.so.5.6.1")).unwrap();
+    let manifest = std::fs::read_to_string(build.path().join(arch).join("manifest.txt")).unwrap();
+    let kid = crate::kernel::id_for(&manifest);
+    let sha = format!("{:x}", Sha256::digest(&library));
+    let index = serde_json::json!({
+        "kid": kid,
+        "msb": MSB_VERSION,
+        "os": "linux",
+        "arch": arch,
+        "revision": "56bf194627a07996dc4ce21211fe86ada4c76080",
+        "manifest_path": format!("{kid}/manifest.txt"),
+        "artifact_path": format!("{kid}/linux-{arch}/libkrunfw.so.5.6.1"),
+        "sha256": sha,
+        "size": library.len(),
+    });
+    let mut files = std::collections::BTreeMap::new();
+    files.insert(
+        format!("/msb-{MSB_VERSION}/linux-{arch}.json"),
+        index.to_string().into_bytes(),
+    );
+    files.insert(format!("/{kid}/manifest.txt"), manifest.into_bytes());
+    files.insert(
+        format!("/{kid}/linux-{arch}/libkrunfw.so.5.6.1"),
+        library.clone(),
+    );
+    let files = Arc::new(files);
+    let requests = Arc::new(Mutex::new(Vec::<String>::new()));
+    let app = axum::Router::new().fallback({
+        let (files, requests) = (files.clone(), requests.clone());
+        move |uri: axum::http::Uri| {
+            let (files, requests) = (files.clone(), requests.clone());
+            async move {
+                use axum::response::IntoResponse;
+                requests.lock().unwrap().push(uri.path().to_owned());
+                match files.get(uri.path()) {
+                    Some(bytes) => bytes.clone().into_response(),
+                    None => axum::http::StatusCode::NOT_FOUND.into_response(),
+                }
+            }
+        }
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, app).await });
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut opts = options(dir.path());
+    opts.kernel_release_url = Some(url);
+    let manager = open_with(opts, Arc::new(Fake::default())).await;
+    manager
+        .register_host(fixture.registration("target"))
+        .unwrap();
+    let job = manager
+        .start_host_job("target", HostJobKind::Prepare)
+        .unwrap();
+    let finished = host_done(&manager, &job.id).await;
+    assert_eq!(
+        finished.status,
+        JobStatus::Succeeded,
+        "{:?}",
+        finished.error
+    );
+    assert!(
+        finished
+            .events
+            .iter()
+            .any(|event| event.message.starts_with("Installing the farm kernel")),
+        "{:?}",
+        finished
+            .events
+            .iter()
+            .map(|event| &event.message)
+            .collect::<Vec<_>>()
+    );
+    let cached = dir.path().join("libkrunfw-cache").join(&kid);
+    assert_eq!(
+        std::fs::read(cached.join("libkrunfw.so.5.6.1")).unwrap(),
+        library
+    );
+    let calls = fixture.observed.calls.lock().unwrap().clone();
+    assert!(
+        calls.iter().any(|call| call == "kernel-upload"),
+        "{calls:?}"
+    );
+    let asked = requests.lock().unwrap().clone();
+    assert_eq!(asked.len(), 3, "{asked:?}");
     settle(&manager).await;
 }

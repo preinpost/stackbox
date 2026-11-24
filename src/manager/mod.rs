@@ -45,6 +45,10 @@ pub struct ManagerOptions {
     /// preparation. `None` leaves every host on the stock microsandbox kernel, which cannot
     /// run an `mtty` GPU farm.
     pub libkrunfw_dir: Option<PathBuf>,
+    /// Where farm-published kernels are downloaded from when `libkrunfw_dir` has none for a
+    /// host, verified and cached under `state_dir/libkrunfw-cache`. `None` turns that off;
+    /// [`ManagerOptions::local`] takes it from `FARM_LIBKRUNFW_URL`.
+    pub kernel_release_url: Option<String>,
 }
 impl ManagerOptions {
     pub fn local(state_dir: PathBuf) -> Self {
@@ -79,6 +83,7 @@ impl ManagerOptions {
                         .and_then(|bind| bind.parse().ok()),
                 }),
             libkrunfw_dir: crate::kernel::artifacts_dir(),
+            kernel_release_url: crate::kernel::release_url(),
         }
     }
 }
@@ -3480,6 +3485,7 @@ mod poison_tests {
                 public_bind: "127.0.0.1".parse().unwrap(),
                 relay: None,
                 libkrunfw_dir: None,
+                kernel_release_url: None,
             },
             Arc::new(super::tests::Fake::default()),
         )

@@ -544,6 +544,259 @@ pub fn install_would_replace(library: &Path) -> bool {
         .any(|pair| pair[0] == ".microsandbox" && pair[1] == "lib")
 }
 
+/// Where kernels published by farm are served from: `<kid>/manifest.txt`, the library under
+/// `<kid>/<os>-<arch>/`, and per-msb indexes under `msb-<version>/<os>-<arch>.json`.
+pub const RELEASE_URL: &str = "https://public-bucket.preinpost.in/farm-libkrunfw";
+
+/// Environment variable overriding [`RELEASE_URL`]. Empty turns the published kernels off.
+pub const URL_VAR: &str = "FARM_LIBKRUNFW_URL";
+
+/// The published kernel base URL the environment selects: unset means [`RELEASE_URL`], an
+/// empty value means none, anything else is used without trailing slashes.
+pub fn release_url() -> Option<String> {
+    release_url_from(std::env::var(URL_VAR).ok().as_deref())
+}
+
+fn release_url_from(value: Option<&str>) -> Option<String> {
+    match value {
+        None => Some(RELEASE_URL.into()),
+        Some(url) => {
+            Some(url.trim().trim_end_matches('/').to_owned()).filter(|url| !url.is_empty())
+        }
+    }
+}
+
+/// The index a published kernel is announced by, as `scripts/libkrunfw-index.sh` writes it.
+#[derive(serde::Deserialize)]
+struct Index {
+    kid: String,
+    msb: String,
+    os: String,
+    arch: String,
+    manifest_path: String,
+    artifact_path: String,
+    sha256: String,
+    size: u64,
+}
+
+/// The largest library a published kernel may be. A real one is about 25 MiB.
+const MAX_PUBLISHED_SIZE: u64 = 128 * 1024 * 1024;
+
+fn lower_hex(value: &str, len: usize) -> bool {
+    value.len() == len
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// A path inside the published bucket: relative, no `..` or `.`, printable ASCII only.
+fn safe_relative(path: &str) -> Result<()> {
+    ensure!(
+        !path.is_empty()
+            && path.len() <= 512
+            && !path.starts_with('/')
+            && !path.contains('\\')
+            && path.bytes().all(|b| b.is_ascii_graphic())
+            && path
+                .split('/')
+                .all(|part| !part.is_empty() && part != ".." && part != "."),
+        "invalid published kernel path {path:?}"
+    );
+    Ok(())
+}
+
+impl Index {
+    fn validate(&self, os: &str, arch: &str, msb_version: &str) -> Result<()> {
+        ensure!(
+            self.msb == msb_version && self.os == os && self.arch == arch,
+            "the published kernel index is for {}-{} msb {}, not {os}-{arch} msb {msb_version}",
+            self.os,
+            self.arch,
+            self.msb
+        );
+        ensure!(lower_hex(&self.kid, 16), "invalid published kernel id");
+        ensure!(
+            lower_hex(&self.sha256, 64),
+            "invalid published kernel sha256"
+        );
+        ensure!(
+            self.size > 0 && self.size <= MAX_PUBLISHED_SIZE,
+            "invalid published kernel size {}",
+            self.size
+        );
+        safe_relative(&self.manifest_path)?;
+        safe_relative(&self.artifact_path)?;
+        let filename = self.artifact_path.rsplit('/').next().unwrap_or_default();
+        validate_filename(filename)?;
+        Ok(())
+    }
+}
+
+fn client() -> Result<reqwest::Client> {
+    Ok(reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .build()?)
+}
+
+/// The body at `url`, or `None` when the bucket has no object there (403 or 404).
+async fn get_optional(
+    url: &str,
+    limit: u64,
+    timeout: std::time::Duration,
+) -> Result<Option<Vec<u8>>> {
+    let response = client()?
+        .get(url)
+        .timeout(timeout)
+        .send()
+        .await
+        .with_context(|| format!("download {url}"))?;
+    if matches!(response.status().as_u16(), 403 | 404) {
+        return Ok(None);
+    }
+    let response = response
+        .error_for_status()
+        .with_context(|| format!("download {url}"))?;
+    if response.content_length().is_some_and(|len| len > limit) {
+        bail!("{url} is larger than {limit} bytes");
+    }
+    let bytes = response
+        .bytes()
+        .await
+        .with_context(|| format!("download {url}"))?;
+    ensure!(
+        (bytes.len() as u64) <= limit,
+        "{url} is larger than {limit} bytes"
+    );
+    Ok(Some(bytes.into()))
+}
+
+/// The artifact `os`-`arch` of msb `msb_version` published under `base_url`, verified and
+/// cached under `cache_dir/<kid>/`. `os` is the bucket's name for the platform (`linux` or
+/// `darwin`). `None` when nothing is published for that build. A cached kernel is reused
+/// without downloading its manifest or library again; the index is always read, since it is
+/// what names the current kernel.
+pub async fn fetch_published(
+    base_url: &str,
+    os: &str,
+    arch: &str,
+    msb_version: &str,
+    cache_dir: &Path,
+) -> Result<Option<Artifact>> {
+    let base = base_url.trim_end_matches('/');
+    let index_url = format!("{base}/msb-{msb_version}/{os}-{arch}.json");
+    let Some(body) =
+        get_optional(&index_url, 64 * 1024, std::time::Duration::from_secs(20)).await?
+    else {
+        return Ok(None);
+    };
+    let index: Index = serde_json::from_slice(&body)
+        .with_context(|| format!("read the published kernel index {index_url}"))?;
+    index.validate(os, arch, msb_version)?;
+    let filename = index
+        .artifact_path
+        .rsplit('/')
+        .next()
+        .unwrap_or_default()
+        .to_owned();
+    // The manifest's own os name for the library: a dylib on macOS, a .so elsewhere.
+    let manifest_os = if os == "darwin" { "macos" } else { os };
+    let dir = cache_dir.join(&index.kid);
+    let library = dir.join(&filename);
+    let manifest_file = dir.join("manifest.txt");
+    let cached = std::fs::read_to_string(&manifest_file).ok().filter(|text| {
+        published_manifest(text, &index, manifest_os, msb_version).is_ok()
+            && sha256_file(&library).is_ok_and(|sha| sha == index.sha256)
+    });
+    if let Some(text) = cached {
+        return Ok(Some(Artifact {
+            id: index.kid.clone(),
+            manifest: text,
+            library,
+            filename,
+            sha256: index.sha256.clone(),
+            msb: msb_version.into(),
+            arch: arch.into(),
+        }));
+    }
+
+    let manifest_url = format!("{base}/{}", index.manifest_path);
+    let manifest_bytes = get_optional(
+        &manifest_url,
+        1024 * 1024,
+        std::time::Duration::from_secs(20),
+    )
+    .await?
+    .with_context(|| format!("the published kernel manifest {manifest_url} is missing"))?;
+    let text = String::from_utf8(manifest_bytes)
+        .with_context(|| format!("{manifest_url} is not UTF-8"))?;
+    published_manifest(&text, &index, manifest_os, msb_version)?;
+    let artifact_url = format!("{base}/{}", index.artifact_path);
+    let bytes = get_optional(
+        &artifact_url,
+        index.size,
+        std::time::Duration::from_secs(300),
+    )
+    .await?
+    .with_context(|| format!("the published kernel {artifact_url} is missing"))?;
+    ensure!(
+        bytes.len() as u64 == index.size && format!("{:x}", Sha256::digest(&bytes)) == index.sha256,
+        "{artifact_url} does not match its published size and sha256"
+    );
+
+    std::fs::create_dir_all(&dir)?;
+    let partial = dir.join(format!(".{filename}.partial"));
+    std::fs::write(&partial, &bytes)?;
+    std::fs::rename(&partial, &library)?;
+    let partial = dir.join(".manifest.txt.partial");
+    std::fs::write(&partial, &text)?;
+    std::fs::rename(&partial, &manifest_file)?;
+    Ok(Some(Artifact {
+        id: index.kid,
+        manifest: text,
+        library,
+        filename,
+        sha256: index.sha256,
+        msb: msb_version.into(),
+        arch: arch.into(),
+    }))
+}
+
+/// Checks a published manifest against the index that named it: its id, msb, architecture,
+/// and that it lists the library the index names, with the index's sha256.
+fn published_manifest(
+    text: &str,
+    index: &Index,
+    manifest_os: &str,
+    msb_version: &str,
+) -> Result<()> {
+    ensure!(
+        id_for(text) == index.kid,
+        "the published manifest does not hash to kernel id {}",
+        index.kid
+    );
+    let manifest = Manifest::parse(text)?;
+    ensure!(
+        manifest.msb.as_deref() == Some(msb_version),
+        "the published kernel was built for msb {:?}, not {msb_version}",
+        manifest.msb
+    );
+    ensure!(
+        manifest.arch == index.arch,
+        "the published kernel is for {}, not {}",
+        manifest.arch,
+        index.arch
+    );
+    let (path, sha256) = manifest
+        .artifact_for(manifest_os)
+        .with_context(|| format!("the published kernel has no library for {manifest_os}"))?;
+    safe_relative(path)?;
+    ensure!(
+        path.rsplit('/').next() == index.artifact_path.rsplit('/').next() && sha256 == index.sha256,
+        "the published manifest does not list the library its index names"
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -804,5 +1057,335 @@ mod tests {
         assert!(!install_would_replace(Path::new(
             "/home/farm/.microsandbox/bin/libkrunfw.5.dylib"
         )));
+    }
+}
+
+#[cfg(test)]
+mod published_tests {
+    use super::*;
+    use std::collections::BTreeMap;
+    use std::sync::{Arc, Mutex};
+
+    const LIBRARY: &[u8] = b"published kernel fixture";
+
+    /// An object store: the files it serves, and every path asked for, in order.
+    #[derive(Default)]
+    struct Bucket {
+        files: Mutex<BTreeMap<String, Vec<u8>>>,
+        requests: Mutex<Vec<String>>,
+    }
+
+    async fn serve(bucket: Arc<Bucket>) -> String {
+        let app = axum::Router::new().fallback(move |uri: axum::http::Uri| {
+            let bucket = bucket.clone();
+            async move {
+                use axum::response::IntoResponse;
+                let path = uri.path().to_owned();
+                bucket.requests.lock().unwrap().push(path.clone());
+                let file = bucket.files.lock().unwrap().get(&path).cloned();
+                match file {
+                    Some(bytes) => bytes.into_response(),
+                    None => axum::http::StatusCode::NOT_FOUND.into_response(),
+                }
+            }
+        });
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, app).await });
+        url
+    }
+
+    /// A published kernel for `msb` and the bucket layout `fetch_published` reads.
+    struct Published {
+        manifest: String,
+        kid: String,
+        index: serde_json::Value,
+    }
+
+    fn published(msb: &str) -> Published {
+        let sha = format!("{:x}", Sha256::digest(LIBRARY));
+        let manifest = format!(
+            "revision f0493b6f1873ed6031bc0bb87568db0095a6d3b6\nmsb {msb}\nkernel linux-6.12.118\narch x86_64\nkbuild-arch x86_64\ntoolchain native\nartifact x86_64/libkrunfw.so.5.6.1 sha256 {sha}\n"
+        );
+        let kid = id_for(&manifest);
+        let index = serde_json::json!({
+            "kid": kid,
+            "msb": msb,
+            "os": "linux",
+            "arch": "x86_64",
+            "revision": "f0493b6f1873ed6031bc0bb87568db0095a6d3b6",
+            "manifest_path": format!("{kid}/manifest.txt"),
+            "artifact_path": format!("{kid}/linux-x86_64/libkrunfw.so.5.6.1"),
+            "sha256": sha,
+            "size": LIBRARY.len(),
+        });
+        Published {
+            manifest,
+            kid,
+            index,
+        }
+    }
+
+    fn bucket_with(published: &Published, index: serde_json::Value) -> Arc<Bucket> {
+        let bucket = Arc::new(Bucket::default());
+        {
+            let mut files = bucket.files.lock().unwrap();
+            files.insert(
+                format!("/msb-{}/linux-x86_64.json", crate::remote::MSB_VERSION),
+                index.to_string().into_bytes(),
+            );
+            files.insert(
+                format!("/{}/manifest.txt", published.kid),
+                published.manifest.clone().into_bytes(),
+            );
+            files.insert(
+                format!("/{}/linux-x86_64/libkrunfw.so.5.6.1", published.kid),
+                LIBRARY.to_vec(),
+            );
+        }
+        bucket
+    }
+
+    fn requests(bucket: &Bucket) -> Vec<String> {
+        bucket.requests.lock().unwrap().clone()
+    }
+
+    #[test]
+    fn the_release_url_follows_the_environment_rule() {
+        assert_eq!(release_url_from(None).as_deref(), Some(RELEASE_URL));
+        assert_eq!(release_url_from(Some("")), None);
+        assert_eq!(release_url_from(Some("   ")), None);
+        assert_eq!(
+            release_url_from(Some(" http://127.0.0.1:9/kernels/ ")).as_deref(),
+            Some("http://127.0.0.1:9/kernels")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_published_kernel_is_downloaded_verified_and_cached() {
+        let published = published(crate::remote::MSB_VERSION);
+        let bucket = bucket_with(&published, published.index.clone());
+        let base = serve(bucket.clone()).await;
+        let cache = tempfile::tempdir().unwrap();
+        let fetched = fetch_published(
+            &base,
+            "linux",
+            "x86_64",
+            crate::remote::MSB_VERSION,
+            cache.path(),
+        )
+        .await
+        .unwrap()
+        .expect("the kernel is published");
+        assert_eq!(fetched.id, published.kid);
+        assert_eq!(fetched.filename, "libkrunfw.so.5.6.1");
+        assert_eq!(std::fs::read(&fetched.library).unwrap(), LIBRARY);
+        assert_eq!(fetched.manifest, published.manifest);
+        assert_eq!(requests(&bucket).len(), 3);
+
+        // A second fetch reads the index again, which says which kernel is current, but
+        // downloads neither the manifest nor the library.
+        let again = fetch_published(
+            &base,
+            "linux",
+            "x86_64",
+            crate::remote::MSB_VERSION,
+            cache.path(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(again.library, fetched.library);
+        let asked = requests(&bucket);
+        assert_eq!(asked.len(), 4, "{asked:?}");
+        assert_eq!(
+            asked[3],
+            format!("/msb-{}/linux-x86_64.json", crate::remote::MSB_VERSION)
+        );
+
+        // A cached library that no longer matches is downloaded again, not reused.
+        std::fs::write(&fetched.library, b"tampered").unwrap();
+        fetch_published(
+            &base,
+            "linux",
+            "x86_64",
+            crate::remote::MSB_VERSION,
+            cache.path(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            requests(&bucket).len(),
+            7,
+            "the index, manifest and library are read again"
+        );
+        assert_eq!(std::fs::read(&fetched.library).unwrap(), LIBRARY);
+    }
+
+    #[tokio::test]
+    async fn a_build_with_no_published_index_is_none() {
+        let published = published(crate::remote::MSB_VERSION);
+        let base = serve(bucket_with(&published, published.index.clone())).await;
+        let cache = tempfile::tempdir().unwrap();
+        assert!(
+            fetch_published(
+                &base,
+                "linux",
+                "aarch64",
+                crate::remote::MSB_VERSION,
+                cache.path()
+            )
+            .await
+            .unwrap()
+            .is_none()
+        );
+        assert!(
+            fetch_published(&base, "linux", "x86_64", "0.7.13", cache.path())
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_library_that_does_not_match_its_checksum_is_refused() {
+        let published = published(crate::remote::MSB_VERSION);
+        let bucket = bucket_with(&published, published.index.clone());
+        bucket.files.lock().unwrap().insert(
+            format!("/{}/linux-x86_64/libkrunfw.so.5.6.1", published.kid),
+            b"tampered kernel fixture".to_vec(),
+        );
+        let base = serve(bucket).await;
+        let cache = tempfile::tempdir().unwrap();
+        let error = fetch_published(
+            &base,
+            "linux",
+            "x86_64",
+            crate::remote::MSB_VERSION,
+            cache.path(),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            format!("{error:#}").contains("size and sha256"),
+            "{error:#}"
+        );
+        assert!(
+            !cache
+                .path()
+                .join(&published.kid)
+                .join("libkrunfw.so.5.6.1")
+                .exists()
+        );
+    }
+
+    #[tokio::test]
+    async fn an_index_that_names_another_msb_or_escapes_the_bucket_is_refused() {
+        let published = published(crate::remote::MSB_VERSION);
+        let cache = tempfile::tempdir().unwrap();
+
+        let mut other_msb = published.index.clone();
+        other_msb["msb"] = "0.7.13".into();
+        let bucket = bucket_with(&published, other_msb);
+        let base = serve(bucket.clone()).await;
+        let error = fetch_published(
+            &base,
+            "linux",
+            "x86_64",
+            crate::remote::MSB_VERSION,
+            cache.path(),
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{error:#}").contains("msb"), "{error:#}");
+        assert_eq!(requests(&bucket).len(), 1, "no artifact is asked for");
+
+        for (field, value) in [
+            ("artifact_path", "../../etc/passwd"),
+            ("manifest_path", "/etc/passwd"),
+            ("artifact_path", "a/./b\tc"),
+        ] {
+            let mut index = published.index.clone();
+            index[field] = value.into();
+            let bucket = bucket_with(&published, index);
+            let base = serve(bucket.clone()).await;
+            assert!(
+                fetch_published(
+                    &base,
+                    "linux",
+                    "x86_64",
+                    crate::remote::MSB_VERSION,
+                    cache.path()
+                )
+                .await
+                .is_err(),
+                "{field}={value:?}"
+            );
+            assert_eq!(requests(&bucket).len(), 1, "{field}={value:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_manifest_for_another_msb_or_with_a_wrong_checksum_is_refused() {
+        let cache = tempfile::tempdir().unwrap();
+        // The index and the manifest hash agree, but the manifest was built for another msb.
+        let older = published("0.7.13");
+        let mut lying = older.index.clone();
+        lying["msb"] = crate::remote::MSB_VERSION.into();
+        let bucket = bucket_with(&older, lying);
+        let base = serve(bucket).await;
+        assert!(
+            fetch_published(
+                &base,
+                "linux",
+                "x86_64",
+                crate::remote::MSB_VERSION,
+                cache.path()
+            )
+            .await
+            .is_err()
+        );
+
+        // The index's sha256 disagrees with the manifest's, though the library matches its
+        // own bytes.
+        let good = published(crate::remote::MSB_VERSION);
+        let mut wrong = good.index.clone();
+        wrong["sha256"] = "0".repeat(64).into();
+        let base = serve(bucket_with(&good, wrong)).await;
+        assert!(
+            fetch_published(
+                &base,
+                "linux",
+                "x86_64",
+                crate::remote::MSB_VERSION,
+                cache.path()
+            )
+            .await
+            .is_err()
+        );
+    }
+}
+
+#[cfg(test)]
+mod kid_tests {
+    use super::*;
+
+    /// The CI job names each kernel with `scripts/libkrunfw-publish.sh kid`, which is
+    /// `sha256sum | cut -c1-16`; this pins that rule to `id_for`.
+    #[test]
+    fn the_kernel_id_is_the_first_sixteen_hex_digits_of_the_manifest_sha256() {
+        assert_eq!(id_for("abc"), "ba7816bf8f01cfea");
+    }
+
+    /// Checks the checked-in build's manifest when a local build exists (`dist/` is not
+    /// committed); the id it gets is the one the bucket serves that manifest under.
+    #[test]
+    fn a_local_build_gets_the_id_the_publish_script_names_it() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("dist/libkrunfw/x86_64/manifest.txt");
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            return;
+        };
+        assert_eq!(id_for(&text), "bfc3b7dc77ee5383");
     }
 }

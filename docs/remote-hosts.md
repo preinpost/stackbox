@@ -40,7 +40,7 @@ keyboard-interactive/MFA, 호스트 인증서/CA, sudo 비밀번호 입력은 �
 준비 작업은 다음 순서다.
 
 1. 등록한 지문으로 SSH 인증 후 조건을 다시 점검한다.
-2. msb가 없거나 0.8.1보다 낮으면 공식 `v0.8.1` Linux 릴리스 번들과 `checksums.sha256`을 HTTPS로 내려받고,
+2. msb가 없거나 0.8.1보다 낮으면 `preinpost/microsandbox` 포크의 `v0.8.1` Linux 릴리스 번들(`FARM_MSB_RELEASE_BASE`로 위치 변경)과 `checksums.sha256`을 HTTPS로 내려받고,
    정확한 번들 항목의 SHA256을 확인한 후 msb와 libkrunfw를 사용자 홈의 `~/.microsandbox/bin`,
    `~/.microsandbox/lib`에 설치한다. 이후 명령은 해당 bin 경로를 사용한다.
    이미 0.8.1이면 재사용한다. 낮은 버전은 msb 공식 설치기처럼 그 자리에서 교체하며,
@@ -124,7 +124,7 @@ Farm이 남아 있는 호스트의 등록 해제는 거절한다. 먼저 해당 
   실제 KVM 호스트를 제공하면 이 경로를 추가 확인해야 한다.
 
 참고: [microsandbox Quickstart](https://docs.microsandbox.dev/getting-started/quickstart),
-[공식 v0.8.1 릴리스](https://github.com/superradcompany/microsandbox/releases/tag/v0.8.1),
+[msb 포크 v0.8.1 릴리스](https://github.com/preinpost/microsandbox/releases/tag/v0.8.1) (기본 설치 원본, `FARM_MSB_RELEASE_BASE`로 바꿈),
 [russh](https://github.com/warp-tech/russh).
 
 

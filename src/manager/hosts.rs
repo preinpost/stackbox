@@ -970,7 +970,29 @@ impl FarmManager {
         self.golden_event(id, &inspection)?;
         Ok(inspection)
     }
-    /// Install the built farm kernel on an SSH host before its verification boot, under
+    /// The farm kernel for a host of this platform: the one built under `dir` when there is
+    /// one, else the one farm publishes for it, downloaded and cached under the state
+    /// directory. `None` when neither has a kernel for the platform.
+    async fn farm_kernel(
+        &self,
+        dir: Option<&std::path::Path>,
+        os: &str,
+        arch: &str,
+    ) -> Result<Option<crate::kernel::Artifact>> {
+        if let Some(dir) = dir
+            && let Some(artifact) = crate::kernel::artifact_for(dir, os, arch)?
+        {
+            return Ok(Some(artifact));
+        }
+        let Some(url) = self.0.options.kernel_release_url.as_deref() else {
+            return Ok(None);
+        };
+        // The bucket names macOS `darwin`, as the install script does.
+        let bucket_os = if os == "macos" { "darwin" } else { os };
+        let cache = self.0.options.state_dir.join("libkrunfw-cache");
+        crate::kernel::fetch_published(url, bucket_os, arch, MSB_VERSION, &cache).await
+    }
+    /// Install the farm kernel on an SSH host before its verification boot, under
     /// `~/.local/share/farm/libkrunfw`. A missing artifact is not a failure: the host then
     /// boots the stock microsandbox kernel, and preparation records no mtty device.
     async fn install_ssh_kernel(
@@ -979,14 +1001,11 @@ impl FarmManager {
         job: &str,
         inspection: &HostInspection,
     ) -> Result<()> {
-        let Some(dir) = self.0.options.libkrunfw_dir.as_deref() else {
-            self.host_event(
-                job,
-                "No built farm kernel is configured; this host boots the stock microsandbox kernel (mtty GPUs are unavailable)",
-            )?;
-            return Ok(());
-        };
-        match crate::kernel::artifact_for(dir, &inspection.os, &inspection.arch) {
+        let dir = self.0.options.libkrunfw_dir.clone();
+        match self
+            .farm_kernel(dir.as_deref(), &inspection.os, &inspection.arch)
+            .await
+        {
             Ok(Some(artifact)) => {
                 self.host_event(
                     job,
@@ -1001,8 +1020,8 @@ impl FarmManager {
                 self.host_event(
                     job,
                     &format!(
-                        "No farm kernel for {}-{} in {}; this host boots the stock microsandbox kernel (mtty GPUs are unavailable)",
-                        inspection.os, inspection.arch, dir.display()
+                        "No farm kernel for {}-{}{}; this host boots the stock microsandbox kernel (mtty GPUs are unavailable)",
+                        inspection.os, inspection.arch, kernel_source(dir.as_deref())
                     ),
                 )?;
             }
@@ -1042,21 +1061,18 @@ impl FarmManager {
             }
             return Ok(());
         }
-        let Some(dir) = self.0.options.libkrunfw_dir.clone() else {
-            self.host_event(
-                &job.id,
-                "No built farm kernel is configured; this host boots the stock microsandbox kernel (mtty GPUs are unavailable)",
-            )?;
-            return Ok(());
-        };
-        let artifact = match crate::kernel::artifact_for(&dir, &inspection.os, &inspection.arch) {
+        let dir = self.0.options.libkrunfw_dir.clone();
+        let artifact = match self
+            .farm_kernel(dir.as_deref(), &inspection.os, &inspection.arch)
+            .await
+        {
             Ok(Some(artifact)) => artifact,
             Ok(None) => {
                 self.host_event(
                     &job.id,
                     &format!(
-                        "No farm kernel for {}-{} in {}; this host boots the stock microsandbox kernel (mtty GPUs are unavailable)",
-                        inspection.os, inspection.arch, dir.display()
+                        "No farm kernel for {}-{}{}; this host boots the stock microsandbox kernel (mtty GPUs are unavailable)",
+                        inspection.os, inspection.arch, kernel_source(dir.as_deref())
                     ),
                 )?;
                 return Ok(());
@@ -1228,4 +1244,12 @@ fn msb_install_step(found: Option<&str>) -> Result<String> {
         ),
         _ => format!("Installing or verifying msb {MSB_VERSION} (release checksum verified)"),
     })
+}
+
+/// Where a host's farm kernel was looked for, for the event that reports it is missing.
+fn kernel_source(dir: Option<&std::path::Path>) -> String {
+    match dir {
+        Some(dir) => format!(" in {}", dir.display()),
+        None => " built or published".into(),
+    }
 }
