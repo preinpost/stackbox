@@ -1,14 +1,14 @@
-import type { Farm } from "../api/client";
+import type { Stackbox } from "../api/client";
 
-type FarmNode = Farm["nodes"][number];
-/** A VM the shell can open: `key` is its multi-node suffix, empty for the farm's default VM. */
-export type ShellTarget = { key: string; node: FarmNode };
+type StackboxNode = Stackbox["nodes"][number];
+/** A VM the shell can open: `key` is its multi-node suffix, empty for the stackbox's default VM. */
+export type ShellTarget = { key: string; node: StackboxNode };
 
 /** Shell-able VMs, control first: the all-in-one VM alone, or each multi-node VM by suffix. */
-export function shellTargets(nodes: FarmNode[]): ShellTarget[] {
+export function shellTargets(nodes: StackboxNode[]): ShellTarget[] {
   const aio = nodes.find((node) => node.role === "all-in-one");
   if (aio) return [{ key: "", node: aio }];
-  const suffix = (node: FarmNode) =>
+  const suffix = (node: StackboxNode) =>
     node.role === "control"
       ? "control"
       : node.role === "compute" && node.index

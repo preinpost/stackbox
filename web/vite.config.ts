@@ -11,7 +11,7 @@ export default defineConfig(({ mode }) => {
       react(),
       tailwindcss(),
       {
-        name: "farm-api",
+        name: "stackbox-api",
         configureServer(server) {
           server.middlewares.use((req, res, next) => {
             if (req.url?.startsWith("/api/")) proxyApi(req, res, env);

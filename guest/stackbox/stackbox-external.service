@@ -1,0 +1,14 @@
+[Unit]
+Description=Stackbox Neutron external network
+Wants=network-online.target
+After=network-online.target stackbox-hostname.service
+Before=docker.service
+ConditionPathExists=/etc/stackbox/external.conf
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/stackbox-external
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

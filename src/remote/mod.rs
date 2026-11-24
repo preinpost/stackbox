@@ -239,17 +239,17 @@ pub struct HostInspection {
     pub msb_version: Option<String>,
     pub msb_compatible: bool,
     pub docker_available: bool,
-    /// This build's golden image is built; otherwise the first farm on the host builds it.
+    /// This build's golden image is built; otherwise the first stackbox on the host builds it.
     pub golden_image_available: bool,
-    /// `FARM_LIBKRUNFW_PATH` the host's agent boots farm VMs from, or the kernel host
-    /// preparation installed under `~/.local/share/farm/libkrunfw`; absent for the stock kernel.
+    /// `STACKBOX_LIBKRUNFW_PATH` the host's agent boots stackbox VMs from, or the kernel host
+    /// preparation installed under `~/.local/share/stackbox/libkrunfw`; absent for the stock kernel.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub custom_kernel: Option<String>,
     /// Why an installed kernel was found but is not used, such as one built for another msb.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub custom_kernel_reason: Option<String>,
-    /// The farm kernel ran the host's verification VM and exposed the `mtty` mediated
-    /// device type, which an OpenStack 2025.1 or newer `mtty` GPU farm binds as a vGPU.
+    /// The stackbox kernel ran the host's verification VM and exposed the `mtty` mediated
+    /// device type, which an OpenStack 2025.1 or newer `mtty` GPU stackbox binds as a vGPU.
     #[serde(default)]
     pub mtty_available: bool,
     /// What the verification VM read from its own kernel about the GPU stack. Our kernel
@@ -258,7 +258,7 @@ pub struct HostInspection {
     /// Absent until a preparation from a coordinator that probes them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gpu_kernel: Option<GpuKernel>,
-    /// PCI devices on this host bound to `vfio-pci`: the only ones a farm may pass through.
+    /// PCI devices on this host bound to `vfio-pci`: the only ones a stackbox may pass through.
     /// Only devices in such a state are listed, so a host's chipset devices stay out of its
     /// inspection and `state.json`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -268,9 +268,9 @@ pub struct HostInspection {
     /// inspection asks the binary's own help. Absent from older inspections, which read false.
     #[serde(default)]
     pub msb_pci_capable: bool,
-    /// Whether this host can take a PCI passthrough farm now: the farm kernel is installed,
+    /// Whether this host can take a PCI passthrough stackbox now: the stackbox kernel is installed,
     /// `msb` supports `--pci`/`--iommu` (`msb_pci_capable`), `/dev/vfio/vfio` exists and at
-    /// least one of `pci_devices` is `vfio_ready`. The guest kernel is the farm's, so the
+    /// least one of `pci_devices` is `vfio_ready`. The guest kernel is the stackbox's, so the
     /// stock kernel answers no.
     #[serde(default)]
     pub pci_passthrough_available: bool,
@@ -278,7 +278,7 @@ pub struct HostInspection {
     pub checked_at: u64,
 }
 
-/// A host PCI device a farm may pass through. Only `vfio-pci`-bound devices are reported.
+/// A host PCI device a stackbox may pass through. Only `vfio-pci`-bound devices are reported.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct HostPciDevice {
     /// Lowercase `DDDD:BB:DD.F`, such as `0000:04:00.3`.
@@ -313,7 +313,7 @@ pub fn group_exclusive(members: &[Option<&str>]) -> bool {
         .all(|driver| driver.is_none() || *driver == Some("vfio-pci"))
 }
 
-/// Whether a host can take a PCI passthrough farm now (`pci_passthrough_available`): the farm
+/// Whether a host can take a PCI passthrough stackbox now (`pci_passthrough_available`): the stackbox
 /// kernel is installed (its guest kernel carries `vfio-pci`), the host's `msb` takes
 /// `--pci`/`--iommu`, `/dev/vfio/vfio` exists, and at least one `vfio-pci` device is
 /// `vfio_ready`. The stock kernel answers no.
@@ -329,12 +329,12 @@ pub fn pci_passthrough_ready(
         && devices.iter().any(|device| device.vfio_ready)
 }
 
-/// Whether `msb run --help` mentions both `--pci` and `--iommu`, the flags a PCI farm's VMs
+/// Whether `msb run --help` mentions both `--pci` and `--iommu`, the flags a PCI stackbox's VMs
 /// need. `inspect.sh` makes the same check on the same text.
 pub fn msb_help_supports_pci(help: &str) -> bool {
     help.contains("--pci") && help.contains("--iommu")
 }
-/// The kernel a verification VM booted: farm's installed kernel, or microsandbox's stock one.
+/// The kernel a verification VM booted: stackbox's installed kernel, or microsandbox's stock one.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum GpuKernelKind {
@@ -344,12 +344,12 @@ pub enum GpuKernelKind {
 }
 /// What the guest kernel of a verification VM reported about the GPU stack. Every flag is
 /// read inside that VM, so it says the kernel came up with the feature, not that the host
-/// has a module for it: farm's kernel is built with VFIO and mdev included.
+/// has a module for it: stackbox's kernel is built with VFIO and mdev included.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct GpuKernel {
     #[serde(default)]
     pub kernel: GpuKernelKind,
-    /// Installed kernel's id: the directory name under `~/.local/share/farm/libkrunfw`.
+    /// Installed kernel's id: the directory name under `~/.local/share/stackbox/libkrunfw`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kernel_id: Option<String>,
     /// Why the stock kernel booted although a kernel is installed, such as one built for
@@ -374,7 +374,7 @@ pub struct GpuKernel {
     pub kernel_release: String,
 }
 impl GpuKernel {
-    /// Name the kernel the probe booted: farm's installed one, or the stock kernel. `reason`
+    /// Name the kernel the probe booted: stackbox's installed one, or the stock kernel. `reason`
     /// explains a stock boot although an installation exists.
     pub fn for_kernel(
         mut self,
@@ -403,7 +403,7 @@ pub struct MdevType {
     pub available_instances: u64,
 }
 impl HostInspection {
-    /// The farm-agent platform this host needs, as in [`AgentArtifactInfo::platform`].
+    /// The stackbox-agent platform this host needs, as in [`AgentArtifactInfo::platform`].
     pub fn platform(&self) -> String {
         format!("{}-{}", self.os, self.arch)
     }
@@ -433,7 +433,7 @@ impl HostInspection {
     }
 }
 
-/// How the coordinator reaches a host's farm-agent.
+/// How the coordinator reaches a host's stackbox-agent.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum HostKind {
@@ -442,7 +442,7 @@ pub enum HostKind {
     Ssh,
     /// The machine the coordinator runs on; its agent is the coordinator's own binary.
     Local,
-    /// A host whose agent dials in to the coordinator (`farm agent connect`).
+    /// A host whose agent dials in to the coordinator (`stackbox agent connect`).
     Agent,
 }
 
@@ -479,7 +479,7 @@ pub struct RemoteHost {
 }
 
 /// What the coordinator's last attempts to reach an SSH host found: its inventory scan, or a
-/// plain connection check for a host that runs no farm.
+/// plain connection check for a host that runs no stackbox.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 pub struct HostReachability {
     /// Whether the host is considered reachable. One failed attempt is not enough to say it is
@@ -553,7 +553,7 @@ pub enum HostJobKind {
     Check,
     Prepare,
     InstallAgent,
-    /// Delete this coordinator's farms and leftover VMs on the host, then unregister it.
+    /// Delete this coordinator's stackboxes and leftover VMs on the host, then unregister it.
     Purge,
 }
 
@@ -652,7 +652,7 @@ mod msb_version_tests {
 
     #[test]
     fn an_inspection_from_before_the_custom_kernel_still_reads() {
-        // A state file written before farm knew about custom kernels has neither field.
+        // A state file written before stackbox knew about custom kernels has neither field.
         let older = serde_json::json!({
             "os": "linux",
             "arch": "aarch64",

@@ -6,9 +6,9 @@ use std::fmt;
 use anyhow::{Context, Result, bail};
 use microsandbox::Sandbox;
 
-use crate::farm;
 use crate::model::Exposure;
 use crate::shell::{run, stream};
+use crate::stackbox;
 pub use config::OPENSTACK_RELEASE;
 /// Python the golden image ships, which the releases that still have a branch run on.
 pub const GUEST_PYTHON: &str = "3.12";
@@ -37,15 +37,15 @@ const VENV: &str = "/opt/kolla";
 const OSC_VENV: &str = "/opt/osc";
 const CONFIG_DIR: &str = "/etc/kolla";
 const INVENTORY: &str = "/etc/kolla/inventory";
-const LOG_DIR: &str = "/var/log/farm";
-/// Neutron's external network lives behind the all-in-one host's `farm-extgw` veth.
+const LOG_DIR: &str = "/var/log/stackbox";
+/// Neutron's external network lives behind the all-in-one host's `stackbox-extgw` veth.
 const EXTERNAL_NETWORK: &str = "172.24.4.0/24";
 const EXTERNAL_GATEWAY: &str = "172.24.4.1";
 /// Replaces the vswitchd image's start hook, which loads the openvswitch kernel module
 /// under `set -e`. The userspace datapath needs no module, and the guest kernel has none.
-const OVS_EXTEND_START: &str = "/etc/farm/ovs-extend-start";
+const OVS_EXTEND_START: &str = "/etc/stackbox/ovs-extend-start";
 const OVS_EXTEND_START_SCRIPT: &str = r#"#!/bin/bash
-# Written by farm: kolla's version also runs `modprobe openvswitch`.
+# Written by stackbox: kolla's version also runs `modprobe openvswitch`.
 if [[ ! -r "/var/log/kolla/openvswitch/ovs-vswitchd.log" ]]; then
     touch /var/log/kolla/openvswitch/ovs-vswitchd.log
     chown openvswitch:openvswitch /var/log/kolla/openvswitch/ovs-vswitchd.log
@@ -115,9 +115,9 @@ impl fmt::Display for Phase {
     }
 }
 
-pub async fn deploy(farm_id: &str, from: Phase, components: &[String]) -> Result<()> {
+pub async fn deploy(stackbox_id: &str, from: Phase, components: &[String]) -> Result<()> {
     deploy_with(
-        farm_id,
+        stackbox_id,
         from,
         None,
         components,
@@ -130,11 +130,11 @@ pub async fn deploy(farm_id: &str, from: Phase, components: &[String]) -> Result
     .await
 }
 
-/// `components` is the farm plan's resolved service list, and `reference` the kolla-ansible
+/// `components` is the stackbox plan's resolved service list, and `reference` the kolla-ansible
 /// ref the coordinator resolved for `release` (see [`releases::info_with`]).
 #[allow(clippy::too_many_arguments)]
 pub async fn deploy_with(
-    farm_id: &str,
+    stackbox_id: &str,
     from: Phase,
     exposure: Option<Exposure>,
     components: &[String],
@@ -145,7 +145,7 @@ pub async fn deploy_with(
     sink: EventSink,
 ) -> Result<()> {
     deploy_on(
-        farm_id,
+        stackbox_id,
         from,
         exposure,
         components,
@@ -160,12 +160,12 @@ pub async fn deploy_with(
     .await
 }
 
-/// Deploy a farm that spans hosts from its control VM's host. The compute VMs numbered in
+/// Deploy a stackbox that spans hosts from its control VM's host. The compute VMs numbered in
 /// `remote` run on other hosts, which [`prepare_share`] readied; Kolla reaches every compute
 /// with `ssh_private_key`.
 #[allow(clippy::too_many_arguments)]
 pub async fn deploy_spanning(
-    farm_id: &str,
+    stackbox_id: &str,
     from: Phase,
     exposure: Option<Exposure>,
     components: &[String],
@@ -178,7 +178,7 @@ pub async fn deploy_spanning(
     sink: EventSink,
 ) -> Result<()> {
     deploy_on(
-        farm_id,
+        stackbox_id,
         from,
         exposure,
         components,
@@ -195,7 +195,7 @@ pub async fn deploy_spanning(
 
 #[allow(clippy::too_many_arguments)]
 async fn deploy_on(
-    farm_id: &str,
+    stackbox_id: &str,
     from: Phase,
     exposure: Option<Exposure>,
     components: &[String],
@@ -207,33 +207,33 @@ async fn deploy_on(
     ssh_private_key: Option<&str>,
     sink: EventSink,
 ) -> Result<()> {
-    let mut nodes = farm::get_farm(farm_id).await?;
+    let mut nodes = stackbox::get_stackbox(stackbox_id).await?;
     // Computes on other hosts take their place in the layout; they are reached over SSH only.
-    nodes.extend(remote.iter().map(|index| farm::FarmNode {
+    nodes.extend(remote.iter().map(|index| stackbox::StackboxNode {
         name: String::new(),
-        role: Some(farm::Role::Compute),
+        role: Some(stackbox::Role::Compute),
         index: Some(*index),
         status: "running".into(),
         memory_mib: 0,
         ip: None,
     }));
     let mut topology = Topology::from_nodes(&nodes)?;
-    let deployer = farm::connect(&topology.name).await?;
+    let deployer = stackbox::connect(&topology.name).await?;
     let mut computes = Vec::new();
     let result = async {
         for compute in &topology.computes {
             let sandbox = if compute.name.is_empty() {
                 None
             } else {
-                Some(farm::connect(&compute.name).await?)
+                Some(stackbox::connect(&compute.name).await?)
             };
             computes.push((compute.clone(), sandbox));
         }
         if let Some(key) = ssh_private_key {
             install_ssh_key(&deployer, key).await?;
         }
-        farm::wait_until_booted(&deployer).await?;
-        // Farms created with a fixed guest identity bind every service to it; older farms use eth0.
+        stackbox::wait_until_booted(&deployer).await?;
+        // Stackboxes created with a fixed guest identity bind every service to it; older stackboxes use eth0.
         let identity = run(&deployer, &identity_command()).await?;
         let (interface, address) = identity
             .trim()
@@ -242,7 +242,7 @@ async fn deploy_on(
         topology.set_address(address)?;
         topology.interface = interface.to_owned();
         deploy_phases(
-            farm_id,
+            stackbox_id,
             from,
             &deployer,
             &computes,
@@ -258,31 +258,31 @@ async fn deploy_on(
         .await
     }
     .await;
-    farm::detach(&deployer).await;
+    stackbox::detach(&deployer).await;
     for (_, sandbox) in computes.into_iter().filter_map(|(c, s)| Some((c, s?))) {
-        farm::detach(&sandbox).await;
+        stackbox::detach(&sandbox).await;
     }
     result
 }
 
-/// Reads the guest's service interface and address on one line: the fixed identity a farm
-/// created with one binds to, or `eth0` on farms made before it.
+/// Reads the guest's service interface and address on one line: the fixed identity a stackbox
+/// created with one binds to, or `eth0` on stackboxes made before it.
 fn identity_command() -> String {
     format!(
-        "if [ -f {conf} ]; then . {conf}; echo \"{dummy} $FARM_ADDRESS\"; else echo \"eth0 $(ip -4 -o addr show dev eth0 | awk '!seen++ {{split($4,a,\"/\"); print a[1]}}')\"; fi",
-        conf = farm::IDENTITY_CONF,
-        dummy = farm::GUEST_INTERFACE,
+        "if [ -f {conf} ]; then . {conf}; echo \"{dummy} $STACKBOX_ADDRESS\"; else echo \"eth0 $(ip -4 -o addr show dev eth0 | awk '!seen++ {{split($4,a,\"/\"); print a[1]}}')\"; fi",
+        conf = stackbox::IDENTITY_CONF,
+        dummy = stackbox::GUEST_INTERFACE,
     )
 }
 
 /// Give the control VM the key Kolla reaches the computes with.
-/// Add one compute VM to a deployed farm with Kolla. `nodes` are the farm's VMs on this
+/// Add one compute VM to a deployed stackbox with Kolla. `nodes` are the stackbox's VMs on this
 /// host; computes on other hosts were prepared there. Everything is limited to the new
 /// compute, so the control plane keeps running. A compute booted from a compute template
 /// (`from_template`) already has Kolla's containers: its identity is wiped and Kolla only
 /// reconfigures it, skipping bootstrap-servers and the image pull.
 pub async fn deploy_compute(
-    farm_id: &str,
+    stackbox_id: &str,
     plan: &crate::model::Plan,
     index: u8,
     nodes: &[String],
@@ -293,20 +293,20 @@ pub async fn deploy_compute(
     let control_spec = plan
         .nodes
         .iter()
-        .find(|spec| spec.role == farm::Role::Control)
-        .context("a compute can only join a farm with a control VM")?;
+        .find(|spec| spec.role == stackbox::Role::Control)
+        .context("a compute can only join a stackbox with a control VM")?;
     let new_suffix = format!("compute-{index}");
     let new_spec = plan
         .nodes
         .iter()
-        .find(|spec| spec.role == farm::Role::Compute && spec.index == Some(index))
-        .with_context(|| format!("farm plan has no {new_suffix}"))?;
+        .find(|spec| spec.role == stackbox::Role::Compute && spec.index == Some(index))
+        .with_context(|| format!("stackbox plan has no {new_suffix}"))?;
     let release = releases::info(plan.release.as_deref().unwrap_or(OPENSTACK_RELEASE));
-    let control_name = farm::node_name(farm_id, farm::Role::Control, None);
-    let control = farm::connect(&control_name).await?;
+    let control_name = stackbox::node_name(stackbox_id, stackbox::Role::Control, None);
+    let control = stackbox::connect(&control_name).await?;
     let mut sandboxes: Vec<Sandbox> = Vec::new();
     let result = async {
-        farm::wait_until_booted(&control).await?;
+        stackbox::wait_until_booted(&control).await?;
         let identity = run(&control, &identity_command()).await?;
         let (interface, address) = identity
             .trim()
@@ -319,9 +319,9 @@ pub async fn deploy_compute(
             computes: plan
                 .nodes
                 .iter()
-                .filter(|spec| spec.role == farm::Role::Compute)
+                .filter(|spec| spec.role == stackbox::Role::Compute)
                 .map(|spec| Compute {
-                    name: farm::node_name(farm_id, spec.role, spec.index),
+                    name: stackbox::node_name(stackbox_id, spec.role, spec.index),
                     hostname: spec.hostname(),
                     address: spec.address(),
                 })
@@ -335,23 +335,23 @@ pub async fn deploy_compute(
             &sink,
             format!("control VM에 {new_suffix}의 hostname·주소 반영"),
         )?;
-        farm::update_identity(&control, control_spec, &plan.nodes).await?;
+        stackbox::update_identity(&control, control_spec, &plan.nodes).await?;
         let neutron = components.iter().any(|c| c == "neutron");
         let mut computes: Vec<(Compute, Option<Sandbox>)> = Vec::new();
         for compute in &topology.computes {
             let suffix = compute
                 .hostname
-                .strip_prefix("farm-")
+                .strip_prefix("stackbox-")
                 .context("compute hostname has no role prefix")?;
             if !nodes.iter().any(|node| node == suffix) {
                 computes.push((compute.clone(), None));
                 continue;
             }
-            let sandbox = farm::connect(&compute.name).await?;
+            let sandbox = stackbox::connect(&compute.name).await?;
             if suffix == new_suffix && from_template {
                 step(&sink, format!("{new_suffix}의 템플릿 identity 초기화"))?;
-                farm::wait_until_booted(&sandbox).await?;
-                farm::update_identity(&sandbox, new_spec, &plan.nodes).await?;
+                stackbox::wait_until_booted(&sandbox).await?;
+                stackbox::update_identity(&sandbox, new_spec, &plan.nodes).await?;
                 run(&sandbox, &wipe_template_script(&new_spec.hostname())).await?;
             } else if suffix == new_suffix {
                 step(&sink, format!("{new_suffix} prepare"))?;
@@ -364,7 +364,7 @@ pub async fn deploy_compute(
                 sandboxes.push(sandbox.clone());
             }
         }
-        // A GPU farm's new compute must boot the same custom kernel as the others.
+        // A GPU stackbox's new compute must boot the same custom kernel as the others.
         if plan
             .gpu
             .as_ref()
@@ -436,9 +436,9 @@ pub async fn deploy_compute(
             )
             .await?;
         }
-        // Kolla restarts the control VM's OVS containers when the farm gains a compute, and the
+        // Kolla restarts the control VM's OVS containers when the stackbox gains a compute, and the
         // agent container that starts with them can find the database not yet listening and die.
-        // A compute would then join a farm whose network node has no agent, so give it one.
+        // A compute would then join a stackbox whose network node has no agent, so give it one.
         step(&sink, "control VM의 OVS agent 확인")?;
         run(&control, RESTART_OVS_AGENT).await?;
         sink(DeployEvent::Phase(Phase::Verify))?;
@@ -461,8 +461,8 @@ pub async fn deploy_compute(
             )
             .await?;
         }
-        // A GPU farm's providers are farm's own, so a compute that joins later gets them
-        // here; the farm's deploy wrote the earlier computes'.
+        // A GPU stackbox's providers are stackbox's own, so a compute that joins later gets them
+        // here; the stackbox's deploy wrote the earlier computes'.
         let advertise = gpu_advertise_script(plan.gpu.as_ref(), std::slice::from_ref(&host));
         if !advertise.is_empty() {
             step(&sink, format!("{host}의 GPU resource provider 광고"))?;
@@ -477,35 +477,39 @@ pub async fn deploy_compute(
         Ok::<_, anyhow::Error>(())
     }
     .await;
-    farm::detach(&control).await;
+    stackbox::detach(&control).await;
     for sandbox in sandboxes {
-        farm::detach(&sandbox).await;
+        stackbox::detach(&sandbox).await;
     }
     result
 }
 
-/// Make a farm restored from a control template forget the computes of the farm it was
+/// Make a stackbox restored from a control template forget the computes of the stackbox it was
 /// frozen from, so its first expansion is compute-1 again. Only this copy changes; the
-/// source farm keeps its computes. Kolla's inventory lists no compute, the control VM forgets
+/// source stackbox keeps its computes. Kolla's inventory lists no compute, the control VM forgets
 /// their SSH host keys, and OpenStack drops their registrations: each nova-compute service
 /// (Nova removes its compute node, placement resource provider and cell host mapping with
 /// it), any of those left behind, and their Neutron agents. Waits for the APIs first, and
 /// is safe to run again.
-pub async fn forget_computes(farm_id: &str, components: &[String], sink: EventSink) -> Result<()> {
-    let name = farm::node_name(farm_id, farm::Role::Control, None);
-    let control = farm::connect(&name).await?;
+pub async fn forget_computes(
+    stackbox_id: &str,
+    components: &[String],
+    sink: EventSink,
+) -> Result<()> {
+    let name = stackbox::node_name(stackbox_id, stackbox::Role::Control, None);
+    let control = stackbox::connect(&name).await?;
     let result = async {
-        farm::wait_until_booted(&control).await?;
+        stackbox::wait_until_booted(&control).await?;
         step(&sink, "Kolla multinode inventory에서 원본 compute 제거")?;
         let topology = Topology {
             name: name.clone(),
             ip: None,
-            interface: farm::GUEST_INTERFACE.into(),
+            interface: stackbox::GUEST_INTERFACE.into(),
             computes: Vec::new(),
             multinode: true,
         };
         write_inventory(&control, &topology).await?;
-        step(&sink, "원본 farm의 compute 등록 정리")?;
+        step(&sink, "원본 stackbox의 compute 등록 정리")?;
         stream(
             &control,
             &forget_computes_script(components),
@@ -515,21 +519,21 @@ pub async fn forget_computes(farm_id: &str, components: &[String], sink: EventSi
         .await
     }
     .await;
-    farm::detach(&control).await;
+    stackbox::detach(&control).await;
     result
 }
 
-/// Compute VMs are `farm-compute-<n>` to OpenStack; the control VM is never matched.
+/// Compute VMs are `stackbox-compute-<n>` to OpenStack; the control VM is never matched.
 fn forget_computes_script(components: &[String]) -> String {
     let has = |id: &str| components.iter().any(|c| c == id);
-    let known_hosts: String = (1..=farm::MAX_COMPUTES)
+    let known_hosts: String = (1..=stackbox::MAX_COMPUTES)
         .map(|index| {
             format!(
                 "ssh-keygen -R {} >/dev/null 2>&1 || true
 ssh-keygen -R {} >/dev/null 2>&1 || true
 ",
-                farm::hostname(farm::Role::Compute, Some(index)),
-                farm::address(farm::Role::Compute, Some(index)),
+                stackbox::hostname(stackbox::Role::Compute, Some(index)),
+                stackbox::address(stackbox::Role::Compute, Some(index)),
             )
         })
         .collect();
@@ -550,7 +554,7 @@ done
             r#"for _ in $(seq 60); do $os compute service list -f value -c ID >/dev/null 2>&1 && break; sleep 5; done
 # Nova deletes a service's compute nodes, their resource providers and its host mapping with it.
 $os compute service list --service nova-compute -f value -c ID -c Host | while read -r id host; do
-  case "$host" in farm-compute-*) ;; *) continue ;; esac
+  case "$host" in stackbox-compute-*) ;; *) continue ;; esac
   echo "nova-compute $host: deleting service $id"
   $os compute service delete "$id"
 done
@@ -558,14 +562,14 @@ done
 {OSC_VENV}/bin/python - <<'PY'
 import openstack
 conn = openstack.connect()
-# A GPU farm's child providers are named after their compute's provider, so deleting in
+# A GPU stackbox's child providers are named after their compute's provider, so deleting in
 # reverse name order takes every child before the provider it hangs from: Placement refuses
 # to delete a provider that still has children, and refuses one that still has allocations.
 for rp in sorted(
     (
         provider
         for provider in conn.placement.resource_providers()
-        if provider.name.startswith("farm-compute-")
+        if provider.name.startswith("stackbox-compute-")
     ),
     key=lambda provider: provider.name,
     reverse=True,
@@ -573,7 +577,7 @@ for rp in sorted(
     print(f"placement: deleting resource provider {{rp.name}} {{rp.id}}", flush=True)
     conn.placement.delete_resource_provider(rp)
 PY
-docker exec nova_api nova-manage cell_v2 list_hosts | awk -F'|' 'NF >= 4 {{ gsub(/ /, "", $3); gsub(/ /, "", $4); if ($4 ~ /^farm-compute-/) print $3, $4 }}' | while read -r cell host; do
+docker exec nova_api nova-manage cell_v2 list_hosts | awk -F'|' 'NF >= 4 {{ gsub(/ /, "", $3); gsub(/ /, "", $4); if ($4 ~ /^stackbox-compute-/) print $3, $4 }}' | while read -r cell host; do
   echo "cell host mapping $host: deleting"
   docker exec nova_api nova-manage cell_v2 delete_host --cell_uuid "$cell" --host "$host"
 done
@@ -583,14 +587,14 @@ done
     if has("neutron") {
         script.push_str(
             r#"$os network agent list -f value -c ID -c Host | while read -r id host; do
-  case "$host" in farm-compute-*) ;; *) continue ;; esac
+  case "$host" in stackbox-compute-*) ;; *) continue ;; esac
   echo "neutron agent on $host: deleting $id"
   $os network agent delete "$id"
 done
 "#,
         );
     }
-    script.push_str("echo \"the source farm's computes are forgotten\"\n");
+    script.push_str("echo \"the source stackbox's computes are forgotten\"\n");
     script
 }
 
@@ -605,22 +609,22 @@ async fn write_inventory(deployer: &Sandbox, topology: &Topology) -> Result<()> 
         .await?;
     let inventory = config::multinode_inventory(
         &template,
-        &farm::hostname(farm::Role::Control, None),
+        &stackbox::hostname(stackbox::Role::Control, None),
         &topology.computes,
     )?;
     let fs = deployer.fs();
     fs.write(INVENTORY, inventory).await?;
     run(deployer, "mkdir -p /etc/kolla/callback_plugins").await?;
     fs.write(
-        "/etc/kolla/callback_plugins/farm.py",
-        include_str!("farm_callback.py"),
+        "/etc/kolla/callback_plugins/stackbox.py",
+        include_str!("stackbox_callback.py"),
     )
     .await?;
     let forks = 1 + topology.computes.len();
     fs.write(
         "/root/.ansible.cfg",
         &format!(
-            "[defaults]\nhost_key_checking = False\nforks = {forks}\nstdout_callback = farm\ncallback_plugins = /etc/kolla/callback_plugins\n\n[ssh_connection]\npipelining = True\n"
+            "[defaults]\nhost_key_checking = False\nforks = {forks}\nstdout_callback = stackbox\ncallback_plugins = /etc/kolla/callback_plugins\n\n[ssh_connection]\npipelining = True\n"
         ),
     )
     .await?;
@@ -635,7 +639,7 @@ async fn write_inventory(deployer: &Sandbox, topology: &Topology) -> Result<()> 
 fn wipe_template_script(hostname: &str) -> String {
     format!(
         r#"set -euo pipefail
-marker=/etc/farm/template-wiped
+marker=/etc/stackbox/template-wiped
 if [ ! -e $marker ]; then
   systemctl stop docker.socket docker.service 2>/dev/null || true
   volumes=/var/lib/docker/volumes
@@ -671,7 +675,7 @@ fi"#
 
 /// Wait for OVS on the control VM to answer, then restart its OVS agent if it is not healthy.
 /// Kolla's agent container exits when it starts while the database is still coming up, and
-/// nothing restarts it afterwards; the farm would keep a network node without an agent.
+/// nothing restarts it afterwards; the stackbox would keep a network node without an agent.
 const RESTART_OVS_AGENT: &str = r#"for _ in $(seq 40); do
   docker ps --format '{{.Names}} {{.Status}}' | grep '^openvswitch_db Up .* (healthy)' >/dev/null && break
   sleep 2
@@ -682,7 +686,7 @@ fi"#;
 
 /// The environment a bash `kolla-ansible` launcher needs. Up to 2024.1 it finds the playbooks
 /// in `$VIRTUAL_ENV/share/kolla-ansible`, or, with no `VIRTUAL_ENV`, in what it takes for a
-/// source checkout next to its own `bin/`; the farm's phase scripts never activate the venv,
+/// source checkout next to its own `bin/`; the stackbox's phase scripts never activate the venv,
 /// so those releases only work when the variable names it. 2024.2 replaced the launcher with a
 /// Python console script that finds its own package.
 fn venv_env(release: &releases::ReleaseInfo) -> &'static str {
@@ -769,10 +773,10 @@ async fn install_ssh_key(deployer: &Sandbox, key: &str) -> Result<()> {
     Ok(())
 }
 
-/// Ready this host's compute VMs of a farm that spans hosts, as the prepare phase readies
+/// Ready this host's compute VMs of a stackbox that spans hosts, as the prepare phase readies
 /// computes, and let `ssh_public_key` in as root.
 pub async fn prepare_share(
-    farm_id: &str,
+    stackbox_id: &str,
     components: &[String],
     release: &str,
     ssh_public_key: &str,
@@ -780,17 +784,17 @@ pub async fn prepare_share(
     let neutron = components.iter().any(|c| c == "neutron");
     let release = releases::info(release);
     let sink: EventSink = Arc::new(|_| Ok(()));
-    for node in farm::get_farm(farm_id).await? {
-        if node.role != Some(farm::Role::Compute) {
+    for node in stackbox::get_stackbox(stackbox_id).await? {
+        if node.role != Some(stackbox::Role::Compute) {
             continue;
         }
-        let sandbox = farm::connect(&node.name).await?;
+        let sandbox = stackbox::connect(&node.name).await?;
         let result = async {
             prepare_host(&sandbox, neutron, &release, &sink).await?;
             authorize_key(&sandbox, ssh_public_key).await
         }
         .await;
-        farm::detach(&sandbox).await;
+        stackbox::detach(&sandbox).await;
         result.with_context(|| format!("prepare {}", node.name))?;
     }
     Ok(())
@@ -803,7 +807,7 @@ fn step(sink: &EventSink, text: impl Into<String>) -> Result<()> {
 
 #[allow(clippy::too_many_arguments)]
 async fn deploy_phases(
-    farm_id: &str,
+    stackbox_id: &str,
     from: Phase,
     deployer: &Sandbox,
     computes: &[(Compute, Option<Sandbox>)],
@@ -821,7 +825,7 @@ async fn deploy_phases(
     let info = releases::info_with(release, reference);
     for phase in Phase::ALL.into_iter().filter(|p| *p >= from) {
         sink(DeployEvent::Phase(phase))?;
-        eprintln!("\n==> [{farm_id}] {phase}");
+        eprintln!("\n==> [{stackbox_id}] {phase}");
         let log = format!("{LOG_DIR}/{phase}.log");
         match phase {
             Phase::Prepare => prepare(deployer, computes, components, &info, sink).await,
@@ -886,7 +890,7 @@ async fn deploy_phases(
                 if !pci_devices.is_empty() {
                     step(
                         sink,
-                        "PCI passthrough 확인 (compute-1 장치와 farm.pci 인스턴스)",
+                        "PCI passthrough 확인 (compute-1 장치와 stackbox.pci 인스턴스)",
                     )?;
                     let guest = probe_guest_pci(deployer, computes, pci_devices.len()).await?;
                     script.push_str(&pci_verify_script(PCI_COMPUTE, &guest));
@@ -894,7 +898,7 @@ async fn deploy_phases(
                 stream(deployer, &script, &log, sink).await
             }
         }
-        .with_context(|| resume_hint(farm_id, phase))?;
+        .with_context(|| resume_hint(stackbox_id, phase))?;
         sink(DeployEvent::Output(format!("phase {phase} completed\n")))?;
     }
     let url = if let Some(exposure) = exposure {
@@ -903,14 +907,14 @@ async fn deploy_phases(
         format!("http://{}:5000/v3", topology.vip()?)
     };
     eprintln!(
-        "\n==> [{farm_id}] ready: {url} (credentials: {CONFIG_DIR}/admin-openrc.sh on {})",
+        "\n==> [{stackbox_id}] ready: {url} (credentials: {CONFIG_DIR}/admin-openrc.sh on {})",
         topology.name
     );
     Ok(())
 }
 
 /// Ready every VM for Kolla. The deployer (all-in-one or control VM) also hosts Neutron's
-/// external network; a multi-node farm's computes only run OVS, Nova and Docker.
+/// external network; a multi-node stackbox's computes only run OVS, Nova and Docker.
 async fn prepare(
     deployer: &Sandbox,
     computes: &[(Compute, Option<Sandbox>)],
@@ -930,7 +934,7 @@ async fn prepare(
         deployer
             .fs()
             .write(
-                "/etc/farm/external.conf",
+                "/etc/stackbox/external.conf",
                 format!(
                     "EXTERNAL_NETWORK={EXTERNAL_NETWORK}\nEXTERNAL_GATEWAY={EXTERNAL_GATEWAY}/24\n"
                 ),
@@ -939,13 +943,13 @@ async fn prepare(
         deployer
             .fs()
             .write(
-                "/etc/farm/neutron-sitecustomize.py",
+                "/etc/stackbox/neutron-sitecustomize.py",
                 include_str!("neutron_sitecustomize.py"),
             )
             .await?;
-        // Golden images now install nftables; farms made from the former Docker-built
+        // Golden images now install nftables; stackboxes made from the former Docker-built
         // image may predate it.
-        run(deployer, "command -v nft >/dev/null || dnf install -y -q nftables; systemctl restart farm-external.service").await?;
+        run(deployer, "command -v nft >/dev/null || dnf install -y -q nftables; systemctl restart stackbox-external.service").await?;
     }
     if !computes.is_empty() {
         step(sink, "control VM의 시스템 Python에 docker 모듈 설치")?;
@@ -968,14 +972,14 @@ async fn prepare_host(
     sink: &EventSink,
 ) -> Result<()> {
     step(sink, "게스트 부팅과 systemd 대기")?;
-    farm::wait_until_booted(sandbox).await?;
-    step(sink, "farm-identity·farm-hostname 유닛 적용")?;
-    // Farms made by an older build get the current units too. msb resets /etc/hosts on
+    stackbox::wait_until_booted(sandbox).await?;
+    step(sink, "stackbox-identity·stackbox-hostname 유닛 적용")?;
+    // Stackboxes made by an older build get the current units too. msb resets /etc/hosts on
     // reboot, so restore the hostname mapping before Docker creates host-network containers.
-    farm::install_guest_files(sandbox).await?;
+    stackbox::install_guest_files(sandbox).await?;
     run(
         sandbox,
-        "systemctl restart farm-identity.service farm-hostname.service",
+        "systemctl restart stackbox-identity.service stackbox-hostname.service",
     )
     .await?;
     // Kolla's `rpm_key` task for the Docker repository runs `gpg2`, which only `gnupg2`
@@ -1009,15 +1013,15 @@ async fn prepare_host(
     step(sink, "Docker 마운트 전파와 /dev/kvm 권한 준비")?;
     // Kolla toolbox bind-mounts /run with shared propagation, and nova_libvirt runs QEMU
     // as uid/gid 42427 without systemd-udevd in the guest. Apply both now and on every Docker
-    // start, which also waits for a multi-node farm's links.
+    // start, which also waits for a multi-node stackbox's links.
     run(
         sandbox,
         r#"set -euo pipefail
 mkdir -p /etc/udev/rules.d /etc/systemd/system/docker.service.d
-cat > /etc/systemd/system/docker.service.d/farm-mounts.conf <<'EOF'
+cat > /etc/systemd/system/docker.service.d/stackbox-mounts.conf <<'EOF'
 [Unit]
-Requires=farm-hostname.service
-After=farm-link@farm0.service farm-link@farm1.service farm-identity.service farm-hostname.service farm-external.service
+Requires=stackbox-hostname.service
+After=stackbox-link@stackbox0.service stackbox-link@stackbox1.service stackbox-identity.service stackbox-hostname.service stackbox-external.service
 
 [Service]
 ExecStartPre=/usr/bin/mount --make-shared /run
@@ -1026,7 +1030,7 @@ EOF
 mount --make-shared /run
 if [ -c /dev/kvm ]; then chown root:42427 /dev/kvm && chmod 0666 /dev/kvm; fi
 # A compute with passed-through devices: nova_libvirt opens the VFIO container and the group
-# files as uid 42427, a group only, so other users cannot open them. farm-vfio.service sets the
+# files as uid 42427, a group only, so other users cannot open them. stackbox-vfio.service sets the
 # same owner and modes at each boot; this covers the first.
 if [ -e /dev/vfio/vfio ]; then chown root:42427 /dev/vfio/vfio && chmod 0660 /dev/vfio/vfio; fi
 for node in /dev/vfio/[0-9]*; do [ -e "$node" ] || continue; chown root:42427 "$node" && chmod 0660 "$node"; done
@@ -1060,9 +1064,9 @@ fn python_command(release: &releases::ReleaseInfo) -> String {
 }
 
 /// uv's own venv, so the system interpreter keeps no packages (Rocky enforces PEP 668).
-const UV_VENV: &str = "/opt/farm-uv";
+const UV_VENV: &str = "/opt/stackbox-uv";
 /// Where uv installs older minors next to the guest's own python3.
-const PYTHON_DIR: &str = "/opt/farm-python";
+const PYTHON_DIR: &str = "/opt/stackbox-python";
 
 /// Shell that resolves `$python` for the two venvs. A release whose tooling runs on the
 /// guest's own `python3` uses it, which is always there. The end-of-life series need an older
@@ -1082,7 +1086,7 @@ fi
     if !needs_own_python(release) {
         setup.push_str(
             r#"if ! command -v "$python" >/dev/null; then
-  echo "this VM has no python3; install it in the golden image and start the farm again" >&2
+  echo "this VM has no python3; install it in the golden image and start the stackbox again" >&2
   exit 1
 fi
 "#,
@@ -1108,7 +1112,7 @@ if ! command -v "$python" >/dev/null; then
 fi
 if ! command -v "$python" >/dev/null; then
   echo "this release needs Python {minor}, which uv could not install" >&2
-  echo "check that the VM reaches pypi.org (uv itself) and github.com (the interpreter), then start the farm again" >&2
+  echo "check that the VM reaches pypi.org (uv itself) and github.com (the interpreter), then start the stackbox again" >&2
   exit 1
 fi
 # The stamp holds the interpreter's absolute path whatever PATH a retry starts from.
@@ -1295,7 +1299,7 @@ struct LegacyPatch {
 ///
 /// `kolla_container_engine` first appears in the zed tag (15.6.0), where it is `docker`; the
 /// older tags run docker only, so the default covers them.
-const LEGACY_BRIDGE_TASK: &str = r#"- name: Create the farm's bridges with the userspace datapath
+const LEGACY_BRIDGE_TASK: &str = r#"- name: Create the stackbox's bridges with the userspace datapath
   become: true
   command: "{{ (kolla_container_engine | default('docker')) }} exec openvswitch_db ovs-vsctl --may-exist add-br {{ item }} -- set Bridge {{ item }} datapath_type={{ ovs_datapath }}"
   loop: "{{ neutron_bridge_name.split(',') }}"
@@ -1309,7 +1313,7 @@ const LEGACY_BRIDGE_TASK: &str = r#"- name: Create the farm's bridges with the u
 /// do not have yet.
 const LEGACY_HW_OFFLOAD_ITEM: &str = "    - { col: \"other_config\", name: \"hw-offload\", value: true, state: \"{{ 'present' if openvswitch_hw_offload | bool else 'absent' }}\" }\n";
 /// The same userspace-TSO item the maintained branch's loop carries. Only compute-only VMs:
-/// on the network node it breaks the router and DHCP ports and the farm link.
+/// on the network node it breaks the router and DHCP ports and the stackbox link.
 const LEGACY_TSO_LOOP_ITEM: &str = "    - { col: \"other_config\", name: \"userspace-tso-enable\", value: true, state: \"{{ 'present' if ovs_datapath == 'netdev' and inventory_hostname in groups['compute'] and inventory_hostname not in groups['network'] else 'absent' }}\" }\n";
 
 /// The ussuri to xena "Set system-id" task, which the tags after it replaced with a
@@ -1360,19 +1364,19 @@ fn legacy_patches(release: &releases::ReleaseInfo) -> Vec<LegacyPatch> {
             aim: "deltarpm",
             file: "roles/baremetal/tasks/install.yml",
             from: "- name: Install deltarpm packages\n  package:\n    name: drpm\n    state: present\n    update_cache: yes\n  become: True\n  when: ansible_facts.os_family == 'RedHat'\n",
-            to: "# farm: dnf5 dropped delta RPMs, and Rocky 10 has no drpm package.\n".into(),
+            to: "# stackbox: dnf5 dropped delta RPMs, and Rocky 10 has no drpm package.\n".into(),
         });
     }
     patches.push(LegacyPatch {
-        // A control VM alone has no compute host yet; the farm's globals say so, and the first
+        // A control VM alone has no compute host yet; the stackbox's globals say so, and the first
         // compute joins later without redeploying the control plane.
         aim: "no-compute precheck",
         file: "roles/nova-cell/tasks/precheck.yml",
         from: "  when:\n    - groups[nova_cell_compute_group] | length < 1\n    - not nova_compute_ironic.enabled | bool\n",
-        to: "  when:\n    - groups[nova_cell_compute_group] | length < 1\n    - not nova_compute_ironic.enabled | bool\n    - not (farm_no_computes | default(false))\n".into(),
+        to: "  when:\n    - groups[nova_cell_compute_group] | length < 1\n    - not nova_compute_ironic.enabled | bool\n    - not (stackbox_no_computes | default(false))\n".into(),
     });
     patches.push(LegacyPatch {
-        // The same kernel has no openvswitch module; farms run OVS with the userspace datapath.
+        // The same kernel has no openvswitch module; stackboxes run OVS with the userspace datapath.
         aim: "netdev datapath",
         file: "roles/openvswitch/tasks/config-host.yml",
         from: "- name: Load and persist openvswitch module\n",
@@ -1426,7 +1430,7 @@ for patch in patches:
     found = text.count(patch["from"])
     if found != 1:
         raise RuntimeError(
-            "unexpected Kolla task for the %s patch in %s (%d matches); review the farm patch for this release"
+            "unexpected Kolla task for the %s patch in %s (%d matches); review the stackbox patch for this release"
             % (patch["aim"], patch["file"], found)
         )
     path.write_text(text.replace(patch["from"], patch["to"], 1))
@@ -1457,8 +1461,8 @@ if patched not in text:
 # Virtio instances leave TCP checksums to the host. The userspace conntrack behind Neutron's OVS firewall
 # checks them as they arrive and drops the replies as invalid, so only ICMP gets through. With
 # userspace TSO, OVS reads the tap's offload flags instead. vswitchd applies it at start, before instances.
-# Only on compute-only VMs: on the network node it breaks the router and DHCP ports and the farm link,
-# so all-in-one farms still drop instance TCP.
+# Only on compute-only VMs: on the network node it breaks the router and DHCP ports and the stackbox link,
+# so all-in-one stackboxes still drop instance TCP.
 text = path.read_text()
 marker = "    - { col: \"other_config\", name: \"hw-offload\", value: true, state: \"{{ 'present' if openvswitch_hw_offload | bool else 'absent' }}\" }\n"
 patched = marker + "    - { col: \"other_config\", name: \"userspace-tso-enable\", value: true, state: \"{{ 'present' if ovs_datapath == 'netdev' and inventory_hostname in groups['compute'] and inventory_hostname not in groups['network'] else 'absent' }}\" }\n"
@@ -1466,17 +1470,17 @@ if patched not in text:
     if text.count(marker) != 1:
         raise RuntimeError("unexpected Kolla OVS other_config task; review the userspace TSO patch")
     path.write_text(text.replace(marker, patched, 1))
-# A control VM alone has no compute host yet; the farm's globals say so, and the first
+# A control VM alone has no compute host yet; the stackbox's globals say so, and the first
 # compute joins later without redeploying the control plane.
 path = Path("{VENV}/share/kolla-ansible/ansible/roles/nova-cell/tasks/precheck.yml")
 text = path.read_text()
 marker = "  when:\n    - groups[nova_cell_compute_group] | length < 1\n    - not nova_compute_ironic.enabled | bool\n"
-patched = marker + "    - not (farm_no_computes | default(false))\n"
+patched = marker + "    - not (stackbox_no_computes | default(false))\n"
 if patched not in text:
     if text.count(marker) != 1:
         raise RuntimeError("unexpected Kolla nova-cell precheck; review the no-compute patch")
     path.write_text(text.replace(marker, patched, 1))
-# The same kernel has no openvswitch module; farms run OVS with the userspace (netdev) datapath.
+# The same kernel has no openvswitch module; stackboxes run OVS with the userspace (netdev) datapath.
 path = Path("{VENV}/share/kolla-ansible/ansible/roles/openvswitch/tasks/config-host.yml")
 text = path.read_text()
 marker = "- name: Load and persist openvswitch module\n"
@@ -1583,7 +1587,7 @@ PY
 pub(crate) fn install_script(release: &releases::ReleaseInfo) -> String {
     format!(
         r#"set -euo pipefail
-# Golden images install the build tools; farms made from the former Docker-built image lack them.
+# Golden images install the build tools; stackboxes made from the former Docker-built image lack them.
 if ! command -v gcc >/dev/null; then
   step "빌드 도구 설치 (gcc, python3-devel, libffi, openssl)"
   dnf install -y -q gcc python3-devel libffi-devel openssl-devel
@@ -1595,26 +1599,26 @@ fi
 # delete the venv and lose the interpreter with it.
 {python_setup}
 stamp="{stamp}"
-if [ ! -x {VENV}/bin/kolla-ansible ] || [ "$(cat {VENV}/.farm-release 2>/dev/null || true)" != "$stamp" ]; then
+if [ ! -x {VENV}/bin/kolla-ansible ] || [ "$(cat {VENV}/.stackbox-release 2>/dev/null || true)" != "$stamp" ]; then
   step "kolla-ansible 가상환경 생성 ({VENV}, $python)"
   rm -rf {VENV}
   "$python" -m venv {VENV}
   {VENV}/bin/pip install -q -U pip
   step "kolla-ansible 설치 ({reference})"
   {VENV}/bin/pip install -q "git+https://opendev.org/openstack/kolla-ansible@{reference}"
-{ansible_install}  printf '%s' "$stamp" > {VENV}/.farm-release
+{ansible_install}  printf '%s' "$stamp" > {VENV}/.stackbox-release
 fi
 {six_fix}{ansible_fixes}export PATH={VENV}/bin:$PATH{venv_export}
 {galaxy}{install_deps}
 {kernel_patches}
-if [ ! -x {OSC_VENV}/bin/openstack ] || [ "$(cat {OSC_VENV}/.farm-release 2>/dev/null || true)" != "$stamp" ]; then
+if [ ! -x {OSC_VENV}/bin/openstack ] || [ "$(cat {OSC_VENV}/.stackbox-release 2>/dev/null || true)" != "$stamp" ]; then
   step "OpenStack CLI 가상환경 생성 ({OSC_VENV})"
   rm -rf {OSC_VENV}
   "$python" -m venv {OSC_VENV}
   {OSC_VENV}/bin/pip install -q -U pip
   step "python-openstackclient 설치"
   {OSC_VENV}/bin/pip install -q -c https://releases.openstack.org/constraints/upper/{series} python-openstackclient
-  printf '%s' "$stamp" > {OSC_VENV}/.farm-release
+  printf '%s' "$stamp" > {OSC_VENV}/.stackbox-release
 fi
 {version_check}"#,
         python_setup = python_setup(release),
@@ -1660,7 +1664,7 @@ async fn configure(
     )
     .await?;
 
-    // A control VM alone is already a multi-node farm: its computes join later, so its
+    // A control VM alone is already a multi-node stackbox: its computes join later, so its
     // network layout must be written the multi-node way from the first deploy. Deciding by
     // the computes present here would leave physnet1 here and physnet2 in post-deploy.
     let multinode = topology.multinode();
@@ -1699,7 +1703,7 @@ async fn configure(
         let peers: Vec<Compute> = computes.iter().map(|(c, _)| c.clone()).collect();
         config::multinode_inventory(
             &template,
-            &farm::hostname(farm::Role::Control, None),
+            &stackbox::hostname(stackbox::Role::Control, None),
             &peers,
         )?
     } else {
@@ -1739,9 +1743,9 @@ async fn configure(
     // Kolla's nova-cell precheck refuses an inventory without a compute host; a control
     // VM alone is exactly that until its first compute joins.
     if multinode && computes.is_empty() {
-        globals.push_str("farm_no_computes: true\n");
+        globals.push_str("stackbox_no_computes: true\n");
     }
-    // A release whose Nova has no `mtty` support gets it from patched files farm mounts into
+    // A release whose Nova has no `mtty` support gets it from patched files stackbox mounts into
     // nova_compute (see `install_nova_mtty_files`). Kolla must mount them in the same deploy
     // that writes `enabled_mdev_types`: an unpatched nova-compute refuses that config.
     if let Some(volumes) = gpu
@@ -1758,7 +1762,7 @@ async fn configure(
         run(deployer, &format!("mkdir -p {CONFIG_DIR}/config/horizon")).await?;
         fs.write(
             &horizon_settings,
-            "# Written by farm: this farm has no Nova, so start on the image list.\nHORIZON_CONFIG[\"user_home\"] = \"/project/images/\"\n",
+            "# Written by stackbox: this stackbox has no Nova, so start on the image list.\nHORIZON_CONFIG[\"user_home\"] = \"/project/images/\"\n",
         )
         .await?;
     } else {
@@ -1796,18 +1800,18 @@ async fn configure(
         run(deployer, &format!("rm -f {ovs_agent} {ml2}")).await?;
     }
     // The mediated device is the only GPU setting Kolla writes: Nova's own inventory comes
-    // from it. A simulated GPU's providers are farm's, written through Placement after the
+    // from it. A simulated GPU's providers are stackbox's, written through Placement after the
     // deploy (see `gpu_advertise_script`), because Kolla's provider-config file takes only
     // custom classes and this contract is the standard VGPU one.
-    // Every farm's nova-compute resumes its guests after a restore; an mtty farm adds its sections.
+    // Every stackbox's nova-compute resumes its guests after a restore; an mtty stackbox adds its sections.
     let nova_compute_conf = format!("{CONFIG_DIR}/config/nova/nova-compute.conf");
     let mtty = gpu.is_some_and(|gpu| gpu.mode == crate::model::GpuMode::Mtty);
     if let Some(gpu) = gpu.filter(|gpu| gpu.mode == crate::model::GpuMode::Mtty) {
         step(sink, "compute VM의 mtty mdev 장치 확인")?;
         check_mdev(deployer, computes, gpu.count).await?;
     }
-    // A passthrough farm's devices are declared by the guest address that compute-1 shows
-    // after farm-vfio-prepare bound them, so they are read from the VM before Nova hears of them.
+    // A passthrough stackbox's devices are declared by the guest address that compute-1 shows
+    // after stackbox-vfio-prepare bound them, so they are read from the VM before Nova hears of them.
     let guest_pci = if pci_devices.is_empty() {
         Vec::new()
     } else {
@@ -1833,7 +1837,7 @@ async fn configure(
             run(deployer, &remove_managed_nova_global(&nova_global)).await?;
         }
     }
-    // A GPU farm installs the fake nvidia-smi on every instance through Nova's static
+    // A GPU stackbox installs the fake nvidia-smi on every instance through Nova's static
     // vendor data: cloud-init merges this cloud-config without user-data. Images that are
     // not cloud-init (CirrOS) ignore it and use the user-data installer the API serves.
     let vendordata = format!("{CONFIG_DIR}/config/nova/vendordata.json");
@@ -1859,14 +1863,14 @@ async fn configure(
     fs.write(INVENTORY, inventory).await?;
     run(deployer, "mkdir -p /etc/kolla/callback_plugins").await?;
     fs.write(
-        "/etc/kolla/callback_plugins/farm.py",
-        include_str!("farm_callback.py"),
+        "/etc/kolla/callback_plugins/stackbox.py",
+        include_str!("stackbox_callback.py"),
     )
     .await?;
     fs.write(
         "/root/.ansible.cfg",
         &format!(
-            "[defaults]\nhost_key_checking = False\nforks = {forks}\nstdout_callback = farm\ncallback_plugins = /etc/kolla/callback_plugins\n\n[ssh_connection]\npipelining = True\n"
+            "[defaults]\nhost_key_checking = False\nforks = {forks}\nstdout_callback = stackbox\ncallback_plugins = /etc/kolla/callback_plugins\n\n[ssh_connection]\npipelining = True\n"
         ),
     )
     .await?;
@@ -1917,7 +1921,7 @@ fn mdev_probe(output: &str) -> MdevProbe {
     }
 }
 
-/// Refuses an `mtty` GPU farm whose compute VMs boot the stock kernel: without the custom
+/// Refuses an `mtty` GPU stackbox whose compute VMs boot the stock kernel: without the custom
 /// libkrunfw there is no `/sys/class/mdev_bus/mtty`, so nova-compute would come up with an
 /// empty VGPU inventory (or fail to create the mdev when an instance is built).
 async fn check_mdev(
@@ -1948,7 +1952,7 @@ async fn check_mdev(
         })?;
         match mdev_probe(&output) {
             MdevProbe::Absent => bail!(
-                "{} has no mtty mediated device; the 'mtty' GPU needs compute VMs booted with farm's kernel (prepare the host so it installs one; see docs/libkrunfw.md and docs/gpu.md)",
+                "{} has no mtty mediated device; the 'mtty' GPU needs compute VMs booted with stackbox's kernel (prepare the host so it installs one; see docs/libkrunfw.md and docs/gpu.md)",
                 compute.hostname
             ),
             MdevProbe::Unreadable => bail!(
@@ -1957,12 +1961,12 @@ async fn check_mdev(
                 output.trim()
             ),
             MdevProbe::Devices { available, in_use } => {
-                // What the type can give this farm is what is left plus what its own
-                // instances already hold; a farm asked for more than that cannot boot.
+                // What the type can give this stackbox is what is left plus what its own
+                // instances already hold; a stackbox asked for more than that cannot boot.
                 let total = available + in_use;
                 if total < count {
                     bail!(
-                        "{} offers {total} mtty devices ({available} free, {in_use} in use), fewer than the {count} the farm asks for",
+                        "{} offers {total} mtty devices ({available} free, {in_use} in use), fewer than the {count} the stackbox asks for",
                         compute.hostname
                     );
                 }
@@ -1972,11 +1976,11 @@ async fn check_mdev(
     Ok(())
 }
 
-/// The compute that receives the farm's PCI devices (`plan.pci_devices` reach compute-1 only).
-const PCI_COMPUTE: &str = "farm-compute-1";
+/// The compute that receives the stackbox's PCI devices (`plan.pci_devices` reach compute-1 only).
+const PCI_COMPUTE: &str = "stackbox-compute-1";
 
-/// The command that removes the farm's `nova.conf` once no device needs it. A file whose first
-/// line is not the farm's marker was written by an operator and stays.
+/// The command that removes the stackbox's `nova.conf` once no device needs it. A file whose first
+/// line is not the stackbox's marker was written by an operator and stays.
 fn remove_managed_nova_global(path: &str) -> String {
     format!(
         "if [ -f {path} ] && [ \"$(sed -n 1p {path})\" = \"{}\" ]; then rm -f {path}; fi",
@@ -1984,11 +1988,11 @@ fn remove_managed_nova_global(path: &str) -> String {
     )
 }
 
-/// Runs on compute-1 once `farm-vfio.service` has bound the devices. Prints one `device` line
+/// Runs on compute-1 once `stackbox-vfio.service` has bound the devices. Prints one `device` line
 /// per `0000:00:*` function (BDF, vendor, product, driver, IOMMU group, whether the group node is
 /// there), then the module parameter and the VFIO container. No single quotes: it crosses ssh.
 const PCI_PROBE: &str = r#"set -eu
-systemctl start farm-vfio.service
+systemctl start stackbox-vfio.service
 for dev in /sys/bus/pci/devices/0000:00:*; do
   [ -e "$dev/vendor" ] || continue
   bdf=$(basename "$dev")
@@ -2070,7 +2074,7 @@ fn parse_guest_pci_probe(output: &str, expected: usize) -> Result<Vec<GuestPciDe
     Ok(devices)
 }
 
-/// Reads compute-1's passthrough devices (see [`PCI_PROBE`]) and checks them against the farm's
+/// Reads compute-1's passthrough devices (see [`PCI_PROBE`]) and checks them against the stackbox's
 /// `expected` count. A compute on another host answers over the control VM's SSH key.
 async fn probe_guest_pci(
     deployer: &Sandbox,
@@ -2080,7 +2084,7 @@ async fn probe_guest_pci(
     let (compute, sandbox) = computes
         .iter()
         .find(|(compute, _)| compute.hostname == PCI_COMPUTE)
-        .with_context(|| format!("the farm has no {PCI_COMPUTE} to pass PCI devices to"))?;
+        .with_context(|| format!("the stackbox has no {PCI_COMPUTE} to pass PCI devices to"))?;
     let output = match sandbox {
         Some(sandbox) => run(sandbox, PCI_PROBE).await,
         None => {
@@ -2109,7 +2113,7 @@ async fn probe_guest_pci(
 }
 
 /// Builds the patched Nova files on every host that runs nova_compute: the deployer when the
-/// farm is all-in-one, else each compute. A compute on another host is reached over the
+/// stackbox is all-in-one, else each compute. A compute on another host is reached over the
 /// control VM's SSH key, as [`check_mdev`] reaches it.
 async fn install_nova_mtty_files(
     deployer: &Sandbox,
@@ -2134,7 +2138,7 @@ async fn install_nova_mtty_files(
                 run(
                     deployer,
                     &format!(
-                        "ssh -o BatchMode=yes -o ConnectTimeout=10 {host} 'mkdir -p /etc/farm && cat > {prepare}' < {prepare} && ssh -o BatchMode=yes -o ConnectTimeout=10 {host} 'bash {prepare}' < /dev/null"
+                        "ssh -o BatchMode=yes -o ConnectTimeout=10 {host} 'mkdir -p /etc/stackbox && cat > {prepare}' < {prepare} && ssh -o BatchMode=yes -o ConnectTimeout=10 {host} 'bash {prepare}' < /dev/null"
                     ),
                 )
                 .await
@@ -2148,7 +2152,7 @@ async fn install_nova_mtty_files(
 /// Puts the preparation script on `sandbox` and runs it.
 async fn prepare_nova_mtty(sandbox: &Sandbox, script: &str) -> Result<()> {
     let prepare = config::NOVA_MTTY_PREPARE;
-    run(sandbox, "mkdir -p /etc/farm").await?;
+    run(sandbox, "mkdir -p /etc/stackbox").await?;
     sandbox.fs().write(prepare, script).await?;
     run(sandbox, &format!("bash {prepare}")).await?;
     Ok(())
@@ -2161,12 +2165,12 @@ fn nova_mtty_backport(gpu: Option<&crate::model::GpuConfig>, release: &str) -> b
         && config::nova_mtty_patch(release).is_some()
 }
 
-/// A compute's name as it travels in a shell word to the control VM's `ssh`. Farm builds
+/// A compute's name as it travels in a shell word to the control VM's `ssh`. Stackbox builds
 /// these names, but a name that is not a lowercase hostname must not reach a command line.
 fn ssh_target(compute: &Compute) -> Result<&str> {
     let hostname = compute.hostname.as_str();
     anyhow::ensure!(
-        hostname.starts_with("farm-")
+        hostname.starts_with("stackbox-")
             && hostname
                 .bytes()
                 .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-'),
@@ -2229,19 +2233,19 @@ grep -xF '{key}' "$f" >/dev/null || {{ [ -s "$f" ] && [ -n "$(tail -c1 "$f")" ] 
     Ok(())
 }
 
-/// Wait until a deployed farm's services answer again after its VM started from disk.
+/// Wait until a deployed stackbox's services answer again after its VM started from disk.
 /// With `rebind`, first point the public catalog entries recorded for `from` at `to`:
-/// a farm restored from a snapshot publishes the services on its own host ports.
+/// a stackbox restored from a snapshot publishes the services on its own host ports.
 pub async fn settle(
-    farm_id: &str,
+    stackbox_id: &str,
     rebind: Option<(&Exposure, &Exposure)>,
     components: &[String],
     sink: EventSink,
 ) -> Result<()> {
-    let name = farm::all_in_one_name(farm_id).await?;
-    let sandbox = farm::connect(&name).await?;
+    let name = stackbox::all_in_one_name(stackbox_id).await?;
+    let sandbox = stackbox::connect(&name).await?;
     let result = async {
-        farm::wait_until_booted(&sandbox).await?;
+        stackbox::wait_until_booted(&sandbox).await?;
         stream(
             &sandbox,
             &settle_script(rebind, components),
@@ -2251,7 +2255,7 @@ pub async fn settle(
         .await
     }
     .await;
-    farm::detach(&sandbox).await;
+    stackbox::detach(&sandbox).await;
     result
 }
 
@@ -2341,13 +2345,13 @@ echo "neutron OK"
     if has("nova") {
         script.push_str(&format!(
             r#"compute_state=''
-# A farm restored from a control template has no compute VM, so no nova-compute, until one
+# A stackbox restored from a control template has no compute VM, so no nova-compute, until one
 # is added; Kolla's multinode inventory then lists no compute host.
 if {no_computes}; then
   $os compute service list -f value -c ID >/dev/null
   echo "nova OK (no compute VM yet)"
 else
-# Every nova-compute, one per compute VM of a multi-node farm.
+# Every nova-compute, one per compute VM of a multi-node stackbox.
 for _ in $(seq 60); do
   compute_state=$($os compute service list --service nova-compute -f value -c State 2>/dev/null || true)
   [ -n "$compute_state" ] && ! echo "$compute_state" | grep -vx up >/dev/null && break
@@ -2412,7 +2416,7 @@ if [ -r {CONFIG_DIR}/admin-openrc.sh ]; then . {CONFIG_DIR}/admin-openrc.sh; fi
 EOF"#
     ));
     if components.iter().any(|c| c == "neutron") {
-        // A shared external network for routers and floating IPs, created once per farm.
+        // A shared external network for routers and floating IPs, created once per stackbox.
         script.push_str(&format!(
             r#"
 set -euo pipefail
@@ -2454,8 +2458,8 @@ fn kolla_ansible(command: &str, release: &releases::ReleaseInfo) -> String {
 /// `computes`: the nova-compute services that must be up; none for a control VM whose
 /// computes join later, which only checks that the Nova API answers.
 ///
-/// `release` names the OpenStack series the farm installed; it decides whether a `mtty`
-/// farm's nova-compute carries farm's backport (see [`config::nova_mtty_patch`]).
+/// `release` names the OpenStack series the stackbox installed; it decides whether a `mtty`
+/// stackbox's nova-compute carries stackbox's backport (see [`config::nova_mtty_patch`]).
 fn verify_script(
     components: &[String],
     computes: usize,
@@ -2482,7 +2486,7 @@ cleanup() {{
 trap cleanup EXIT
 step "Glance 이미지 업로드·다운로드 검증"
 head -c 1048576 /dev/urandom > "$work/upload.img"
-image_id=$($os image create --disk-format raw --container-format bare --file "$work/upload.img" "farm-verify-$(cat /proc/sys/kernel/random/uuid)" -f value -c id)
+image_id=$($os image create --disk-format raw --container-format bare --file "$work/upload.img" "stackbox-verify-$(cat /proc/sys/kernel/random/uuid)" -f value -c id)
 test "$($os image show "$image_id" -f value -c status)" = active
 $os image save --file "$work/download.img" "$image_id"
 cmp "$work/upload.img" "$work/download.img"
@@ -2549,13 +2553,13 @@ echo "horizon OK: ${home#200 }"
         } else {
             script.push_str(&nova_verify_script(computes));
         }
-        // A GPU farm advertises its providers first, then verifies them with a flavor and
+        // A GPU stackbox advertises its providers first, then verifies them with a flavor and
         // the allocation the instance it booted holds.
         if let Some(gpu) = gpu
             && computes > 0
         {
             let hosts: Vec<String> = (1..=computes)
-                .map(|index| format!("farm-compute-{index}"))
+                .map(|index| format!("stackbox-compute-{index}"))
                 .collect();
             let advertise = gpu_advertise_script(Some(gpu), &hosts);
             if !advertise.is_empty() {
@@ -2591,12 +2595,13 @@ echo "skyline OK: $skyline"
 
 /// The failure message for `phase`. Phases after `configure` read the configuration that
 /// `configure` wrote, so a user who edited it must resume from `configure` to rewrite it.
-fn resume_hint(farm_id: &str, phase: Phase) -> String {
-    let mut hint =
-        format!("phase '{phase}' failed; resume with `farm deploy {farm_id} --from {phase}`");
+fn resume_hint(stackbox_id: &str, phase: Phase) -> String {
+    let mut hint = format!(
+        "phase '{phase}' failed; resume with `stackbox deploy {stackbox_id} --from {phase}`"
+    );
     if phase > Phase::Configure {
         hint.push_str(&format!(
-            "; if you changed the configuration, resume with `farm deploy {farm_id} --from configure`"
+            "; if you changed the configuration, resume with `stackbox deploy {stackbox_id} --from configure`"
         ));
     }
     hint
@@ -2614,7 +2619,7 @@ for agent in "Open vSwitch agent" "DHCP agent" "L3 agent" "Metadata agent"; do
   echo "$agents" | grep "^$agent True" >/dev/null || { echo "$agent is not alive" >&2; exit 1; }
 done
 step "테넌트 네트워크·라우터·DHCP 포트 검증"
-name="farm-verify-$(cut -c1-8 /proc/sys/kernel/random/uuid)"
+name="stackbox-verify-$(cut -c1-8 /proc/sys/kernel/random/uuid)"
 net_id=''; router_id=''; subnet_id=''
 extra_cleanup() {
   if [ -n "$router_id" ]; then
@@ -2675,13 +2680,13 @@ case "$arch" in
     image_props=''
     ;;
 esac
-image_name=cirros-farm
+image_name=cirros-stackbox
 if ! $os image show "$image_name" >/dev/null 2>&1; then
   curl -fsSL -o "$work/cirros.img" "$image_url"
   # shellcheck disable=SC2086
   $os image create --disk-format qcow2 --container-format bare --property os_distro=cirros $image_props --file "$work/cirros.img" "$image_name" >/dev/null
 fi
-name="farm-vm-$(cut -c1-8 /proc/sys/kernel/random/uuid)"
+name="stackbox-vm-$(cut -c1-8 /proc/sys/kernel/random/uuid)"
 net_id=''; router_id=''; subnet_id=''; server_id=''
 extra_cleanup() {
   if [ -n "$server_id" ]; then $os server delete "$server_id" >/dev/null 2>&1 || true; fi
@@ -2725,13 +2730,13 @@ echo "nova OK: $name at $fixed answered ping and TCP from the router"
 "#
 }
 
-/// The child resource providers a `simulated` GPU farm advertises, one per fake GPU of each
+/// The child resource providers a `simulated` GPU stackbox advertises, one per fake GPU of each
 /// of `hosts`: the name, parent and inventory a vGPU deployment's Nova gives its own, so a
 /// flavor that names the standard class and a custom trait schedules here.
 ///
 /// Nothing else writes them. Nova's libvirt driver has no mediated-device type configured,
 /// so `_update_provider_tree_for_vgpu` returns before touching a compute's tree, and its
-/// PCI healing only rewrites providers carrying its own trait. The flip side is that farm
+/// PCI healing only rewrites providers carrying its own trait. The flip side is that stackbox
 /// has to write them again whenever the tree could have changed: after a deploy, when a
 /// compute joins, and after a restore. The writes are idempotent, and the inventory of an
 /// existing provider is updated in place, so a re-run keeps whatever is allocated.
@@ -2835,7 +2840,7 @@ def named(name):
 
 
 # nova-compute reports a compute's resource provider when it first runs; the child providers
-# hang off it, so wait for every compute of the farm.
+# hang off it, so wait for every compute of the stackbox.
 providers = {{}}
 for _ in range(60):
     providers = {{
@@ -2922,12 +2927,12 @@ PY
     )
 }
 
-/// A GPU farm's own verification: Placement carries the mode's resource class on the child
+/// A GPU stackbox's own verification: Placement carries the mode's resource class on the child
 /// provider of every fake GPU, then a flavor of the mode boots an instance and the
 /// instance's allocation names that class on one of those providers. A flavor asking for one
 /// unit more than any provider holds is refused with `NoValidHost`, which proves the
 /// inventory is what the scheduler reads. `mtty` additionally proves libvirt attached the
-/// mediated device to the instance's domain and, on a release whose Nova needed farm's
+/// mediated device to the instance's domain and, on a release whose Nova needed stackbox's
 /// backport, that the running nova-compute carries it; the guest-side `lspci` check is left
 /// to the end-to-end test, which reads the console log.
 fn gpu_verify_script(gpu: &crate::model::GpuConfig, computes: usize, release: &str) -> String {
@@ -2941,7 +2946,7 @@ fn gpu_verify_script(gpu: &crate::model::GpuConfig, computes: usize, release: &s
     }
     let properties = format!("--property resources:{class}=1{trait_properties}");
     let hosts: Vec<String> = (1..=computes)
-        .map(|index| format!("farm-compute-{index}"))
+        .map(|index| format!("stackbox-compute-{index}"))
         .collect();
     let joined = hosts.join(" ");
     let inventory = match gpu.mode {
@@ -2954,13 +2959,13 @@ fn gpu_verify_script(gpu: &crate::model::GpuConfig, computes: usize, release: &s
         crate::model::GpuMode::Simulated => format!(
             r#"
 step "GPU(simulated) 재고를 넘는 요청이 NoValidHost로 거절되는지 확인 ({class}×{over})"
-over='farm.vgpu-full'
+over='stackbox.vgpu-full'
 $os flavor show "$over" >/dev/null 2>&1 || $os flavor create --ram 512 --disk 1 --vcpus 1 "$over" >/dev/null
 $os flavor set "$over" --property resources:{class}={over}{trait_properties} >/dev/null
-full="farm-gpu-full-$(cut -c1-8 /proc/sys/kernel/random/uuid)"
+full="stackbox-gpu-full-$(cut -c1-8 /proc/sys/kernel/random/uuid)"
 # The API accepts the request and the scheduler refuses it, so the answer is the instance's
 # fault, not this command's exit status.
-$os server create --flavor "$over" --image cirros-farm --network "$net_id" "$full" --wait >/dev/null 2>&1 || true
+$os server create --flavor "$over" --image cirros-stackbox --network "$net_id" "$full" --wait >/dev/null 2>&1 || true
 full_id=$($os server list --name "$full" -f value -c ID | awk 'NR == 1 {{print $1}}')
 [ -n "$full_id" ] || {{ echo "the oversubscribed instance was not created" >&2; exit 1; }}
 [ "$($os server show "$full_id" -f value -c status)" = ERROR ] || {{ echo "a {class} request larger than the inventory was scheduled" >&2; exit 1; }}
@@ -2989,7 +2994,7 @@ echo "mtty mdev is bound to the instance's libvirt domain on $bound"
         ),
         crate::model::GpuMode::Simulated => String::new(),
     };
-    // Releases before 2026.2 get `mtty` support from the patched files farm mounts into
+    // Releases before 2026.2 get `mtty` support from the patched files stackbox mounts into
     // nova_compute; a container that started without them has different bytes here.
     let backport = match (gpu.mode, config::nova_mtty_mounts(release)) {
         (crate::model::GpuMode::Mtty, Some(mounts)) => {
@@ -3004,7 +3009,7 @@ step "GPU(mtty) nova-compute의 Nova mtty 백포트 확인 ({release})"
 for host in {joined}; do
   ssh -o BatchMode=yes -o ConnectTimeout=10 "$host" \
     "a=\$(docker exec nova_compute sha256sum {targets} | cut -d' ' -f1) && b=\$(sha256sum {copies} | cut -d' ' -f1) && [ -n \"\$a\" ] && [ \"\$a\" = \"\$b\" ]" \
-    2>&1 || {{ echo "$host: nova-compute is not running with farm's Nova mtty backport files ({release}); see docker logs nova_compute" >&2; exit 1; }}
+    2>&1 || {{ echo "$host: nova-compute is not running with stackbox's Nova mtty backport files ({release}); see docker logs nova_compute" >&2; exit 1; }}
 done
 echo "mtty backport files are in place on {joined}"
 "#,
@@ -3021,7 +3026,7 @@ $os flavor show {flavor} >/dev/null 2>&1 || $os flavor create --ram 512 --disk 1
 # A flavor that already existed may carry other or missing properties; set ours again so
 # the instance is scheduled on the class this script just checked.
 $os flavor set {flavor} {properties} >/dev/null
-name="farm-gpu-$(cut -c1-8 /proc/sys/kernel/random/uuid)"
+name="stackbox-gpu-$(cut -c1-8 /proc/sys/kernel/random/uuid)"
 net_id=''; subnet_id=''; router_id=''; server_id=''; full_id=''
 extra_cleanup() {{
   if [ -n "$server_id" ]; then $os server delete "$server_id" >/dev/null 2>&1 || true; fi
@@ -3039,11 +3044,11 @@ $os router add subnet "$router_id" "$subnet_id" >/dev/null
 # CirrOS does not apply Nova vendor data, so the verification instance gets the same
 # installer a user would pass as user-data. It prints the first XML document to the
 # console, which the check below reads.
-user_data="$work/farm-gpu-user-data.sh"
-cat > "$user_data" <<'FARM_GPU_USER_DATA_EOF'
+user_data="$work/stackbox-gpu-user-data.sh"
+cat > "$user_data" <<'STACKBOX_GPU_USER_DATA_EOF'
 {installer}
-FARM_GPU_USER_DATA_EOF
-server_id=$($os server create --flavor {flavor} --image cirros-farm --network "$net_id" --user-data "$user_data" "$name" -f value -c id)
+STACKBOX_GPU_USER_DATA_EOF
+server_id=$($os server create --flavor {flavor} --image cirros-stackbox --network "$net_id" --user-data "$user_data" "$name" -f value -c id)
 status=''
 for _ in $(seq 90); do
   status=$($os server show "$server_id" -f value -c status)
@@ -3074,7 +3079,7 @@ def get(path):
     return json.load(urllib.request.urlopen(request, timeout=30))
 
 
-# The providers this farm advertised. An mdev farm leaves the file empty, and then any
+# The providers this stackbox advertised. An mdev stackbox leaves the file empty, and then any
 # provider holding the class is the one Nova built.
 watched = set()
 if os.path.exists(provider_list):
@@ -3084,7 +3089,7 @@ for uuid, body in get("/allocations/" + consumer)["allocations"].items():
     if body["resources"].get(resource_class, 0) >= 1:
         if watched and uuid not in watched:
             sys.exit(
-                "%s is allocated on %s, which this farm did not advertise"
+                "%s is allocated on %s, which this stackbox did not advertise"
                 % (resource_class, uuid)
             )
         print(
@@ -3113,14 +3118,14 @@ echo "GPU OK: {mode} flavor {flavor} booted an instance with {class}"
     )
 }
 
-/// The PCI half of the verification: a `farm.pci` flavor per `[pci] alias` (the first is
-/// `farm.pci`, the rest `farm.pci-2`, ...), one instance of `farm.pci` that must reach ACTIVE, and
+/// The PCI half of the verification: a `stackbox.pci` flavor per `[pci] alias` (the first is
+/// `stackbox.pci`, the rest `stackbox.pci-2`, ...), one instance of `stackbox.pci` that must reach ACTIVE, and
 /// its libvirt domain on `host` must carry a `type='pci'` hostdev. The instance is deleted; the
 /// flavors stay for the user.
 fn pci_verify_script(host: &str, devices: &[GuestPciDevice]) -> String {
     let mut flavors = String::new();
     for alias in config::pci_aliases(devices) {
-        let flavor = format!("farm.{}", alias.name.trim_start_matches("farm-"));
+        let flavor = format!("stackbox.{}", alias.name.trim_start_matches("stackbox-"));
         flavors.push_str(&format!(
             r#"step "PCI passthrough 플레이버 {flavor} (alias {name})"
 $os flavor show {flavor} >/dev/null 2>&1 || $os flavor create --ram 512 --disk 1 --vcpus 1 {flavor} >/dev/null
@@ -3131,7 +3136,7 @@ $os flavor set {flavor} --property "pci_passthrough:alias={name}:1" >/dev/null
     }
     format!(
         r#"{flavors}
-step "PCI passthrough 검증 인스턴스 (farm.pci)와 libvirt hostdev 확인 ({host})"
+step "PCI passthrough 검증 인스턴스 (stackbox.pci)와 libvirt hostdev 확인 ({host})"
 pci_net=''; pci_subnet=''; pci_router=''; pci_server=''
 pci_cleanup() {{
   if [ -n "$pci_server" ]; then $os server delete --wait "$pci_server" >/dev/null 2>&1 || true; fi
@@ -3142,12 +3147,12 @@ pci_cleanup() {{
   if [ -n "$pci_net" ]; then $os network delete "$pci_net" >/dev/null 2>&1 || true; fi
 }}
 trap 'pci_cleanup; cleanup' EXIT
-pci_name="farm-pci-verify-$(cut -c1-8 /proc/sys/kernel/random/uuid)"
+pci_name="stackbox-pci-verify-$(cut -c1-8 /proc/sys/kernel/random/uuid)"
 pci_net=$($os network create "$pci_name" -f value -c id)
 pci_subnet=$($os subnet create --network "$pci_net" --subnet-range 10.196.0.0/24 "$pci_name" -f value -c id)
 pci_router=$($os router create --external-gateway public "$pci_name" -f value -c id)
 $os router add subnet "$pci_router" "$pci_subnet" >/dev/null
-pci_server=$($os server create --flavor farm.pci --image cirros-farm --network "$pci_net" "$pci_name" -f value -c id)
+pci_server=$($os server create --flavor stackbox.pci --image cirros-stackbox --network "$pci_net" "$pci_name" -f value -c id)
 status=''
 for _ in $(seq 90); do
   status=$($os server show "$pci_server" -f value -c status)
@@ -3169,15 +3174,15 @@ esac
 echo "PCI hostdev is bound to the instance's libvirt domain on $pci_host"
 $os server delete --wait "$pci_server" >/dev/null
 pci_server=''
-echo "farm.pci flavor kept for use"
+echo "stackbox.pci flavor kept for use"
 "#
     )
 }
 
-/// The child-provider half of [`gpu_verify_script`] for a `simulated` farm: every fake GPU of
+/// The child-provider half of [`gpu_verify_script`] for a `simulated` stackbox: every fake GPU of
 /// every compute is a child of that compute's own provider, carrying exactly the inventory
 /// and the traits the plan asked for, and no compute's root provider carries the class (Nova
-/// replaces that inventory every sync, so a farm that wrote there would lose it).
+/// replaces that inventory every sync, so a stackbox that wrote there would lose it).
 fn simulated_inventory_check(gpu: &crate::model::GpuConfig, hosts: &[String]) -> String {
     let class = gpu.resource_class();
     let traits = gpu.traits().join(",");
@@ -3338,7 +3343,7 @@ if set(found) != expected:
         % (resource_class, ", ".join(sorted(expected - set(found))))
     )
 # The class total a compute offers, not the units this check asked for: the kernel's mdev
-# type carries 24 whether the farm requested 1 or 24.
+# type carries 24 whether the stackbox requested 1 or 24.
 totals = sorted(set(found.values()))
 if len(totals) == 1:
     counted = "%d each" % totals[0]
@@ -3359,10 +3364,10 @@ mod tests {
     use std::io::Write;
     use std::process::{Command, Stdio};
 
-    /// Runs the removal the farm sends for `nova.conf` through a real shell, so the test sees
+    /// Runs the removal the stackbox sends for `nova.conf` through a real shell, so the test sees
     /// what the guest's shell does with a managed file, an operator's file and no file.
     #[test]
-    fn nova_global_is_removed_only_when_the_farm_wrote_it() {
+    fn nova_global_is_removed_only_when_the_stackbox_wrote_it() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("nova.conf");
         let path = path.to_str().unwrap();
@@ -3374,7 +3379,7 @@ mod tests {
             assert!(status.success(), "{status}");
         };
 
-        // A file the farm wrote carries the marker on its first line and goes.
+        // A file the stackbox wrote carries the marker on its first line and goes.
         let device = GuestPciDevice {
             bdf: "0000:00:05.0".into(),
             vendor_id: "10de".into(),
@@ -3408,7 +3413,7 @@ mod tests {
     /// open them: the prepare script and the one Kolla runs at deploy both set `0660`.
     #[test]
     fn the_guest_vfio_nodes_are_group_42427_and_0660() {
-        let script = include_str!("../../guest/farm/farm-vfio-prepare");
+        let script = include_str!("../../guest/stackbox/stackbox-vfio-prepare");
         assert!(script.contains("chown root:42427"), "{script}");
         assert!(script.contains("chmod 0660"), "{script}");
         assert!(!script.contains("0666"), "{script}");
@@ -3464,14 +3469,14 @@ mod tests {
         let after = resume_hint("demo", Phase::Deploy);
         assert_eq!(
             after,
-            "phase 'deploy' failed; resume with `farm deploy demo --from deploy`; if you changed the configuration, resume with `farm deploy demo --from configure`"
+            "phase 'deploy' failed; resume with `stackbox deploy demo --from deploy`; if you changed the configuration, resume with `stackbox deploy demo --from configure`"
         );
         assert!(resume_hint("demo", Phase::Verify).contains("--from configure"));
         assert!(resume_hint("demo", Phase::Prechecks).contains("--from configure"));
         let before = resume_hint("demo", Phase::Configure);
         assert_eq!(
             before,
-            "phase 'configure' failed; resume with `farm deploy demo --from configure`"
+            "phase 'configure' failed; resume with `stackbox deploy demo --from configure`"
         );
         assert!(!resume_hint("demo", Phase::Install).contains("configuration"));
     }
@@ -3498,19 +3503,22 @@ mod tests {
         // The prefix used to be doubled, pointing at /opt/pythonpython3.8/bin/pythonpython3.8.
         assert!(!legacy.contains("pythonpython"), "{legacy}");
         assert!(
-            legacy.contains("UV_PYTHON_INSTALL_DIR=/opt/farm-python"),
+            legacy.contains("UV_PYTHON_INSTALL_DIR=/opt/stackbox-python"),
             "{legacy}"
         );
         assert!(
-            legacy.contains("/opt/farm-uv/bin/uv python install 3.8"),
+            legacy.contains("/opt/stackbox-uv/bin/uv python install 3.8"),
             "{legacy}"
         );
         assert!(
-            legacy.contains(r#"python="$(/opt/farm-uv/bin/uv python find 3.8"#),
+            legacy.contains(r#"python="$(/opt/stackbox-uv/bin/uv python find 3.8"#),
             "{legacy}"
         );
         // uv comes from a venv of its own: Rocky refuses pip into the system interpreter.
-        assert!(legacy.contains("python3 -m venv /opt/farm-uv"), "{legacy}");
+        assert!(
+            legacy.contains("python3 -m venv /opt/stackbox-uv"),
+            "{legacy}"
+        );
         assert!(
             legacy.contains(r#"step "Python 3.8 준비 (uv)""#),
             "{legacy}"
@@ -3522,7 +3530,7 @@ mod tests {
         let current = python_setup(&releases::info(OPENSTACK_RELEASE));
         assert!(current.contains("python=python3"), "{current}");
         assert!(!current.contains("uv"), "{current}");
-        assert!(!current.contains("farm-python"), "{current}");
+        assert!(!current.contains("stackbox-python"), "{current}");
         assert!(!install_script(&releases::info(OPENSTACK_RELEASE)).contains("uv"));
         // The failure names both hosts uv needs: PyPI for uv itself, GitHub for the Python.
         assert!(legacy.contains("pypi.org"), "{legacy}");
@@ -3770,7 +3778,7 @@ mod tests {
     #[test]
     fn maintained_releases_keep_the_install_script_they_had() {
         // The end-of-life work must not change the install for a maintained release: these
-        // fixtures pin what the farm generates for one now, so a change there shows up here.
+        // fixtures pin what the stackbox generates for one now, so a change there shows up here.
         // Compared with the script this branch deployed before the work, the 2026.2 fixture
         // differs only in the interpreter handling the older series needed: the old
         // template's `/opt/pythonpython3` typo is fixed (the variable already held `python3`),
@@ -3857,7 +3865,7 @@ mod tests {
             read("roles/openvswitch/tasks/config-host.yml")
                 .contains("when: ovs_datapath == 'system'")
         );
-        assert!(read("roles/nova-cell/tasks/precheck.yml").contains("farm_no_computes"));
+        assert!(read("roles/nova-cell/tasks/precheck.yml").contains("stackbox_no_computes"));
         assert!(read("roles/nova-cell/tasks/config-host.yml").contains("    - false\n"));
     }
 
@@ -3874,7 +3882,7 @@ mod tests {
             let read = |path: &str| std::fs::read_to_string(dir.path().join(path)).unwrap();
             let first = read("roles/openvswitch/tasks/post-config.yml");
 
-            // The bridge is created with the farm's datapath type before Kolla's own task adds
+            // The bridge is created with the stackbox's datapath type before Kolla's own task adds
             // the port; Kolla's helper would have created a kernel (system) datapath.
             assert!(
                 first.contains("datapath_type={{ ovs_datapath }}"),
@@ -3919,7 +3927,7 @@ mod tests {
 
             let precheck = read("roles/nova-cell/tasks/precheck.yml");
             assert!(
-                precheck.contains("- not (farm_no_computes | default(false))"),
+                precheck.contains("- not (stackbox_no_computes | default(false))"),
                 "{}",
                 entry.release
             );
@@ -3932,7 +3940,7 @@ mod tests {
                 let baremetal = read("roles/baremetal/tasks/install.yml");
                 assert!(!baremetal.contains("name: drpm"), "{}", entry.release);
                 assert!(
-                    baremetal.contains("# farm: dnf5 dropped delta RPMs"),
+                    baremetal.contains("# stackbox: dnf5 dropped delta RPMs"),
                     "{}",
                     entry.release
                 );
@@ -4020,17 +4028,17 @@ mod tests {
             forget_computes_script(&components),
             forget_computes_script(&components[..2]),
             OVS_EXTEND_START_SCRIPT.to_owned(),
-            include_str!("../../guest/farm/farm-external").to_owned(),
-            include_str!("../../guest/farm/farm-identity").to_owned(),
-            // Deploying a farm and adding a compute read the guest's address the same way.
+            include_str!("../../guest/stackbox/stackbox-external").to_owned(),
+            include_str!("../../guest/stackbox/stackbox-identity").to_owned(),
+            // Deploying a stackbox and adding a compute read the guest's address the same way.
             identity_command(),
             // The deploy waits for OVS and the compute prepares its links: both poll commands
             // that keep writing after the answer is known.
             deploy_script(&info),
             RESTART_OVS_AGENT.to_owned(),
-            verify_compute_script("farm-compute-1", true),
+            verify_compute_script("stackbox-compute-1", true),
             // A compute booted from a template recreates the containers it inherited.
-            wipe_template_script("farm-compute-2"),
+            wipe_template_script("stackbox-compute-2"),
             // Every end-of-life series installs from its last tag on its own Python, with the
             // libcrypt and Jinja2 fixes its interpreter and Ansible need.
             install_script(&releases::info("2022.2")),
@@ -4120,7 +4128,7 @@ mod tests {
         for absent in [
             "libxcrypt-compat",
             "Jinja2<3.1",
-            "farm patch for this release",
+            "stackbox patch for this release",
         ] {
             assert!(!current.contains(absent), "{absent}: {current}");
         }
@@ -4130,23 +4138,23 @@ mod tests {
 
         // The agent check reads the host's own agents: `--agent-type` takes names that differ
         // between client versions, and a rejected filter looked like a dead agent.
-        let verify = verify_compute_script("farm-compute-2", true);
+        let verify = verify_compute_script("stackbox-compute-2", true);
         assert!(verify.contains(r#"-c "Agent Type" -c Alive"#));
         assert!(!verify.contains("--agent-type"));
 
         // A template's containers carry its hostname; the copy drops the ones that are not its
         // own, so Kolla's OVS agent registers under this VM and not the source one.
-        let wipe = wipe_template_script("farm-compute-2");
+        let wipe = wipe_template_script("stackbox-compute-2");
         assert!(wipe.contains(r#"if [ -n "$h" ] && [ "$h" != "$me" ]"#));
         assert!(wipe.contains(r#"docker rm -f "$c""#));
-        // The host's own OVS containers carry the farm's network state, not a copy's identity.
+        // The host's own OVS containers carry the stackbox's network state, not a copy's identity.
         assert!(wipe.contains("openvswitch_db | openvswitch_vswitchd) continue"));
 
-        // A control VM alone deploys as a multi-node farm: its external network is physnet2
+        // A control VM alone deploys as a multi-node stackbox: its external network is physnet2
         // on br-ex, and the computes that join later keep the same layout.
-        let control_only = Topology::from_nodes(&[farm::FarmNode {
+        let control_only = Topology::from_nodes(&[stackbox::StackboxNode {
             name: "dev-control".into(),
-            role: Some(farm::Role::Control),
+            role: Some(stackbox::Role::Control),
             index: None,
             status: "running".into(),
             memory_mib: 6656,
@@ -4186,11 +4194,11 @@ mod tests {
         let components = ["keystone", "glance", "placement", "neutron", "nova"].map(String::from);
         let script = forget_computes_script(&components);
         for expected in [
-            "ssh-keygen -R farm-compute-1 ",
+            "ssh-keygen -R stackbox-compute-1 ",
             "ssh-keygen -R 10.254.0.13 ",
             "$os compute service delete \"$id\"",
             "conn.placement.delete_resource_provider(rp)",
-            // A GPU farm's child providers hang off a compute's, and Placement refuses to
+            // A GPU stackbox's child providers hang off a compute's, and Placement refuses to
             // delete a provider with children: the reverse name order deletes them first.
             "key=lambda provider: provider.name,",
             "reverse=True,",
@@ -4200,7 +4208,7 @@ mod tests {
             assert!(script.contains(expected), "{expected}");
         }
         // Nothing of the control VM's own matches.
-        assert!(!script.contains("farm-control"));
+        assert!(!script.contains("stackbox-control"));
         let without = forget_computes_script(&components[..2]);
         assert!(!without.contains("compute service") && !without.contains("network agent"));
 
@@ -4219,14 +4227,14 @@ mod tests {
         };
         let compute = config::Compute {
             name: "demo-compute-1".into(),
-            hostname: "farm-compute-1".into(),
+            hostname: "stackbox-compute-1".into(),
             address: "10.254.0.11".into(),
         };
         assert!(check(
-            &config::multinode_inventory(template, "farm-control", &[]).unwrap()
+            &config::multinode_inventory(template, "stackbox-control", &[]).unwrap()
         ));
         assert!(!check(
-            &config::multinode_inventory(template, "farm-control", &[compute]).unwrap()
+            &config::multinode_inventory(template, "stackbox-control", &[compute]).unwrap()
         ));
         assert!(!check("[control]\nlocalhost\n\n[compute]\nlocalhost\n"));
         assert!(settle_script(None, &components).contains("no compute VM yet"));
@@ -4235,7 +4243,7 @@ mod tests {
     #[test]
     fn each_published_port_maps_to_its_kolla_variable_at_its_own_offset() {
         let exposure = Exposure {
-            host: "farm.example".into(),
+            host: "stackbox.example".into(),
             bind: [127, 0, 0, 1].into(),
             port_base: 15000,
         };
@@ -4258,13 +4266,13 @@ mod tests {
             );
         }
         // Heat's API and CFN ports, and Skyline's console, keep distinct offsets.
-        assert_eq!(urls["heat"], "http://farm.example:15009");
-        assert_eq!(urls["heat-cfn"], "http://farm.example:15010");
-        assert_eq!(urls["barbican"], "http://farm.example:15011");
-        assert_eq!(urls["designate"], "http://farm.example:15012");
-        assert_eq!(urls["magnum"], "http://farm.example:15013");
-        assert_eq!(urls["skyline"], "http://farm.example:15014");
-        assert_eq!(urls["skyline-console"], "http://farm.example:15015");
+        assert_eq!(urls["heat"], "http://stackbox.example:15009");
+        assert_eq!(urls["heat-cfn"], "http://stackbox.example:15010");
+        assert_eq!(urls["barbican"], "http://stackbox.example:15011");
+        assert_eq!(urls["designate"], "http://stackbox.example:15012");
+        assert_eq!(urls["magnum"], "http://stackbox.example:15013");
+        assert_eq!(urls["skyline"], "http://stackbox.example:15014");
+        assert_eq!(urls["skyline-console"], "http://stackbox.example:15015");
         assert_eq!(
             public_url_variable("heat-cfn"),
             Some("heat_cfn_public_base_endpoint")
@@ -4284,10 +4292,16 @@ mod tests {
         };
         let map = rebind_map(
             &exposure("localhost", 15000),
-            &exposure("farm.example", 15020),
+            &exposure("stackbox.example", 15020),
         );
-        assert_eq!(map["http://localhost:15000"], "http://farm.example:15020");
-        assert_eq!(map["http://localhost:15005"], "http://farm.example:15025");
+        assert_eq!(
+            map["http://localhost:15000"],
+            "http://stackbox.example:15020"
+        );
+        assert_eq!(
+            map["http://localhost:15005"],
+            "http://stackbox.example:15025"
+        );
         assert_eq!(
             map.len(),
             crate::model::COMPONENTS
@@ -4426,7 +4440,7 @@ mod tests {
         }
     }
 
-    /// Every `<<'PY'` program of a GPU farm's verify script must still parse as Python after
+    /// Every `<<'PY'` program of a GPU stackbox's verify script must still parse as Python after
     /// `format!` has turned `{{` into `{`.
     #[test]
     fn the_gpu_verify_script_holds_valid_python() {
@@ -4463,7 +4477,7 @@ mod tests {
                 devices: Some(2),
                 ..Default::default()
             }),
-            &["farm-compute-2".to_owned()],
+            &["stackbox-compute-2".to_owned()],
         );
         for block in python_blocks(&advertise) {
             assert_python_parses(&block);
@@ -4496,9 +4510,12 @@ mod tests {
             ),
             gpu_advertise_script(
                 Some(&shaped),
-                &["farm-compute-1".to_owned(), "farm-compute-2".to_owned()],
+                &[
+                    "stackbox-compute-1".to_owned(),
+                    "stackbox-compute-2".to_owned(),
+                ],
             ),
-            // The same farm on a release whose nova-compute carries farm's backport.
+            // The same stackbox on a release whose nova-compute carries stackbox's backport.
             verify_script(
                 &components,
                 2,
@@ -4569,14 +4586,17 @@ mod tests {
             devices: Some(2),
             ..Default::default()
         };
-        let hosts = ["farm-compute-1".to_owned(), "farm-compute-2".to_owned()];
+        let hosts = [
+            "stackbox-compute-1".to_owned(),
+            "stackbox-compute-2".to_owned(),
+        ];
         let script = gpu_advertise_script(Some(&gpu), &hosts);
         for expected in [
             // A provider per fake card, under the name a vGPU deployment's Nova would use.
-            "farm-compute-1_pci_0000_84_00_0=3",
-            "farm-compute-1_pci_0000_85_00_0=2",
-            "farm-compute-2_pci_0000_84_00_0=3",
-            "farm-compute-2_pci_0000_85_00_0=2",
+            "stackbox-compute-1_pci_0000_84_00_0=3",
+            "stackbox-compute-1_pci_0000_85_00_0=2",
+            "stackbox-compute-2_pci_0000_84_00_0=3",
+            "stackbox-compute-2_pci_0000_85_00_0=2",
             // The child hangs off the compute's own provider, never the root's inventory.
             "\"parent_provider_uuid\": providers[host]",
             "\"resource_provider_generation\": generation",
@@ -4593,15 +4613,15 @@ mod tests {
             "location.rstrip(\"/\").rsplit(\"/\", 1)[-1]",
             "uuid = named(name)",
             // A provider takes only traits the trait table holds; a fresh Placement has
-            // none of farm's CUSTOM_* names.
+            // none of stackbox's CUSTOM_* names.
             "call(\"PUT\", \"/traits/\" + trait)",
-            // A request farm can shape: class and traits the flavor will ask for.
-            "python3 - VGPU \"CUSTOM_FARM_VGPU\"",
+            // A request stackbox can shape: class and traits the flavor will ask for.
+            "python3 - VGPU \"CUSTOM_STACKBOX_VGPU\"",
             "time.sleep(5)",
         ] {
             assert!(script.contains(expected), "{expected}\n{script}");
         }
-        // A farm that named its own contract advertises that one.
+        // A stackbox that named its own contract advertises that one.
         let custom = crate::model::GpuConfig {
             mode: crate::model::GpuMode::Simulated,
             count: 1,
@@ -4615,10 +4635,10 @@ mod tests {
             "{script}"
         );
         assert!(
-            script.contains("farm-compute-1_pci_0000_84_00_0=1"),
+            script.contains("stackbox-compute-1_pci_0000_84_00_0=1"),
             "{script}"
         );
-        // The mediated device's providers are Nova's; farm advertises nothing for them.
+        // The mediated device's providers are Nova's; stackbox advertises nothing for them.
         assert!(
             gpu_advertise_script(
                 Some(&crate::model::GpuConfig {
@@ -4634,7 +4654,7 @@ mod tests {
     }
 
     #[test]
-    fn a_gpu_farm_verifies_its_providers_flavor_and_allocation() {
+    fn a_gpu_stackbox_verifies_its_providers_flavor_and_allocation() {
         let components = ["keystone", "glance", "placement", "neutron", "nova"].map(String::from);
         let simulated = crate::model::GpuConfig {
             mode: crate::model::GpuMode::Simulated,
@@ -4643,20 +4663,20 @@ mod tests {
         };
         let script = verify_script(&components, 1, OPENSTACK_RELEASE, Some(&simulated));
         for expected in [
-            // Advertised first, then checked: both name the child providers of the farm.
+            // Advertised first, then checked: both name the child providers of the stackbox.
             "GPU(simulated) Placement 리소스 프로바이더 광고",
-            "farm-compute-1_pci_0000_84_00_0=4",
+            "stackbox-compute-1_pci_0000_84_00_0=4",
             "GPU(simulated) 자식 리소스 프로바이더 확인",
             "\"parent_provider_uuid\"",
             "carries %s on its root provider",
             "lacks trait(s)",
             // The flavor asks for the standard class and the trait; the instance's
-            // allocation must land on a provider this farm advertised.
-            "farm.vgpu",
+            // allocation must land on a provider this stackbox advertised.
+            "stackbox.vgpu",
             "resources:VGPU=1",
-            "trait:CUSTOM_FARM_VGPU=required",
-            "$os flavor set farm.vgpu",
-            "which this farm did not advertise",
+            "trait:CUSTOM_STACKBOX_VGPU=required",
+            "$os flavor set stackbox.vgpu",
+            "which this stackbox did not advertise",
             "$work/gpu-providers",
             "/allocations/",
             // An oversubscribed request is refused by the scheduler, with the fault to show
@@ -4670,7 +4690,7 @@ mod tests {
         }
         // Only the mediated device has a libvirt hostdev to look for.
         assert!(!script.contains("type='mdev'"));
-        // A farm that asked for no trait writes none into its flavor.
+        // A stackbox that asked for no trait writes none into its flavor.
         let bare = crate::model::GpuConfig {
             mode: crate::model::GpuMode::Simulated,
             count: 1,
@@ -4678,8 +4698,8 @@ mod tests {
             ..Default::default()
         };
         let script = verify_script(&components, 1, OPENSTACK_RELEASE, Some(&bare));
-        assert!(script.contains("--property resources:VGPU=1 farm.vgpu"));
-        assert!(!script.contains("trait:CUSTOM_FARM_VGPU"));
+        assert!(script.contains("--property resources:VGPU=1 stackbox.vgpu"));
+        assert!(!script.contains("trait:CUSTOM_STACKBOX_VGPU"));
 
         let mtty = crate::model::GpuConfig {
             mode: crate::model::GpuMode::Mtty,
@@ -4689,51 +4709,51 @@ mod tests {
         let script = verify_script(&components, 2, OPENSTACK_RELEASE, Some(&mtty));
         for expected in [
             "GPU(mtty)",
-            "farm.vgpu",
+            "stackbox.vgpu",
             "resources:VGPU=1",
-            "farm-compute-1,farm-compute-2 \"$placement\"",
-            "farm-compute-1 farm-compute-2",
-            "$os flavor set farm.vgpu",
+            "stackbox-compute-1,stackbox-compute-2 \"$placement\"",
+            "stackbox-compute-1 stackbox-compute-2",
+            "$os flavor set stackbox.vgpu",
             "type='mdev'",
             "docker exec nova_libvirt",
             "inventory on %d compute resource(s)",
         ] {
             assert!(script.contains(expected), "{expected}");
         }
-        // The mediated device's inventory is Nova's, so farm neither advertises nor
+        // The mediated device's inventory is Nova's, so stackbox neither advertises nor
         // oversubscribes it; the flavor carries no trait the driver does not set.
         assert!(
             !script.contains("Placement 리소스 프로바이더 광고"),
             "{script}"
         );
-        assert!(!script.contains("farm.vgpu-full"), "{script}");
+        assert!(!script.contains("stackbox.vgpu-full"), "{script}");
         assert!(!script.contains("trait:VGPU"));
-        // 2026.2 is the first release whose nova has the mtty support itself, so this farm's
+        // 2026.2 is the first release whose nova has the mtty support itself, so this stackbox's
         // container needs no backport and the verification asks for none.
         assert!(!script.contains("백포트"), "{script}");
 
-        // On an older release farm patches nova-compute at start; the verification runs the
+        // On an older release stackbox patches nova-compute at start; the verification runs the
         // same hook in `--check` mode on every compute before it boots an instance.
         let backported = verify_script(&components, 2, "2026.1", Some(&mtty));
         for expected in [
             "nova-compute의 Nova mtty 백포트 확인 (2026.1)",
             "docker exec nova_compute sha256sum /var/lib/kolla/venv/lib/python3.12/site-packages/nova/virt/libvirt/config.py /var/lib/kolla/venv/lib/python3.12/site-packages/nova/virt/libvirt/driver.py",
-            "sha256sum /etc/farm/nova-mtty/2026.1/nova/virt/libvirt/config.py /etc/farm/nova-mtty/2026.1/nova/virt/libvirt/driver.py",
-            "for host in farm-compute-1 farm-compute-2; do",
-            "nova-compute is not running with farm's Nova mtty backport files",
+            "sha256sum /etc/stackbox/nova-mtty/2026.1/nova/virt/libvirt/config.py /etc/stackbox/nova-mtty/2026.1/nova/virt/libvirt/driver.py",
+            "for host in stackbox-compute-1 stackbox-compute-2; do",
+            "nova-compute is not running with stackbox's Nova mtty backport files",
         ] {
             assert!(backported.contains(expected), "{expected}");
         }
-        // It is a farm's own check: a release farm does not patch (2025.1 is patched too,
+        // It is a stackbox's own check: a release stackbox does not patch (2025.1 is patched too,
         // and a simulated GPU never is) must not claim one.
         assert!(
             !verify_script(&components, 2, "2025.1", Some(&simulated)).contains("백포트"),
             "{script}"
         );
         assert!(!verify_script(&components, 2, "2026.1", None).contains("백포트"));
-        // A farm without a GPU verifies no GPU.
+        // A stackbox without a GPU verifies no GPU.
         let plain = verify_script(&components, 1, OPENSTACK_RELEASE, None);
-        assert!(!plain.contains("farm.vgpu"));
+        assert!(!plain.contains("stackbox.vgpu"));
         assert!(!plain.contains("GPU("));
     }
 
@@ -4799,7 +4819,7 @@ esac
         .unwrap();
         std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755))
             .unwrap();
-        let script = verify_compute_script("farm-compute-1", true)
+        let script = verify_compute_script("stackbox-compute-1", true)
             .replace("/etc/kolla/admin-openrc.sh", rc.to_str().unwrap())
             .replace("/opt/osc/bin/openstack", fake.to_str().unwrap())
             .replace("sleep 5", "sleep 0.01");
@@ -4820,11 +4840,11 @@ esac
             String::from_utf8_lossy(&output.stderr)
         );
         assert!(
-            stdout.contains("nova-compute farm-compute-1 up"),
+            stdout.contains("nova-compute stackbox-compute-1 up"),
             "{stdout}"
         );
         assert!(
-            stdout.contains("Open vSwitch agent on farm-compute-1 alive"),
+            stdout.contains("Open vSwitch agent on stackbox-compute-1 alive"),
             "{stdout}"
         );
 
@@ -4833,7 +4853,7 @@ esac
         assert!(!output.status.success());
         assert!(
             stderr.contains(
-                "nova-compute farm-compute-1 is not up: missing (last error: Missing value auth-url required)"
+                "nova-compute stackbox-compute-1 is not up: missing (last error: Missing value auth-url required)"
             ),
             "{stderr}"
         );
@@ -4843,7 +4863,7 @@ esac
         assert!(!output.status.success());
         assert!(
             stderr.contains(
-                "Open vSwitch agent on farm-compute-1 is not alive: missing (last error: Unable to establish connection to https://keystone:5000)"
+                "Open vSwitch agent on stackbox-compute-1 is not alive: missing (last error: Unable to establish connection to https://keystone:5000)"
             ),
             "{stderr}"
         );
@@ -4875,7 +4895,7 @@ esac
         .unwrap();
         std::fs::set_permissions(&mktemp, std::os::unix::fs::PermissionsExt::from_mode(0o755))
             .unwrap();
-        let script = verify_compute_script("farm-compute-1", false)
+        let script = verify_compute_script("stackbox-compute-1", false)
             .replace("/etc/kolla/admin-openrc.sh", rc.to_str().unwrap())
             .replace("/opt/osc/bin/openstack", fake.to_str().unwrap())
             .replace("sleep 5", "false");
@@ -4900,7 +4920,7 @@ esac
     /// The check runs under `set -euo pipefail` and reads libvirt's XML over ssh. A reader that
     /// stops at its first match (`grep -q`) closes the pipe while ssh is still writing the other
     /// domains, and ssh's 255 then fails the pipeline through `pipefail` although the mdev is
-    /// bound: with two farm guests up, `deploy --from verify` failed 8 times in 10.
+    /// bound: with two stackbox guests up, `deploy --from verify` failed 8 times in 10.
     #[test]
     fn the_mtty_check_reads_the_libvirt_xml_to_the_end() {
         let components = ["keystone", "glance", "placement", "neutron", "nova"].map(String::from);
@@ -4937,16 +4957,18 @@ for _ in $(seq 200); do printf '%s\n' "  <interface type='network'/>"; done
         );
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(
-            stdout
-                .contains("mtty mdev is bound to the instance's libvirt domain on farm-compute-1"),
+            stdout.contains(
+                "mtty mdev is bound to the instance's libvirt domain on stackbox-compute-1"
+            ),
             "{stdout}"
         );
         // A domain without an mdev hostdev still fails the check, so the fix stays a check.
         let output = run_mtty_check(&check, "printf '%s\\n' \"<domain><devices/></domain>\"\n");
         assert!(!output.status.success());
         assert!(
-            String::from_utf8_lossy(&output.stderr)
-                .contains("no libvirt domain on farm-compute-1 farm-compute-2 has an mdev hostdev"),
+            String::from_utf8_lossy(&output.stderr).contains(
+                "no libvirt domain on stackbox-compute-1 stackbox-compute-2 has an mdev hostdev"
+            ),
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
@@ -4990,7 +5012,7 @@ for _ in $(seq 200); do printf '%s\n' "  <interface type='network'/>"; done
         format!("http://{addr}")
     }
 
-    /// The inventory line is read as the farm's capacity, so it names the class total a
+    /// The inventory line is read as the stackbox's capacity, so it names the class total a
     /// compute offers. Reporting the requested count made a 24-device kernel look like 1.
     #[test]
     fn the_gpu_inventory_log_names_the_class_total_not_the_request() {
@@ -5007,14 +5029,14 @@ for _ in $(seq 200); do printf '%s\n' "  <interface type='network'/>"; done
         );
         let block = python_blocks(&script).remove(0);
         // Nova discovers the kernel's mdev type as a child provider of the compute, whose
-        // inventory covers all 24 devices however many this farm requested.
+        // inventory covers all 24 devices however many this stackbox requested.
         let placement = placement_server(
-            r#"{"resource_providers":[{"uuid":"p1","name":"farm-compute-1_mtty_mtty"}]}"#,
+            r#"{"resource_providers":[{"uuid":"p1","name":"stackbox-compute-1_mtty_mtty"}]}"#,
             r#"{"inventories":{"VGPU":{"total":24}}}"#,
         );
         let mut child = match Command::new("python3")
             .arg("-")
-            .args(["VGPU", "1", "farm-compute-1", &placement, "token"])
+            .args(["VGPU", "1", "stackbox-compute-1", &placement, "token"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -5123,7 +5145,10 @@ for _ in $(seq 200); do printf '%s\n' "  <interface type='network'/>"; done
         crate::model::GpuConfig {
             mode: crate::model::GpuMode::Simulated,
             count: 2,
-            traits: Some(vec!["CUSTOM_FARM_VGPU".into(), "CUSTOM_E2E_EXTRA".into()]),
+            traits: Some(vec![
+                "CUSTOM_STACKBOX_VGPU".into(),
+                "CUSTOM_E2E_EXTRA".into(),
+            ]),
             ..Default::default()
         }
     }
@@ -5135,20 +5160,20 @@ for _ in $(seq 200); do printf '%s\n' "  <interface type='network'/>"; done
     #[test]
     fn a_simulated_gpu_advertise_script_creates_its_traits_and_finds_a_new_provider() {
         let gpu = simulated_gpu();
-        let hosts = ["farm-compute-1".to_owned()];
+        let hosts = ["stackbox-compute-1".to_owned()];
         let block = python_blocks(&gpu_advertise_script(Some(&gpu), &hosts)).remove(0);
         let Some(placement) = FakePlacement::start() else {
             eprintln!("python3 unavailable, skipping the gpu advertise test");
             return;
         };
-        let provider = "farm-compute-1_pci_0000_84_00_0";
-        let spec = format!("farm-compute-1:{provider}=2");
+        let provider = "stackbox-compute-1_pci_0000_84_00_0";
+        let spec = format!("stackbox-compute-1:{provider}=2");
         for run in 0..2 {
             let output = run_python_block(
                 &block,
                 &[
                     "VGPU",
-                    "CUSTOM_FARM_VGPU,CUSTOM_E2E_EXTRA",
+                    "CUSTOM_STACKBOX_VGPU,CUSTOM_E2E_EXTRA",
                     &placement.url,
                     "token",
                     &spec,
@@ -5159,13 +5184,15 @@ for _ in $(seq 200); do printf '%s\n' "  <interface type='network'/>"; done
             let stdout = String::from_utf8_lossy(&output.stdout);
             assert!(
                 stdout.contains(&format!(
-                    "{provider}: VGPU=2, traits CUSTOM_FARM_VGPU,CUSTOM_E2E_EXTRA"
+                    "{provider}: VGPU=2, traits CUSTOM_STACKBOX_VGPU,CUSTOM_E2E_EXTRA"
                 )),
                 "run {run}: {stdout}"
             );
             if run == 0 {
                 assert!(
-                    stdout.contains(&format!("{provider}: created as a child of farm-compute-1")),
+                    stdout.contains(&format!(
+                        "{provider}: created as a child of stackbox-compute-1"
+                    )),
                     "{stdout}"
                 );
             }
@@ -5175,7 +5202,7 @@ for _ in $(seq 200); do printf '%s\n' "  <interface type='network'/>"; done
         let state = placement.state();
         assert_eq!(
             state["traits"],
-            serde_json::json!(["CUSTOM_E2E_EXTRA", "CUSTOM_FARM_VGPU"])
+            serde_json::json!(["CUSTOM_E2E_EXTRA", "CUSTOM_STACKBOX_VGPU"])
         );
         let providers = state["providers"].as_array().unwrap();
         assert_eq!(providers.len(), 2, "{state}");
@@ -5187,7 +5214,7 @@ for _ in $(seq 200); do printf '%s\n' "  <interface type='network'/>"; done
         assert_eq!(child["inventories"]["VGPU"]["total"], 2);
         assert_eq!(
             child["traits"],
-            serde_json::json!(["CUSTOM_FARM_VGPU", "CUSTOM_E2E_EXTRA"])
+            serde_json::json!(["CUSTOM_STACKBOX_VGPU", "CUSTOM_E2E_EXTRA"])
         );
         assert_eq!(state["microversions"], serde_json::json!(["1.14"]));
     }
@@ -5199,20 +5226,20 @@ for _ in $(seq 200); do printf '%s\n' "  <interface type='network'/>"; done
     #[test]
     fn a_simulated_gpu_inventory_check_reads_traits_as_strings_and_fails_on_a_missing_one() {
         let gpu = simulated_gpu();
-        let hosts = ["farm-compute-1".to_owned()];
+        let hosts = ["stackbox-compute-1".to_owned()];
         let Some(placement) = FakePlacement::start() else {
             eprintln!("python3 unavailable, skipping the gpu inventory test");
             return;
         };
-        let provider = "farm-compute-1_pci_0000_84_00_0";
-        let spec = format!("farm-compute-1:{provider}=2");
+        let provider = "stackbox-compute-1_pci_0000_84_00_0";
+        let spec = format!("stackbox-compute-1:{provider}=2");
         // A deploy advertises first, so the check has something to read.
         let advertise = python_blocks(&gpu_advertise_script(Some(&gpu), &hosts)).remove(0);
         let output = run_python_block(
             &advertise,
             &[
                 "VGPU",
-                "CUSTOM_FARM_VGPU,CUSTOM_E2E_EXTRA",
+                "CUSTOM_STACKBOX_VGPU,CUSTOM_E2E_EXTRA",
                 &placement.url,
                 "token",
                 &spec,
@@ -5230,7 +5257,7 @@ for _ in $(seq 200); do printf '%s\n' "  <interface type='network'/>"; done
             &check,
             &[
                 "VGPU",
-                "CUSTOM_FARM_VGPU,CUSTOM_E2E_EXTRA",
+                "CUSTOM_STACKBOX_VGPU,CUSTOM_E2E_EXTRA",
                 out.to_str().unwrap(),
                 &placement.url,
                 "token",
@@ -5251,7 +5278,7 @@ for _ in $(seq 200); do printf '%s\n' "  <interface type='network'/>"; done
         assert!(lines.starts_with(provider), "{lines}");
         // A trait the provider does not carry is still a failure.
         let stricter = crate::model::GpuConfig {
-            traits: Some(vec!["CUSTOM_FARM_VGPU".into(), "CUSTOM_EXTRA_2".into()]),
+            traits: Some(vec!["CUSTOM_STACKBOX_VGPU".into(), "CUSTOM_EXTRA_2".into()]),
             ..gpu
         };
         let check = python_blocks(&simulated_inventory_check(&stricter, &hosts)).remove(0);
@@ -5259,7 +5286,7 @@ for _ in $(seq 200); do printf '%s\n' "  <interface type='network'/>"; done
             &check,
             &[
                 "VGPU",
-                "CUSTOM_FARM_VGPU,CUSTOM_EXTRA_2",
+                "CUSTOM_STACKBOX_VGPU,CUSTOM_EXTRA_2",
                 out.to_str().unwrap(),
                 &placement.url,
                 "token",
@@ -5296,7 +5323,7 @@ for _ in $(seq 200); do printf '%s\n' "  <interface type='network'/>"; done
         assert_eq!(devices[0].product_id, "1521");
         assert_eq!(devices[0].iommu_group, 3);
         assert_eq!(devices[1].iommu_group, 4);
-        // More devices than the farm asked for is fine.
+        // More devices than the stackbox asked for is fine.
         assert_eq!(parse_guest_pci_probe(&output, 1).unwrap().len(), 2);
     }
 
@@ -5343,7 +5370,7 @@ for _ in $(seq 200); do printf '%s\n' "  <interface type='network'/>"; done
     }
 
     #[test]
-    fn the_guest_pci_probe_refuses_fewer_devices_than_the_farm_passes_through() {
+    fn the_guest_pci_probe_refuses_fewer_devices_than_the_stackbox_passes_through() {
         let output = healthy_probe(&guest_line("0000:00:05.0", "vfio-pci", "3", "yes"));
         let error = parse_guest_pci_probe(&output, 2).unwrap_err().to_string();
         assert!(error.contains("1 PCI devices"), "{error}");
@@ -5393,37 +5420,37 @@ for _ in $(seq 200); do printf '%s\n' "  <interface type='network'/>"; done
 
     #[test]
     fn the_pci_verify_script_creates_the_flavors_and_reads_the_domain_xml() {
-        let script = pci_verify_script("farm-compute-1", &pci_devices_for_verify());
+        let script = pci_verify_script("stackbox-compute-1", &pci_devices_for_verify());
         assert!(
-            script.contains("flavor create --ram 512 --disk 1 --vcpus 1 farm.pci "),
+            script.contains("flavor create --ram 512 --disk 1 --vcpus 1 stackbox.pci "),
             "{script}"
         );
         assert!(
-            script.contains("\"pci_passthrough:alias=farm-pci:1\""),
+            script.contains("\"pci_passthrough:alias=stackbox-pci:1\""),
             "{script}"
         );
         // A second device pair gets its own flavor and alias.
-        assert!(script.contains("farm.pci-2"), "{script}");
+        assert!(script.contains("stackbox.pci-2"), "{script}");
         assert!(
-            script.contains("\"pci_passthrough:alias=farm-pci-2:1\""),
+            script.contains("\"pci_passthrough:alias=stackbox-pci-2:1\""),
             "{script}"
         );
-        assert!(script.contains("--flavor farm.pci "), "{script}");
+        assert!(script.contains("--flavor stackbox.pci "), "{script}");
         assert!(script.contains("virsh dumpxml $inst"), "{script}");
         assert!(
             script.contains("<hostdev mode='subsystem' type='pci'"),
             "{script}"
         );
         assert!(script.contains("server delete --wait"), "{script}");
-        assert!(script.contains("farm-pci-verify-"), "{script}");
+        assert!(script.contains("stackbox-pci-verify-"), "{script}");
         // One pair: no second flavor.
-        let single = pci_verify_script("farm-compute-1", &pci_devices_for_verify()[..1]);
-        assert!(!single.contains("farm.pci-2"), "{single}");
+        let single = pci_verify_script("stackbox-compute-1", &pci_devices_for_verify()[..1]);
+        assert!(!single.contains("stackbox.pci-2"), "{single}");
     }
 
     #[test]
     fn the_pci_verify_script_is_safe_under_pipefail() {
-        let script = pci_verify_script("farm-compute-1", &pci_devices_for_verify());
+        let script = pci_verify_script("stackbox-compute-1", &pci_devices_for_verify());
         assert!(!script.contains("grep -q"), "{script}");
         assert!(!script.contains("| head"), "{script}");
         assert!(!script.contains("grep -m"), "{script}");
@@ -5459,7 +5486,7 @@ for _ in $(seq 200); do printf '%s\n' "  <interface type='network'/>"; done
     /// with its hostdev and keeps writing the rest. The XML is read whole, so ssh ends 0.
     #[test]
     fn the_pci_check_reads_the_libvirt_xml_to_the_end() {
-        let script = pci_verify_script("farm-compute-1", &pci_devices_for_verify());
+        let script = pci_verify_script("stackbox-compute-1", &pci_devices_for_verify());
         let check = pci_check(&script);
         let output = run_mtty_check(
             &check,
@@ -5480,7 +5507,7 @@ for _ in $(seq 200); do printf '%s\n' "  <interface type='network'/>"; done
         let stdout = String::from_utf8_lossy(&output.stdout);
         assert!(
             stdout.contains(
-                "PCI hostdev is bound to the instance's libvirt domain on farm-compute-1"
+                "PCI hostdev is bound to the instance's libvirt domain on stackbox-compute-1"
             ),
             "{stdout}"
         );
@@ -5491,8 +5518,9 @@ for _ in $(seq 200); do printf '%s\n' "  <interface type='network'/>"; done
         );
         assert!(!output.status.success());
         assert!(
-            String::from_utf8_lossy(&output.stderr)
-                .contains("libvirt domain instance-00000001 on farm-compute-1 has no PCI hostdev"),
+            String::from_utf8_lossy(&output.stderr).contains(
+                "libvirt domain instance-00000001 on stackbox-compute-1 has no PCI hostdev"
+            ),
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );

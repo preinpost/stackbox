@@ -42,13 +42,13 @@ function breadcrumb(pathname: string): Crumb[] {
   if (pathname.startsWith("/hosts")) return [{ label: "Hosts" }];
   if (pathname.startsWith("/jobs")) return [{ label: "Jobs" }];
   if (pathname.startsWith("/snapshots")) return [{ label: "Snapshots" }];
-  const farm = pathname.match(/^\/farms\/([^/]+)/);
-  if (farm)
+  const stackbox = pathname.match(/^\/stackboxes\/([^/]+)/);
+  if (stackbox)
     return [
-      { label: "Farms", to: "/" },
-      { label: decodeURIComponent(farm[1]) },
+      { label: "Stackboxes", to: "/" },
+      { label: decodeURIComponent(stackbox[1]) },
     ];
-  return [{ label: "Farms" }];
+  return [{ label: "Stackboxes" }];
 }
 
 export function Shell() {
@@ -87,17 +87,17 @@ export function Shell() {
   const budget = capacities.reduce((sum, c) => sum + c.memory_budget_mib, 0);
   const reservation = budget ? Math.min(100, (reserved / budget) * 100) : 0;
   const navigation = [
-    // Hosts come first: a farm is always created on one of them.
+    // Hosts come first: a stackbox is always created on one of them.
     { to: "/hosts" as const, label: "Hosts", icon: Server },
-    { to: "/" as const, label: "Farms", icon: LayoutGrid },
+    { to: "/" as const, label: "Stackboxes", icon: LayoutGrid },
     { to: "/snapshots" as const, label: "Snapshots", icon: Snowflake },
     { to: "/jobs" as const, label: "Jobs", icon: Activity },
   ];
   const sectionActive = (to: string) =>
-    to === "/" && pathname.startsWith("/farms/");
+    to === "/" && pathname.startsWith("/stackboxes/");
   const navActive = (to: string) =>
     to === "/"
-      ? pathname === "/" || pathname.startsWith("/farms/")
+      ? pathname === "/" || pathname.startsWith("/stackboxes/")
       : pathname.startsWith(to);
   const dark = theme === "dark";
   return (
@@ -118,7 +118,7 @@ export function Shell() {
             <Boxes size={18} strokeWidth={1.8} />
           </span>
           <span className="brand-name">
-            farm<span className="brand-period">.</span>
+            stackbox<span className="brand-period">.</span>
           </span>
           <span className="version-tag">LOCAL</span>
         </Link>
@@ -211,7 +211,7 @@ export function Shell() {
             ) : (
               <p>
                 {hosts.isError
-                  ? "farmd 연결 상태를 확인합니다"
+                  ? "stackboxd 연결 상태를 확인합니다"
                   : "로컬 호스트나 원격 서버를 등록하세요"}
               </p>
             )}
@@ -273,10 +273,10 @@ export function Shell() {
           {coordinator.data?.build_id && (
             <span
               className="build-chip"
-              title={`farmd build ${coordinator.data.build_id}`}
+              title={`stackboxd build ${coordinator.data.build_id}`}
             >
               <span className="dot" aria-hidden="true" />
-              farmd {coordinator.data.build_id.slice(0, 7)}
+              stackboxd {coordinator.data.build_id.slice(0, 7)}
             </span>
           )}
           <button
@@ -305,7 +305,7 @@ export function Shell() {
           <Outlet />
         </main>
         <footer className="main-footer">
-          <span>farm · OpenStack VM workspace</span>
+          <span>stackbox · OpenStack VM workspace</span>
           <span>호스트에서 직접 실행되는 환경</span>
         </footer>
       </div>

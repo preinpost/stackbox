@@ -6,8 +6,8 @@ COPY docker ./docker
 COPY guest ./guest
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/build/target \
-    cargo build --locked --release --bin farm-agent && \
-    mkdir /out && cp target/release/farm-agent /out/farm-agent
+    cargo build --locked --release --bin stackbox-agent && \
+    mkdir /out && cp target/release/stackbox-agent /out/stackbox-agent
 
 FROM scratch AS artifact
-COPY --from=build /out/farm-agent /farm-agent
+COPY --from=build /out/stackbox-agent /stackbox-agent

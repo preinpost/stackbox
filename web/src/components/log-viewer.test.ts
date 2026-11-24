@@ -84,7 +84,7 @@ describe("log stream connection state", () => {
 
   it("shows reconnecting while the browser is still retrying", () => {
     let last = { connection: "", gap: false };
-    subscribe("farm-a", (s) => (last = s));
+    subscribe("stackbox-a", (s) => (last = s));
     current().readyState = FakeEventSource.CONNECTING;
     current().fire("error");
     expect(last.connection).toBe("reconnecting");
@@ -92,14 +92,14 @@ describe("log stream connection state", () => {
 
   it("marks the stream closed when EventSource gave up, and reconnects on demand", () => {
     let last = { connection: "", gap: false };
-    subscribe("farm-b", (s) => (last = s));
+    subscribe("stackbox-b", (s) => (last = s));
     const first = current();
     first.readyState = FakeEventSource.CLOSED;
     first.fire("error");
     expect(last.connection).toBe("closed");
     expect(FakeEventSource.instances).toHaveLength(1);
 
-    reconnectLogStream("farm-b", client);
+    reconnectLogStream("stackbox-b", client);
     expect(FakeEventSource.instances).toHaveLength(2);
     expect(current().url).toBe(first.url);
     expect(last.connection).toBe("connecting");
@@ -107,13 +107,13 @@ describe("log stream connection state", () => {
 
   it("clears a stale gap flag when a new stream is opened", () => {
     let last = { connection: "", gap: false };
-    subscribe("farm-c", (s) => (last = s));
+    subscribe("stackbox-c", (s) => (last = s));
     current().fire("gap", {});
     expect(last.gap).toBe(true);
 
     current().readyState = FakeEventSource.CLOSED;
     current().fire("error");
-    reconnectLogStream("farm-c", client);
+    reconnectLogStream("stackbox-c", client);
     expect(last.gap).toBe(false);
   });
 });

@@ -1,9 +1,9 @@
-//! The coordinator's relay between the switches of a farm that spans hosts. Each host's switch
-//! keeps an uplink open per such farm (`GET /api/v1/link-relay?farm=<id>&host=<host>` with the
-//! uplink's token); the relay passes every trunk message to the farm's other hosts, whose
+//! The coordinator's relay between the switches of a stackbox that spans hosts. Each host's switch
+//! keeps an uplink open per such stackbox (`GET /api/v1/link-relay?stackbox=<id>&host=<host>` with the
+//! uplink's token); the relay passes every trunk message to the stackbox's other hosts, whose
 //! switches deliver its frames. Messages are sealed end to end with each host's own key
 //! ([`super::seal`]); the relay opens them, routes by segment and seals them anew for each
-//! receiving host, so a TLS proxy in front of it sees only ciphertext. It learns nothing itself: with a farm on two hosts, each
+//! receiving host, so a TLS proxy in front of it sees only ciphertext. It learns nothing itself: with a stackbox on two hosts, each
 //! message has one place to go.
 
 use std::{
@@ -62,7 +62,7 @@ impl RelayTlsMode {
     }
 }
 
-/// Where farms that span hosts join, set from the portal or `PUT /api/v1/relay`.
+/// Where stackboxes that span hosts join, set from the portal or `PUT /api/v1/relay`.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RelaySettings {
@@ -140,11 +140,11 @@ pub fn router(relay: Arc<Relay>) -> Router {
 
 #[derive(Deserialize)]
 struct UplinkQuery {
-    farm: String,
+    stackbox: String,
     host: String,
 }
 
-/// A host's switch joins a farm that spans hosts here, with that farm's uplink token.
+/// A host's switch joins a stackbox that spans hosts here, with that stackbox's uplink token.
 async fn upgrade(
     State(relay): State<Arc<Relay>>,
     Query(query): Query<UplinkQuery>,
@@ -156,7 +156,7 @@ async fn upgrade(
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
         .unwrap_or_default();
-    let Ok(accepted) = relay.accept(&query.farm, &query.host, token) else {
+    let Ok(accepted) = relay.accept(&query.stackbox, &query.host, token) else {
         return (StatusCode::UNAUTHORIZED, "uplink token required\n").into_response();
     };
     let limit = super::MAX_MESSAGE + 256;
@@ -166,7 +166,7 @@ async fn upgrade(
 }
 
 #[derive(Default)]
-struct Farm {
+struct Stackbox {
     /// Token hash and sealing key of each host's uplink.
     tokens: HashMap<String, (String, String)>,
     /// Connected uplinks by host.
@@ -175,13 +175,13 @@ struct Farm {
 
 #[derive(Default)]
 pub struct Relay {
-    farms: Mutex<HashMap<String, Farm>>,
+    stackboxes: Mutex<HashMap<String, Stackbox>>,
     next: AtomicU64,
 }
 
 /// An accepted uplink, from [`Relay::accept`] until [`Relay::serve`] ends.
 pub struct Accepted {
-    farm: String,
+    stackbox: String,
     host: String,
     id: u64,
     key: String,
@@ -189,26 +189,26 @@ pub struct Accepted {
 }
 
 impl Relay {
-    /// Let `host` join `farm`'s segments with the token hashed as `token_sha256`, its
+    /// Let `host` join `stackbox`'s segments with the token hashed as `token_sha256`, its
     /// messages sealed with `key`, replacing its previous token and key.
-    pub fn authorize(&self, farm: &str, host: &str, token_sha256: &str, key: &str) {
-        let mut farms = self.farms.lock().unwrap();
-        let entry = farms.entry(farm.to_owned()).or_default();
+    pub fn authorize(&self, stackbox: &str, host: &str, token_sha256: &str, key: &str) {
+        let mut stackboxes = self.stackboxes.lock().unwrap();
+        let entry = stackboxes.entry(stackbox.to_owned()).or_default();
         let new = (token_sha256.to_owned(), key.to_owned());
         if entry.tokens.insert(host.to_owned(), new.clone()) != Some(new) {
             // An uplink authenticated with the old token ends.
             entry.uplinks.remove(host);
         }
     }
-    /// Close the farm's uplinks and refuse new ones.
-    pub fn forget(&self, farm: &str) {
-        self.farms.lock().unwrap().remove(farm);
+    /// Close the stackbox's uplinks and refuse new ones.
+    pub fn forget(&self, stackbox: &str) {
+        self.stackboxes.lock().unwrap().remove(stackbox);
     }
-    /// Hosts whose uplink for `farm` is connected.
-    pub fn connected(&self, farm: &str) -> Vec<String> {
-        let farms = self.farms.lock().unwrap();
-        let mut hosts: Vec<String> = farms
-            .get(farm)
+    /// Hosts whose uplink for `stackbox` is connected.
+    pub fn connected(&self, stackbox: &str) -> Vec<String> {
+        let stackboxes = self.stackboxes.lock().unwrap();
+        let mut hosts: Vec<String> = stackboxes
+            .get(stackbox)
             .map(|f| f.uplinks.keys().cloned().collect())
             .unwrap_or_default();
         hosts.sort();
@@ -216,16 +216,16 @@ impl Relay {
     }
 
     /// Check an uplink's token; a host that reconnects replaces its older uplink.
-    pub fn accept(&self, farm: &str, host: &str, token: &str) -> Result<Accepted> {
-        let mut farms = self.farms.lock().unwrap();
-        let entry = farms
-            .get_mut(farm)
-            .ok_or_else(|| anyhow!("no relay for farm {farm}"))?;
+    pub fn accept(&self, stackbox: &str, host: &str, token: &str) -> Result<Accepted> {
+        let mut stackboxes = self.stackboxes.lock().unwrap();
+        let entry = stackboxes
+            .get_mut(stackbox)
+            .ok_or_else(|| anyhow!("no relay for stackbox {stackbox}"))?;
         let (expected, key) = entry
             .tokens
             .get(host)
             .cloned()
-            .ok_or_else(|| anyhow!("host {host} has no uplink for farm {farm}"))?;
+            .ok_or_else(|| anyhow!("host {host} has no uplink for stackbox {stackbox}"))?;
         use subtle::ConstantTimeEq;
         ensure!(
             bool::from(expected.as_bytes().ct_eq(token_hash(token).as_bytes())),
@@ -235,7 +235,7 @@ impl Relay {
         let (tx, rx) = mpsc::channel(QUEUE);
         entry.uplinks.insert(host.to_owned(), (id, tx));
         Ok(Accepted {
-            farm: farm.to_owned(),
+            stackbox: stackbox.to_owned(),
             host: host.to_owned(),
             id,
             key,
@@ -243,18 +243,18 @@ impl Relay {
         })
     }
 
-    /// Pass the uplink's messages to the farm's other hosts and theirs to it, until either
+    /// Pass the uplink's messages to the stackbox's other hosts and theirs to it, until either
     /// side closes or the uplink is replaced or forgotten.
     pub async fn serve(self: Arc<Self>, accepted: Accepted, socket: WebSocket) {
         let Accepted {
-            farm,
+            stackbox,
             host,
             id,
             key,
             mut rx,
         } = accepted;
         let (mut sink, mut stream) = socket.split();
-        let prefix = format!("{farm}/");
+        let prefix = format!("{stackbox}/");
         // Each side's hello first; every later message is sealed against the other's.
         let session = async {
             use super::seal::{Direction, Opener, Sealer, hello, read_hello};
@@ -278,12 +278,12 @@ impl Relay {
         let (mut sealer, mut opener) = match session.await {
             Ok(session) => session,
             Err(error) => {
-                eprintln!("relay: uplink {farm} from {host}: {error:#}");
-                self.release(&farm, &host, id);
+                eprintln!("relay: uplink {stackbox} from {host}: {error:#}");
+                self.release(&stackbox, &host, id);
                 return;
             }
         };
-        eprintln!("relay: uplink {farm} from {host} up");
+        eprintln!("relay: uplink {stackbox} from {host} up");
         let mut ping = tokio::time::interval(PING_EVERY);
         ping.tick().await;
         loop {
@@ -309,39 +309,39 @@ impl Relay {
                     let plain = match opener.open(&data) {
                         Ok(plain) if plain.len() <= MAX_MESSAGE + 256 => Bytes::from(plain),
                         Ok(_) => {
-                            eprintln!("relay: uplink {farm} from {host} sent an oversized message; closing");
+                            eprintln!("relay: uplink {stackbox} from {host} sent an oversized message; closing");
                             break;
                         }
                         Err(error) => {
-                            eprintln!("relay: uplink {farm} from {host}: {error:#}; closing");
+                            eprintln!("relay: uplink {stackbox} from {host}: {error:#}; closing");
                             break;
                         }
                     };
                     if !decode_trunk(&plain).is_ok_and(|(segment, _)| segment.starts_with(&prefix)) {
-                        eprintln!("relay: uplink {farm} from {host} sent a bad message; closing");
+                        eprintln!("relay: uplink {stackbox} from {host} sent a bad message; closing");
                         break;
                     }
-                    self.pass(&farm, &host, plain);
+                    self.pass(&stackbox, &host, plain);
                 }
             }
         }
-        self.release(&farm, &host, id);
-        eprintln!("relay: uplink {farm} from {host} down");
+        self.release(&stackbox, &host, id);
+        eprintln!("relay: uplink {stackbox} from {host} down");
     }
 
     /// Forget the uplink `id` unless a newer one replaced it.
-    fn release(&self, farm: &str, host: &str, id: u64) {
-        let mut farms = self.farms.lock().unwrap();
-        if let Some(entry) = farms.get_mut(farm)
+    fn release(&self, stackbox: &str, host: &str, id: u64) {
+        let mut stackboxes = self.stackboxes.lock().unwrap();
+        if let Some(entry) = stackboxes.get_mut(stackbox)
             && entry.uplinks.get(host).is_some_and(|(live, _)| *live == id)
         {
             entry.uplinks.remove(host);
         }
     }
 
-    fn pass(&self, farm: &str, from: &str, message: Bytes) {
-        let farms = self.farms.lock().unwrap();
-        let Some(entry) = farms.get(farm) else {
+    fn pass(&self, stackbox: &str, from: &str, message: Bytes) {
+        let stackboxes = self.stackboxes.lock().unwrap();
+        let Some(entry) = stackboxes.get(stackbox) else {
             return;
         };
         for (host, (_, tx)) in &entry.uplinks {
@@ -353,9 +353,9 @@ impl Relay {
     }
 }
 
-/// `wss://<relay>/api/v1/link-relay?farm=<id>&host=<host>` for the relay's base URL as other
+/// `wss://<relay>/api/v1/link-relay?stackbox=<id>&host=<host>` for the relay's base URL as other
 /// hosts reach it (`https://host:port`).
-pub fn uplink_url(base: &str, farm: &str, host: &str) -> Result<String> {
+pub fn uplink_url(base: &str, stackbox: &str, host: &str) -> Result<String> {
     let base = base.trim_end_matches('/');
     let (scheme, rest) = base
         .split_once("://")
@@ -368,10 +368,10 @@ pub fn uplink_url(base: &str, farm: &str, host: &str) -> Result<String> {
         !rest.is_empty() && !rest.contains(['/', '?', '#']),
         "the relay URL {base} must be only a scheme, host and port"
     );
-    super::validate_name(farm)?;
+    super::validate_name(stackbox)?;
     crate::model::validate_id(host)?;
     Ok(format!(
-        "wss://{rest}{}?farm={farm}&host={host}",
+        "wss://{rest}{}?stackbox={stackbox}&host={host}",
         super::RELAY_PATH
     ))
 }
@@ -383,11 +383,11 @@ mod tests {
     #[test]
     fn uplink_urls_always_use_tls() {
         assert_eq!(
-            uplink_url("https://farm.example:10011/", "f", "h1").unwrap(),
-            "wss://farm.example:10011/api/v1/link-relay?farm=f&host=h1"
+            uplink_url("https://stackbox.example:10011/", "f", "h1").unwrap(),
+            "wss://stackbox.example:10011/api/v1/link-relay?stackbox=f&host=h1"
         );
         assert!(uplink_url("http://10.0.0.1:10011", "f", "h1").is_err());
-        assert!(uplink_url("farm.example", "f", "h1").is_err());
+        assert!(uplink_url("stackbox.example", "f", "h1").is_err());
         assert!(uplink_url("https://x/path", "f", "h1").is_err());
         assert_eq!(
             crate::link::tls::url_host("https://10.0.0.1:10011").unwrap(),
@@ -398,8 +398,8 @@ mod tests {
             "::1"
         );
         assert_eq!(
-            crate::link::tls::url_host("https://farm.example").unwrap(),
-            "farm.example"
+            crate::link::tls::url_host("https://stackbox.example").unwrap(),
+            "stackbox.example"
         );
     }
 }

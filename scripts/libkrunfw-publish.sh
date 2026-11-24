@@ -1,5 +1,5 @@
 #!/bin/sh
-# Describes one built libkrunfw for the farm-libkrunfw bucket, the way src/kernel.rs reads it.
+# Describes one built libkrunfw for the stackbox-libkrunfw bucket, the way src/kernel.rs reads it.
 #
 #   scripts/libkrunfw-publish.sh kid MANIFEST
 #       the kernel id: the first 16 hex digits of SHA-256 over the manifest's bytes, which is

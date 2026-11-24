@@ -8,7 +8,7 @@ use crate::remote::{
     ssh::Session,
 };
 
-impl FarmManager {
+impl StackboxManager {
     pub fn hosts(&self) -> Result<Vec<RemoteHost>> {
         let store = self
             .0
@@ -32,9 +32,9 @@ impl FarmManager {
                         },
                         memory_reserved_mib: store
                             .state
-                            .farms
+                            .stackboxes
                             .values()
-                            .filter(|f| f.status != FarmStatus::Deleted)
+                            .filter(|f| f.status != StackboxStatus::Deleted)
                             .map(|f| f.memory_on(&host.id))
                             .sum(),
                     });
@@ -155,13 +155,13 @@ impl FarmManager {
         })
     }
     /// Register a host whose agent will dial in with the returned token
-    /// (`farm agent connect`). No address or credential is stored.
+    /// (`stackbox agent connect`). No address or credential is stored.
     pub fn register_agent_host(&self, request: RegisterAgentHost) -> Result<AgentHostToken> {
         crate::model::validate_id(&request.id).map_err(|e| bad_request(e.to_string()))?;
         let mut secret = [0u8; 32];
         getrandom::getrandom(&mut secret).map_err(|e| anyhow!("cannot generate a token: {e}"))?;
         let token = format!(
-            "farm_{}",
+            "stackbox_{}",
             base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, secret)
         );
         let host = RemoteHost {
@@ -278,12 +278,12 @@ impl FarmManager {
                 return Err(conflict("host has an active job"));
             }
             if state
-                .farms
+                .stackboxes
                 .values()
-                .any(|f| f.hosts().contains(&id) && f.status != FarmStatus::Deleted)
+                .any(|f| f.hosts().contains(&id) && f.status != StackboxStatus::Deleted)
             {
                 return Err(conflict(
-                    "delete all farms on this host before unregistering it",
+                    "delete all stackboxes on this host before unregistering it",
                 ));
             }
             // This removes only coordinator records and encrypted credentials, never remote VMs/files.
@@ -302,11 +302,11 @@ impl FarmManager {
         self.update(|state| {
             self.ensure_accepting()?;
             if state
-                .farms
+                .stackboxes
                 .values()
                 .any(|f| f.hosts().contains(&request.id.as_str()) && f.active_job.is_some())
             {
-                return Err(conflict("a farm operation is running on this host"));
+                return Err(conflict("a stackbox operation is running on this host"));
             }
             let stored = state
                 .hosts
@@ -395,7 +395,7 @@ impl FarmManager {
                     stale.push(host.id.clone());
                 } else {
                     eprintln!(
-                        "host {} runs another build's farm-agent and no current artifact is loaded for it; run `task agent-build` and restart",
+                        "host {} runs another build's stackbox-agent and no current artifact is loaded for it; run `task agent-build` and restart",
                         host.id
                     );
                 }
@@ -405,7 +405,7 @@ impl FarmManager {
         for id in stale {
             match self.start_host_job(&id, HostJobKind::InstallAgent) {
                 Ok(job) => jobs.push(job),
-                Err(error) => eprintln!("cannot reinstall the farm-agent on {id}: {error:#}"),
+                Err(error) => eprintln!("cannot reinstall the stackbox-agent on {id}: {error:#}"),
             }
         }
         Ok(jobs)
@@ -422,11 +422,11 @@ impl FarmManager {
                 return Err(conflict("daemon is draining"));
             }
             if state
-                .farms
+                .stackboxes
                 .values()
                 .any(|f| f.hosts().contains(&id) && f.active_job.is_some())
             {
-                return Err(conflict("a farm operation is running on this host"));
+                return Err(conflict("a stackbox operation is running on this host"));
             }
             let host = &mut state
                 .hosts
@@ -484,30 +484,30 @@ impl FarmManager {
         });
         Ok(job)
     }
-    /// Removes everything this coordinator put on the host: its farms' VMs, any VM left in the
+    /// Removes everything this coordinator put on the host: its stackboxes' VMs, any VM left in the
     /// agent's registry, and then the host record itself. Sandboxes the agent does not own stay.
     async fn purge_host(&self, job: &HostJob) -> Result<HostInspection> {
         let host_id = job.host_id.clone();
         let stored = self.stored_host(&host_id)?;
-        let farms: Vec<String> = self
+        let stackboxes: Vec<String> = self
             .list()?
             .into_iter()
-            .filter(|farm| farm.hosts().contains(&host_id.as_str()))
-            .map(|farm| farm.id)
+            .filter(|stackbox| stackbox.hosts().contains(&host_id.as_str()))
+            .map(|stackbox| stackbox.id)
             .collect();
-        if !farms.is_empty() {
+        if !stackboxes.is_empty() {
             self.host_event(
                 &job.id,
-                &format!("Deleting {} farm(s) and their VMs", farms.len()),
+                &format!("Deleting {} stackbox(s) and their VMs", stackboxes.len()),
             )?;
         }
-        for farm in &farms {
+        for stackbox in &stackboxes {
             // This job owns the host's active_job slot, so bypass that guard.
-            let delete = self.delete_farm(farm, true, false)?;
+            let delete = self.delete_stackbox(stackbox, true, false)?;
             let outcome = self.wait(&delete.id).await?;
             if outcome.status != crate::model::JobStatus::Succeeded {
                 anyhow::bail!(
-                    "deleting farm {farm} failed: {}; the host was left registered",
+                    "deleting stackbox {stackbox} failed: {}; the host was left registered",
                     outcome.error.unwrap_or_else(|| "unknown error".into())
                 );
             }
@@ -583,7 +583,7 @@ impl FarmManager {
                 )
             })?;
         let purged = match reply {
-            Reply::Purged { farms } => farms,
+            Reply::Purged { stackboxes } => stackboxes,
             _ => anyhow::bail!("unexpected remote purge response"),
         };
         self.host_event(
@@ -617,17 +617,17 @@ impl FarmManager {
         inspection.ok_or_else(|| anyhow::anyhow!("host has no inspection to report"))
     }
 
-    /// Tell how the host gets its golden image, which preparation leaves to the first farm.
+    /// Tell how the host gets its golden image, which preparation leaves to the first stackbox.
     fn golden_event(&self, job: &str, inspection: &HostInspection) -> Result<()> {
-        let golden = crate::farm::golden::current();
+        let golden = crate::stackbox::golden::current();
         self.host_event(
             job,
             &if inspection.golden_image_available {
                 format!("Golden image {golden} is built")
             } else {
                 format!(
-                    "Golden image {golden} is not built yet; the first farm builds it from {} with msb",
-                    crate::farm::golden::DEFAULT_OS.base_image
+                    "Golden image {golden} is not built yet; the first stackbox builds it from {} with msb",
+                    crate::stackbox::golden::DEFAULT_OS.base_image
                 )
             },
         )
@@ -659,7 +659,7 @@ impl FarmManager {
         })
     }
     /// Re-inspect an SSH host whose last inspection is older than `max_age` seconds, as a
-    /// farm created on it is about to start. Returns whether it inspected the host.
+    /// stackbox created on it is about to start. Returns whether it inspected the host.
     pub(super) async fn refresh_ssh_inspection(&self, host_id: &str, max_age: u64) -> Result<bool> {
         let stored = self.stored_host(host_id)?;
         let Some(previous) = stored.host.inspection.as_ref() else {
@@ -745,7 +745,7 @@ impl FarmManager {
         }
         if matches!(job.kind, HostJobKind::Check) {
             if let Some(agent) = &stored.host.agent {
-                self.host_event(id, "Checking the installed Farm execution agent")?;
+                self.host_event(id, "Checking the installed Stackbox execution agent")?;
                 let coordinator_id = self
                     .0
                     .store
@@ -777,7 +777,7 @@ impl FarmManager {
                         Ok(())
                     })?;
                     anyhow::bail!(
-                        "the installed Farm execution agent was built from a different revision than this coordinator ({build}); run `task agent-build` and install the agent again",
+                        "the installed Stackbox execution agent was built from a different revision than this coordinator ({build}); run `task agent-build` and install the agent again",
                         build = crate::BUILD_ID
                     );
                 }
@@ -837,7 +837,7 @@ impl FarmManager {
             self.host_event(
                 id,
                 &format!(
-                    "No {} farm-agent of this build is loaded or published; preparation finished without installing the execution agent",
+                    "No {} stackbox-agent of this build is loaded or published; preparation finished without installing the execution agent",
                     inspection.platform()
                 ),
             )?;
@@ -865,11 +865,11 @@ impl FarmManager {
                 None,
             )
         };
-        self.host_event(id, "Checking the host's farm agent")?;
+        self.host_event(id, "Checking the host's stackbox agent")?;
         let hello = call(Operation::Hello).await?;
         anyhow::ensure!(
             matches!(hello, Reply::Hello { version: VERSION, ref build_id, .. } if build_id == crate::BUILD_ID),
-            "the host's farm agent was built from other sources than this coordinator ({}); update it",
+            "the host's stackbox agent was built from other sources than this coordinator ({}); update it",
             crate::BUILD_ID
         );
         self.host_event(
@@ -879,7 +879,7 @@ impl FarmManager {
         let inspect = || async {
             match call(Operation::Inspect).await? {
                 Reply::Inspection { inspection } => Ok::<_, anyhow::Error>(*inspection),
-                _ => anyhow::bail!("unexpected farm-agent inspection response"),
+                _ => anyhow::bail!("unexpected stackbox-agent inspection response"),
             }
         };
         let mut inspection = inspect().await?;
@@ -920,7 +920,7 @@ impl FarmManager {
                 self.host_event(
                     id,
                     &format!(
-                        "Skipping the msb install: it would replace the custom kernel this host boots at {} (keep FARM_LIBKRUNFW_PATH outside ~/.microsandbox/lib on the host)",
+                        "Skipping the msb install: it would replace the custom kernel this host boots at {} (keep STACKBOX_LIBKRUNFW_PATH outside ~/.microsandbox/lib on the host)",
                         inspection.custom_kernel.as_deref().unwrap_or_default()
                     ),
                 )?;
@@ -953,12 +953,12 @@ impl FarmManager {
         )?;
         // The verification boot reports where it left the host, including whether that boot's
         // kernel exposed the mtty device. Asking the agent again instead would lose it: the
-        // local agent is a new process per request (`farm host local`, docs/gpu.md).
+        // local agent is a new process per request (`stackbox host local`, docs/gpu.md).
         let verified = match call(Operation::VerifyVm).await? {
             Reply::Inspection { inspection } => *inspection,
             // An agent built before its verification reply carried the inspection.
             Reply::Done => inspect().await?,
-            _ => anyhow::bail!("unexpected farm-agent response"),
+            _ => anyhow::bail!("unexpected stackbox-agent response"),
         };
         inspection = verified;
         anyhow::ensure!(
@@ -970,10 +970,10 @@ impl FarmManager {
         self.golden_event(id, &inspection)?;
         Ok(inspection)
     }
-    /// The farm kernel for a host of this platform: the one built under `dir` when there is
-    /// one, else the one farm publishes for it, downloaded and cached under the state
+    /// The stackbox kernel for a host of this platform: the one built under `dir` when there is
+    /// one, else the one stackbox publishes for it, downloaded and cached under the state
     /// directory. `None` when neither has a kernel for the platform.
-    async fn farm_kernel(
+    async fn stackbox_kernel(
         &self,
         dir: Option<&std::path::Path>,
         os: &str,
@@ -992,8 +992,8 @@ impl FarmManager {
         let cache = self.0.options.state_dir.join("libkrunfw-cache");
         crate::kernel::fetch_published(url, bucket_os, arch, MSB_VERSION, &cache).await
     }
-    /// Install the farm kernel on an SSH host before its verification boot, under
-    /// `~/.local/share/farm/libkrunfw`. A missing artifact is not a failure: the host then
+    /// Install the stackbox kernel on an SSH host before its verification boot, under
+    /// `~/.local/share/stackbox/libkrunfw`. A missing artifact is not a failure: the host then
     /// boots the stock microsandbox kernel, and preparation records no mtty device.
     async fn install_ssh_kernel(
         &self,
@@ -1003,14 +1003,14 @@ impl FarmManager {
     ) -> Result<()> {
         let dir = self.0.options.libkrunfw_dir.clone();
         match self
-            .farm_kernel(dir.as_deref(), &inspection.os, &inspection.arch)
+            .stackbox_kernel(dir.as_deref(), &inspection.os, &inspection.arch)
             .await
         {
             Ok(Some(artifact)) => {
                 self.host_event(
                     job,
                     &format!(
-                        "Installing the farm kernel {} for {}-{} (built for msb {})",
+                        "Installing the stackbox kernel {} for {}-{} (built for msb {})",
                         artifact.id, inspection.os, inspection.arch, artifact.msb
                     ),
                 )?;
@@ -1020,7 +1020,7 @@ impl FarmManager {
                 self.host_event(
                     job,
                     &format!(
-                        "No farm kernel for {}-{}{}; this host boots the stock microsandbox kernel (mtty GPUs are unavailable)",
+                        "No stackbox kernel for {}-{}{}; this host boots the stock microsandbox kernel (mtty GPUs are unavailable)",
                         inspection.os, inspection.arch, kernel_source(dir.as_deref())
                     ),
                 )?;
@@ -1029,16 +1029,16 @@ impl FarmManager {
                 self.host_event(
                     job,
                     &format!(
-                        "The farm kernel was not installed: {error:#}; this host boots the stock microsandbox kernel"
+                        "The stackbox kernel was not installed: {error:#}; this host boots the stock microsandbox kernel"
                     ),
                 )?;
             }
         }
         Ok(())
     }
-    /// Install the built farm kernel on this machine before its verification boot. Only the
+    /// Install the built stackbox kernel on this machine before its verification boot. Only the
     /// local host shares this process's home; a dial-in host's agent boots a kernel installed
-    /// there or named by `FARM_LIBKRUNFW_PATH`.
+    /// there or named by `STACKBOX_LIBKRUNFW_PATH`.
     async fn install_agent_kernel(
         &self,
         job: &HostJob,
@@ -1055,7 +1055,7 @@ impl FarmManager {
                 self.host_event(
                     &job.id,
                     &format!(
-                        "The host's agent boots the stock microsandbox kernel{note}; install farm's kernel on it, or set FARM_LIBKRUNFW_PATH there, for mtty GPUs"
+                        "The host's agent boots the stock microsandbox kernel{note}; install stackbox's kernel on it, or set STACKBOX_LIBKRUNFW_PATH there, for mtty GPUs"
                     ),
                 )?;
             }
@@ -1063,7 +1063,7 @@ impl FarmManager {
         }
         let dir = self.0.options.libkrunfw_dir.clone();
         let artifact = match self
-            .farm_kernel(dir.as_deref(), &inspection.os, &inspection.arch)
+            .stackbox_kernel(dir.as_deref(), &inspection.os, &inspection.arch)
             .await
         {
             Ok(Some(artifact)) => artifact,
@@ -1071,7 +1071,7 @@ impl FarmManager {
                 self.host_event(
                     &job.id,
                     &format!(
-                        "No farm kernel for {}-{}{}; this host boots the stock microsandbox kernel (mtty GPUs are unavailable)",
+                        "No stackbox kernel for {}-{}{}; this host boots the stock microsandbox kernel (mtty GPUs are unavailable)",
                         inspection.os, inspection.arch, kernel_source(dir.as_deref())
                     ),
                 )?;
@@ -1081,7 +1081,7 @@ impl FarmManager {
                 self.host_event(
                     &job.id,
                     &format!(
-                        "The farm kernel was not installed: {error:#}; this host boots the stock microsandbox kernel"
+                        "The stackbox kernel was not installed: {error:#}; this host boots the stock microsandbox kernel"
                     ),
                 )?;
                 return Ok(());
@@ -1093,11 +1093,11 @@ impl FarmManager {
         let installed =
             tokio::task::spawn_blocking(move || crate::kernel::install(&artifact, &home))
                 .await
-                .context("the farm kernel installation task failed")??;
+                .context("the stackbox kernel installation task failed")??;
         self.host_event(
             &job.id,
             &format!(
-                "Installed the farm kernel {id} at {} (built for msb {msb})",
+                "Installed the stackbox kernel {id} at {} (built for msb {msb})",
                 installed.display()
             ),
         )?;
@@ -1114,7 +1114,7 @@ impl FarmManager {
         if self.loaded_current(&platform).is_none() && self.has_current_agent(&platform) {
             self.host_event(
                 &job.id,
-                &format!("Fetching the published {platform} farm-agent"),
+                &format!("Fetching the published {platform} stackbox-agent"),
             )?;
         }
         let artifact = self.artifact_for(&platform).await?;
@@ -1130,7 +1130,7 @@ impl FarmManager {
             .clone();
         self.host_event(
             &job.id,
-            "Uploading farm-agent, verifying its SHA256 and checking the protocol",
+            "Uploading stackbox-agent, verifying its SHA256 and checking the protocol",
         )?;
         let agent = ssh.install_agent(&artifact, &coordinator).await?;
         self.update(|state| {
@@ -1209,11 +1209,11 @@ fn check_artifact_build(arch: &str, build_id: &str) -> Result<()> {
     }
     if build_id.is_empty() {
         return Err(anyhow::anyhow!(
-            "the {arch} farm-agent artifact was built before build stamps existed; rebuild it with `task agent-build` and restart the coordinator, which reinstalls the agent"
+            "the {arch} stackbox-agent artifact was built before build stamps existed; rebuild it with `task agent-build` and restart the coordinator, which reinstalls the agent"
         ));
     }
     Err(anyhow::anyhow!(
-        "the {arch} farm-agent artifact was built from {build_id} but this coordinator is {daemon}; rebuild it with `task agent-build` and restart the coordinator, which reinstalls the agent",
+        "the {arch} stackbox-agent artifact was built from {build_id} but this coordinator is {daemon}; rebuild it with `task agent-build` and restart the coordinator, which reinstalls the agent",
         daemon = crate::BUILD_ID
     ))
 }
@@ -1240,13 +1240,13 @@ fn msb_install_step(found: Option<&str>) -> Result<String> {
             format!("Upgrading msb {version} to {MSB_VERSION} (release checksum verified)")
         }
         Some(version) if version != MSB_VERSION => anyhow::bail!(
-            "msb {version} is newer than {MSB_VERSION}, which this coordinator runs; Farm does not downgrade msb"
+            "msb {version} is newer than {MSB_VERSION}, which this coordinator runs; Stackbox does not downgrade msb"
         ),
         _ => format!("Installing or verifying msb {MSB_VERSION} (release checksum verified)"),
     })
 }
 
-/// Where a host's farm kernel was looked for, for the event that reports it is missing.
+/// Where a host's stackbox kernel was looked for, for the event that reports it is missing.
 fn kernel_source(dir: Option<&std::path::Path>) -> String {
     match dir {
         Some(dir) => format!(" in {}", dir.display()),

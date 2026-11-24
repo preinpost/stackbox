@@ -3,7 +3,7 @@ import { currentStep, stepLabel } from "../components/job-steps";
 import { duration, jobKindLabels, phases } from "../lib";
 
 export type Activity =
-  { scope: "farm"; job: Job } | { scope: "host"; job: HostJob };
+  { scope: "stackbox"; job: Job } | { scope: "host"; job: HostJob };
 export type ActivityRow = { activity: Activity; previous: ActivityRow[] };
 export type HistoryFilters = {
   search: string;
@@ -12,18 +12,18 @@ export type HistoryFilters = {
   days: string;
 };
 export const subject = (a: Activity) =>
-  a.scope === "farm" ? a.job.farm_id : a.job.host_id;
+  a.scope === "stackbox" ? a.job.stackbox_id : a.job.host_id;
 export const startedAt = (a: Activity) =>
-  a.scope === "farm"
+  a.scope === "stackbox"
     ? (a.job.started_at ?? a.job.created_at)
     : a.job.created_at;
 export const activityLabel = (a: Activity) =>
-  a.scope === "farm"
+  a.scope === "stackbox"
     ? jobKindLabels[a.job.kind]
     : {
         check: "SSH 점검",
         prepare: "환경 준비",
-        install_agent: "Farm 실행기 업데이트",
+        install_agent: "Stackbox 실행기 업데이트",
         purge: "호스트 VM 정리",
       }[a.job.kind];
 export function activityStep(a: Activity) {
@@ -49,7 +49,7 @@ export function activityStep(a: Activity) {
 export function failureSummary(a: Activity) {
   if (!["failed", "interrupted"].includes(a.job.status)) return null;
   if (a.job.status === "interrupted") return "작업이 중단되었습니다";
-  return `${a.scope === "farm" && a.job.phase ? (phases.find((p) => p.id === a.job.phase)?.label ?? a.job.phase) : activityLabel(a)} 실패`;
+  return `${a.scope === "stackbox" && a.job.phase ? (phases.find((p) => p.id === a.job.phase)?.label ?? a.job.phase) : activityLabel(a)} 실패`;
 }
 export function elapsed(a: Activity, now: number) {
   if (a.job.status === "queued") return "대기 중";

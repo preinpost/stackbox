@@ -29,9 +29,9 @@ impl Logs {
             tails: BTreeMap::new(),
         })
     }
-    fn load(&mut self, farm: &str) -> Result<&mut Tail> {
-        if !self.tails.contains_key(farm) {
-            let path = self.dir.join(format!("{farm}.jsonl"));
+    fn load(&mut self, stackbox: &str) -> Result<&mut Tail> {
+        if !self.tails.contains_key(stackbox) {
+            let path = self.dir.join(format!("{stackbox}.jsonl"));
             let mut tail = Tail::default();
             match OpenOptions::new().read(true).write(true).open(path) {
                 Ok(mut file) => {
@@ -64,20 +64,20 @@ impl Logs {
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                 Err(e) => return Err(e.into()),
             }
-            self.tails.insert(farm.to_owned(), tail);
+            self.tails.insert(stackbox.to_owned(), tail);
         }
-        Ok(self.tails.get_mut(farm).unwrap())
+        Ok(self.tails.get_mut(stackbox).unwrap())
     }
     pub fn append(
         &mut self,
-        farm: &str,
+        stackbox: &str,
         job: &str,
         phase: Option<Phase>,
         message: String,
     ) -> Result<()> {
         // Limit individual events so reconnect tails always contain complete recent entries.
         for chunk in message.as_bytes().chunks(16 * 1024) {
-            let id = self.load(farm)?.last_id + 1;
+            let id = self.load(stackbox)?.last_id + 1;
             let entry = LogEntry {
                 id,
                 timestamp: now(),
@@ -92,11 +92,11 @@ impl Logs {
                 use std::os::unix::fs::OpenOptionsExt;
                 options.mode(0o600);
             }
-            let mut file = options.open(self.dir.join(format!("{farm}.jsonl")))?;
+            let mut file = options.open(self.dir.join(format!("{stackbox}.jsonl")))?;
             let mut bytes = serde_json::to_vec(&entry)?;
             bytes.push(b'\n');
             file.write_all(&bytes)?;
-            let tail = self.load(farm)?;
+            let tail = self.load(stackbox)?;
             tail.last_id = id;
             tail.entries.push_back(entry);
             if tail.entries.len() > RETAIN {
@@ -105,9 +105,9 @@ impl Logs {
         }
         Ok(())
     }
-    pub fn tail(&mut self, farm: &str, after: u64, limit: usize) -> Result<Vec<LogEntry>> {
+    pub fn tail(&mut self, stackbox: &str, after: u64, limit: usize) -> Result<Vec<LogEntry>> {
         Ok(self
-            .load(farm)?
+            .load(stackbox)?
             .entries
             .iter()
             .filter(|e| e.id > after)

@@ -70,7 +70,7 @@ const serviceOf = (bucket?: Bucket): Service =>
         ? "r2"
         : "other";
 
-/** The prefix as farmd stores it: no leading slash, one trailing slash unless empty. */
+/** The prefix as stackboxd stores it: no leading slash, one trailing slash unless empty. */
 const cleanPrefix = (prefix: string) => {
   const trimmed = prefix.trim().replace(/^\/+|\/+$/g, "");
   return trimmed ? `${trimmed}/` : "";
@@ -169,7 +169,7 @@ function BucketRow({ bucket }: { bucket: Bucket }) {
         <CreateFromBucketDialog
           initialBucket={bucket.id}
           triggerVariant="ghost"
-          triggerLabel="Farm 만들기"
+          triggerLabel="Stackbox 만들기"
         />
         <Button
           variant="ghost"
@@ -238,7 +238,7 @@ export function BucketDialog({ bucket }: { bucket?: Bucket }) {
     setEndpoint(bucket?.endpoint ?? "");
     setRegion(bucket?.region ?? "");
     setName(bucket?.name ?? "");
-    setPrefix(bucket?.prefix ?? "farm/");
+    setPrefix(bucket?.prefix ?? "stackbox/");
     setAccessKey(bucket?.access_key_id ?? "");
     setSecret("");
     setPathStyle(bucket?.path_style ?? true);
@@ -365,7 +365,7 @@ export function BucketDialog({ bucket }: { bucket?: Bucket }) {
                     onValueChange={edited(setName)}
                     className="input font-mono"
                     required
-                    placeholder="farm-snapshots"
+                    placeholder="stackbox-snapshots"
                     disabled={pending}
                   />
                 </label>
@@ -390,7 +390,7 @@ export function BucketDialog({ bucket }: { bucket?: Bucket }) {
                   value={prefix}
                   onValueChange={edited(setPrefix)}
                   className="input font-mono"
-                  placeholder="farm/"
+                  placeholder="stackbox/"
                   disabled={pending}
                 />
                 <small>아카이브를 올리고 찾는 경로입니다.</small>
@@ -627,7 +627,7 @@ function DeleteBucketDialog({ bucket }: { bucket: Bucket }) {
       </Dialog.Trigger>
       <Modal
         title="버킷 등록을 해제할까요?"
-        description="farm에 저장된 버킷 설정과 암호화된 키를 지웁니다. 버킷에 올린 아카이브는 그대로 남습니다."
+        description="stackbox에 저장된 버킷 설정과 암호화된 키를 지웁니다. 버킷에 올린 아카이브는 그대로 남습니다."
         closeDisabled={mutation.isPending}
       >
         <div className="modal-body space-y-5">

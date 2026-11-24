@@ -50,7 +50,7 @@ export function mergeLogs(
 type StreamConnection = "connecting" | "live" | "reconnecting" | "closed";
 type LogStreamState = { connection: StreamConnection; gap: boolean };
 
-/** The panels showing one farm's logs share its one EventSource, so a tab switch never doubles it. */
+/** The panels showing one stackbox's logs share its one EventSource, so a tab switch never doubles it. */
 interface LogStream {
   source: EventSource;
   state: LogStreamState;
@@ -79,7 +79,7 @@ function attachSource(id: string, client: QueryClient, stream: LogStream) {
   const tail = client.getQueryData<LogEntry[]>(keys.logs(id)) ?? [];
   const lastId = tail.at(-1)?.id ?? 0;
   const source = new EventSource(
-    `/api/v1/farms/${encodeURIComponent(id)}/logs/stream?after=${lastId}`,
+    `/api/v1/stackboxes/${encodeURIComponent(id)}/logs/stream?after=${lastId}`,
   );
   stream.source = source;
   source.onopen = () => setStreamState(stream, { connection: "live" });
@@ -131,7 +131,7 @@ export function subscribeLogStream(
   };
 }
 
-/** Follows a farm's log stream, opening the one shared connection when `enabled`.
+/** Follows a stackbox's log stream, opening the one shared connection when `enabled`.
  * The overview tail enables it only while a job runs; the logs tab always does. */
 export function useLogStream(
   id: string,

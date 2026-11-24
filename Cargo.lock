@@ -1846,45 +1846,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "farm"
-version = "0.1.9"
-dependencies = [
- "anyhow",
- "async-stream",
- "axum",
- "base64 0.22.1",
- "bytes",
- "chacha20poly1305",
- "clap",
- "flate2",
- "fs2",
- "futures",
- "getrandom 0.2.17",
- "http-body-util",
- "libc",
- "microsandbox",
- "rcgen",
- "reqwest",
- "russh",
- "rustls",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "subtle",
- "sysinfo",
- "tar",
- "tempfile",
- "time",
- "tokio",
- "tokio-rustls",
- "tokio-tungstenite",
- "tower",
- "utoipa",
- "uuid",
- "zeroize",
-]
-
-[[package]]
 name = "fastrand"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6026,6 +5987,45 @@ name = "stable_deref_trait"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
+
+[[package]]
+name = "stackbox"
+version = "0.1.9"
+dependencies = [
+ "anyhow",
+ "async-stream",
+ "axum",
+ "base64 0.22.1",
+ "bytes",
+ "chacha20poly1305",
+ "clap",
+ "flate2",
+ "fs2",
+ "futures",
+ "getrandom 0.2.17",
+ "http-body-util",
+ "libc",
+ "microsandbox",
+ "rcgen",
+ "reqwest",
+ "russh",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "subtle",
+ "sysinfo",
+ "tar",
+ "tempfile",
+ "time",
+ "tokio",
+ "tokio-rustls",
+ "tokio-tungstenite",
+ "tower",
+ "utoipa",
+ "uuid",
+ "zeroize",
+]
 
 [[package]]
 name = "static_assertions"

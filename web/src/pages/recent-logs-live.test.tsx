@@ -4,7 +4,7 @@ import type { ReactNode } from "react";
 import { afterEach, expect, test, vi } from "vitest";
 import { keys, type LogEntry } from "../api/client";
 import { LogViewer } from "../components/log-viewer";
-import { RecentLogs } from "./farm-detail";
+import { RecentLogs } from "./stackbox-detail";
 
 type Listener = (event: MessageEvent<string>) => void;
 
@@ -67,34 +67,34 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-test("the overview tail follows the stream while the farm has an active job", async () => {
+test("the overview tail follows the stream while the stackbox has an active job", async () => {
   vi.stubGlobal("EventSource", FakeEventSource);
-  const client = clientWithLogs("farm-1", [entry(1, "old line")]);
+  const client = clientWithLogs("stackbox-1", [entry(1, "old line")]);
   renderWithClient(
     client,
-    <RecentLogs id="farm-1" live onOpenLogs={() => {}} />,
+    <RecentLogs id="stackbox-1" live onOpenLogs={() => {}} />,
   );
 
   expect(screen.getByText("old line")).toBeTruthy();
   await waitFor(() => expect(FakeEventSource.instances).toHaveLength(1));
   expect(FakeEventSource.instances[0].url).toContain(
-    "/farms/farm-1/logs/stream?after=1",
+    "/stackboxes/stackbox-1/logs/stream?after=1",
   );
 
   act(() => FakeEventSource.instances[0].emit("log", entry(2, "deploying")));
   await waitFor(() => expect(screen.getByText("deploying")).toBeTruthy());
   // The same cache feeds the Logs tab, so the tail and the full viewer agree.
-  expect(client.getQueryData<LogEntry[]>(keys.logs("farm-1"))).toHaveLength(2);
+  expect(client.getQueryData<LogEntry[]>(keys.logs("stackbox-1"))).toHaveLength(2);
 });
 
-test("one stream serves the overview and the logs tab of the same farm", async () => {
+test("one stream serves the overview and the logs tab of the same stackbox", async () => {
   vi.stubGlobal("EventSource", FakeEventSource);
-  const client = clientWithLogs("farm-1", [entry(1, "old line")]);
+  const client = clientWithLogs("stackbox-1", [entry(1, "old line")]);
   renderWithClient(
     client,
     <>
-      <RecentLogs id="farm-1" live onOpenLogs={() => {}} />
-      <LogViewer id="farm-1" />
+      <RecentLogs id="stackbox-1" live onOpenLogs={() => {}} />
+      <LogViewer id="stackbox-1" />
     </>,
   );
 
@@ -104,12 +104,12 @@ test("one stream serves the overview and the logs tab of the same farm", async (
   ).toHaveLength(1);
 });
 
-test("the overview opens no stream when the farm has no active job", () => {
+test("the overview opens no stream when the stackbox has no active job", () => {
   vi.stubGlobal("EventSource", FakeEventSource);
-  const client = clientWithLogs("farm-2", [entry(1, "old line")]);
+  const client = clientWithLogs("stackbox-2", [entry(1, "old line")]);
   renderWithClient(
     client,
-    <RecentLogs id="farm-2" live={false} onOpenLogs={() => {}} />,
+    <RecentLogs id="stackbox-2" live={false} onOpenLogs={() => {}} />,
   );
 
   expect(screen.getByText("old line")).toBeTruthy();

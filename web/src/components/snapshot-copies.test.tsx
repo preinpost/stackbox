@@ -16,7 +16,7 @@ const snapshot = {
   copies: [
     {
       host_id: "edge",
-      reference: "farm-snap-tpl",
+      reference: "stackbox-snap-tpl",
       via: "bucket",
       size_bytes: 2048,
       copied_at: 1,

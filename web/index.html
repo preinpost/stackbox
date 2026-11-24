@@ -6,16 +6,16 @@
     <meta name="theme-color" content="#f6f6f3" />
     <meta
       name="description"
-      content="로컬 OpenStack VM farm을 생성하고 관리하는 운영 포탈"
+      content="로컬 OpenStack VM stackbox를 생성하고 관리하는 운영 포탈"
     />
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
-    <title>farm — VM workspace</title>
+    <title>stackbox — VM workspace</title>
     <script>
       // Sets the theme before first paint, so a dark workspace never flashes light.
       // src/theme.ts owns the same rule once the app boots.
       (() => {
         try {
-          const stored = localStorage.getItem("farm-theme");
+          const stored = localStorage.getItem("stackbox-theme");
           const dark = matchMedia("(prefers-color-scheme: dark)").matches;
           const theme =
             stored === "light" || stored === "dark"

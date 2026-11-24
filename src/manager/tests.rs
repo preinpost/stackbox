@@ -3,9 +3,9 @@ mod transfers;
 use super::*;
 use crate::{
     api,
-    farm::FarmNode,
     kolla::{DeployEvent, Phase},
     model,
+    stackbox::StackboxNode,
 };
 use axum::{
     body::{Body, to_bytes},
@@ -23,7 +23,7 @@ pub(crate) struct Fake {
     pub(crate) fail_create: AtomicBool,
     /// Make the inventory scan fail, as an unreachable host's scan does.
     pub(crate) fail_scan: AtomicBool,
-    pub(crate) farms: Mutex<BTreeMap<String, Vec<FarmNode>>>,
+    pub(crate) stackboxes: Mutex<BTreeMap<String, Vec<StackboxNode>>>,
     /// msb snapshot references and their labels.
     snapshots: Mutex<BTreeMap<String, BTreeMap<String, String>>>,
     /// `(from, to)` of each settle call.
@@ -37,7 +37,7 @@ pub(crate) struct Fake {
     /// Freezes started, finished or not; `Some(0)` holds a capture open.
     pub(crate) freeze_gate: Option<Semaphore>,
     scan_delay: Mutex<Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>>,
-    /// `(farm, node, impair)` of each fault set on a link.
+    /// `(stackbox, node, impair)` of each fault set on a link.
     faults: Mutex<Vec<(String, String, crate::link::Impair)>>,
     /// Shares created here and the remote computes of each spanning deploy.
     shares: Mutex<Vec<crate::remote::protocol::Share>>,
@@ -47,20 +47,20 @@ pub(crate) struct Fake {
     pub(crate) run_scripts: AtomicBool,
     /// Environment of that shell, for a fake admin-openrc and OpenStack CLI.
     pub(crate) script_env: Mutex<BTreeMap<String, String>>,
-    /// Scripts run in a farm VM through the control-script channel.
+    /// Scripts run in a stackbox VM through the control-script channel.
     pub(crate) scripts: Mutex<Vec<String>>,
     /// JSON the fake control VM returns for the instance-list script.
     pub(crate) instances: Mutex<String>,
-    /// `(farm, nodes on this host, added suffixes)` of each expansion.
+    /// `(stackbox, nodes on this host, added suffixes)` of each expansion.
     expanded: Mutex<Vec<Expansion>>,
-    /// `(farm, index)` of each Kolla compute deployment.
+    /// `(stackbox, index)` of each Kolla compute deployment.
     computed: Mutex<Vec<(String, u8)>>,
-    /// `(farm, index)` of each compute booted from a template that Kolla reconfigured.
+    /// `(stackbox, index)` of each compute booted from a template that Kolla reconfigured.
     reconfigured: Mutex<Vec<(String, u8)>>,
     /// The compute template each expansion that created a VM booted it from.
     expanded_from: Mutex<Vec<Option<String>>>,
     /// The GPU setting of each deploy this backend was asked to run. The coordinator
-    /// passes the farm's GPU to its host's agent only through the plan, so a test reads it
+    /// passes the stackbox's GPU to its host's agent only through the plan, so a test reads it
     /// back here as the agent's deploy sees it.
     gpus: Mutex<Vec<Option<crate::model::GpuConfig>>>,
     /// The kolla-ansible ref each deploy carried. The coordinator resolves it from the
@@ -71,7 +71,7 @@ pub(crate) struct Fake {
     /// later one; 0 never fails.
     pub(crate) fail_expansion_from: AtomicUsize,
     pub(crate) fail_compute: AtomicBool,
-    /// Farms restored from a control template that forgot their source's computes.
+    /// Stackboxes restored from a control template that forgot their source's computes.
     forgotten: Mutex<Vec<String>>,
     pub(crate) fail_forget: AtomicBool,
 }
@@ -88,10 +88,11 @@ impl Backend for Fake {
         mut plan: Plan,
         exposure: Exposure,
         share: crate::remote::protocol::Share,
-    ) -> BoxFuture<'_, Result<Vec<FarmNode>>> {
+    ) -> BoxFuture<'_, Result<Vec<StackboxNode>>> {
         Box::pin(async move {
             plan.nodes.retain(|spec| {
-                crate::farm::suffix(spec.role, spec.index).is_some_and(|s| share.nodes.contains(&s))
+                crate::stackbox::suffix(spec.role, spec.index)
+                    .is_some_and(|s| share.nodes.contains(&s))
             });
             self.shares.lock().unwrap().push(share);
             self.create(id, plan, exposure).await
@@ -104,7 +105,7 @@ impl Backend for Fake {
         exposure: Exposure,
         share: crate::remote::protocol::Share,
         source: String,
-    ) -> BoxFuture<'_, Result<Vec<FarmNode>>> {
+    ) -> BoxFuture<'_, Result<Vec<StackboxNode>>> {
         Box::pin(async move {
             assert!(self.snapshots.lock().unwrap().contains_key(&source));
             self.expanded_from.lock().unwrap().push(Some(source));
@@ -119,7 +120,7 @@ impl Backend for Fake {
         add: Vec<String>,
         _uplink: Option<crate::link::UplinkConfig>,
         source: Option<String>,
-    ) -> BoxFuture<'_, Result<Vec<FarmNode>>> {
+    ) -> BoxFuture<'_, Result<Vec<StackboxNode>>> {
         Box::pin(async move {
             if self.fail_expand.load(Ordering::SeqCst) {
                 bail!("intentional expand failure");
@@ -138,24 +139,24 @@ impl Backend for Fake {
                 .lock()
                 .unwrap()
                 .push((id.clone(), nodes, add.clone()));
-            let mut farms = self.farms.lock().unwrap();
-            let existing = farms.entry(id.clone()).or_default();
+            let mut stackboxes = self.stackboxes.lock().unwrap();
+            let existing = stackboxes.entry(id.clone()).or_default();
             let mut created = Vec::new();
             for suffix in add {
                 let spec = plan
                     .nodes
                     .iter()
                     .find(|spec| {
-                        crate::farm::suffix(spec.role, spec.index).as_deref()
+                        crate::stackbox::suffix(spec.role, spec.index).as_deref()
                             == Some(suffix.as_str())
                     })
                     .with_context(|| format!("no VM {suffix} in the plan"))?;
-                let name = crate::farm::node_name(&id, spec.role, spec.index);
+                let name = crate::stackbox::node_name(&id, spec.role, spec.index);
                 if let Some(node) = existing.iter().find(|node| node.name == name) {
                     created.push(node.clone());
                     continue;
                 }
-                let node = FarmNode {
+                let node = StackboxNode {
                     name,
                     index: spec.index,
                     role: Some(spec.role),
@@ -243,12 +244,12 @@ impl Backend for Fake {
             Ok(())
         })
     }
-    fn scan(&self) -> BoxFuture<'_, Result<BTreeMap<String, Vec<FarmNode>>>> {
+    fn scan(&self) -> BoxFuture<'_, Result<BTreeMap<String, Vec<StackboxNode>>>> {
         Box::pin(async {
             if self.fail_scan.load(Ordering::SeqCst) {
                 bail!("scan failed: connection timed out");
             }
-            let snapshot = self.farms.lock().unwrap().clone();
+            let snapshot = self.stackboxes.lock().unwrap().clone();
             let delay = self.scan_delay.lock().unwrap().take();
             if let Some((started, release)) = delay {
                 started.notify_one();
@@ -257,7 +258,12 @@ impl Backend for Fake {
             Ok(snapshot)
         })
     }
-    fn create(&self, id: String, plan: Plan, _: Exposure) -> BoxFuture<'_, Result<Vec<FarmNode>>> {
+    fn create(
+        &self,
+        id: String,
+        plan: Plan,
+        _: Exposure,
+    ) -> BoxFuture<'_, Result<Vec<StackboxNode>>> {
         Box::pin(async move {
             if self.fail_create.load(Ordering::SeqCst) {
                 bail!("intentional create failure");
@@ -265,8 +271,8 @@ impl Backend for Fake {
             let nodes = plan
                 .nodes
                 .iter()
-                .map(|spec| FarmNode {
-                    name: crate::farm::node_name(&id, spec.role, spec.index),
+                .map(|spec| StackboxNode {
+                    name: crate::stackbox::node_name(&id, spec.role, spec.index),
                     index: spec.index,
                     role: Some(spec.role),
                     status: "running".into(),
@@ -274,7 +280,7 @@ impl Backend for Fake {
                     ip: Some("10.250.0.1".into()),
                 })
                 .collect::<Vec<_>>();
-            self.farms.lock().unwrap().insert(id, nodes.clone());
+            self.stackboxes.lock().unwrap().insert(id, nodes.clone());
             Ok(nodes)
         })
     }
@@ -312,7 +318,7 @@ impl Backend for Fake {
     }
     fn delete(&self, id: String) -> BoxFuture<'_, Result<()>> {
         Box::pin(async move {
-            self.farms.lock().unwrap().remove(&id);
+            self.stackboxes.lock().unwrap().remove(&id);
             Ok(())
         })
     }
@@ -359,7 +365,7 @@ impl Backend for Fake {
         node: Option<String>,
         mut labels: BTreeMap<String, String>,
         sink: EventSink,
-    ) -> BoxFuture<'_, Result<crate::farm::FrozenSnapshot>> {
+    ) -> BoxFuture<'_, Result<crate::stackbox::FrozenSnapshot>> {
         Box::pin(async move {
             let step = |index, step: &str| {
                 sink(DeployEvent::Progress(crate::kolla::StepProgress {
@@ -380,7 +386,7 @@ impl Backend for Fake {
             // A compute template is that one VM's disks.
             if let Some(node) = node {
                 assert!(
-                    self.farms.lock().unwrap()[&id]
+                    self.stackboxes.lock().unwrap()[&id]
                         .iter()
                         .any(|vm| vm.name == format!("{id}-{node}"))
                 );
@@ -390,19 +396,19 @@ impl Backend for Fake {
                     .lock()
                     .unwrap()
                     .insert(reference.clone(), labels);
-                return Ok(crate::farm::FrozenSnapshot {
+                return Ok(crate::stackbox::FrozenSnapshot {
                     reference,
                     size_bytes: Some(4096),
                     restart_error: None,
                     nodes: Vec::new(),
                 });
             }
-            let vms = self.farms.lock().unwrap()[&id].clone();
-            // A multi-node farm's VMs are captured one by one, control first.
+            let vms = self.stackboxes.lock().unwrap()[&id].clone();
+            // A multi-node stackbox's VMs are captured one by one, control first.
             let nodes: Vec<_> = vms
                 .iter()
-                .filter_map(|vm| crate::farm::suffix(vm.role?, vm.index))
-                .map(|node| crate::farm::NodeSnapshot {
+                .filter_map(|vm| crate::stackbox::suffix(vm.role?, vm.index))
+                .map(|node| crate::stackbox::NodeSnapshot {
                     reference: format!("fake/{snapshot_id}-{node}"),
                     node,
                     size_bytes: Some(4096),
@@ -425,7 +431,7 @@ impl Backend for Fake {
                     reference
                 }
             };
-            Ok(crate::farm::FrozenSnapshot {
+            Ok(crate::stackbox::FrozenSnapshot {
                 reference,
                 size_bytes: Some(4096 * nodes.len().max(1) as u64),
                 restart_error: None,
@@ -437,10 +443,10 @@ impl Backend for Fake {
         &self,
         id: String,
         reference: String,
-        nodes: Vec<crate::farm::NodeSnapshot>,
+        nodes: Vec<crate::stackbox::NodeSnapshot>,
         plan: Plan,
         exposure: Exposure,
-    ) -> BoxFuture<'_, Result<Vec<FarmNode>>> {
+    ) -> BoxFuture<'_, Result<Vec<StackboxNode>>> {
         Box::pin(async move {
             assert!(self.snapshots.lock().unwrap().contains_key(&reference));
             for node in &nodes {
@@ -476,14 +482,14 @@ impl Backend for Fake {
                 bail!("intentional forget failure");
             }
             // Only the restored control VM is left to clean up.
-            let farms = self.farms.lock().unwrap();
+            let stackboxes = self.stackboxes.lock().unwrap();
             assert!(
-                farms[&id]
+                stackboxes[&id]
                     .iter()
-                    .all(|vm| vm.role == Some(crate::farm::Role::Control))
+                    .all(|vm| vm.role == Some(crate::stackbox::Role::Control))
             );
             sink(DeployEvent::Output(
-                "the source farm's computes are forgotten".into(),
+                "the source stackbox's computes are forgotten".into(),
             ))?;
             self.forgotten.lock().unwrap().push(id);
             Ok(())
@@ -505,7 +511,7 @@ impl Backend for Fake {
         &self,
         archive: std::path::PathBuf,
         snapshot_id: String,
-    ) -> BoxFuture<'_, Result<crate::farm::ImportedSnapshot>> {
+    ) -> BoxFuture<'_, Result<crate::stackbox::ImportedSnapshot>> {
         Box::pin(async move {
             let labels: BTreeMap<String, String> =
                 serde_json::from_slice(&std::fs::read(&archive)?).unwrap_or_default();
@@ -521,7 +527,7 @@ impl Backend for Fake {
                 .lock()
                 .unwrap()
                 .insert(reference.clone(), labels.clone());
-            Ok(crate::farm::ImportedSnapshot {
+            Ok(crate::stackbox::ImportedSnapshot {
                 reference,
                 labels,
                 size_bytes: Some(4096),
@@ -550,26 +556,26 @@ impl Backend for Fake {
         &self,
         _id: String,
         _node: Option<String>,
-        size: crate::farm::TerminalSize,
-        io: crate::farm::TerminalIo,
+        size: crate::stackbox::TerminalSize,
+        io: crate::stackbox::TerminalIo,
     ) -> BoxFuture<'_, Result<()>> {
         if self.run_scripts.load(Ordering::SeqCst) {
             let env = self.script_env.lock().unwrap().clone();
             return Box::pin(run_test_shell(io, env));
         }
         Box::pin(async move {
-            let crate::farm::TerminalIo { mut input, output } = io;
+            let crate::stackbox::TerminalIo { mut input, output } = io;
             output
                 .send(format!("{}x{}", size.rows, size.cols).into_bytes())
                 .await?;
             while let Some(message) = input.recv().await {
                 let echo = match message {
-                    crate::farm::TerminalInput::Data(data) => data,
-                    crate::farm::TerminalInput::Resize(size) => {
+                    crate::stackbox::TerminalInput::Data(data) => data,
+                    crate::stackbox::TerminalInput::Resize(size) => {
                         format!("{}x{}", size.rows, size.cols).into_bytes()
                     }
                     // EOF for a script's stdin has nothing to echo; the session stays open.
-                    crate::farm::TerminalInput::Close => continue,
+                    crate::stackbox::TerminalInput::Close => continue,
                 };
                 output.send(echo).await?;
             }
@@ -592,7 +598,7 @@ fn options(dir: &Path) -> ManagerOptions {
 }
 /// Registers this machine as a prepared host, as its check and preparation leave it.
 /// Its agent runs in-process on the test's fake backend.
-fn local_host(manager: &FarmManager) {
+fn local_host(manager: &StackboxManager) {
     if manager.host("local").is_err() {
         manager
             .register_local_host(crate::remote::RegisterLocalHost { id: "local".into() })
@@ -629,11 +635,11 @@ fn local_host(manager: &FarmManager) {
         })
         .unwrap();
 }
-async fn open_with(options: ManagerOptions, backend: Arc<Fake>) -> FarmManager {
+async fn open_with(options: ManagerOptions, backend: Arc<Fake>) -> StackboxManager {
     // A job task can outlive the manager that started it by a moment and still hold the state
     // lock; the test harness opens the same state again right after dropping that manager.
     for _ in 0..100 {
-        match FarmManager::with_backend(options.clone(), backend.clone()).await {
+        match StackboxManager::with_backend(options.clone(), backend.clone()).await {
             Ok(manager) => {
                 local_host(&manager);
                 return manager;
@@ -644,7 +650,7 @@ async fn open_with(options: ManagerOptions, backend: Arc<Fake>) -> FarmManager {
             Err(error) => panic!("{error:#}"),
         }
     }
-    panic!("farm state stayed locked by a finishing job");
+    panic!("stackbox state stayed locked by a finishing job");
 }
 fn request(id: &str) -> CreateRequest {
     CreateRequest {
@@ -666,31 +672,31 @@ fn request(id: &str) -> CreateRequest {
         gpu: None,
     }
 }
-async fn done(manager: &FarmManager, job: &Job) -> Job {
+async fn done(manager: &StackboxManager, job: &Job) -> Job {
     tokio::time::timeout(Duration::from_secs(5), manager.wait(&job.id))
         .await
         .unwrap()
         .unwrap()
 }
-async fn settle(manager: &FarmManager) {
+async fn settle(manager: &StackboxManager) {
     manager.shutdown().await.unwrap();
 }
 
 /// A terminal session backed by a real `bash -s`, so a test can follow a script the
 /// coordinator sends to the control VM. The script's stderr is captured by the wrapper
-/// farm writes; the shell's own stderr is discarded.
+/// stackbox writes; the shell's own stderr is discarded.
 pub(crate) async fn run_test_shell(
-    io: crate::farm::TerminalIo,
+    io: crate::stackbox::TerminalIo,
     env: BTreeMap<String, String>,
 ) -> Result<()> {
     run_test_shell_with(io, env, true).await
 }
 
 /// `honor_eof` models the two stdin backends the real session can drive: a pipe, where EOF
-/// ends `bash -s`, and the PTY farm actually opens, where the microsandbox agent keeps the
+/// ends `bash -s`, and the PTY stackbox actually opens, where the microsandbox agent keeps the
 /// master open and an EOF is a no-op. Only the wrapper itself can end that shell.
 async fn run_test_shell_with(
-    io: crate::farm::TerminalIo,
+    io: crate::stackbox::TerminalIo,
     env: BTreeMap<String, String>,
     honor_eof: bool,
 ) -> Result<()> {
@@ -711,7 +717,7 @@ async fn run_test_shell_with(
     let mut child = command.spawn()?;
     let mut stdin = Some(child.stdin.take().expect("shell has stdin"));
     let mut stdout = BufReader::new(child.stdout.take().expect("shell has stdout"));
-    let crate::farm::TerminalIo { mut input, output } = io;
+    let crate::stackbox::TerminalIo { mut input, output } = io;
     let mut line = String::new();
     loop {
         tokio::select! {
@@ -726,15 +732,15 @@ async fn run_test_shell_with(
                     .await?;
             }
             message = input.recv(), if stdin.is_some() => match message {
-                Some(crate::farm::TerminalInput::Data(data)) => {
+                Some(crate::stackbox::TerminalInput::Data(data)) => {
                     stdin.as_mut().expect("guarded").write_all(&data).await?;
                 }
-                Some(crate::farm::TerminalInput::Resize(_)) => {}
+                Some(crate::stackbox::TerminalInput::Resize(_)) => {}
                 // The script is complete; a pipe's EOF ends `bash -s` and the session stays up.
-                Some(crate::farm::TerminalInput::Close) if honor_eof => {
+                Some(crate::stackbox::TerminalInput::Close) if honor_eof => {
                     stdin.take();
                 }
-                Some(crate::farm::TerminalInput::Close) => {}
+                Some(crate::stackbox::TerminalInput::Close) => {}
                 None => {
                     // The client left. The real session hangs the shell up; a stand-in that
                     // only closed stdin would hide a script session that drops its input
@@ -757,7 +763,7 @@ async fn run_test_shell_with(
 /// and its echo of what it reads reach the session's output, and closing the writer is not
 /// an EOF for the shell.
 #[cfg(unix)]
-async fn run_pty_login_shell(io: crate::farm::TerminalIo) -> Result<()> {
+async fn run_pty_login_shell(io: crate::stackbox::TerminalIo) -> Result<()> {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     let mut child = tokio::process::Command::new("python3")
         .args([
@@ -772,7 +778,7 @@ async fn run_pty_login_shell(io: crate::farm::TerminalIo) -> Result<()> {
         .spawn()?;
     let mut stdin = Some(child.stdin.take().expect("shell has stdin"));
     let mut stdout = child.stdout.take().expect("shell has stdout");
-    let crate::farm::TerminalIo { mut input, output } = io;
+    let crate::stackbox::TerminalIo { mut input, output } = io;
     let mut buffer = vec![0_u8; 4096];
     loop {
         tokio::select! {
@@ -784,13 +790,13 @@ async fn run_pty_login_shell(io: crate::farm::TerminalIo) -> Result<()> {
                 output.send(buffer[..read].to_vec()).await?;
             }
             message = input.recv(), if stdin.is_some() => match message {
-                Some(crate::farm::TerminalInput::Data(data)) => {
+                Some(crate::stackbox::TerminalInput::Data(data)) => {
                     stdin.as_mut().expect("guarded").write_all(&data).await?;
                     stdin.as_mut().expect("guarded").flush().await?;
                 }
-                Some(crate::farm::TerminalInput::Resize(_)) => {}
+                Some(crate::stackbox::TerminalInput::Resize(_)) => {}
                 // The agent keeps the master open, so the shell sees no EOF from this.
-                Some(crate::farm::TerminalInput::Close) => {}
+                Some(crate::stackbox::TerminalInput::Close) => {}
                 None => {
                     // A departed client kills the session; only the wrapper ends the shell.
                     let _ = child.start_kill();
@@ -821,7 +827,7 @@ async fn a_control_script_captures_only_its_own_output_from_a_login_shell() {
     // stream loses one of them, and an interactive shell would put its prompt in front.
     let script = "printf 'one\\n'; sleep 0.2\nprintf 'two\\n'\nprintf 'VGPU=2\\n'";
     for _ in 0..3 {
-        let out = crate::farm::ScriptSession::new(|io| Box::pin(run_pty_login_shell(io)))
+        let out = crate::stackbox::ScriptSession::new(|io| Box::pin(run_pty_login_shell(io)))
             .run(script)
             .await
             .unwrap();
@@ -838,7 +844,7 @@ async fn a_control_script_finishes_after_its_input_closes() {
     let script = "printf 'one\\n'; sleep 0.3\nprintf 'two\\n'\nfor i in 3 4; do printf '%s\\n' \"line-$i\"; done\nprintf 'done\\n'";
     for honor_eof in [true, false] {
         for _ in 0..5 {
-            let out = crate::farm::ScriptSession::new(|io| {
+            let out = crate::stackbox::ScriptSession::new(|io| {
                 Box::pin(run_test_shell_with(io, BTreeMap::new(), honor_eof))
             })
             .run(script)
@@ -850,7 +856,8 @@ async fn a_control_script_finishes_after_its_input_closes() {
 }
 
 #[tokio::test]
-async fn remote_farms_route_over_ssh_with_separate_budgets_ports_streams_and_offline_inventory() {
+async fn remote_stackboxes_route_over_ssh_with_separate_budgets_ports_streams_and_offline_inventory()
+ {
     use crate::remote::{AgentArtifactInfo, HostJobKind, InstalledAgent, test_server::Fixture};
     let fixture = Fixture::start().await;
     let dir = tempfile::tempdir().unwrap();
@@ -884,16 +891,16 @@ async fn remote_farms_route_over_ssh_with_separate_budgets_ports_streams_and_off
             Ok(())
         })
         .unwrap();
-    let local = manager.create(request("local-farm")).unwrap();
+    let local = manager.create(request("local-stackbox")).unwrap();
     done(&manager, &local).await;
-    // Local admission probes real TCP ports, so an actual running farm can make
+    // Local admission probes real TCP ports, so an actual running stackbox can make
     // it choose a later block. Pin the fake reservation to the remote pool's
     // first block to test host isolation independently of the machine's ports.
     manager
         .update(|state| {
             state
-                .farms
-                .get_mut("local-farm")
+                .stackboxes
+                .get_mut("local-stackbox")
                 .unwrap()
                 .exposure
                 .as_mut()
@@ -902,7 +909,7 @@ async fn remote_farms_route_over_ssh_with_separate_budgets_ports_streams_and_off
             Ok(())
         })
         .unwrap();
-    let mut remote = request("remote-farm");
+    let mut remote = request("remote-stackbox");
     remote.host_id = Some("target".into());
     remote.external_host = "target.example".into();
     manager
@@ -925,9 +932,9 @@ async fn remote_farms_route_over_ssh_with_separate_budgets_ports_streams_and_off
         old_agent_error.is::<Conflict>()
             && old_agent_error
                 .to_string()
-                .contains("updated Farm execution agent")
+                .contains("updated Stackbox execution agent")
     );
-    assert!(manager.get("remote-farm").is_err());
+    assert!(manager.get("remote-stackbox").is_err());
     manager
         .update(|state| {
             state
@@ -945,13 +952,19 @@ async fn remote_farms_route_over_ssh_with_separate_budgets_ports_streams_and_off
         .unwrap();
     let created = manager.create(remote).unwrap();
     assert_eq!(done(&manager, &created).await.status, JobStatus::Succeeded);
-    assert!(!backend.farms.lock().unwrap().contains_key("remote-farm"));
-    let farm = manager.get("remote-farm").unwrap();
-    assert_eq!(farm.nodes.len(), 1);
+    assert!(
+        !backend
+            .stackboxes
+            .lock()
+            .unwrap()
+            .contains_key("remote-stackbox")
+    );
+    let stackbox = manager.get("remote-stackbox").unwrap();
+    assert_eq!(stackbox.nodes.len(), 1);
     assert_eq!(
-        farm.exposure.unwrap().port_base,
+        stackbox.exposure.unwrap().port_base,
         manager
-            .get("local-farm")
+            .get("local-stackbox")
             .unwrap()
             .exposure
             .unwrap()
@@ -972,7 +985,7 @@ async fn remote_farms_route_over_ssh_with_separate_budgets_ports_streams_and_off
             .unwrap_err()
             .is::<Conflict>()
     );
-    // A host with existing farms can recover credentials without being unregistered.
+    // A host with existing stackboxes can recover credentials without being unregistered.
     manager
         .update_host_credentials(fixture.registration("target"))
         .unwrap();
@@ -987,7 +1000,7 @@ async fn remote_farms_route_over_ssh_with_separate_budgets_ports_streams_and_off
     let permit = manager.0.deploy_gate.acquire().await.unwrap();
     let job = manager
         .deploy(
-            "remote-farm",
+            "remote-stackbox",
             DeployRequest {
                 from: Phase::Verify,
             },
@@ -1004,13 +1017,17 @@ async fn remote_farms_route_over_ssh_with_separate_budgets_ports_streams_and_off
     assert_eq!(manager.job(&job.id).unwrap().phase, Some(Phase::Verify));
     assert!(
         manager
-            .logs("remote-farm", 0, 1000)
+            .logs("remote-stackbox", 0, 1000)
             .unwrap()
             .iter()
             .any(|entry| entry.message.contains("remote deploy streamed output"))
     );
     assert_eq!(
-        manager.endpoints("remote-farm").await.unwrap().credentials["OS_PASSWORD"],
+        manager
+            .endpoints("remote-stackbox")
+            .await
+            .unwrap()
+            .credentials["OS_PASSWORD"],
         "remote-guest-secret"
     );
     assert!(
@@ -1020,10 +1037,10 @@ async fn remote_farms_route_over_ssh_with_separate_budgets_ports_streams_and_off
     );
     fixture.observed.fail_scan.store(true, Ordering::SeqCst);
     manager.reconcile().await.unwrap();
-    let farm = manager.get("remote-farm").unwrap();
-    assert_eq!(farm.status, FarmStatus::Ready);
-    assert_eq!(farm.nodes.len(), 1);
-    assert!(farm.observation_error.is_some());
+    let stackbox = manager.get("remote-stackbox").unwrap();
+    assert_eq!(stackbox.status, StackboxStatus::Ready);
+    assert_eq!(stackbox.nodes.len(), 1);
+    assert!(stackbox.observation_error.is_some());
     assert_eq!(
         manager
             .host("target")
@@ -1037,12 +1054,12 @@ async fn remote_farms_route_over_ssh_with_separate_budgets_ports_streams_and_off
     manager.reconcile().await.unwrap();
     assert!(
         manager
-            .get("remote-farm")
+            .get("remote-stackbox")
             .unwrap()
             .observation_error
             .is_none()
     );
-    let deleted = manager.delete("remote-farm").unwrap();
+    let deleted = manager.delete("remote-stackbox").unwrap();
     assert_eq!(done(&manager, &deleted).await.status, JobStatus::Succeeded);
     assert_eq!(
         manager
@@ -1054,14 +1071,14 @@ async fn remote_farms_route_over_ssh_with_separate_budgets_ports_streams_and_off
         0
     );
     assert_eq!(
-        manager.get("local-farm").unwrap().status,
-        FarmStatus::Created
+        manager.get("local-stackbox").unwrap().status,
+        StackboxStatus::Created
     );
     manager.unregister_host("target").unwrap();
     settle(&manager).await;
 }
 
-async fn host_done(manager: &FarmManager, id: &str) -> crate::remote::HostJob {
+async fn host_done(manager: &StackboxManager, id: &str) -> crate::remote::HostJob {
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             let job = manager.host_job(id).unwrap();
@@ -1087,7 +1104,9 @@ async fn shell_websocket_relays_bytes_and_resizes_and_refuses_other_origins() {
     let address = listener.local_addr().unwrap();
     let server =
         tokio::spawn(axum::serve(listener, api::router(manager.clone(), None)).into_future());
-    let url = |farm: &str, query: &str| format!("ws://{address}/api/v1/farms/{farm}/shell?{query}");
+    let url = |stackbox: &str, query: &str| {
+        format!("ws://{address}/api/v1/stackboxes/{stackbox}/shell?{query}")
+    };
 
     let (mut socket, _) = tokio_tungstenite::connect_async(url("shell", "rows=24&cols=80"))
         .await
@@ -1314,7 +1333,7 @@ async fn remote_host_preparation_is_serialized_idempotent_and_secrets_never_reac
         JobStatus::Succeeded
     );
     let calls = fixture.observed.calls.lock().unwrap().clone();
-    // Preparation leaves the golden image to the first farm; it never builds with Docker.
+    // Preparation leaves the golden image to the first stackbox; it never builds with Docker.
     assert!(!calls.iter().any(|c| c == "golden"), "{calls:?}");
     assert_eq!(calls.iter().filter(|c| *c == "smoke").count(), 2);
     fixture.observed.fail_smoke.store(true, Ordering::SeqCst);
@@ -1421,11 +1440,11 @@ async fn preparation_upgrades_an_older_msb_and_refuses_a_newer_one() {
     settle(&manager).await;
 }
 
-/// A local farm-agent that reports `msb` as its installed version and installs on request.
+/// A local stackbox-agent that reports `msb` as its installed version and installs on request.
 #[derive(Default)]
 struct MsbLink {
     msb: std::sync::Mutex<Option<String>>,
-    /// The farm kernel path the host says it boots VMs from.
+    /// The stackbox kernel path the host says it boots VMs from.
     custom_kernel: std::sync::Mutex<Option<String>>,
     calls: std::sync::Mutex<Vec<&'static str>>,
     /// Whether this fake's verification VM saw the custom kernel's mtty device. Only the
@@ -1543,7 +1562,7 @@ impl crate::remote::link::AgentLink for MsbLink {
     fn terminal(
         &self,
         _: crate::remote::protocol::Request,
-        _: crate::farm::TerminalIo,
+        _: crate::stackbox::TerminalIo,
     ) -> BoxFuture<'_, Result<()>> {
         Box::pin(async { anyhow::bail!("no terminal") })
     }
@@ -1555,7 +1574,7 @@ async fn agent_host_preparation_upgrades_an_older_msb_and_refuses_a_newer_one() 
     let dir = tempfile::tempdir().unwrap();
     let link = Arc::new(MsbLink::default());
     *link.msb.lock().unwrap() = Some("0.7.8".into());
-    let manager = FarmManager::with_link(options(dir.path()), link.clone())
+    let manager = StackboxManager::with_link(options(dir.path()), link.clone())
         .await
         .unwrap();
     manager
@@ -1612,7 +1631,7 @@ async fn agent_host_preparation_keeps_the_verification_replys_mtty_result() {
     *link.msb.lock().unwrap() = Some(crate::remote::MSB_VERSION.into());
     // The verification VM saw mtty-1; a later `Inspect` in a new process reports none.
     link.verify_mtty.store(true, Ordering::SeqCst);
-    let manager = FarmManager::with_link(options(dir.path()), link.clone())
+    let manager = StackboxManager::with_link(options(dir.path()), link.clone())
         .await
         .unwrap();
     manager
@@ -1629,7 +1648,7 @@ async fn agent_host_preparation_keeps_the_verification_replys_mtty_result() {
         finished.error
     );
     // The coordinator stores what the reply said, so `host list` can show `(mtty)` and the
-    // mtty gate lets a farm in.
+    // mtty gate lets a stackbox in.
     let inspection = manager.host("local").unwrap().inspection.unwrap();
     assert!(
         inspection.mtty_available,
@@ -1652,7 +1671,7 @@ async fn agent_host_preparation_keeps_the_verification_replys_mtty_result() {
     let link = Arc::new(MsbLink::default());
     *link.msb.lock().unwrap() = Some(crate::remote::MSB_VERSION.into());
     link.legacy_verify.store(true, Ordering::SeqCst);
-    let manager = FarmManager::with_link(options(dir.path()), link.clone())
+    let manager = StackboxManager::with_link(options(dir.path()), link.clone())
         .await
         .unwrap();
     manager
@@ -1681,7 +1700,7 @@ async fn agent_host_preparation_keeps_the_pci_devices_the_reply_carried() {
     let dir = tempfile::tempdir().unwrap();
     let link = Arc::new(MsbLink::default());
     *link.msb.lock().unwrap() = Some(crate::remote::MSB_VERSION.into());
-    *link.custom_kernel.lock().unwrap() = Some("/opt/farm/libkrunfw.so.5".into());
+    *link.custom_kernel.lock().unwrap() = Some("/opt/stackbox/libkrunfw.so.5".into());
     *link.pci.lock().unwrap() = vec![crate::remote::HostPciDevice {
         bdf: "0000:04:00.3".into(),
         vendor_id: "1022".into(),
@@ -1692,7 +1711,7 @@ async fn agent_host_preparation_keeps_the_pci_devices_the_reply_carried() {
         group_exclusive: true,
         vfio_ready: true,
     }];
-    let manager = FarmManager::with_link(options(dir.path()), link.clone())
+    let manager = StackboxManager::with_link(options(dir.path()), link.clone())
         .await
         .unwrap();
     manager
@@ -1726,7 +1745,7 @@ async fn agent_host_preparation_keeps_the_custom_kernel_the_host_reports() {
     *link.msb.lock().unwrap() = Some("0.7.8".into());
     let kernel = "/home/edge/.microsandbox/lib/libkrunfw.so.5.6.1";
     *link.custom_kernel.lock().unwrap() = Some(kernel.into());
-    let manager = FarmManager::with_link(options(dir.path()), link.clone())
+    let manager = StackboxManager::with_link(options(dir.path()), link.clone())
         .await
         .unwrap();
     manager
@@ -1775,7 +1794,7 @@ async fn agent_host_preparation_keeps_the_custom_kernel_the_host_reports() {
 /// A build tree with one fake kernel for `arch`, as scripts/build-libkrunfw.sh leaves it.
 fn kernel_build(dir: &std::path::Path, arch: &str) {
     use sha2::{Digest, Sha256};
-    let bytes = b"farm kernel fixture";
+    let bytes = b"stackbox kernel fixture";
     let sha = format!("{:x}", Sha256::digest(bytes));
     let base = dir.join(arch);
     std::fs::create_dir_all(&base).unwrap();
@@ -1794,7 +1813,8 @@ fn kernel_build(dir: &std::path::Path, arch: &str) {
 /// same SSH connection as the agent, and the verification reply carries both the path and
 /// the mtty evidence to the coordinator, which a shell inspection cannot produce.
 #[tokio::test]
-async fn ssh_host_preparation_installs_the_farm_kernel_and_keeps_the_verification_replys_mtty() {
+async fn ssh_host_preparation_installs_the_stackbox_kernel_and_keeps_the_verification_replys_mtty()
+{
     use crate::remote::{HostJobKind, test_server::Fixture};
     let fixture = Fixture::start().await;
     let dir = tempfile::tempdir().unwrap();
@@ -1820,7 +1840,7 @@ async fn ssh_host_preparation_installs_the_farm_kernel_and_keeps_the_verificatio
         finished
             .events
             .iter()
-            .any(|event| event.message.starts_with("Installing the farm kernel")),
+            .any(|event| event.message.starts_with("Installing the stackbox kernel")),
         "{:?}",
         finished
             .events
@@ -1843,7 +1863,7 @@ async fn ssh_host_preparation_installs_the_farm_kernel_and_keeps_the_verificatio
     let inspection = manager.host("target").unwrap().inspection.unwrap();
     assert_eq!(
         inspection.custom_kernel.as_deref(),
-        Some("/home/operator/.local/share/farm/libkrunfw/0123456789abcdef/libkrunfw.so.5.6.1")
+        Some("/home/operator/.local/share/stackbox/libkrunfw/0123456789abcdef/libkrunfw.so.5.6.1")
     );
     assert!(inspection.mtty_available);
     assert!(inspection.vm_boot_verified);
@@ -1884,7 +1904,7 @@ async fn an_ssh_host_check_keeps_mtty_only_for_the_kernel_it_verified() {
             let host = &mut state.hosts.get_mut("target").unwrap().host;
             host.status = crate::remote::HostStatus::Ready;
             host.inspection = Some(crate::remote::HostInspection {
-                custom_kernel: Some("/home/operator/.local/share/farm/libkrunfw/0123456789abcdef/libkrunfw.so.5.6.1".into()),
+                custom_kernel: Some("/home/operator/.local/share/stackbox/libkrunfw/0123456789abcdef/libkrunfw.so.5.6.1".into()),
                 custom_kernel_reason: None,
                 mtty_available: true,
                 vm_boot_verified: true,
@@ -1895,7 +1915,7 @@ async fn an_ssh_host_check_keeps_mtty_only_for_the_kernel_it_verified() {
         })
         .unwrap();
     *fixture.observed.kernel.lock().unwrap() = Some(
-        "/home/operator/.local/share/farm/libkrunfw/0123456789abcdef/libkrunfw.so.5.6.1".into(),
+        "/home/operator/.local/share/stackbox/libkrunfw/0123456789abcdef/libkrunfw.so.5.6.1".into(),
     );
     let job = manager
         .start_host_job("target", HostJobKind::Check)
@@ -1911,7 +1931,7 @@ async fn an_ssh_host_check_keeps_mtty_only_for_the_kernel_it_verified() {
 
     // Another installed kernel was never booted here, so its mtty state is unknown.
     *fixture.observed.kernel.lock().unwrap() = Some(
-        "/home/operator/.local/share/farm/libkrunfw/fedcba9876543210/libkrunfw.so.5.6.1".into(),
+        "/home/operator/.local/share/stackbox/libkrunfw/fedcba9876543210/libkrunfw.so.5.6.1".into(),
     );
     let job = manager
         .start_host_job("target", HostJobKind::Check)
@@ -1967,7 +1987,7 @@ async fn remote_host_restart_recovers_interrupted_jobs_and_missing_key_never_rep
     drop(manager);
     std::fs::remove_file(dir.path().join("credentials.key")).unwrap();
     assert!(
-        FarmManager::with_backend(options(dir.path()), Arc::new(Fake::default()))
+        StackboxManager::with_backend(options(dir.path()), Arc::new(Fake::default()))
             .await
             .is_err()
     );
@@ -2019,7 +2039,7 @@ async fn lifecycle_reservations_failures_and_logs_survive_restart() {
         )
         .unwrap();
     done(&manager, &retry).await;
-    assert_eq!(manager.get("one").unwrap().status, FarmStatus::Ready);
+    assert_eq!(manager.get("one").unwrap().status, StackboxStatus::Ready);
     assert_eq!(
         manager.endpoints("one").await.unwrap().credentials["OS_PASSWORD"],
         "test-secret"
@@ -2035,17 +2055,23 @@ async fn lifecycle_reservations_failures_and_logs_survive_restart() {
     settle(&manager).await;
     drop(manager);
     let manager = open_with(options(dir.path()), backend.clone()).await;
-    assert_eq!(manager.get("one").unwrap().status, FarmStatus::Ready);
+    assert_eq!(manager.get("one").unwrap().status, StackboxStatus::Ready);
     assert_eq!(
         manager.logs("one", 0, 1000).unwrap().last().unwrap().id,
         last
     );
-    backend.farms.lock().unwrap().get_mut("one").unwrap().pop();
+    backend
+        .stackboxes
+        .lock()
+        .unwrap()
+        .get_mut("one")
+        .unwrap()
+        .pop();
     manager.reconcile().await.unwrap();
-    assert_eq!(manager.get("one").unwrap().status, FarmStatus::Broken);
+    assert_eq!(manager.get("one").unwrap().status, StackboxStatus::Broken);
     let deleted = manager.delete("one").unwrap();
     assert_eq!(done(&manager, &deleted).await.status, JobStatus::Succeeded);
-    assert_eq!(manager.get("one").unwrap().status, FarmStatus::Deleted);
+    assert_eq!(manager.get("one").unwrap().status, StackboxStatus::Deleted);
     assert_eq!(manager.list().unwrap().len(), 1);
     let reused = manager.create(request("one")).unwrap();
     done(&manager, &reused).await;
@@ -2060,7 +2086,7 @@ async fn lifecycle_reservations_failures_and_logs_survive_restart() {
 }
 
 #[tokio::test]
-async fn multi_node_farms_are_created_deployed_and_faulted_per_vm() {
+async fn multi_node_stackboxes_are_created_deployed_and_faulted_per_vm() {
     let dir = tempfile::tempdir().unwrap();
     let backend = Arc::new(Fake::default());
     let mut opts = options(dir.path());
@@ -2077,18 +2103,18 @@ async fn multi_node_farms_are_created_deployed_and_faulted_per_vm() {
             refused.to_string().contains("task agent-build"),
             "{refused}"
         );
-        *manager.0.guest_agent.write().unwrap() = Some(dir.path().join("farm-agent"));
+        *manager.0.guest_agent.write().unwrap() = Some(dir.path().join("stackbox-agent"));
     }
     let job = manager.create(multi).unwrap();
     assert_eq!(done(&manager, &job).await.status, JobStatus::Succeeded);
-    let farm = manager.get("mn").unwrap();
-    let names: Vec<_> = farm.nodes.iter().map(|n| n.name.as_str()).collect();
+    let stackbox = manager.get("mn").unwrap();
+    let names: Vec<_> = stackbox.nodes.iter().map(|n| n.name.as_str()).collect();
     assert_eq!(names, ["mn-control", "mn-compute-1", "mn-compute-2"]);
-    assert_eq!(farm.plan.as_ref().unwrap().computes, 2);
+    assert_eq!(stackbox.plan.as_ref().unwrap().computes, 2);
     let job = manager.deploy("mn", DeployRequest::default()).unwrap();
     assert_eq!(done(&manager, &job).await.status, JobStatus::Succeeded);
     manager.reconcile().await.unwrap();
-    assert_eq!(manager.get("mn").unwrap().status, FarmStatus::Ready);
+    assert_eq!(manager.get("mn").unwrap().status, StackboxStatus::Ready);
     manager.check_terminal("mn", None).unwrap();
     manager.check_terminal("mn", Some("compute-2")).unwrap();
     assert!(manager.check_terminal("mn", Some("compute-3")).is_err());
@@ -2097,15 +2123,15 @@ async fn multi_node_farms_are_created_deployed_and_faulted_per_vm() {
         delay_ms: 0,
         loss: 1.0,
     };
-    let farm = manager.impair("mn", "compute-1", cut).await.unwrap();
-    assert_eq!(farm.faults["compute-1"], cut);
+    let stackbox = manager.impair("mn", "compute-1", cut).await.unwrap();
+    assert_eq!(stackbox.faults["compute-1"], cut);
     // The record keeps the fault across a restart's reload.
     assert_eq!(manager.get("mn").unwrap().faults["compute-1"], cut);
-    let farm = manager
+    let stackbox = manager
         .impair("mn", "compute-1", crate::link::Impair::default())
         .await
         .unwrap();
-    assert!(farm.faults.is_empty());
+    assert!(stackbox.faults.is_empty());
     assert_eq!(
         backend.faults.lock().unwrap().clone(),
         [
@@ -2131,7 +2157,7 @@ async fn multi_node_farms_are_created_deployed_and_faulted_per_vm() {
             .unwrap_err()
             .is::<BadRequest>()
     );
-    // An all-in-one farm has no links.
+    // An all-in-one stackbox has no links.
     let job = manager.create(request("aio")).unwrap();
     assert_eq!(done(&manager, &job).await.status, JobStatus::Succeeded);
     assert!(
@@ -2141,7 +2167,7 @@ async fn multi_node_farms_are_created_deployed_and_faulted_per_vm() {
             .unwrap_err()
             .is::<Conflict>()
     );
-    // A multi-node farm freezes every VM and restores into a farm of the same layout.
+    // A multi-node stackbox freezes every VM and restores into a stackbox of the same layout.
     let job = manager
         .freeze(
             "mn",
@@ -2225,7 +2251,7 @@ async fn multi_node_farms_are_created_deployed_and_faulted_per_vm() {
     assert_eq!(done(&manager, &job).await.status, JobStatus::Succeeded);
     let restored = manager.get("mn2").unwrap();
     assert_eq!(restored.plan.as_ref().unwrap().computes, 2);
-    assert_eq!(restored.status, FarmStatus::Ready);
+    assert_eq!(restored.status, StackboxStatus::Ready);
     assert_eq!(restored.nodes.len(), 3);
     let job = manager.delete("mn2").unwrap();
     assert_eq!(done(&manager, &job).await.status, JobStatus::Succeeded);
@@ -2235,7 +2261,7 @@ async fn multi_node_farms_are_created_deployed_and_faulted_per_vm() {
     let app = api::router(manager.clone(), None);
     let response = app
         .oneshot(
-            Request::put("/api/v1/farms/mn/nodes/control/faults")
+            Request::put("/api/v1/stackboxes/mn/nodes/control/faults")
                 .header("content-type", "application/json")
                 .body(Body::from(r#"{"delay_ms":40}"#))
                 .unwrap(),
@@ -2271,14 +2297,14 @@ async fn deploy_step_is_shown_while_running_and_cleared_after() {
     );
     backend.deployment_gate.as_ref().unwrap().add_permits(1);
     done(&manager, &job).await;
-    let farm = manager.get("step").unwrap();
-    assert_eq!(farm.status, FarmStatus::Ready);
-    assert!(farm.step.is_none(), "a finished job keeps no step text");
+    let stackbox = manager.get("step").unwrap();
+    assert_eq!(stackbox.status, StackboxStatus::Ready);
+    assert!(stackbox.step.is_none(), "a finished job keeps no step text");
     settle(&manager).await;
 }
 
 #[tokio::test]
-async fn deploy_queue_is_serial_and_farm_mutations_conflict() {
+async fn deploy_queue_is_serial_and_stackbox_mutations_conflict() {
     let dir = tempfile::tempdir().unwrap();
     let backend = Arc::new(Fake {
         deployment_gate: Some(Semaphore::new(0)),
@@ -2326,20 +2352,20 @@ async fn recovers_interrupted_jobs_and_refuses_second_writer_or_corrupt_state() 
             let mut job = new_job("resume", JobKind::Deploy);
             job.status = JobStatus::Running;
             job.phase = Some(Phase::Configure);
-            let farm = state.farms.get_mut("resume").unwrap();
-            farm.active_job = Some(job.id.clone());
-            farm.status = FarmStatus::Deploying;
-            farm.phase = job.phase;
+            let stackbox = state.stackboxes.get_mut("resume").unwrap();
+            stackbox.active_job = Some(job.id.clone());
+            stackbox.status = StackboxStatus::Deploying;
+            stackbox.phase = job.phase;
             state.jobs.insert(job.id.clone(), job);
             Ok(())
         })
         .unwrap();
     drop(manager);
     let manager = open_with(options(dir.path()), backend).await;
-    let farm = manager.get("resume").unwrap();
-    assert_eq!(farm.status, FarmStatus::Failed);
-    assert_eq!(farm.phase, Some(Phase::Configure));
-    assert!(farm.active_job.is_none());
+    let stackbox = manager.get("resume").unwrap();
+    assert_eq!(stackbox.status, StackboxStatus::Failed);
+    assert_eq!(stackbox.phase, Some(Phase::Configure));
+    assert!(stackbox.active_job.is_none());
     assert_eq!(
         manager
             .jobs()
@@ -2378,15 +2404,15 @@ async fn memory_reservations_and_failed_state_writes_prevent_creation() {
     std::fs::create_dir(dir.path().join("state.json.tmp")).unwrap();
     assert!(manager.create(request("cannot-write")).is_err());
     assert!(manager.get("cannot-write").is_err());
-    assert!(backend.farms.lock().unwrap().is_empty());
+    assert!(backend.stackboxes.lock().unwrap().is_empty());
 }
 
 #[tokio::test]
 async fn http_auth_validation_job_locations_and_schema() {
     let dir = tempfile::tempdir().unwrap();
     let manager = open_with(options(dir.path()), Arc::new(Fake::default())).await;
-    // A new farm runs a compute VM, whose guest links need the agent; this host has no build.
-    *manager.0.guest_agent.write().unwrap() = Some(dir.path().join("farm-agent"));
+    // A new stackbox runs a compute VM, whose guest links need the agent; this host has no build.
+    *manager.0.guest_agent.write().unwrap() = Some(dir.path().join("stackbox-agent"));
     let app = api::router(manager.clone(), Some("test-token".into()));
     let response = app
         .clone()
@@ -2410,7 +2436,11 @@ async fn http_auth_validation_job_locations_and_schema() {
     };
     let response = app
         .clone()
-        .oneshot(authorized("POST", "/api/v1/farms", r#"{"id":"../bad"}"#))
+        .oneshot(authorized(
+            "POST",
+            "/api/v1/stackboxes",
+            r#"{"id":"../bad"}"#,
+        ))
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
@@ -2426,12 +2456,16 @@ async fn http_auth_validation_job_locations_and_schema() {
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let response = app
         .clone()
-        .oneshot(authorized("POST", "/api/v1/farms", r#"{"id":"http-demo"}"#))
+        .oneshot(authorized(
+            "POST",
+            "/api/v1/stackboxes",
+            r#"{"id":"http-demo"}"#,
+        ))
         .await
         .unwrap();
-    // Every farm runs on a registered host, with a compute beside its control VM.
+    // Every stackbox runs on a registered host, with a compute beside its control VM.
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    // A new farm without computes, or with one of the legacy layouts, is refused.
+    // A new stackbox without computes, or with one of the legacy layouts, is refused.
     for payload in [
         r#"{"id":"http-demo","host_id":"local"}"#,
         r#"{"id":"http-demo","host_id":"local","layout":"all-in-one"}"#,
@@ -2439,7 +2473,7 @@ async fn http_auth_validation_job_locations_and_schema() {
     ] {
         let response = app
             .clone()
-            .oneshot(authorized("POST", "/api/v1/farms", payload))
+            .oneshot(authorized("POST", "/api/v1/stackboxes", payload))
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{payload}");
@@ -2459,7 +2493,7 @@ async fn http_auth_validation_job_locations_and_schema() {
         .clone()
         .oneshot(authorized(
             "POST",
-            "/api/v1/farms",
+            "/api/v1/stackboxes",
             r#"{"id":"http-demo","host_id":"local","computes":1}"#,
         ))
         .await
@@ -2477,17 +2511,17 @@ async fn http_auth_validation_job_locations_and_schema() {
     done(&manager, &created).await;
     let response = app
         .clone()
-        .oneshot(authorized("GET", "/api/v1/farms/http-demo", ""))
+        .oneshot(authorized("GET", "/api/v1/stackboxes/http-demo", ""))
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
-    // The portal names a farm's release from the release tables, not from a second list of
-    // names of its own. This farm was created without naming a release, so its record carries
+    // The portal names a stackbox's release from the release tables, not from a second list of
+    // names of its own. This stackbox was created without naming a release, so its record carries
     // none and the portal says so rather than guessing the coordinator's own.
-    let farm: serde_json::Value =
+    let stackbox: serde_json::Value =
         serde_json::from_slice(&to_bytes(response.into_body(), 1_000_000).await.unwrap()).unwrap();
-    assert_eq!(farm["id"], "http-demo");
-    assert!(farm["openstack"].is_null());
+    assert_eq!(stackbox["id"], "http-demo");
+    assert!(stackbox["openstack"].is_null());
     let response = app
         .clone()
         .oneshot(authorized("GET", "/api/v1/jobs/missing", ""))
@@ -2496,7 +2530,11 @@ async fn http_auth_validation_job_locations_and_schema() {
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
     let response = app
         .clone()
-        .oneshot(authorized("POST", "/api/v1/farms/http-demo/deploy", "{}"))
+        .oneshot(authorized(
+            "POST",
+            "/api/v1/stackboxes/http-demo/deploy",
+            "{}",
+        ))
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::ACCEPTED);
@@ -2507,7 +2545,7 @@ async fn http_auth_validation_job_locations_and_schema() {
         .clone()
         .oneshot(authorized(
             "GET",
-            "/api/v1/farms/http-demo/logs/stream?after=1",
+            "/api/v1/stackboxes/http-demo/logs/stream?after=1",
             "",
         ))
         .await
@@ -2529,13 +2567,13 @@ async fn http_auth_validation_job_locations_and_schema() {
         .unwrap();
     let spec: serde_json::Value =
         serde_json::from_slice(&to_bytes(response.into_body(), 1_000_000).await.unwrap()).unwrap();
-    assert!(spec["paths"]["/api/v1/farms/{id}/logs/stream"].is_object());
+    assert!(spec["paths"]["/api/v1/stackboxes/{id}/logs/stream"].is_object());
     assert!(spec["components"]["schemas"]["CreateRequest"].is_object());
     settle(&manager).await;
 }
 
 #[tokio::test]
-async fn the_farms_api_names_the_release_each_farm_recorded() {
+async fn the_stackboxes_api_names_the_release_each_stackbox_recorded() {
     let dir = tempfile::tempdir().unwrap();
     let manager = open_with(options(dir.path()), Arc::new(Fake::default())).await;
     let created = manager
@@ -2546,9 +2584,9 @@ async fn the_farms_api_names_the_release_each_farm_recorded() {
         .unwrap();
     done(&manager, &created).await;
     let app = api::router(manager.clone(), None);
-    // The portal labels farms with the release they record, named as the images name it, so
+    // The portal labels stackboxes with the release they record, named as the images name it, so
     // both the list and the detail carry the series and whether the release is still supported.
-    for uri in ["/api/v1/farms", "/api/v1/farms/released"] {
+    for uri in ["/api/v1/stackboxes", "/api/v1/stackboxes/released"] {
         let response = app
             .clone()
             .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
@@ -2558,40 +2596,40 @@ async fn the_farms_api_names_the_release_each_farm_recorded() {
         let body: serde_json::Value =
             serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
                 .unwrap();
-        let farm = if uri.ends_with("released") {
+        let stackbox = if uri.ends_with("released") {
             &body
         } else {
             &body[0]
         };
-        assert_eq!(farm["id"], "released", "{uri}");
+        assert_eq!(stackbox["id"], "released", "{uri}");
         assert_eq!(
-            farm["openstack"]["release"],
+            stackbox["openstack"]["release"],
             crate::kolla::OPENSTACK_RELEASE,
             "{uri}"
         );
         assert_eq!(
-            farm["openstack"]["series"],
+            stackbox["openstack"]["series"],
             crate::kolla::OPENSTACK_RELEASE,
             "{uri}"
         );
         // The code name is display only, so it does not replace the series the images use.
         assert_eq!(
-            farm["openstack"]["codename"],
+            stackbox["openstack"]["codename"],
             crate::kolla::releases::info(crate::kolla::OPENSTACK_RELEASE).codename,
             "{uri}"
         );
-        assert_eq!(farm["openstack"]["eol"], false, "{uri}");
-        assert_eq!(farm["openstack"]["supported"], true, "{uri}");
+        assert_eq!(stackbox["openstack"]["eol"], false, "{uri}");
+        assert_eq!(stackbox["openstack"]["supported"], true, "{uri}");
     }
     settle(&manager).await;
 }
 
 #[tokio::test]
-async fn stale_inventory_scan_does_not_break_a_newly_created_farm() {
+async fn stale_inventory_scan_does_not_break_a_newly_created_stackbox() {
     let dir = tempfile::tempdir().unwrap();
     let backend = Arc::new(Fake::default());
     let manager = open_with(options(dir.path()), backend.clone()).await;
-    // Reconciliation scans the hosts that hold farms.
+    // Reconciliation scans the hosts that hold stackboxes.
     done(&manager, &manager.create(request("existing")).unwrap()).await;
     let started = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
@@ -2605,9 +2643,9 @@ async fn stale_inventory_scan_does_not_break_a_newly_created_farm() {
     assert_eq!(done(&manager, &job).await.status, JobStatus::Succeeded);
     release.notify_one();
     scan.await.unwrap().unwrap();
-    let farm = manager.get("racing").unwrap();
-    assert_eq!(farm.status, FarmStatus::Created);
-    assert_eq!(farm.nodes.len(), 1);
+    let stackbox = manager.get("racing").unwrap();
+    assert_eq!(stackbox.status, StackboxStatus::Created);
+    assert_eq!(stackbox.nodes.len(), 1);
     settle(&manager).await;
 }
 
@@ -2617,38 +2655,39 @@ async fn a_running_job_still_lets_inventory_clear_or_record_the_host_observation
     let backend = Arc::new(Fake::default());
     let manager = open_with(options(dir.path()), backend.clone()).await;
     done(&manager, &manager.create(request("busy")).unwrap()).await;
-    // Stand in for a job that is still running on the farm.
+    // Stand in for a job that is still running on the stackbox.
     manager
         .update(|state| {
-            let farm = state.farms.get_mut("busy").unwrap();
-            farm.active_job = Some("running-job".into());
-            farm.observation_error = Some("host inventory unavailable: old".into());
-            farm.last_seen_at = None;
+            let stackbox = state.stackboxes.get_mut("busy").unwrap();
+            stackbox.active_job = Some("running-job".into());
+            stackbox.observation_error = Some("host inventory unavailable: old".into());
+            stackbox.last_seen_at = None;
             Ok(())
         })
         .unwrap();
     manager.reconcile().await.unwrap();
-    let farm = manager.get("busy").unwrap();
+    let stackbox = manager.get("busy").unwrap();
     assert!(
-        farm.observation_error.is_none(),
+        stackbox.observation_error.is_none(),
         "{:?}",
-        farm.observation_error
+        stackbox.observation_error
     );
-    assert!(farm.last_seen_at.is_some());
+    assert!(stackbox.last_seen_at.is_some());
     backend.fail_scan.store(true, Ordering::SeqCst);
     manager.reconcile().await.unwrap();
-    let farm = manager.get("busy").unwrap();
+    let stackbox = manager.get("busy").unwrap();
     assert!(
-        farm.observation_error
+        stackbox
+            .observation_error
             .as_deref()
             .is_some_and(|e| e.starts_with("host inventory unavailable")),
         "{:?}",
-        farm.observation_error
+        stackbox.observation_error
     );
     backend.fail_scan.store(false, Ordering::SeqCst);
     manager
         .update(|state| {
-            state.farms.get_mut("busy").unwrap().active_job = None;
+            state.stackboxes.get_mut("busy").unwrap().active_job = None;
             Ok(())
         })
         .unwrap();
@@ -2682,7 +2721,7 @@ async fn host_reachability_needs_two_failed_scans_to_go_offline() {
 }
 
 #[tokio::test]
-async fn ssh_hosts_without_farms_get_a_plain_connection_check_each_reconcile() {
+async fn ssh_hosts_without_stackboxes_get_a_plain_connection_check_each_reconcile() {
     use crate::remote::test_server::Fixture;
     let fixture = Fixture::start().await;
     let dir = tempfile::tempdir().unwrap();
@@ -2717,13 +2756,13 @@ async fn ssh_hosts_without_farms_get_a_plain_connection_check_each_reconcile() {
 }
 
 #[tokio::test]
-async fn unreserved_vms_are_never_adopted_and_hostless_farms_can_only_be_removed() {
+async fn unreserved_vms_are_never_adopted_and_hostless_stackboxes_can_only_be_removed() {
     let dir = tempfile::tempdir().unwrap();
     let backend = Arc::new(Fake::default());
-    // A VM with farm labels that no agent reservation of this coordinator covers.
-    backend.farms.lock().unwrap().insert(
+    // A VM with stackbox labels that no agent reservation of this coordinator covers.
+    backend.stackboxes.lock().unwrap().insert(
         "stray".into(),
-        vec![FarmNode {
+        vec![StackboxNode {
             index: None,
             name: "stray".into(),
             role: Some(Role::AllInOne),
@@ -2735,17 +2774,17 @@ async fn unreserved_vms_are_never_adopted_and_hostless_farms_can_only_be_removed
     let manager = open_with(options(dir.path()), backend.clone()).await;
     manager.reconcile().await.unwrap();
     assert!(manager.get("stray").unwrap_err().is::<NotFound>());
-    // A farm recorded before farms needed a host has no agent to act through.
+    // A stackbox recorded before stackboxes needed a host has no agent to act through.
     manager
         .update(|state| {
-            let farm = FarmRecord {
+            let stackbox = StackboxRecord {
                 id: "old".into(),
                 host_id: None,
                 remote_generation: None,
                 agent_sha256: None,
                 observation_error: None,
                 last_seen_at: None,
-                status: FarmStatus::Created,
+                status: StackboxStatus::Created,
                 plan: None,
                 exposure: None,
                 owner: None,
@@ -2764,7 +2803,7 @@ async fn unreserved_vms_are_never_adopted_and_hostless_farms_can_only_be_removed
                 shares: vec![],
                 uplink_sha256: None,
             };
-            state.farms.insert("old".into(), farm);
+            state.stackboxes.insert("old".into(), stackbox);
             Ok(())
         })
         .unwrap();
@@ -2776,9 +2815,9 @@ async fn unreserved_vms_are_never_adopted_and_hostless_farms_can_only_be_removed
     );
     let deleted = manager.delete("old").unwrap();
     assert_eq!(done(&manager, &deleted).await.status, JobStatus::Succeeded);
-    assert_eq!(manager.get("old").unwrap().status, FarmStatus::Deleted);
+    assert_eq!(manager.get("old").unwrap().status, StackboxStatus::Deleted);
     // The stray VM was left alone.
-    assert!(backend.farms.lock().unwrap().contains_key("stray"));
+    assert!(backend.stackboxes.lock().unwrap().contains_key("stray"));
     settle(&manager).await;
 }
 
@@ -2841,16 +2880,16 @@ async fn snapshots_freeze_restore_export_import_and_delete() {
     assert_eq!(snapshot.plan.components, ["keystone", "glance", "horizon"]);
     assert_eq!(snapshot.reference.as_deref(), Some("fake/clean"));
     let source = manager.get("src").unwrap();
-    assert_eq!(source.status, FarmStatus::Ready);
+    assert_eq!(source.status, StackboxStatus::Ready);
     assert!(source.active_job.is_none());
     // The source's services were awaited after its restart, without rebinding.
     assert!(matches!(backend.settled.lock().unwrap()[..], [None]));
     let labels = backend.snapshots.lock().unwrap()["fake/clean"].clone();
     assert_eq!(
-        labels["farm.snapshot.components"],
+        labels["stackbox.snapshot.components"],
         "keystone,glance,horizon"
     );
-    assert_eq!(labels["farm.snapshot.source"], "src");
+    assert_eq!(labels["stackbox.snapshot.source"], "src");
 
     // Restore: the snapshot's plan replaces components, and public endpoints move to new ports.
     let mut copy = request("copy");
@@ -2867,7 +2906,7 @@ async fn snapshots_freeze_restore_export_import_and_delete() {
     assert_eq!(job.snapshot_id.as_deref(), Some("clean"));
     assert_eq!(done(&manager, &job).await.status, JobStatus::Succeeded);
     let restored = manager.get("copy").unwrap();
-    assert_eq!(restored.status, FarmStatus::Ready);
+    assert_eq!(restored.status, StackboxStatus::Ready);
     assert_eq!(restored.snapshot_id.as_deref(), Some("clean"));
     assert_eq!(
         restored.plan.as_ref().unwrap().components,
@@ -2938,16 +2977,16 @@ async fn snapshots_freeze_restore_export_import_and_delete() {
     assert_eq!(moved.status, SnapshotStatus::Ready);
     assert_eq!(moved.plan.components, snapshot.plan.components);
     assert!(moved.deployed);
-    assert_eq!(moved.source_farm.as_deref(), Some("src"));
+    assert_eq!(moved.source_stackbox.as_deref(), Some("src"));
     assert_eq!(moved.note.as_deref(), Some("clean install"));
     assert_eq!(moved.source_exposure.port_base, from.port_base);
-    // An archive without farm labels is rejected and not left in msb.
+    // An archive without stackbox labels is rejected and not left in msb.
     let plain = dir.path().join("plain.msb");
     std::fs::write(&plain, b"x").unwrap();
     import(&plain, None).unwrap();
     let rejected = manager.wait_snapshot("plain").await.unwrap();
     assert_eq!(rejected.status, SnapshotStatus::Failed);
-    assert!(rejected.error.unwrap().contains("not frozen by farm"));
+    assert!(rejected.error.unwrap().contains("not frozen by stackbox"));
     assert!(
         !backend
             .snapshots
@@ -2956,7 +2995,7 @@ async fn snapshots_freeze_restore_export_import_and_delete() {
             .contains_key("fake/imported/plain")
     );
 
-    // A failed capture leaves the farm as it was and records the error on the snapshot.
+    // A failed capture leaves the stackbox as it was and records the error on the snapshot.
     backend.fail.store(true, Ordering::SeqCst);
     let failed = done(&manager, &freeze("broken").unwrap()).await;
     assert_eq!(failed.status, JobStatus::Failed);
@@ -2969,7 +3008,7 @@ async fn snapshots_freeze_restore_export_import_and_delete() {
         manager.snapshot("broken").unwrap().status,
         SnapshotStatus::Failed
     );
-    assert_eq!(manager.get("src").unwrap().status, FarmStatus::Ready);
+    assert_eq!(manager.get("src").unwrap().status, StackboxStatus::Ready);
     backend.fail.store(false, Ordering::SeqCst);
 
     // A guest frozen elsewhere cannot boot here, and an archive records where it was frozen.
@@ -2989,7 +3028,7 @@ async fn snapshots_freeze_restore_export_import_and_delete() {
     from_foreign.snapshot_id = Some("clean".into());
     let error = manager.create(from_foreign).unwrap_err().to_string();
     assert!(error.contains("cannot boot on host"), "{error}");
-    // Freezing records the architecture of the farm's host.
+    // Freezing records the architecture of the stackbox's host.
     assert_eq!(manager.snapshot("clean").unwrap().arch, foreign.arch);
     let local = manager.freeze(
         "src",
@@ -3003,7 +3042,7 @@ async fn snapshots_freeze_restore_export_import_and_delete() {
     assert_eq!(manager.snapshot("local-arch").unwrap().arch, current_arch());
     assert_eq!(backend.snapshots.lock().unwrap().len(), 3);
     let arch_label = backend.snapshots.lock().unwrap()["fake/local-arch"]
-        .get("farm.snapshot.arch")
+        .get("stackbox.snapshot.arch")
         .cloned();
     assert_eq!(arch_label.as_deref(), Some(current_arch().as_str()));
     // The host platform travels with the archive and is shown to the operator.
@@ -3013,7 +3052,7 @@ async fn snapshots_freeze_restore_export_import_and_delete() {
         Some(current_platform().as_str())
     );
     let platform_label = backend.snapshots.lock().unwrap()["fake/local-arch"]
-        .get("farm.snapshot.platform")
+        .get("stackbox.snapshot.platform")
         .cloned();
     assert_eq!(platform_label.as_deref(), Some(current_platform().as_str()));
     manager.delete_snapshot("local-arch").await.unwrap();
@@ -3077,7 +3116,7 @@ async fn snapshots_freeze_restore_export_import_and_delete() {
         .clone()
         .oneshot(call(
             "POST",
-            "/api/v1/farms/src/snapshots",
+            "/api/v1/stackboxes/src/snapshots",
             r#"{"id":"Bad"}"#,
         ))
         .await
@@ -3131,7 +3170,7 @@ async fn bucket_archives_carry_metadata_files_and_an_index() {
             id: "minio".into(),
             endpoint: Some(endpoint),
             region: None,
-            name: "farm".into(),
+            name: "stackbox".into(),
             prefix: Some("snapshots".into()),
             path_style: None,
             ca_pem: None,
@@ -3193,7 +3232,7 @@ async fn bucket_archives_carry_metadata_files_and_an_index() {
         Some(crate::kolla::OPENSTACK_RELEASE)
     );
     assert_eq!(metadata.role, None);
-    assert_eq!(metadata.source_farm.as_deref(), Some("src"));
+    assert_eq!(metadata.source_stackbox.as_deref(), Some("src"));
     assert_eq!(metadata.note.as_deref(), Some("catalogued"));
     assert_eq!(metadata.arch, current_arch());
     let index = BucketIndex::parse(&object("snapshots/index.json").unwrap()).unwrap();
@@ -3274,7 +3313,7 @@ async fn bucket_archives_carry_metadata_files_and_an_index() {
         .await
         .is_empty()
     );
-    // Farm snapshots are not templates.
+    // Stackbox snapshots are not templates.
     assert_eq!(found(TemplateQuery::default()).await.len(), 2);
 
     // A corrupt index is rebuilt by the next listing; a gone archive leaves it.
@@ -3323,7 +3362,7 @@ async fn bucket_archives_carry_metadata_files_and_an_index() {
             .unwrap()
             .contains_key("fake/imported/tampered")
     );
-    // The labels inside say farm snapshot, the metadata file control template.
+    // The labels inside say stackbox snapshot, the metadata file control template.
     let contradicted = import("snapshots/ctl.msb", "contradicted").await;
     assert_eq!(contradicted.status, SnapshotStatus::Failed);
     let error = contradicted.error.unwrap();
@@ -3353,7 +3392,7 @@ async fn snapshots_move_through_registered_buckets_with_sealed_keys() {
         id: "minio".into(),
         endpoint: Some(endpoint.clone()),
         region: None,
-        name: "farm".into(),
+        name: "stackbox".into(),
         prefix: Some("snapshots".into()),
         path_style: None,
         ca_pem: None,
@@ -3371,7 +3410,7 @@ async fn snapshots_move_through_registered_buckets_with_sealed_keys() {
             .test_bucket(registration(Some("unique-test-secret")))
             .await
             .unwrap()
-            .contains("s3://farm/snapshots/")
+            .contains("s3://stackbox/snapshots/")
     );
     assert!(s3.objects.lock().unwrap().is_empty());
     let bucket = manager
@@ -3393,8 +3432,8 @@ async fn snapshots_move_through_registered_buckets_with_sealed_keys() {
     moved.endpoint = Some("http://elsewhere:9000".into());
     assert!(manager.update_bucket(moved).unwrap_err().is::<BadRequest>());
     let mut renamed = registration(None);
-    renamed.prefix = Some("farm/".into());
-    assert_eq!(manager.update_bucket(renamed).unwrap().prefix, "farm/");
+    renamed.prefix = Some("stackbox/".into());
+    assert_eq!(manager.update_bucket(renamed).unwrap().prefix, "stackbox/");
     manager.check_bucket("minio").await.unwrap();
 
     done(&manager, &manager.create(request("src")).unwrap()).await;
@@ -3427,7 +3466,7 @@ async fn snapshots_move_through_registered_buckets_with_sealed_keys() {
     );
     let exporting = export("minio", None).unwrap();
     let transfer = exporting.transfer.unwrap();
-    assert_eq!(transfer.key, "farm/clean.msb");
+    assert_eq!(transfer.key, "stackbox/clean.msb");
     // A running transfer keeps its bucket registered.
     assert!(
         manager
@@ -3439,9 +3478,9 @@ async fn snapshots_move_through_registered_buckets_with_sealed_keys() {
     assert_eq!(exported.error, None);
     assert!(exported.transfer.is_none());
     let archive = exported.archive.unwrap();
-    assert_eq!(archive.path, "s3://farm/farm/clean.msb");
+    assert_eq!(archive.path, "s3://stackbox/stackbox/clean.msb");
     assert_eq!(archive.bucket.as_deref(), Some("minio"));
-    let uploaded = s3.objects.lock().unwrap()["farm/clean.msb"].clone();
+    let uploaded = s3.objects.lock().unwrap()["stackbox/clean.msb"].clone();
     assert_eq!(archive.size_bytes, uploaded.len() as u64);
     // The local copy is gone once uploaded.
     assert_eq!(
@@ -3459,16 +3498,16 @@ async fn snapshots_move_through_registered_buckets_with_sealed_keys() {
     );
     assert_eq!(again.archive.unwrap().exported_at, archive.exported_at);
     // Exports keep the extension imports look for.
-    export("minio", Some("farm/renamed")).unwrap();
+    export("minio", Some("stackbox/renamed")).unwrap();
     let renamed = manager.wait_snapshot("clean").await.unwrap();
     assert_eq!(renamed.error, None);
     assert_eq!(
         renamed.archive.unwrap().key.as_deref(),
-        Some("farm/renamed.msb")
+        Some("stackbox/renamed.msb")
     );
     // A failed upload is aborted rather than left billed.
     *s3.fail_parts.lock().unwrap() = Some(StatusCode::FORBIDDEN);
-    export("minio", Some("farm/failed.msb")).unwrap();
+    export("minio", Some("stackbox/failed.msb")).unwrap();
     let failed = manager.wait_snapshot("clean").await.unwrap();
     assert!(failed.error.unwrap().contains("upload part 1"));
     assert!(s3.uploads.lock().unwrap().is_empty());
@@ -3482,7 +3521,7 @@ async fn snapshots_move_through_registered_buckets_with_sealed_keys() {
     let objects = manager.bucket_objects("minio").await.unwrap();
     assert_eq!(
         objects.iter().map(|o| o.key.as_str()).collect::<Vec<_>>(),
-        ["farm/clean.msb", "farm/renamed.msb"]
+        ["stackbox/clean.msb", "stackbox/renamed.msb"]
     );
     let import = |key: Option<&str>, id: Option<&str>| {
         manager.import_snapshot(ImportRequest {
@@ -3494,18 +3533,18 @@ async fn snapshots_move_through_registered_buckets_with_sealed_keys() {
     };
     assert!(import(None, Some("x")).unwrap_err().is::<BadRequest>());
     assert!(
-        import(Some("farm/clean.msb"), None)
+        import(Some("stackbox/clean.msb"), None)
             .unwrap_err()
             .is::<Conflict>()
     );
-    let importing = import(Some("farm/clean.msb"), Some("moved")).unwrap();
-    assert_eq!(importing.transfer.unwrap().key, "farm/clean.msb");
+    let importing = import(Some("stackbox/clean.msb"), Some("moved")).unwrap();
+    assert_eq!(importing.transfer.unwrap().key, "stackbox/clean.msb");
     let moved = manager.wait_snapshot("moved").await.unwrap();
     assert_eq!(moved.status, SnapshotStatus::Ready, "{:?}", moved.error);
     assert_eq!(moved.note.as_deref(), Some("via s3"));
-    assert_eq!(moved.source_farm.as_deref(), Some("src"));
+    assert_eq!(moved.source_stackbox.as_deref(), Some("src"));
     assert!(moved.transfer.is_none());
-    import(Some("farm/absent.msb"), None).unwrap();
+    import(Some("stackbox/absent.msb"), None).unwrap();
     let absent = manager.wait_snapshot("absent").await.unwrap();
     assert_eq!(absent.status, SnapshotStatus::Failed);
     assert!(absent.error.unwrap().contains("NoSuchKey"));
@@ -3521,7 +3560,7 @@ async fn snapshots_move_through_registered_buckets_with_sealed_keys() {
                 "left".into(),
                 crate::s3::PendingUpload {
                     bucket: "minio".into(),
-                    key: "farm/left.msb".into(),
+                    key: "stackbox/left.msb".into(),
                 },
             );
             Ok(())
@@ -3568,7 +3607,7 @@ async fn snapshots_move_through_registered_buckets_with_sealed_keys() {
         .oneshot(call(
             "PUT",
             "/api/v1/buckets/minio",
-            r#"{"id":"other","name":"farm","access_key_id":"a"}"#,
+            r#"{"id":"other","name":"stackbox","access_key_id":"a"}"#,
         ))
         .await
         .unwrap();
@@ -3592,12 +3631,17 @@ async fn snapshots_move_through_registered_buckets_with_sealed_keys() {
             .is::<BadRequest>()
     );
     // Objects stay in the bucket.
-    assert!(s3.objects.lock().unwrap().contains_key("farm/clean.msb"));
+    assert!(
+        s3.objects
+            .lock()
+            .unwrap()
+            .contains_key("stackbox/clean.msb")
+    );
     settle(&manager).await;
 }
 
 #[tokio::test]
-async fn settle_rechecks_a_restored_farm_without_redeploying() {
+async fn settle_rechecks_a_restored_stackbox_without_redeploying() {
     let dir = tempfile::tempdir().unwrap();
     let backend = Arc::new(Fake::default());
     let manager = open_with(options(dir.path()), backend.clone()).await;
@@ -3628,29 +3672,29 @@ async fn settle_rechecks_a_restored_farm_without_redeploying() {
     let mut copy = request("copy");
     copy.snapshot_id = Some("frozen".into());
     done(&manager, &manager.create(copy).unwrap()).await;
-    assert_eq!(manager.get("copy").unwrap().status, FarmStatus::Ready);
+    assert_eq!(manager.get("copy").unwrap().status, StackboxStatus::Ready);
 
     // A restart is observed as broken, then created; the check restores Ready without deploying.
-    backend.farms.lock().unwrap().get_mut("copy").unwrap()[0].status = "stopped".into();
+    backend.stackboxes.lock().unwrap().get_mut("copy").unwrap()[0].status = "stopped".into();
     manager.reconcile().await.unwrap();
-    assert_eq!(manager.get("copy").unwrap().status, FarmStatus::Broken);
-    backend.farms.lock().unwrap().get_mut("copy").unwrap()[0].status = "running".into();
+    assert_eq!(manager.get("copy").unwrap().status, StackboxStatus::Broken);
+    backend.stackboxes.lock().unwrap().get_mut("copy").unwrap()[0].status = "running".into();
     manager.reconcile().await.unwrap();
-    assert_eq!(manager.get("copy").unwrap().status, FarmStatus::Created);
+    assert_eq!(manager.get("copy").unwrap().status, StackboxStatus::Created);
     let deploys = backend.deploys.load(Ordering::SeqCst);
     let job = manager.settle("copy").unwrap();
     assert_eq!(job.kind, JobKind::Settle);
     assert_eq!(job.phase, Some(Phase::Verify));
     assert!(manager.settle("copy").unwrap_err().is::<Conflict>());
     assert_eq!(done(&manager, &job).await.status, JobStatus::Succeeded);
-    assert_eq!(manager.get("copy").unwrap().status, FarmStatus::Ready);
+    assert_eq!(manager.get("copy").unwrap().status, StackboxStatus::Ready);
     assert_eq!(backend.deploys.load(Ordering::SeqCst), deploys);
     assert!(matches!(backend.settled.lock().unwrap().last(), Some(None)));
 
     backend.fail.store(true, Ordering::SeqCst);
     let failed = manager.settle("copy").unwrap();
     assert_eq!(done(&manager, &failed).await.status, JobStatus::Failed);
-    assert_eq!(manager.get("copy").unwrap().status, FarmStatus::Created);
+    assert_eq!(manager.get("copy").unwrap().status, StackboxStatus::Created);
     settle(&manager).await;
 }
 
@@ -3659,7 +3703,7 @@ fn port_blocks_never_overlap_even_when_the_block_width_grows() {
     // The current grid: ten-apart bases do not share ports.
     assert!(!blocks_overlap(15000, 15010, 10));
     assert!(blocks_overlap(15000, 15000, 10));
-    // A base inside another farm's range is rejected, so widening the block is a safe change
+    // A base inside another stackbox's range is rejected, so widening the block is a safe change
     // as long as the grid and the overlap test agree.
     assert!(blocks_overlap(15000, 15005, 10));
     assert!(blocks_overlap(15008, 15000, 10));
@@ -3669,7 +3713,7 @@ fn port_blocks_never_overlap_even_when_the_block_width_grows() {
 }
 
 #[tokio::test]
-async fn purging_a_host_deletes_its_farms_and_leftover_vms_then_unregisters_it() {
+async fn purging_a_host_deletes_its_stackboxes_and_leftover_vms_then_unregisters_it() {
     use crate::remote::{AgentArtifactInfo, HostJobKind, InstalledAgent, test_server::Fixture};
     let fixture = Fixture::start().await;
     let dir = tempfile::tempdir().unwrap();
@@ -3701,20 +3745,24 @@ async fn purging_a_host_deletes_its_farms_and_leftover_vms_then_unregisters_it()
         })
         .unwrap();
 
-    let mut remote = request("remote-farm");
+    let mut remote = request("remote-stackbox");
     remote.host_id = Some("target".into());
     remote.external_host = "target.example".into();
     done(&manager, &manager.create(remote).unwrap()).await;
-    // A local farm must survive a purge of the remote host.
-    done(&manager, &manager.create(request("local-farm")).unwrap()).await;
+    // A local stackbox must survive a purge of the remote host.
+    done(
+        &manager,
+        &manager.create(request("local-stackbox")).unwrap(),
+    )
+    .await;
 
-    // Plain unregister still refuses while a farm lives on the host.
+    // Plain unregister still refuses while a stackbox lives on the host.
     assert!(
         manager
             .unregister_host("target")
             .unwrap_err()
             .to_string()
-            .contains("delete all farms")
+            .contains("delete all stackboxes")
     );
 
     let purge = manager
@@ -3734,12 +3782,12 @@ async fn purging_a_host_deletes_its_farms_and_leftover_vms_then_unregisters_it()
     assert_eq!(jobs.len(), 1);
     assert!(matches!(jobs[0].kind, HostJobKind::Purge));
     assert_eq!(
-        manager.get("remote-farm").unwrap().status,
-        FarmStatus::Deleted
+        manager.get("remote-stackbox").unwrap().status,
+        StackboxStatus::Deleted
     );
     assert_eq!(
-        manager.get("local-farm").unwrap().status,
-        FarmStatus::Created
+        manager.get("local-stackbox").unwrap().status,
+        StackboxStatus::Created
     );
     // The agent was asked to drop what it still reserved for this coordinator.
     assert!(
@@ -3780,9 +3828,9 @@ async fn forgetting_removes_records_without_asking_the_host() {
     let forget = manager.forget("src").unwrap();
     assert!(forget.forget);
     assert_eq!(done(&manager, &forget).await.status, JobStatus::Succeeded);
-    assert_eq!(manager.get("src").unwrap().status, FarmStatus::Deleted);
+    assert_eq!(manager.get("src").unwrap().status, StackboxStatus::Deleted);
     // The host was not asked, so its VM is still there.
-    assert!(backend.farms.lock().unwrap().contains_key("src"));
+    assert!(backend.stackboxes.lock().unwrap().contains_key("src"));
     assert!(
         manager
             .logs("src", 0, 1000)
@@ -3843,7 +3891,7 @@ async fn purging_the_local_host_can_also_delete_its_snapshots() {
     );
     assert!(matches!(finished.kind, HostJobKind::Purge));
     assert!(manager.host("local").is_err());
-    assert_eq!(manager.get("src").unwrap().status, FarmStatus::Deleted);
+    assert_eq!(manager.get("src").unwrap().status, StackboxStatus::Deleted);
     assert!(manager.snapshot("clean").unwrap_err().is::<NotFound>());
     assert!(!backend.snapshots.lock().unwrap().contains_key("fake/clean"));
     assert!(
@@ -3858,7 +3906,7 @@ async fn purging_the_local_host_can_also_delete_its_snapshots() {
 }
 
 #[tokio::test]
-async fn a_snapshot_shows_the_farm_as_snapshotting_and_puts_it_back() {
+async fn a_snapshot_shows_the_stackbox_as_snapshotting_and_puts_it_back() {
     let dir = tempfile::tempdir().unwrap();
     let backend = Arc::new(Fake {
         freeze_gate: Some(Semaphore::new(0)),
@@ -3881,11 +3929,11 @@ async fn a_snapshot_shows_the_farm_as_snapshotting_and_puts_it_back() {
             },
         )
         .unwrap();
-    // While the VM is stopped for the capture, the farm says so instead of claiming Ready,
+    // While the VM is stopped for the capture, the stackbox says so instead of claiming Ready,
     // and it refuses other work until its VM has started again.
     assert_eq!(
         manager.get("snap").unwrap().status,
-        FarmStatus::Snapshotting
+        StackboxStatus::Snapshotting
     );
     assert!(
         manager
@@ -3899,13 +3947,13 @@ async fn a_snapshot_shows_the_farm_as_snapshotting_and_puts_it_back() {
         JobStatus::Succeeded,
         "the capture itself finishes"
     );
-    // The deployment still stands, so the farm is Ready again, not merely created.
-    let farm = manager.get("snap").unwrap();
-    assert_eq!(farm.status, FarmStatus::Ready);
-    assert!(farm.resume.is_none(), "the kept status is used up");
-    assert_eq!(farm.active_job, None);
+    // The deployment still stands, so the stackbox is Ready again, not merely created.
+    let stackbox = manager.get("snap").unwrap();
+    assert_eq!(stackbox.status, StackboxStatus::Ready);
+    assert!(stackbox.resume.is_none(), "the kept status is used up");
+    assert_eq!(stackbox.active_job, None);
 
-    // A capture that fails is reported on its job; the farm is what it was before it.
+    // A capture that fails is reported on its job; the stackbox is what it was before it.
     backend.fail.store(true, Ordering::SeqCst);
     backend.freeze_gate.as_ref().unwrap().add_permits(1);
     let failed = manager
@@ -3919,7 +3967,7 @@ async fn a_snapshot_shows_the_farm_as_snapshotting_and_puts_it_back() {
         )
         .unwrap();
     assert_eq!(done(&manager, &failed).await.status, JobStatus::Failed);
-    assert_eq!(manager.get("snap").unwrap().status, FarmStatus::Ready);
+    assert_eq!(manager.get("snap").unwrap().status, StackboxStatus::Ready);
     settle(&manager).await;
 }
 
@@ -3945,7 +3993,7 @@ async fn a_restarted_daemon_reinstalls_agents_another_build_installed() {
         )
         .bytes(),
     );
-    let artifact = dir.path().join("farm-agent");
+    let artifact = dir.path().join("stackbox-agent");
     std::fs::write(&artifact, elf).unwrap();
     let mut options = options(&dir.path().join("state"));
     options.agent_binary = Some(artifact);
@@ -3984,7 +4032,7 @@ async fn a_restarted_daemon_reinstalls_agents_another_build_installed() {
 }
 
 #[tokio::test]
-async fn deploying_a_remote_farm_moves_it_to_the_hosts_current_agent() {
+async fn deploying_a_remote_stackbox_moves_it_to_the_hosts_current_agent() {
     use crate::remote::{AgentArtifactInfo, HostJobKind, InstalledAgent, test_server::Fixture};
     let fixture = Fixture::start().await;
     let dir = tempfile::tempdir().unwrap();
@@ -4014,11 +4062,14 @@ async fn deploying_a_remote_farm_moves_it_to_the_hosts_current_agent() {
             Ok(())
         })
         .unwrap();
-    let mut remote = request("remote-farm");
+    let mut remote = request("remote-stackbox");
     remote.host_id = Some("target".into());
     remote.external_host = "target.example".into();
     done(&manager, &manager.create(remote).unwrap()).await;
-    assert_eq!(manager.get("remote-farm").unwrap().agent_sha256, Some(old));
+    assert_eq!(
+        manager.get("remote-stackbox").unwrap().agent_sha256,
+        Some(old)
+    );
 
     // The operator reinstalls the agent; the next deploy follows the host instead of the pin.
     let new = "b".repeat(64);
@@ -4029,16 +4080,16 @@ async fn deploying_a_remote_farm_moves_it_to_the_hosts_current_agent() {
         })
         .unwrap();
     let deploy = manager
-        .deploy("remote-farm", DeployRequest::default())
+        .deploy("remote-stackbox", DeployRequest::default())
         .unwrap();
     assert_eq!(done(&manager, &deploy).await.status, JobStatus::Succeeded);
     assert_eq!(
-        manager.get("remote-farm").unwrap().agent_sha256,
+        manager.get("remote-stackbox").unwrap().agent_sha256,
         Some(new.clone())
     );
     assert!(
         manager
-            .logs("remote-farm", 0, 100)
+            .logs("remote-stackbox", 0, 100)
             .unwrap()
             .iter()
             .any(|entry| entry.message.contains("host's current agent"))
@@ -4063,23 +4114,26 @@ async fn deploying_a_remote_farm_moves_it_to_the_hosts_current_agent() {
         })
         .unwrap();
     let error = manager
-        .deploy("remote-farm", DeployRequest::default())
+        .deploy("remote-stackbox", DeployRequest::default())
         .unwrap_err()
         .to_string();
     assert!(error.contains("reinstall it from Hosts"), "{error}");
-    assert_eq!(manager.get("remote-farm").unwrap().agent_sha256, Some(new));
+    assert_eq!(
+        manager.get("remote-stackbox").unwrap().agent_sha256,
+        Some(new)
+    );
     settle(&manager).await;
 }
 
 #[tokio::test]
-async fn this_machine_registers_once_without_credentials_and_runs_farms_through_its_agent() {
+async fn this_machine_registers_once_without_credentials_and_runs_stackboxes_through_its_agent() {
     use crate::remote::{HostJobKind, HostKind, RegisterLocalHost};
     let dir = tempfile::tempdir().unwrap();
     let backend = Arc::new(Fake::default());
-    let manager = FarmManager::with_backend(options(dir.path()), backend.clone())
+    let manager = StackboxManager::with_backend(options(dir.path()), backend.clone())
         .await
         .unwrap();
-    // No host yet: a farm has nowhere to run.
+    // No host yet: a stackbox has nowhere to run.
     assert!(
         manager
             .create(request("early"))
@@ -4117,13 +4171,16 @@ async fn this_machine_registers_once_without_credentials_and_runs_farms_through_
     );
     local_host(&manager);
     done(&manager, &manager.create(request("one")).unwrap()).await;
-    let farm = manager.get("one").unwrap();
-    assert_eq!(farm.host_id.as_deref(), Some("local"));
-    assert!(farm.agent_sha256.is_none() && farm.remote_generation.is_some());
-    assert_eq!(farm.exposure.unwrap().bind, options(dir.path()).public_bind);
-    // The agent keeps its own reservation, so a scan reports the farm back.
+    let stackbox = manager.get("one").unwrap();
+    assert_eq!(stackbox.host_id.as_deref(), Some("local"));
+    assert!(stackbox.agent_sha256.is_none() && stackbox.remote_generation.is_some());
+    assert_eq!(
+        stackbox.exposure.unwrap().bind,
+        options(dir.path()).public_bind
+    );
+    // The agent keeps its own reservation, so a scan reports the stackbox back.
     manager.reconcile().await.unwrap();
-    assert_eq!(manager.get("one").unwrap().status, FarmStatus::Created);
+    assert_eq!(manager.get("one").unwrap().status, StackboxStatus::Created);
     assert!(
         manager
             .unregister_host("local")
@@ -4131,17 +4188,17 @@ async fn this_machine_registers_once_without_credentials_and_runs_farms_through_
             .is::<Conflict>()
     );
     done(&manager, &manager.delete("one").unwrap()).await;
-    assert!(backend.farms.lock().unwrap().is_empty());
+    assert!(backend.stackboxes.lock().unwrap().is_empty());
     manager.unregister_host("local").unwrap();
     settle(&manager).await;
 }
 
 #[tokio::test]
-async fn a_dial_in_host_runs_farms_and_shells_over_its_own_connection() {
+async fn a_dial_in_host_runs_stackboxes_and_shells_over_its_own_connection() {
     use crate::remote::{HostKind, RegisterAgentHost, agent::Agent, dial};
     let dir = tempfile::tempdir().unwrap();
     // The coordinator holds no VMs itself; the dialling agent has its own fake runtime.
-    let manager = FarmManager::with_backend(options(dir.path()), Arc::new(Fake::default()))
+    let manager = StackboxManager::with_backend(options(dir.path()), Arc::new(Fake::default()))
         .await
         .unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -4164,7 +4221,7 @@ async fn a_dial_in_host_runs_farms_and_shells_over_its_own_connection() {
         dir.path().join("edge-agent"),
         remote.clone(),
     ));
-    for token in ["api-token", "farm_wrong"] {
+    for token in ["api-token", "stackbox_wrong"] {
         assert!(dial::serve(&url, token, agent.clone()).await.is_err());
     }
     let dialling = tokio::spawn({
@@ -4193,21 +4250,27 @@ async fn a_dial_in_host_runs_farms_and_shells_over_its_own_connection() {
             Ok(())
         })
         .unwrap();
-    let mut on_edge = request("edge-farm");
+    let mut on_edge = request("edge-stackbox");
     on_edge.host_id = Some("edge".into());
     let created = manager.create(on_edge).unwrap();
     assert_eq!(done(&manager, &created).await.status, JobStatus::Succeeded);
-    assert!(remote.farms.lock().unwrap().contains_key("edge-farm"));
-    let farm = manager.get("edge-farm").unwrap();
-    assert_eq!(farm.exposure.unwrap().bind.to_string(), "0.0.0.0");
+    assert!(
+        remote
+            .stackboxes
+            .lock()
+            .unwrap()
+            .contains_key("edge-stackbox")
+    );
+    let stackbox = manager.get("edge-stackbox").unwrap();
+    assert_eq!(stackbox.exposure.unwrap().bind.to_string(), "0.0.0.0");
     // A shell travels over the same socket.
     let (input, input_rx) = tokio::sync::mpsc::channel(4);
     let (output_tx, mut output) = tokio::sync::mpsc::channel(4);
     let shell = manager.terminal(
-        "edge-farm",
+        "edge-stackbox",
         None,
-        crate::farm::TerminalSize { rows: 24, cols: 80 },
-        crate::farm::TerminalIo {
+        crate::stackbox::TerminalSize { rows: 24, cols: 80 },
+        crate::stackbox::TerminalIo {
             input: input_rx,
             output: output_tx,
         },
@@ -4215,7 +4278,7 @@ async fn a_dial_in_host_runs_farms_and_shells_over_its_own_connection() {
     let client = async {
         assert_eq!(output.recv().await.unwrap(), b"24x80");
         input
-            .send(crate::farm::TerminalInput::Data(b"ls\r".to_vec()))
+            .send(crate::stackbox::TerminalInput::Data(b"ls\r".to_vec()))
             .await
             .unwrap();
         assert_eq!(output.recv().await.unwrap(), b"ls\r");
@@ -4223,7 +4286,7 @@ async fn a_dial_in_host_runs_farms_and_shells_over_its_own_connection() {
     };
     let (shell, ()) = tokio::join!(shell, client);
     shell.unwrap();
-    // Without its connection the host takes no new farms.
+    // Without its connection the host takes no new stackboxes.
     dialling.abort();
     tokio::time::timeout(Duration::from_secs(5), async {
         while manager.host("edge").unwrap().connected {
@@ -4257,7 +4320,7 @@ async fn a_released_build_installs_agents_it_never_loaded() {
         .bytes(),
     );
     let sha256 = format!("{:x}", Sha256::digest(&agent));
-    let path = format!("{}/windows-x86_64/farm-agent.exe", crate::BUILD_ID);
+    let path = format!("{}/windows-x86_64/stackbox-agent.exe", crate::BUILD_ID);
     let manifest = serde_json::json!({
         "build_id": crate::BUILD_ID,
         "version": "0.0.0",
@@ -4267,11 +4330,11 @@ async fn a_released_build_installs_agents_it_never_loaded() {
     let downloads = Arc::new(AtomicUsize::new(0));
     let app = axum::Router::new()
         .route(
-            &format!("/farm-agent/{}/manifest.json", crate::BUILD_ID),
+            &format!("/stackbox-agent/{}/manifest.json", crate::BUILD_ID),
             axum::routing::get(move || async move { axum::Json(manifest) }),
         )
         .route(
-            &format!("/farm-agent/{path}"),
+            &format!("/stackbox-agent/{path}"),
             axum::routing::get({
                 let (served, downloads) = (served.clone(), downloads.clone());
                 move || async move {
@@ -4281,7 +4344,7 @@ async fn a_released_build_installs_agents_it_never_loaded() {
             }),
         );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let url = format!("http://{}/farm-agent", listener.local_addr().unwrap());
+    let url = format!("http://{}/stackbox-agent", listener.local_addr().unwrap());
     tokio::spawn(async move { axum::serve(listener, app).await });
 
     let dir = tempfile::tempdir().unwrap();
@@ -4314,7 +4377,7 @@ async fn a_released_build_installs_agents_it_never_loaded() {
         .path()
         .join("agents")
         .join(&sha256)
-        .join("farm-agent.exe");
+        .join("stackbox-agent.exe");
     assert_eq!(std::fs::read(&cached).unwrap(), agent);
 
     settle(&manager).await;
@@ -4349,19 +4412,19 @@ async fn a_released_build_installs_agents_it_never_loaded() {
     settle(&unreleased).await;
 }
 
-/// Records a running deploy of `farm` as a coordinator that stopped mid-deploy leaves it,
+/// Records a running deploy of `stackbox` as a coordinator that stopped mid-deploy leaves it,
 /// with the host-side job `remote` of which `frames` progress frames were recorded.
-fn running_deploy(manager: &FarmManager, farm: &str, remote: &str, frames: u64) -> Job {
+fn running_deploy(manager: &StackboxManager, stackbox: &str, remote: &str, frames: u64) -> Job {
     manager
         .update(|state| {
-            let mut job = new_job(farm, JobKind::Deploy);
+            let mut job = new_job(stackbox, JobKind::Deploy);
             job.status = JobStatus::Running;
             job.phase = Some(Phase::Prepare);
             job.started_at = Some(now());
             job.remote_job_id = Some(remote.into());
             job.remote_frames = frames;
-            let record = state.farms.get_mut(farm).unwrap();
-            record.status = FarmStatus::Deploying;
+            let record = state.stackboxes.get_mut(stackbox).unwrap();
+            record.status = StackboxStatus::Deploying;
             record.active_job = Some(job.id.clone());
             record.phase = job.phase;
             state.jobs.insert(job.id.clone(), job.clone());
@@ -4369,9 +4432,9 @@ fn running_deploy(manager: &FarmManager, farm: &str, remote: &str, frames: u64) 
         })
         .unwrap()
 }
-fn count(manager: &FarmManager, farm: &str, message: &str) -> usize {
+fn count(manager: &StackboxManager, stackbox: &str, message: &str) -> usize {
     manager
-        .logs(farm, 0, 1000)
+        .logs(stackbox, 0, 1000)
         .unwrap()
         .iter()
         .filter(|entry| entry.message.contains(message))
@@ -4400,7 +4463,7 @@ async fn a_restarted_coordinator_reattaches_to_the_deploy_its_host_kept_running(
             version: protocol::VERSION,
             coordinator_id,
             operation: protocol::Operation::Deploy {
-                farm_id: "resume".into(),
+                stackbox_id: "resume".into(),
                 generation,
                 from: Phase::Prepare,
                 job_id: remote.clone(),
@@ -4426,7 +4489,10 @@ async fn a_restarted_coordinator_reattaches_to_the_deploy_its_host_kept_running(
 
     let manager = open_with(options(dir.path()), backend.clone()).await;
     assert_eq!(manager.job(&job.id).unwrap().status, JobStatus::Running);
-    assert_eq!(manager.get("resume").unwrap().status, FarmStatus::Deploying);
+    assert_eq!(
+        manager.get("resume").unwrap().status,
+        StackboxStatus::Deploying
+    );
     assert_eq!(
         count(&manager, "resume", "re-attaching to the running deploy"),
         1
@@ -4441,9 +4507,9 @@ async fn a_restarted_coordinator_reattaches_to_the_deploy_its_host_kept_running(
     );
     assert_eq!(finished.remote_frames, 3);
     assert_eq!(finished.started_at, job.started_at);
-    let farm = manager.get("resume").unwrap();
-    assert_eq!(farm.status, FarmStatus::Ready);
-    assert!(farm.active_job.is_none() && farm.step.is_none() && farm.error.is_none());
+    let stackbox = manager.get("resume").unwrap();
+    assert_eq!(stackbox.status, StackboxStatus::Ready);
+    assert!(stackbox.active_job.is_none() && stackbox.step.is_none() && stackbox.error.is_none());
     // Only the frames recorded after the restart are applied, each once, from one deploy.
     assert_eq!(count(&manager, "resume", "test deployment output"), 1);
     assert_eq!(count(&manager, "resume", "step: make images"), 1);
@@ -4463,7 +4529,7 @@ async fn a_deploy_whose_host_stays_unreachable_after_a_restart_is_interrupted() 
     done(&manager, &manager.create(request("far")).unwrap()).await;
     manager
         .update(|state| {
-            state.farms.get_mut("far").unwrap().host_id = Some("edge".into());
+            state.stackboxes.get_mut("far").unwrap().host_id = Some("edge".into());
             Ok(())
         })
         .unwrap();
@@ -4487,9 +4553,9 @@ async fn a_deploy_whose_host_stays_unreachable_after_a_restart_is_interrupted() 
         "{:?}",
         finished.error
     );
-    let farm = manager.get("far").unwrap();
-    assert_eq!(farm.status, FarmStatus::Failed);
-    assert!(farm.active_job.is_none());
+    let stackbox = manager.get("far").unwrap();
+    assert_eq!(stackbox.status, StackboxStatus::Failed);
+    assert!(stackbox.active_job.is_none());
     settle(&manager).await;
 }
 
@@ -4522,12 +4588,12 @@ async fn a_restarted_coordinator_reattaches_to_a_remote_deploy_over_ssh() {
             Ok(())
         })
         .unwrap();
-    let mut remote = request("remote-farm");
+    let mut remote = request("remote-stackbox");
     remote.host_id = Some("target".into());
     remote.external_host = "target.example".into();
     done(&manager, &manager.create(remote).unwrap()).await;
     let remote_job = uuid::Uuid::new_v4().to_string();
-    let job = running_deploy(&manager, "remote-farm", &remote_job, 5);
+    let job = running_deploy(&manager, "remote-stackbox", &remote_job, 5);
     settle(&manager).await;
     drop(manager);
 
@@ -4549,12 +4615,16 @@ async fn a_restarted_coordinator_reattaches_to_a_remote_deploy_over_ssh() {
             .contains(&format!("attach:{remote_job}:5"))
     );
     assert_eq!(
-        count(&manager, "remote-farm", "remote deploy re-attached output"),
+        count(
+            &manager,
+            "remote-stackbox",
+            "remote deploy re-attached output"
+        ),
         1
     );
     assert_eq!(
-        manager.get("remote-farm").unwrap().status,
-        FarmStatus::Ready
+        manager.get("remote-stackbox").unwrap().status,
+        StackboxStatus::Ready
     );
     settle(&manager).await;
 }
@@ -4601,7 +4671,7 @@ impl crate::remote::link::AgentLink for DroppingLink {
     fn terminal(
         &self,
         request: crate::remote::protocol::Request,
-        io: crate::farm::TerminalIo,
+        io: crate::stackbox::TerminalIo,
     ) -> BoxFuture<'_, Result<()>> {
         self.inner.terminal(request, io)
     }
@@ -4624,7 +4694,7 @@ async fn a_deploy_that_loses_its_connection_follows_the_host_job_again() {
         dropped: AtomicBool::new(false),
         attaches: AtomicUsize::new(0),
     });
-    let manager = FarmManager::with_link(options(dir.path()), link.clone())
+    let manager = StackboxManager::with_link(options(dir.path()), link.clone())
         .await
         .unwrap();
     local_host(&manager);
@@ -4651,7 +4721,7 @@ async fn a_deploy_that_loses_its_connection_follows_the_host_job_again() {
     assert_eq!(count(&manager, "flaky", "test deployment output"), 1);
     assert_eq!(count(&manager, "flaky", "step: make images"), 1);
     assert_eq!(backend.deployed.load(Ordering::SeqCst), 1);
-    assert_eq!(manager.get("flaky").unwrap().status, FarmStatus::Ready);
+    assert_eq!(manager.get("flaky").unwrap().status, StackboxStatus::Ready);
     settle(&manager).await;
 }
 
@@ -4672,7 +4742,7 @@ async fn a_deploy_carries_the_kolla_ansible_ref_the_coordinator_resolved() {
             backend.clone(),
         )),
     });
-    let manager = FarmManager::with_link(options(dir.path()), link)
+    let manager = StackboxManager::with_link(options(dir.path()), link)
         .await
         .unwrap();
     local_host(&manager);
@@ -4709,12 +4779,12 @@ async fn a_deploy_carries_the_kolla_ansible_ref_the_coordinator_resolved() {
 }
 
 #[tokio::test]
-async fn a_deployed_farm_can_gain_a_compute_on_the_same_host() {
+async fn a_deployed_stackbox_can_gain_a_compute_on_the_same_host() {
     let dir = tempfile::tempdir().unwrap();
     let backend = Arc::new(Fake::default());
     let manager = open_with(options(dir.path()), backend.clone()).await;
     if !cfg!(target_os = "linux") {
-        *manager.0.guest_agent.write().unwrap() = Some(dir.path().join("farm-agent"));
+        *manager.0.guest_agent.write().unwrap() = Some(dir.path().join("stackbox-agent"));
     }
     let created = manager
         .create(CreateRequest {
@@ -4725,7 +4795,7 @@ async fn a_deployed_farm_can_gain_a_compute_on_the_same_host() {
     assert_eq!(done(&manager, &created).await.status, JobStatus::Succeeded);
     let deployed = manager.deploy("grow", DeployRequest::default()).unwrap();
     assert_eq!(done(&manager, &deployed).await.status, JobStatus::Succeeded);
-    assert_eq!(manager.get("grow").unwrap().status, FarmStatus::Ready);
+    assert_eq!(manager.get("grow").unwrap().status, StackboxStatus::Ready);
 
     let job = manager
         .add_compute("grow", AddComputeRequest::default())
@@ -4740,12 +4810,12 @@ async fn a_deployed_farm_can_gain_a_compute_on_the_same_host() {
         "{:?}",
         finished.error
     );
-    let farm = manager.get("grow").unwrap();
-    assert_eq!(farm.status, FarmStatus::Ready);
-    assert_eq!(farm.plan.as_ref().unwrap().computes, 2);
-    assert_eq!(farm.nodes.len(), 3);
-    assert_eq!(farm.host_of("compute-2"), Some("local"));
-    assert_eq!(farm.memory_on("local"), farm.memory_mib());
+    let stackbox = manager.get("grow").unwrap();
+    assert_eq!(stackbox.status, StackboxStatus::Ready);
+    assert_eq!(stackbox.plan.as_ref().unwrap().computes, 2);
+    assert_eq!(stackbox.nodes.len(), 3);
+    assert_eq!(stackbox.host_of("compute-2"), Some("local"));
+    assert_eq!(stackbox.memory_on("local"), stackbox.memory_mib());
     assert_eq!(
         backend.expanded.lock().unwrap().as_slice(),
         &[(
@@ -4764,12 +4834,12 @@ async fn a_deployed_farm_can_gain_a_compute_on_the_same_host() {
 }
 
 #[tokio::test]
-async fn only_a_deployed_multi_node_farm_can_gain_a_compute() {
+async fn only_a_deployed_multi_node_stackbox_can_gain_a_compute() {
     let dir = tempfile::tempdir().unwrap();
     let backend = Arc::new(Fake::default());
     let manager = open_with(options(dir.path()), backend.clone()).await;
     if !cfg!(target_os = "linux") {
-        *manager.0.guest_agent.write().unwrap() = Some(dir.path().join("farm-agent"));
+        *manager.0.guest_agent.write().unwrap() = Some(dir.path().join("stackbox-agent"));
     }
     let created = manager.create(request("aio")).unwrap();
     assert_eq!(done(&manager, &created).await.status, JobStatus::Succeeded);
@@ -4790,7 +4860,10 @@ async fn only_a_deployed_multi_node_farm_can_gain_a_compute() {
     let refused = manager
         .add_compute("waiting", AddComputeRequest::default())
         .unwrap_err();
-    assert!(refused.to_string().contains("deploy the farm"), "{refused}");
+    assert!(
+        refused.to_string().contains("deploy the stackbox"),
+        "{refused}"
+    );
 }
 
 #[tokio::test]
@@ -4799,7 +4872,7 @@ async fn a_failed_expansion_keeps_the_old_plan_and_resumes_on_retry() {
     let backend = Arc::new(Fake::default());
     let manager = open_with(options(dir.path()), backend.clone()).await;
     if !cfg!(target_os = "linux") {
-        *manager.0.guest_agent.write().unwrap() = Some(dir.path().join("farm-agent"));
+        *manager.0.guest_agent.write().unwrap() = Some(dir.path().join("stackbox-agent"));
     }
     let created = manager
         .create(CreateRequest {
@@ -4816,11 +4889,11 @@ async fn a_failed_expansion_keeps_the_old_plan_and_resumes_on_retry() {
         .unwrap();
     let finished = done(&manager, &failed).await;
     assert_eq!(finished.status, JobStatus::Failed);
-    let farm = manager.get("retry").unwrap();
-    assert_eq!(farm.status, FarmStatus::Failed);
+    let stackbox = manager.get("retry").unwrap();
+    assert_eq!(stackbox.status, StackboxStatus::Failed);
     // The VM exists, but the plan still describes the deployed layout.
-    assert_eq!(farm.plan.as_ref().unwrap().computes, 1);
-    assert_eq!(farm.nodes.len(), 3);
+    assert_eq!(stackbox.plan.as_ref().unwrap().computes, 1);
+    assert_eq!(stackbox.nodes.len(), 3);
 
     backend.fail_compute.store(false, Ordering::SeqCst);
     let retried = manager
@@ -4834,10 +4907,10 @@ async fn a_failed_expansion_keeps_the_old_plan_and_resumes_on_retry() {
         "{:?}",
         finished.error
     );
-    let farm = manager.get("retry").unwrap();
-    assert_eq!(farm.status, FarmStatus::Ready);
-    assert_eq!(farm.plan.as_ref().unwrap().computes, 2);
-    assert_eq!(farm.nodes.len(), 3);
+    let stackbox = manager.get("retry").unwrap();
+    assert_eq!(stackbox.status, StackboxStatus::Ready);
+    assert_eq!(stackbox.plan.as_ref().unwrap().computes, 2);
+    assert_eq!(stackbox.nodes.len(), 3);
     assert_eq!(manager.jobs().unwrap().len(), 4);
 }
 
@@ -4847,7 +4920,7 @@ async fn a_compute_template_boots_the_next_compute_and_kolla_only_reconfigures_i
     let backend = Arc::new(Fake::default());
     let manager = open_with(options(dir.path()), backend.clone()).await;
     if !cfg!(target_os = "linux") {
-        *manager.0.guest_agent.write().unwrap() = Some(dir.path().join("farm-agent"));
+        *manager.0.guest_agent.write().unwrap() = Some(dir.path().join("stackbox-agent"));
     }
     let created = manager
         .create(CreateRequest {
@@ -4861,7 +4934,7 @@ async fn a_compute_template_boots_the_next_compute_and_kolla_only_reconfigures_i
         note: None,
         node: Some(node.into()),
     };
-    // Only a deployed farm's control or compute VM can become a template.
+    // Only a deployed stackbox's control or compute VM can become a template.
     assert!(
         manager
             .freeze("src", template("compute-0"))
@@ -4906,10 +4979,10 @@ async fn a_compute_template_boots_the_next_compute_and_kolla_only_reconfigures_i
         labels[crate::model::snapshot_labels::RELEASE],
         crate::kolla::OPENSTACK_RELEASE
     );
-    // Freezing one compute leaves the farm's control plane alone.
+    // Freezing one compute leaves the stackbox's control plane alone.
     assert!(backend.settled.lock().unwrap().is_empty());
-    assert_eq!(manager.get("src").unwrap().status, FarmStatus::Ready);
-    // No farm restores from a template.
+    assert_eq!(manager.get("src").unwrap().status, StackboxStatus::Ready);
+    // No stackbox restores from a template.
     assert!(
         manager
             .create(CreateRequest {
@@ -4939,9 +5012,9 @@ async fn a_compute_template_boots_the_next_compute_and_kolla_only_reconfigures_i
         "{:?}",
         finished.error
     );
-    let farm = manager.get("src").unwrap();
-    assert_eq!(farm.plan.as_ref().unwrap().computes, 2);
-    assert_eq!(farm.nodes.len(), 3);
+    let stackbox = manager.get("src").unwrap();
+    assert_eq!(stackbox.plan.as_ref().unwrap().computes, 2);
+    assert_eq!(stackbox.nodes.len(), 3);
     assert_eq!(
         backend.expanded_from.lock().unwrap().as_slice(),
         &[Some("fake/tpl".to_owned())]
@@ -4981,7 +5054,7 @@ async fn a_compute_template_boots_the_next_compute_and_kolla_only_reconfigures_i
     assert_eq!(imported.release, snapshot.release);
     assert_eq!(imported.plan.components, snapshot.plan.components);
 
-    // A template must match the farm's OpenStack release and services.
+    // A template must match the stackbox's OpenStack release and services.
     manager
         .update(|state| {
             state.snapshots.get_mut("tpl").unwrap().release = Some("2024.1".into());
@@ -5025,7 +5098,7 @@ async fn a_compute_template_boots_the_next_compute_and_kolla_only_reconfigures_i
         )
         .unwrap_err();
     assert!(refused.to_string().contains("horizon"), "{refused}");
-    // A farm snapshot is not a template.
+    // A stackbox snapshot is not a template.
     let job = manager
         .freeze(
             "other",
@@ -5058,7 +5131,7 @@ async fn a_failed_expansion_from_a_template_is_retried_the_same_way() {
     let backend = Arc::new(Fake::default());
     let manager = open_with(options(dir.path()), backend.clone()).await;
     if !cfg!(target_os = "linux") {
-        *manager.0.guest_agent.write().unwrap() = Some(dir.path().join("farm-agent"));
+        *manager.0.guest_agent.write().unwrap() = Some(dir.path().join("stackbox-agent"));
     }
     let created = manager
         .create(CreateRequest {
@@ -5111,12 +5184,13 @@ async fn a_failed_expansion_from_a_template_is_retried_the_same_way() {
 }
 
 #[tokio::test]
-async fn a_control_template_starts_a_farm_without_computes_that_expands_clean_or_from_a_template() {
+async fn a_control_template_starts_a_stackbox_without_computes_that_expands_clean_or_from_a_template()
+ {
     let dir = tempfile::tempdir().unwrap();
     let backend = Arc::new(Fake::default());
     let manager = open_with(options(dir.path()), backend.clone()).await;
     if !cfg!(target_os = "linux") {
-        *manager.0.guest_agent.write().unwrap() = Some(dir.path().join("farm-agent"));
+        *manager.0.guest_agent.write().unwrap() = Some(dir.path().join("stackbox-agent"));
     }
     let created = manager
         .create(CreateRequest {
@@ -5144,7 +5218,7 @@ async fn a_control_template_starts_a_farm_without_computes_that_expands_clean_or
     assert_eq!(snapshot.reference.as_deref(), Some("fake/ctl"));
     assert_eq!(snapshot.plan.computes, 0);
     assert_eq!(snapshot.plan.nodes.len(), 1);
-    assert_eq!(snapshot.plan.nodes[0].role, crate::farm::Role::Control);
+    assert_eq!(snapshot.plan.nodes[0].role, crate::stackbox::Role::Control);
     assert_eq!(
         serde_json::to_value(snapshot.plan.nodes[0]).unwrap(),
         serde_json::to_value(source_plan.nodes[0]).unwrap()
@@ -5162,12 +5236,12 @@ async fn a_control_template_starts_a_farm_without_computes_that_expands_clean_or
     assert!(matches!(backend.settled.lock().unwrap().as_slice(), [None]));
     assert!(backend.forgotten.lock().unwrap().is_empty());
     let source = manager.get("src").unwrap();
-    assert_eq!(source.status, FarmStatus::Ready);
+    assert_eq!(source.status, StackboxStatus::Ready);
     assert_eq!(source.plan.unwrap().computes, 1);
     let job = manager.freeze("src", template("cpt", "compute-1")).unwrap();
     assert_eq!(done(&manager, &job).await.status, JobStatus::Succeeded);
 
-    // The whole-farm restore path starts a multi-node farm with the control VM alone.
+    // The whole-stackbox restore path starts a multi-node stackbox with the control VM alone.
     let restored = manager
         .create(CreateRequest {
             snapshot_id: Some("ctl".into()),
@@ -5183,7 +5257,7 @@ async fn a_control_template_starts_a_farm_without_computes_that_expands_clean_or
         finished.error
     );
     let copy = manager.get("copy").unwrap();
-    assert_eq!(copy.status, FarmStatus::Ready);
+    assert_eq!(copy.status, StackboxStatus::Ready);
     assert_eq!(copy.snapshot_id.as_deref(), Some("ctl"));
     let plan = copy.plan.clone().unwrap();
     assert!(plan.multinode());
@@ -5203,7 +5277,7 @@ async fn a_control_template_starts_a_farm_without_computes_that_expands_clean_or
             .any(|entry| entry.message.contains("computes are forgotten")),
         "{logs:?}"
     );
-    // Kolla came with the template; a farm without a compute VM only grows.
+    // Kolla came with the template; a stackbox without a compute VM only grows.
     assert!(
         manager
             .deploy("copy", DeployRequest::default())
@@ -5320,19 +5394,19 @@ async fn a_control_template_starts_a_farm_without_computes_that_expands_clean_or
 }
 
 #[tokio::test]
-async fn a_control_template_needs_a_deployed_multi_node_farm_and_a_clean_copy() {
+async fn a_control_template_needs_a_deployed_multi_node_stackbox_and_a_clean_copy() {
     let dir = tempfile::tempdir().unwrap();
     let backend = Arc::new(Fake::default());
     let manager = open_with(options(dir.path()), backend.clone()).await;
     if !cfg!(target_os = "linux") {
-        *manager.0.guest_agent.write().unwrap() = Some(dir.path().join("farm-agent"));
+        *manager.0.guest_agent.write().unwrap() = Some(dir.path().join("stackbox-agent"));
     }
     let control = |id: &str| SnapshotRequest {
         id: id.into(),
         note: None,
         node: Some("control".into()),
     };
-    // An all-in-one farm has no control VM.
+    // An all-in-one stackbox has no control VM.
     let aio = manager.create(request("aio")).unwrap();
     assert_eq!(done(&manager, &aio).await.status, JobStatus::Succeeded);
     let deployed = manager.deploy("aio", DeployRequest::default()).unwrap();
@@ -5349,7 +5423,10 @@ async fn a_control_template_needs_a_deployed_multi_node_farm_and_a_clean_copy() 
         .unwrap();
     assert_eq!(done(&manager, &created).await.status, JobStatus::Succeeded);
     let refused = manager.freeze("src", control("nope")).unwrap_err();
-    assert!(refused.to_string().contains("deploy the farm"), "{refused}");
+    assert!(
+        refused.to_string().contains("deploy the stackbox"),
+        "{refused}"
+    );
     let deployed = manager.deploy("src", DeployRequest::default()).unwrap();
     assert_eq!(done(&manager, &deployed).await.status, JobStatus::Succeeded);
     let job = manager.freeze("src", control("ctl")).unwrap();
@@ -5387,7 +5464,7 @@ async fn a_control_template_needs_a_deployed_multi_node_farm_and_a_clean_copy() 
         "{:?}",
         failed.error
     );
-    assert_eq!(manager.get("copy").unwrap().status, FarmStatus::Failed);
+    assert_eq!(manager.get("copy").unwrap().status, StackboxStatus::Failed);
     assert!(
         manager
             .add_compute("copy", AddComputeRequest::default())
@@ -5400,7 +5477,7 @@ async fn compute_templates_recorded_before_control_templates_load_as_compute_tem
     let dir = tempfile::tempdir().unwrap();
     let manager = open_with(options(dir.path()), Arc::new(Fake::default())).await;
     if !cfg!(target_os = "linux") {
-        *manager.0.guest_agent.write().unwrap() = Some(dir.path().join("farm-agent"));
+        *manager.0.guest_agent.write().unwrap() = Some(dir.path().join("stackbox-agent"));
     }
     let created = manager
         .create(CreateRequest {
@@ -5445,12 +5522,12 @@ async fn compute_templates_recorded_before_control_templates_load_as_compute_tem
 }
 
 #[tokio::test]
-async fn a_farm_restored_from_a_snapshot_can_gain_a_compute() {
+async fn a_stackbox_restored_from_a_snapshot_can_gain_a_compute() {
     let dir = tempfile::tempdir().unwrap();
     let backend = Arc::new(Fake::default());
     let manager = open_with(options(dir.path()), backend.clone()).await;
     if !cfg!(target_os = "linux") {
-        *manager.0.guest_agent.write().unwrap() = Some(dir.path().join("farm-agent"));
+        *manager.0.guest_agent.write().unwrap() = Some(dir.path().join("stackbox-agent"));
     }
     let created = manager
         .create(CreateRequest {
@@ -5479,7 +5556,7 @@ async fn a_farm_restored_from_a_snapshot_can_gain_a_compute() {
         })
         .unwrap();
     assert_eq!(done(&manager, &restored).await.status, JobStatus::Succeeded);
-    assert_eq!(manager.get("copy").unwrap().status, FarmStatus::Ready);
+    assert_eq!(manager.get("copy").unwrap().status, StackboxStatus::Ready);
 
     let job = manager
         .add_compute("copy", AddComputeRequest::default())
@@ -5491,10 +5568,10 @@ async fn a_farm_restored_from_a_snapshot_can_gain_a_compute() {
         "{:?}",
         finished.error
     );
-    let farm = manager.get("copy").unwrap();
-    assert_eq!(farm.snapshot_id.as_deref(), Some("snap"));
-    assert_eq!(farm.plan.as_ref().unwrap().computes, 2);
-    assert_eq!(farm.nodes.len(), 3);
+    let stackbox = manager.get("copy").unwrap();
+    assert_eq!(stackbox.snapshot_id.as_deref(), Some("snap"));
+    assert_eq!(stackbox.plan.as_ref().unwrap().computes, 2);
+    assert_eq!(stackbox.nodes.len(), 3);
     assert_eq!(
         backend.computed.lock().unwrap().as_slice(),
         &[("copy".into(), 2)]
@@ -5502,7 +5579,7 @@ async fn a_farm_restored_from_a_snapshot_can_gain_a_compute() {
 }
 
 #[tokio::test]
-async fn a_farm_can_gain_a_compute_on_a_new_remote_host_and_another_on_its_primary_host() {
+async fn a_stackbox_can_gain_a_compute_on_a_new_remote_host_and_another_on_its_primary_host() {
     use crate::remote::{AgentArtifactInfo, HostJobKind, InstalledAgent, test_server::Fixture};
     let fixture = Fixture::start().await;
     let dir = tempfile::tempdir().unwrap();
@@ -5511,7 +5588,7 @@ async fn a_farm_can_gain_a_compute_on_a_new_remote_host_and_another_on_its_prima
     opts.memory_budget_mib = 64 * 1024;
     let manager = open_with(opts, backend.clone()).await;
     if !cfg!(target_os = "linux") {
-        *manager.0.guest_agent.write().unwrap() = Some(dir.path().join("farm-agent"));
+        *manager.0.guest_agent.write().unwrap() = Some(dir.path().join("stackbox-agent"));
     }
     manager.register_host(fixture.registration("edge")).unwrap();
     let prep = manager
@@ -5574,14 +5651,14 @@ async fn a_farm_can_gain_a_compute_on_a_new_remote_host_and_another_on_its_prima
         "{:?}",
         finished.error
     );
-    let farm = manager.get("span").unwrap();
-    assert_eq!(farm.plan.as_ref().unwrap().computes, 2);
-    assert_eq!(farm.shares.len(), 1);
-    assert_eq!(farm.shares[0].host_id, "edge");
-    assert_eq!(farm.shares[0].nodes, ["compute-2"]);
-    assert_eq!(farm.host_of("compute-2"), Some("edge"));
-    assert!(farm.uplink_sha256.is_some());
-    assert_eq!(farm.nodes.len(), 3);
+    let stackbox = manager.get("span").unwrap();
+    assert_eq!(stackbox.plan.as_ref().unwrap().computes, 2);
+    assert_eq!(stackbox.shares.len(), 1);
+    assert_eq!(stackbox.shares[0].host_id, "edge");
+    assert_eq!(stackbox.shares[0].nodes, ["compute-2"]);
+    assert_eq!(stackbox.host_of("compute-2"), Some("edge"));
+    assert!(stackbox.uplink_sha256.is_some());
+    assert_eq!(stackbox.nodes.len(), 3);
     assert_eq!(manager.read(|s| s.relay_keys["span"].len()).unwrap(), 2);
     assert!(
         !manager
@@ -5620,11 +5697,11 @@ async fn a_farm_can_gain_a_compute_on_a_new_remote_host_and_another_on_its_prima
         "{:?}",
         finished.error
     );
-    let farm = manager.get("span").unwrap();
-    assert_eq!(farm.plan.as_ref().unwrap().computes, 3);
-    assert_eq!(farm.shares[0].nodes, ["compute-2"]);
-    assert_eq!(farm.host_of("compute-3"), Some("local"));
-    assert_eq!(farm.nodes.len(), 4);
+    let stackbox = manager.get("span").unwrap();
+    assert_eq!(stackbox.plan.as_ref().unwrap().computes, 3);
+    assert_eq!(stackbox.shares[0].nodes, ["compute-2"]);
+    assert_eq!(stackbox.host_of("compute-3"), Some("local"));
+    assert_eq!(stackbox.nodes.len(), 4);
     assert_eq!(manager.read(|s| s.relay_keys["span"].len()).unwrap(), 2);
     assert_eq!(
         backend.computed.lock().unwrap().as_slice(),
@@ -5633,7 +5710,7 @@ async fn a_farm_can_gain_a_compute_on_a_new_remote_host_and_another_on_its_prima
 }
 
 #[tokio::test]
-async fn a_farm_can_gain_a_second_compute_on_a_remote_host_it_already_uses() {
+async fn a_stackbox_can_gain_a_second_compute_on_a_remote_host_it_already_uses() {
     use crate::remote::{AgentArtifactInfo, HostJobKind, InstalledAgent, test_server::Fixture};
     let fixture = Fixture::start().await;
     let dir = tempfile::tempdir().unwrap();
@@ -5642,7 +5719,7 @@ async fn a_farm_can_gain_a_second_compute_on_a_remote_host_it_already_uses() {
     opts.memory_budget_mib = 64 * 1024;
     let manager = open_with(opts, backend.clone()).await;
     if !cfg!(target_os = "linux") {
-        *manager.0.guest_agent.write().unwrap() = Some(dir.path().join("farm-agent"));
+        *manager.0.guest_agent.write().unwrap() = Some(dir.path().join("stackbox-agent"));
     }
     manager.register_host(fixture.registration("edge")).unwrap();
     let prep = manager
@@ -5706,11 +5783,11 @@ async fn a_farm_can_gain_a_second_compute_on_a_remote_host_it_already_uses() {
             finished.error
         );
     }
-    let farm = manager.get("span").unwrap();
-    assert_eq!(farm.plan.as_ref().unwrap().computes, 3);
-    assert_eq!(farm.shares[0].nodes, ["compute-2", "compute-3"]);
-    assert_eq!(farm.host_of("compute-3"), Some("edge"));
-    assert_eq!(farm.nodes.len(), 4);
+    let stackbox = manager.get("span").unwrap();
+    assert_eq!(stackbox.plan.as_ref().unwrap().computes, 3);
+    assert_eq!(stackbox.shares[0].nodes, ["compute-2", "compute-3"]);
+    assert_eq!(stackbox.host_of("compute-3"), Some("edge"));
+    assert_eq!(stackbox.nodes.len(), 4);
     assert_eq!(manager.read(|s| s.relay_keys["span"].len()).unwrap(), 2);
     assert!(
         fixture
@@ -5727,7 +5804,7 @@ async fn a_farm_can_gain_a_second_compute_on_a_remote_host_it_already_uses() {
 }
 
 #[tokio::test]
-async fn a_farm_spans_hosts_with_its_computes_placed_elsewhere() {
+async fn a_stackbox_spans_hosts_with_its_computes_placed_elsewhere() {
     use crate::remote::{AgentArtifactInfo, HostJobKind, InstalledAgent, test_server::Fixture};
     let fixture = Fixture::start().await;
     let dir = tempfile::tempdir().unwrap();
@@ -5736,7 +5813,7 @@ async fn a_farm_spans_hosts_with_its_computes_placed_elsewhere() {
     opts.memory_budget_mib = 64 * 1024;
     let manager = open_with(opts, backend.clone()).await;
     if !cfg!(target_os = "linux") {
-        *manager.0.guest_agent.write().unwrap() = Some(dir.path().join("farm-agent"));
+        *manager.0.guest_agent.write().unwrap() = Some(dir.path().join("stackbox-agent"));
     }
     manager.register_host(fixture.registration("edge")).unwrap();
     let prep = manager
@@ -5808,20 +5885,20 @@ async fn a_farm_spans_hosts_with_its_computes_placed_elsewhere() {
         "{:?}",
         finished.error
     );
-    let farm = manager.get("mn").unwrap();
-    assert_eq!(farm.shares.len(), 1);
-    assert_eq!(farm.shares[0].host_id, "edge");
-    assert_eq!(farm.shares[0].nodes, ["compute-2"]);
-    assert_eq!(farm.nodes.len(), 3, "{:?}", farm.nodes);
-    assert_eq!(farm.host_of("compute-2"), Some("edge"));
-    assert_eq!(farm.host_of("compute-1"), Some("local"));
+    let stackbox = manager.get("mn").unwrap();
+    assert_eq!(stackbox.shares.len(), 1);
+    assert_eq!(stackbox.shares[0].host_id, "edge");
+    assert_eq!(stackbox.shares[0].nodes, ["compute-2"]);
+    assert_eq!(stackbox.nodes.len(), 3, "{:?}", stackbox.nodes);
+    assert_eq!(stackbox.host_of("compute-2"), Some("edge"));
+    assert_eq!(stackbox.host_of("compute-1"), Some("local"));
     // Each host got its part; only the control VM's host holds the private key.
     let local_share = backend.shares.lock().unwrap()[0].clone();
     assert_eq!(local_share.nodes, ["control", "compute-1"]);
     assert!(local_share.ssh_private_key.is_some());
     assert_eq!(
         local_share.uplink.url,
-        "wss://coordinator.example:10011/api/v1/link-relay?farm=mn&host=local"
+        "wss://coordinator.example:10011/api/v1/link-relay?stackbox=mn&host=local"
     );
     assert!(
         fixture
@@ -5831,12 +5908,12 @@ async fn a_farm_spans_hosts_with_its_computes_placed_elsewhere() {
             .unwrap()
             .contains(&"share:compute-2".to_string())
     );
-    // Uplink keys are kept sealed: never in the state file, nor in the API's farm record.
+    // Uplink keys are kept sealed: never in the state file, nor in the API's stackbox record.
     assert_eq!(local_share.uplink.key.len(), 64);
     let state_file = std::fs::read_to_string(dir.path().join("state.json")).unwrap();
     assert!(!state_file.contains(&local_share.uplink.key));
     assert!(
-        !serde_json::to_string(&farm)
+        !serde_json::to_string(&stackbox)
             .unwrap()
             .contains(&local_share.uplink.key)
     );
@@ -5855,8 +5932,8 @@ async fn a_farm_spans_hosts_with_its_computes_placed_elsewhere() {
             .is_err()
     );
     // Memory counts on the host that runs each VM.
-    let edge_memory = farm.memory_on("edge");
-    assert!(edge_memory > 0 && edge_memory + farm.memory_on("local") == farm.memory_mib());
+    let edge_memory = stackbox.memory_on("edge");
+    assert!(edge_memory > 0 && edge_memory + stackbox.memory_on("local") == stackbox.memory_mib());
 
     let deploy = manager.deploy("mn", DeployRequest::default()).unwrap();
     let finished = done(&manager, &deploy).await;
@@ -5889,12 +5966,13 @@ async fn a_farm_spans_hosts_with_its_computes_placed_elsewhere() {
         *backend.relinked.lock().unwrap(),
         [(
             "mn".to_string(),
-            "wss://calm-river.trycloudflare.com/api/v1/link-relay?farm=mn&host=local".to_string()
+            "wss://calm-river.trycloudflare.com/api/v1/link-relay?stackbox=mn&host=local"
+                .to_string()
         )]
     );
     assert!(
         fixture.observed.calls.lock().unwrap().contains(
-            &"relink:mn:wss://calm-river.trycloudflare.com/api/v1/link-relay?farm=mn&host=edge"
+            &"relink:mn:wss://calm-river.trycloudflare.com/api/v1/link-relay?stackbox=mn&host=edge"
                 .to_string()
         )
     );
@@ -5904,10 +5982,8 @@ async fn a_farm_spans_hosts_with_its_computes_placed_elsewhere() {
     *manager.0.tunnel_url.lock().unwrap() = Some("https://new-river.trycloudflare.com".into());
     manager.relink_missing().await;
     assert_eq!(backend.relinked.lock().unwrap().len(), 1);
-    assert!(
-        fixture.observed.calls.lock().unwrap().iter().any(|c| c
-            == "relink:mn:wss://new-river.trycloudflare.com/api/v1/link-relay?farm=mn&host=edge")
-    );
+    assert!(fixture.observed.calls.lock().unwrap().iter().any(|c| c
+        == "relink:mn:wss://new-river.trycloudflare.com/api/v1/link-relay?stackbox=mn&host=edge"));
     *manager.0.tunnel_url.lock().unwrap() = None;
     // A quick tunnel's URL comes from Cloudflare, so none may be given.
     assert!(
@@ -5947,13 +6023,13 @@ async fn a_farm_spans_hosts_with_its_computes_placed_elsewhere() {
     assert!(
         fixture
             .observed
-            .rpc_farms
+            .rpc_stackboxes
             .lock()
             .unwrap()
             .get("mn")
             .is_none()
     );
-    assert!(!backend.farms.lock().unwrap().contains_key("mn"));
+    assert!(!backend.stackboxes.lock().unwrap().contains_key("mn"));
     assert!(!manager.read(|s| s.relay_keys.contains_key("mn")).unwrap());
     assert!(
         manager
@@ -5961,7 +6037,7 @@ async fn a_farm_spans_hosts_with_its_computes_placed_elsewhere() {
             .accept("mn", "local", &local_share.uplink.token)
             .is_err()
     );
-    // Behind a proxy, new farms' switches trust public CAs.
+    // Behind a proxy, new stackboxes' switches trust public CAs.
     let status = manager
         .set_relay(Some(RelaySettings {
             bind: Some("127.0.0.1:0".parse().unwrap()),
@@ -5985,7 +6061,7 @@ async fn a_farm_spans_hosts_with_its_computes_placed_elsewhere() {
         assert!(
             last.uplink
                 .url
-                .starts_with("wss://relay.example/api/v1/link-relay?farm=px")
+                .starts_with("wss://relay.example/api/v1/link-relay?stackbox=px")
         );
     }
     let delete = manager.delete("px").unwrap();
@@ -6095,13 +6171,13 @@ async fn the_relay_rebinds_its_listen_address_on_each_change() {
     settle(&manager).await;
 }
 
-/// A deployed multi-node farm `src`, frozen into control templates `ctl-old` and `ctl` (the
+/// A deployed multi-node stackbox `src`, frozen into control templates `ctl-old` and `ctl` (the
 /// newer) and compute template `cpt`.
-async fn release_templates(dir: &Path) -> (FarmManager, Arc<Fake>) {
+async fn release_templates(dir: &Path) -> (StackboxManager, Arc<Fake>) {
     let backend = Arc::new(Fake::default());
     let manager = open_with(options(dir), backend.clone()).await;
     if !cfg!(target_os = "linux") {
-        *manager.0.guest_agent.write().unwrap() = Some(dir.join("farm-agent"));
+        *manager.0.guest_agent.write().unwrap() = Some(dir.join("stackbox-agent"));
     }
     let created = manager
         .create(CreateRequest {
@@ -6188,7 +6264,7 @@ async fn a_gpu_release_is_refused_for_its_release_window_before_missing_images()
         Ok(plan) => assert_eq!(plan.release, "2025.1"),
         Err(why) => assert!(!why.to_string().contains("cannot offer"), "{why:#}"),
     }
-    // mtty uses the same window: 2025.1's Nova gains the device support from farm's own
+    // mtty uses the same window: 2025.1's Nova gains the device support from stackbox's own
     // backport, while 2024.2 has neither the driver patch nor a supported image.
     let why = manager
         .preview_release(&ReleaseCreateRequest {
@@ -6395,7 +6471,7 @@ async fn a_release_plan_picks_the_newest_matching_templates_or_says_why_it_insta
     assert!(own.installable);
     assert!(!own.eol);
     assert_eq!(own.arches, ["x86_64", "aarch64"]);
-    // 2024.1 and 2024.2 are offered with the images the farm publishes for them.
+    // 2024.1 and 2024.2 are offered with the images the stackbox publishes for them.
     for (built, codename) in [("2024.1", "Caracal"), ("2024.2", "Dalmatian")] {
         let templates = catalog
             .releases
@@ -6456,7 +6532,7 @@ async fn a_release_plan_picks_the_newest_matching_templates_or_says_why_it_insta
         }
     }
 
-    // A farm ID in use is refused before anything else.
+    // A stackbox ID in use is refused before anything else.
     assert!(
         manager
             .preview_release(&by_release("src", 1))
@@ -6480,11 +6556,11 @@ fn release_support_policy_is_enforced_and_can_be_opted_into() {
                 "--nocapture",
                 "manager::tests::release_support_policy_probe",
             ])
-            .env("FARM_TEST_RELEASE_POLICY", mode);
+            .env("STACKBOX_TEST_RELEASE_POLICY", mode);
         if allow {
-            command.env("FARM_ALLOW_UNSUPPORTED_RELEASES", "1");
+            command.env("STACKBOX_ALLOW_UNSUPPORTED_RELEASES", "1");
         } else {
-            command.env_remove("FARM_ALLOW_UNSUPPORTED_RELEASES");
+            command.env_remove("STACKBOX_ALLOW_UNSUPPORTED_RELEASES");
         }
         let output = command.output().expect("run the test binary");
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -6503,7 +6579,7 @@ fn release_support_policy_is_enforced_and_can_be_opted_into() {
 /// The child half of [`release_support_policy_is_enforced_and_can_be_opted_into`].
 #[tokio::test]
 async fn release_support_policy_probe() {
-    let Ok(mode) = std::env::var("FARM_TEST_RELEASE_POLICY") else {
+    let Ok(mode) = std::env::var("STACKBOX_TEST_RELEASE_POLICY") else {
         return;
     };
     let dir = tempfile::tempdir().unwrap();
@@ -6567,7 +6643,7 @@ async fn release_support_policy_probe() {
             assert_eq!(legacy.arches, ["x86_64"]);
             // 2023.1/2023.2 have no images and are not part of the end-of-life opt-in.
             assert!(!catalog.releases.iter().any(|r| r.release == "2023.1"));
-            // The opt-in does not make a code name a farm's release name.
+            // The opt-in does not make a code name a stackbox's release name.
             let why = manager
                 .preview_release(&request("old", "zed"))
                 .await
@@ -6584,10 +6660,10 @@ async fn release_support_policy_probe() {
 }
 
 #[tokio::test]
-async fn an_existing_farm_of_an_unsupported_release_still_loads_and_deletes() {
+async fn an_existing_stackbox_of_an_unsupported_release_still_loads_and_deletes() {
     let dir = tempfile::tempdir().unwrap();
     let (manager, _) = release_templates(dir.path()).await;
-    // A farm frozen before the supported range changed keeps its own release; only new
+    // A stackbox frozen before the supported range changed keeps its own release; only new
     // create and plan requests are held to the minimum.
     manager
         .update(|state| {
@@ -6598,7 +6674,7 @@ async fn an_existing_farm_of_an_unsupported_release_still_loads_and_deletes() {
         })
         .unwrap();
     // Below the supported minimum, whether or not this host opted into the older series: a
-    // farm recorded before the range changed keeps the release it was made with.
+    // stackbox recorded before the range changed keeps the release it was made with.
     assert!("2021.1" < crate::kolla::releases::MIN_SUPPORTED_RELEASE);
     let job = manager
         .create(CreateRequest {
@@ -6607,13 +6683,13 @@ async fn an_existing_farm_of_an_unsupported_release_still_loads_and_deletes() {
         })
         .unwrap();
     assert_eq!(done(&manager, &job).await.status, JobStatus::Succeeded);
-    let farm = manager.get("legacy").unwrap();
+    let stackbox = manager.get("legacy").unwrap();
     assert_eq!(
-        farm.plan.as_ref().unwrap().release.as_deref(),
+        stackbox.plan.as_ref().unwrap().release.as_deref(),
         Some("2021.1")
     );
-    // Deploy still reads the farm's own release; only new create and plan requests are held
-    // to the minimum. This farm has no compute yet, which is the ordinary refusal here.
+    // Deploy still reads the stackbox's own release; only new create and plan requests are held
+    // to the minimum. This stackbox has no compute yet, which is the ordinary refusal here.
     let deploy = manager
         .deploy("legacy", DeployRequest::default())
         .unwrap_err();
@@ -6623,7 +6699,7 @@ async fn an_existing_farm_of_an_unsupported_release_still_loads_and_deletes() {
 }
 
 #[tokio::test]
-async fn a_release_farm_restores_its_control_then_adds_each_compute_in_order() {
+async fn a_release_stackbox_restores_its_control_then_adds_each_compute_in_order() {
     let dir = tempfile::tempdir().unwrap();
     let (manager, backend) = release_templates(dir.path()).await;
     let job = manager.create_release(by_release("r", 2)).await.unwrap();
@@ -6662,11 +6738,11 @@ async fn a_release_farm_restores_its_control_then_adds_each_compute_in_order() {
             ),
         ]
     );
-    let farm = manager.get("r").unwrap();
-    assert_eq!(farm.status, FarmStatus::Ready);
-    assert_eq!(farm.snapshot_id.as_deref(), Some("ctl"));
-    assert_eq!(farm.plan.unwrap().computes, 2);
-    assert_eq!(farm.nodes.len(), 3);
+    let stackbox = manager.get("r").unwrap();
+    assert_eq!(stackbox.status, StackboxStatus::Ready);
+    assert_eq!(stackbox.snapshot_id.as_deref(), Some("ctl"));
+    assert_eq!(stackbox.plan.unwrap().computes, 2);
+    assert_eq!(stackbox.nodes.len(), 3);
     assert_eq!(
         backend.reconfigured.lock().unwrap().as_slice(),
         &[("r".into(), 1), ("r".into(), 2)]
@@ -6676,7 +6752,7 @@ async fn a_release_farm_restores_its_control_then_adds_each_compute_in_order() {
         logs.iter()
             .any(|l| l.job_id == job.id && l.message.contains("compute-2 on local: template cpt"))
     );
-    // The same farm cannot be started twice.
+    // The same stackbox cannot be started twice.
     assert!(
         manager
             .create_release(by_release("r", 1))
@@ -6707,13 +6783,13 @@ async fn a_release_farm_restores_its_control_then_adds_each_compute_in_order() {
         "{:?}",
         finished.error
     );
-    let farm = manager.get("clean").unwrap();
-    assert_eq!(farm.status, FarmStatus::Ready);
-    assert_eq!(farm.snapshot_id, None);
-    assert_eq!(farm.plan.unwrap().computes, 1);
+    let stackbox = manager.get("clean").unwrap();
+    assert_eq!(stackbox.status, StackboxStatus::Ready);
+    assert_eq!(stackbox.snapshot_id, None);
+    assert_eq!(stackbox.plan.unwrap().computes, 1);
 }
 
-async fn done_slowly(manager: &FarmManager, job: &Job) -> Job {
+async fn done_slowly(manager: &StackboxManager, job: &Job) -> Job {
     tokio::time::timeout(Duration::from_secs(30), manager.wait(&job.id))
         .await
         .unwrap()
@@ -6721,7 +6797,7 @@ async fn done_slowly(manager: &FarmManager, job: &Job) -> Job {
 }
 
 #[tokio::test]
-async fn a_release_farm_can_start_as_its_control_vm_alone_and_gain_a_compute_later() {
+async fn a_release_stackbox_can_start_as_its_control_vm_alone_and_gain_a_compute_later() {
     let dir = tempfile::tempdir().unwrap();
     let (manager, backend) = release_templates(dir.path()).await;
     // The control installs clean, as it would on a host without a control template.
@@ -6734,7 +6810,7 @@ async fn a_release_farm_can_start_as_its_control_vm_alone_and_gain_a_compute_lat
         })
         .unwrap();
     let control_only = || ReleaseCreateRequest {
-        layout: Some(FarmLayout::Control),
+        layout: Some(StackboxLayout::Control),
         ..by_release("ctl", 0)
     };
     let plan = manager.preview_release(&control_only()).await.unwrap();
@@ -6742,10 +6818,10 @@ async fn a_release_farm_can_start_as_its_control_vm_alone_and_gain_a_compute_lat
     assert!(plan.computes.is_empty());
     assert!(plan.control.reason.contains("installed clean"));
 
-    // An all-in-one farm of the same release stays one VM.
+    // An all-in-one stackbox of the same release stays one VM.
     let all_in_one = manager
         .preview_release(&ReleaseCreateRequest {
-            layout: Some(FarmLayout::AllInOne),
+            layout: Some(StackboxLayout::AllInOne),
             ..by_release("aio", 0)
         })
         .await
@@ -6763,14 +6839,14 @@ async fn a_release_farm_can_start_as_its_control_vm_alone_and_gain_a_compute_lat
         "{:?}",
         finished.error
     );
-    let farm = manager.get("ctl").unwrap();
-    assert_eq!(farm.status, FarmStatus::Ready);
-    let plan = farm.plan.unwrap();
+    let stackbox = manager.get("ctl").unwrap();
+    assert_eq!(stackbox.status, StackboxStatus::Ready);
+    let plan = stackbox.plan.unwrap();
     assert_eq!(plan.computes, 0);
     assert_eq!(plan.nodes.len(), 1);
-    assert_eq!(plan.nodes[0].role, crate::farm::Role::Control);
+    assert_eq!(plan.nodes[0].role, crate::stackbox::Role::Control);
 
-    // The release's compute template still joins the farm it was kept for.
+    // The release's compute template still joins the stackbox it was kept for.
     let job = manager
         .add_compute(
             "ctl",
@@ -6787,10 +6863,10 @@ async fn a_release_farm_can_start_as_its_control_vm_alone_and_gain_a_compute_lat
         "{:?}",
         finished.error
     );
-    let farm = manager.get("ctl").unwrap();
-    assert_eq!(farm.nodes.len(), 2);
-    assert_eq!(farm.plan.unwrap().computes, 1);
-    assert_eq!(farm.status, FarmStatus::Ready);
+    let stackbox = manager.get("ctl").unwrap();
+    assert_eq!(stackbox.nodes.len(), 2);
+    assert_eq!(stackbox.plan.unwrap().computes, 1);
+    assert_eq!(stackbox.status, StackboxStatus::Ready);
     assert_eq!(
         backend.reconfigured.lock().unwrap().as_slice(),
         &[("ctl".into(), 1)]
@@ -6808,20 +6884,20 @@ async fn a_release_layout_is_checked_against_its_computes_and_templates() {
     };
     // A layout never rides along with computes.
     let error = manager
-        .preview_release(&request(FarmLayout::Control, 1, None))
+        .preview_release(&request(StackboxLayout::Control, 1, None))
         .await
         .unwrap_err();
     assert!(error.is::<BadRequest>(), "{error:#}");
-    // An all-in-one farm starts from scratch, so a control template is not its own.
+    // An all-in-one stackbox starts from scratch, so a control template is not its own.
     let error = manager
-        .preview_release(&request(FarmLayout::AllInOne, 0, Some("ctl")))
+        .preview_release(&request(StackboxLayout::AllInOne, 0, Some("ctl")))
         .await
         .unwrap_err();
     assert!(error.is::<BadRequest>(), "{error:#}");
 }
 
 #[tokio::test]
-async fn an_expansion_retries_when_its_leftover_vm_marked_the_farm_broken() {
+async fn an_expansion_retries_when_its_leftover_vm_marked_the_stackbox_broken() {
     let dir = tempfile::tempdir().unwrap();
     let (manager, backend) = release_templates(dir.path()).await;
     // The control VM and compute-1 come up; the expansion that adds compute-2 fails.
@@ -6830,25 +6906,25 @@ async fn an_expansion_retries_when_its_leftover_vm_marked_the_farm_broken() {
     let finished = done_slowly(&manager, &job).await;
     assert_eq!(finished.status, JobStatus::Failed);
     // The attempt died after its VM started, so the host runs a compute the plan never kept:
-    // the inventory no longer matches, and the farm is reported as broken rather than ready.
+    // the inventory no longer matches, and the stackbox is reported as broken rather than ready.
     backend
-        .farms
+        .stackboxes
         .lock()
         .unwrap()
         .get_mut("r")
         .unwrap()
-        .push(FarmNode {
+        .push(StackboxNode {
             name: "r-compute-2".into(),
             index: Some(2),
-            role: Some(crate::farm::Role::Compute),
+            role: Some(crate::stackbox::Role::Compute),
             status: "running".into(),
             memory_mib: 3072,
             ip: Some("10.250.0.2".into()),
         });
     manager.reconcile().await.unwrap();
-    let farm = manager.get("r").unwrap();
-    assert_eq!(farm.status, FarmStatus::Broken);
-    assert_eq!(farm.plan.as_ref().unwrap().computes, 1);
+    let stackbox = manager.get("r").unwrap();
+    assert_eq!(stackbox.status, StackboxStatus::Broken);
+    assert_eq!(stackbox.plan.as_ref().unwrap().computes, 1);
 
     // The same attempt goes on, adopting the VM the host already has.
     backend.fail_expansion_from.store(0, Ordering::SeqCst);
@@ -6863,15 +6939,15 @@ async fn an_expansion_retries_when_its_leftover_vm_marked_the_farm_broken() {
         .unwrap();
     assert_eq!(retry.target_node.as_deref(), Some("compute-2"));
     assert_eq!(done(&manager, &retry).await.status, JobStatus::Succeeded);
-    let farm = manager.get("r").unwrap();
-    assert_eq!(farm.status, FarmStatus::Ready);
-    assert_eq!(farm.plan.unwrap().computes, 2);
-    assert_eq!(farm.nodes.len(), 3);
+    let stackbox = manager.get("r").unwrap();
+    assert_eq!(stackbox.status, StackboxStatus::Ready);
+    assert_eq!(stackbox.plan.unwrap().computes, 2);
+    assert_eq!(stackbox.nodes.len(), 3);
     settle(&manager).await;
 }
 
 #[tokio::test]
-async fn a_release_farm_that_fails_midway_keeps_its_vms_and_is_retried_by_expansion() {
+async fn a_release_stackbox_that_fails_midway_keeps_its_vms_and_is_retried_by_expansion() {
     let dir = tempfile::tempdir().unwrap();
     let (manager, backend) = release_templates(dir.path()).await;
     backend.fail_expansion_from.store(2, Ordering::SeqCst);
@@ -6892,11 +6968,11 @@ async fn a_release_farm_that_fails_midway_keeps_its_vms_and_is_retried_by_expans
         ]
     );
     assert!(finished.assembly[3].job_id.is_none());
-    // The farm has its control VM and compute-1; the failed expansion committed nothing.
-    let farm = manager.get("r").unwrap();
-    assert_eq!(farm.status, FarmStatus::Failed);
-    assert_eq!(farm.active_job, None);
-    assert_eq!(farm.plan.as_ref().unwrap().computes, 1);
+    // The stackbox has its control VM and compute-1; the failed expansion committed nothing.
+    let stackbox = manager.get("r").unwrap();
+    assert_eq!(stackbox.status, StackboxStatus::Failed);
+    assert_eq!(stackbox.active_job, None);
+    assert_eq!(stackbox.plan.as_ref().unwrap().computes, 1);
 
     // Retried the way it started, then expanded further.
     backend.fail_expansion_from.store(0, Ordering::SeqCst);
@@ -6910,11 +6986,11 @@ async fn a_release_farm_that_fails_midway_keeps_its_vms_and_is_retried_by_expans
     let next = manager.add_compute("r", request).unwrap();
     assert_eq!(next.target_node.as_deref(), Some("compute-3"));
     assert_eq!(done(&manager, &next).await.status, JobStatus::Succeeded);
-    let farm = manager.get("r").unwrap();
-    assert_eq!(farm.status, FarmStatus::Ready);
-    assert_eq!(farm.plan.unwrap().computes, 3);
+    let stackbox = manager.get("r").unwrap();
+    assert_eq!(stackbox.status, StackboxStatus::Ready);
+    assert_eq!(stackbox.plan.unwrap().computes, 3);
 
-    // A daemon stop leaves an assemble job interrupted, not its farm.
+    // A daemon stop leaves an assemble job interrupted, not its stackbox.
     manager
         .update(|state| {
             let job = state.jobs.get_mut(&job.id).unwrap();
@@ -6929,11 +7005,11 @@ async fn a_release_farm_that_fails_midway_keeps_its_vms_and_is_retried_by_expans
     let job = manager.job(&job.id).unwrap();
     assert_eq!(job.status, JobStatus::Interrupted);
     assert_eq!(job.assembly[3].status, JobStatus::Interrupted);
-    assert_eq!(manager.get("r").unwrap().status, FarmStatus::Ready);
+    assert_eq!(manager.get("r").unwrap().status, StackboxStatus::Ready);
 }
 
 #[tokio::test]
-async fn a_release_farm_imports_bucket_templates_once_and_reuses_the_import() {
+async fn a_release_stackbox_imports_bucket_templates_once_and_reuses_the_import() {
     use crate::s3::{RegisterBucket, fake::FakeS3};
     let s3 = Arc::new(FakeS3::default());
     let endpoint = s3.start().await;
@@ -6944,7 +7020,7 @@ async fn a_release_farm_imports_bucket_templates_once_and_reuses_the_import() {
             id: "minio".into(),
             endpoint: Some(endpoint),
             region: None,
-            name: "farm".into(),
+            name: "stackbox".into(),
             prefix: Some("snapshots".into()),
             path_style: None,
             ca_pem: None,
@@ -7071,7 +7147,7 @@ async fn a_release_farm_imports_bucket_templates_once_and_reuses_the_import() {
 }
 
 #[tokio::test]
-async fn release_routes_preview_and_start_farms() {
+async fn release_routes_preview_and_start_stackboxes() {
     let dir = tempfile::tempdir().unwrap();
     let (manager, _) = release_templates(dir.path()).await;
     let app = api::router(manager.clone(), None);
@@ -7108,7 +7184,7 @@ async fn release_routes_preview_and_start_farms() {
     assert_eq!(plan["computes"][0]["snapshot_id"], "cpt");
     let response = app
         .clone()
-        .oneshot(call("POST", "/api/v1/releases/farms", Some(request)))
+        .oneshot(call("POST", "/api/v1/releases/stackboxes", Some(request)))
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::ACCEPTED);
@@ -7119,7 +7195,7 @@ async fn release_routes_preview_and_start_farms() {
         done_slowly(&manager, &job).await.status,
         JobStatus::Succeeded
     );
-    // A new farm always has computes, so a plan without them never reaches the release.
+    // A new stackbox always has computes, so a plan without them never reaches the release.
     let response = app
         .clone()
         .oneshot(call(
@@ -7199,7 +7275,7 @@ fn prepared_inspection(mtty: bool, custom_kernel: Option<&str>) -> crate::remote
     }
 }
 
-fn gpu_farm(id: &str, mode: crate::model::GpuMode, count: u32) -> CreateRequest {
+fn gpu_stackbox(id: &str, mode: crate::model::GpuMode, count: u32) -> CreateRequest {
     CreateRequest {
         computes: 1,
         gpu: Some(crate::model::GpuConfig {
@@ -7212,12 +7288,12 @@ fn gpu_farm(id: &str, mode: crate::model::GpuMode, count: u32) -> CreateRequest 
 }
 
 #[tokio::test]
-async fn a_gpu_farm_reaches_its_hosts_agent_with_the_gpu() {
+async fn a_gpu_stackbox_reaches_its_hosts_agent_with_the_gpu() {
     let dir = tempfile::tempdir().unwrap();
     let backend = Arc::new(Fake::default());
     let manager = open_with(options(dir.path()), backend.clone()).await;
     if !cfg!(target_os = "linux") {
-        *manager.0.guest_agent.write().unwrap() = Some(dir.path().join("farm-agent"));
+        *manager.0.guest_agent.write().unwrap() = Some(dir.path().join("stackbox-agent"));
     }
     let gpu = crate::model::GpuConfig {
         mode: crate::model::GpuMode::Simulated,
@@ -7225,7 +7301,7 @@ async fn a_gpu_farm_reaches_its_hosts_agent_with_the_gpu() {
         ..Default::default()
     };
     let created = manager
-        .create(gpu_farm("gpu", gpu.mode, gpu.count))
+        .create(gpu_stackbox("gpu", gpu.mode, gpu.count))
         .unwrap();
     assert_eq!(done(&manager, &created).await.status, JobStatus::Succeeded);
     let deployed = manager.deploy("gpu", DeployRequest::default()).unwrap();
@@ -7240,11 +7316,11 @@ async fn a_gpu_farm_reaches_its_hosts_agent_with_the_gpu() {
 }
 
 #[tokio::test]
-async fn a_gpu_farm_cannot_be_frozen_as_a_control_template() {
+async fn a_gpu_stackbox_cannot_be_frozen_as_a_control_template() {
     let dir = tempfile::tempdir().unwrap();
     let manager = open_with(options(dir.path()), Arc::new(Fake::default())).await;
     if !cfg!(target_os = "linux") {
-        *manager.0.guest_agent.write().unwrap() = Some(dir.path().join("farm-agent"));
+        *manager.0.guest_agent.write().unwrap() = Some(dir.path().join("stackbox-agent"));
     }
     let gpu = crate::model::GpuConfig {
         mode: crate::model::GpuMode::Simulated,
@@ -7252,13 +7328,13 @@ async fn a_gpu_farm_cannot_be_frozen_as_a_control_template() {
         ..Default::default()
     };
     let created = manager
-        .create(gpu_farm("gpu", gpu.mode, gpu.count))
+        .create(gpu_stackbox("gpu", gpu.mode, gpu.count))
         .unwrap();
     assert_eq!(done(&manager, &created).await.status, JobStatus::Succeeded);
     let deployed = manager.deploy("gpu", DeployRequest::default()).unwrap();
     assert_eq!(done(&manager, &deployed).await.status, JobStatus::Succeeded);
     // A control template keeps no computes, and the GPU is part of them: restoring it
-    // would silently make a GPU-less farm.
+    // would silently make a GPU-less stackbox.
     let why = manager
         .freeze(
             "gpu",
@@ -7271,7 +7347,7 @@ async fn a_gpu_farm_cannot_be_frozen_as_a_control_template() {
         .unwrap_err();
     assert!(why.is::<Conflict>(), "{why:#}");
     assert!(why.to_string().contains("GPU"), "{why:#}");
-    // The farm still freezes whole, with the GPU in the snapshot's plan.
+    // The stackbox still freezes whole, with the GPU in the snapshot's plan.
     let job = manager
         .freeze(
             "gpu",
@@ -7291,7 +7367,7 @@ async fn a_gpu_farm_cannot_be_frozen_as_a_control_template() {
 }
 
 #[tokio::test]
-async fn a_release_farm_with_a_gpu_installs_clean_and_keeps_the_gpu() {
+async fn a_release_stackbox_with_a_gpu_installs_clean_and_keeps_the_gpu() {
     let dir = tempfile::tempdir().unwrap();
     let (manager, backend) = release_templates(dir.path()).await;
     let gpu = crate::model::GpuConfig {
@@ -7345,10 +7421,10 @@ async fn a_release_farm_with_a_gpu_installs_clean_and_keeps_the_gpu() {
 }
 
 /// The `mtty` gate reads each compute host's stored inspection, never this process's own
-/// kernel; see also [`mtty_farms_need_the_vm_hosts_kernel_not_the_coordinators`] for the
+/// kernel; see also [`mtty_stackboxes_need_the_vm_hosts_kernel_not_the_coordinators`] for the
 /// coordinator that has no kernel at all.
 #[tokio::test]
-async fn gpu_mtty_farms_need_each_compute_host_verified_with_the_custom_kernel() {
+async fn gpu_mtty_stackboxes_need_each_compute_host_verified_with_the_custom_kernel() {
     let mtty = crate::model::GpuConfig {
         mode: crate::model::GpuMode::Mtty,
         count: 1,
@@ -7358,11 +7434,11 @@ async fn gpu_mtty_farms_need_each_compute_host_verified_with_the_custom_kernel()
     let backend = Arc::new(Fake::default());
     let manager = open_with(options(dir.path()), backend.clone()).await;
     if !cfg!(target_os = "linux") {
-        *manager.0.guest_agent.write().unwrap() = Some(dir.path().join("farm-agent"));
+        *manager.0.guest_agent.write().unwrap() = Some(dir.path().join("stackbox-agent"));
     }
     // The local host is ready, but its preparation never verified a custom kernel.
     let why = manager
-        .create(gpu_farm("cold", mtty.mode, mtty.count))
+        .create(gpu_stackbox("cold", mtty.mode, mtty.count))
         .unwrap_err();
     assert!(why.is::<BadRequest>(), "{why:#}");
     assert!(why.to_string().contains("host 'local'"), "{why:#}");
@@ -7371,7 +7447,7 @@ async fn gpu_mtty_farms_need_each_compute_host_verified_with_the_custom_kernel()
         "{why:#}"
     );
     assert!(
-        why.to_string().contains("farm host prepare local"),
+        why.to_string().contains("stackbox host prepare local"),
         "{why:#}"
     );
     // A compute on another host is gated the same way, and the error names that host.
@@ -7385,16 +7461,16 @@ async fn gpu_mtty_farms_need_each_compute_host_verified_with_the_custom_kernel()
             Ok(())
         })
         .unwrap();
-    let mut spread = gpu_farm("spread", mtty.mode, mtty.count);
+    let mut spread = gpu_stackbox("spread", mtty.mode, mtty.count);
     spread.computes = 2;
     spread.placement = BTreeMap::from([("compute-2".into(), "edge".into())]);
     let why = manager.create(spread).unwrap_err();
     assert!(
         why.to_string()
-            .contains("host 'edge' cannot run an mtty GPU farm"),
+            .contains("host 'edge' cannot run an mtty GPU stackbox"),
         "{why:#}"
     );
-    // The local compute verified farm's kernel, so only the SSH host is left to judge.
+    // The local compute verified stackbox's kernel, so only the SSH host is left to judge.
     manager
         .update(|state| {
             state
@@ -7409,29 +7485,29 @@ async fn gpu_mtty_farms_need_each_compute_host_verified_with_the_custom_kernel()
             Ok(())
         })
         .unwrap();
-    // An SSH host that verified farm's kernel is no longer refused for its transport: the
-    // gate now reads only the kernel evidence, and the farm gets as far as its agent check.
+    // An SSH host that verified stackbox's kernel is no longer refused for its transport: the
+    // gate now reads only the kernel evidence, and the stackbox gets as far as its agent check.
     manager
         .update(|state| {
             let host = &mut state.hosts.get_mut("edge").unwrap().host;
             host.kind = crate::remote::HostKind::Ssh;
             host.inspection = Some(prepared_inspection(
                 true,
-                Some("/home/user/.local/share/farm/libkrunfw/0123456789abcdef/libkrunfw.so.5.6.1"),
+                Some("/home/user/.local/share/stackbox/libkrunfw/0123456789abcdef/libkrunfw.so.5.6.1"),
             ));
             Ok(())
         })
         .unwrap();
-    let mut ssh = gpu_farm("ssh", mtty.mode, mtty.count);
+    let mut ssh = gpu_stackbox("ssh", mtty.mode, mtty.count);
     ssh.computes = 2;
     ssh.placement = BTreeMap::from([("compute-2".into(), "edge".into())]);
     let why = manager.create(ssh).unwrap_err();
     assert!(!why.to_string().contains("reached over SSH"), "{why:#}");
     assert!(
-        !why.to_string().contains("cannot run an mtty GPU farm"),
+        !why.to_string().contains("cannot run an mtty GPU stackbox"),
         "{why:#}"
     );
-    // A verified host takes the farm, and the GPU reaches its agent.
+    // A verified host takes the stackbox, and the GPU reaches its agent.
     manager
         .update(|state| {
             state
@@ -7447,7 +7523,7 @@ async fn gpu_mtty_farms_need_each_compute_host_verified_with_the_custom_kernel()
         })
         .unwrap();
     let created = manager
-        .create(gpu_farm("warm", mtty.mode, mtty.count))
+        .create(gpu_stackbox("warm", mtty.mode, mtty.count))
         .unwrap();
     assert_eq!(done(&manager, &created).await.status, JobStatus::Succeeded);
     let deployed = manager.deploy("warm", DeployRequest::default()).unwrap();
@@ -7457,10 +7533,10 @@ async fn gpu_mtty_farms_need_each_compute_host_verified_with_the_custom_kernel()
     settle(&manager).await;
 }
 
-/// farm's kernel belongs to the host that boots the VM. A coordinator whose own machine never
-/// installed it still creates an `mtty` farm on an SSH host whose preparation did.
+/// stackbox's kernel belongs to the host that boots the VM. A coordinator whose own machine never
+/// installed it still creates an `mtty` stackbox on an SSH host whose preparation did.
 #[test]
-fn mtty_farms_need_the_vm_hosts_kernel_not_the_coordinators() {
+fn mtty_stackboxes_need_the_vm_hosts_kernel_not_the_coordinators() {
     // This process's kernel is an override or an installation under HOME, so the probe runs
     // in a child with neither: a coordinator on a machine that has not been prepared.
     let home = tempfile::tempdir().unwrap();
@@ -7468,11 +7544,11 @@ fn mtty_farms_need_the_vm_hosts_kernel_not_the_coordinators() {
         .args([
             "--exact",
             "--nocapture",
-            "manager::tests::mtty_farm_probe_without_a_coordinator_kernel",
+            "manager::tests::mtty_stackbox_probe_without_a_coordinator_kernel",
         ])
         .env_remove(crate::kernel::LIBKRUNFW_VAR)
         .env("HOME", home.path())
-        .env("FARM_TEST_NO_COORDINATOR_KERNEL", "1")
+        .env("STACKBOX_TEST_NO_COORDINATOR_KERNEL", "1")
         .output()
         .expect("run the test binary");
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -7487,30 +7563,31 @@ fn mtty_farms_need_the_vm_hosts_kernel_not_the_coordinators() {
     );
 }
 
-/// The child half of [`mtty_farms_need_the_vm_hosts_kernel_not_the_coordinators`].
+/// The child half of [`mtty_stackboxes_need_the_vm_hosts_kernel_not_the_coordinators`].
 #[tokio::test]
-async fn mtty_farm_probe_without_a_coordinator_kernel() {
+async fn mtty_stackbox_probe_without_a_coordinator_kernel() {
     use crate::remote::{AgentArtifactInfo, HostJobKind, InstalledAgent, test_server::Fixture};
-    if std::env::var_os("FARM_TEST_NO_COORDINATOR_KERNEL").is_none() {
+    if std::env::var_os("STACKBOX_TEST_NO_COORDINATOR_KERNEL").is_none() {
         return;
     }
     // The premise: this coordinator boots the stock microsandbox kernel. Planning offers mtty
     // anyway; only the target host's inspection decides whether its VMs can bind the device.
     assert!(
         crate::kernel::select_in_process().path.is_none(),
-        "this probe needs a coordinator without a farm kernel"
+        "this probe needs a coordinator without a stackbox kernel"
     );
     let fixture = Fixture::start().await;
-    // dev-01's preparation installed farm's kernel, and its verification VM saw mtty-1. Both
+    // dev-01's preparation installed stackbox's kernel, and its verification VM saw mtty-1. Both
     // reach the coordinator in the reply, which is the whole gate's evidence.
-    *fixture.observed.kernel.lock().unwrap() =
-        Some("/home/user/.local/share/farm/libkrunfw/72f012b2c2c8c33c/libkrunfw.so.5.6.1".into());
+    *fixture.observed.kernel.lock().unwrap() = Some(
+        "/home/user/.local/share/stackbox/libkrunfw/72f012b2c2c8c33c/libkrunfw.so.5.6.1".into(),
+    );
     let dir = tempfile::tempdir().unwrap();
     let backend = Arc::new(Fake::default());
     let manager = open_with(options(dir.path()), backend.clone()).await;
-    // The local host is this test machine; a multi-node farm's guests need a Linux agent.
+    // The local host is this test machine; a multi-node stackbox's guests need a Linux agent.
     if !cfg!(target_os = "linux") {
-        *manager.0.guest_agent.write().unwrap() = Some(dir.path().join("farm-agent"));
+        *manager.0.guest_agent.write().unwrap() = Some(dir.path().join("stackbox-agent"));
     }
     manager
         .register_host(fixture.registration("dev-01"))
@@ -7560,8 +7637,8 @@ async fn mtty_farm_probe_without_a_coordinator_kernel() {
     })
     .unwrap();
     assert_eq!(planned.gpu, Some(gpu.clone()));
-    // The farm runs on dev-01, whose kernel has the device, not on this machine.
-    let mut created = gpu_farm("remote-mtty", gpu.mode, gpu.count);
+    // The stackbox runs on dev-01, whose kernel has the device, not on this machine.
+    let mut created = gpu_stackbox("remote-mtty", gpu.mode, gpu.count);
     created.host_id = Some("dev-01".into());
     created.release = Some("2026.2".into());
     let created = manager.create(created).unwrap();
@@ -7579,7 +7656,7 @@ async fn mtty_farm_probe_without_a_coordinator_kernel() {
     assert!(
         fixture
             .observed
-            .rpc_farms
+            .rpc_stackboxes
             .lock()
             .unwrap()
             .contains_key("remote-mtty")
@@ -7587,33 +7664,33 @@ async fn mtty_farm_probe_without_a_coordinator_kernel() {
     // A host that boots the stock kernel is refused, and the error says which host and why:
     // the fix belongs to that host's preparation, not to this coordinator.
     let why = manager
-        .create(gpu_farm("local-mtty", gpu.mode, gpu.count))
+        .create(gpu_stackbox("local-mtty", gpu.mode, gpu.count))
         .unwrap_err();
     let message = why.to_string();
     assert!(message.contains("host 'local'"), "{message}");
     assert!(message.contains("stock microsandbox kernel"), "{message}");
-    assert!(message.contains("farm host prepare local"), "{message}");
+    assert!(message.contains("stackbox host prepare local"), "{message}");
     println!("mtty host kernel: ok");
     settle(&manager).await;
 }
 
-/// A farm that gains a compute, and a release that would install one, read the *new* VM's
+/// A stackbox that gains a compute, and a release that would install one, read the *new* VM's
 /// host. The error names that host and what keeps it from binding the device, before any job
 /// starts.
 #[tokio::test]
-async fn expanding_or_releasing_an_mtty_farm_gates_the_host_that_boots_it() {
+async fn expanding_or_releasing_an_mtty_stackbox_gates_the_host_that_boots_it() {
     let dir = tempfile::tempdir().unwrap();
     let backend = Arc::new(Fake::default());
     let manager = open_with(options(dir.path()), backend.clone()).await;
     if !cfg!(target_os = "linux") {
-        *manager.0.guest_agent.write().unwrap() = Some(dir.path().join("farm-agent"));
+        *manager.0.guest_agent.write().unwrap() = Some(dir.path().join("stackbox-agent"));
     }
     let gpu = crate::model::GpuConfig {
         mode: crate::model::GpuMode::Mtty,
         count: 1,
         ..Default::default()
     };
-    // The local host verified farm's kernel when the farm was accepted.
+    // The local host verified stackbox's kernel when the stackbox was accepted.
     manager
         .update(|state| {
             state
@@ -7629,7 +7706,7 @@ async fn expanding_or_releasing_an_mtty_farm_gates_the_host_that_boots_it() {
         })
         .unwrap();
     let created = manager
-        .create(gpu_farm("grow-mtty", gpu.mode, gpu.count))
+        .create(gpu_stackbox("grow-mtty", gpu.mode, gpu.count))
         .unwrap();
     assert_eq!(done(&manager, &created).await.status, JobStatus::Succeeded);
     let deployed = manager
@@ -7638,7 +7715,7 @@ async fn expanding_or_releasing_an_mtty_farm_gates_the_host_that_boots_it() {
     assert_eq!(done(&manager, &deployed).await.status, JobStatus::Succeeded);
 
     // Preparation ran again and left the host on the stock kernel: its kernel is no longer
-    // the one the farm's computes booted, so the next compute there cannot bind the device.
+    // the one the stackbox's computes booted, so the next compute there cannot bind the device.
     manager
         .update(|state| {
             let inspection = state
@@ -7652,7 +7729,7 @@ async fn expanding_or_releasing_an_mtty_farm_gates_the_host_that_boots_it() {
             inspection.mtty_available = false;
             inspection.custom_kernel = None;
             inspection.custom_kernel_reason =
-                Some("the farm kernel was built for msb 0.7.8".into());
+                Some("the stackbox kernel was built for msb 0.7.8".into());
             Ok(())
         })
         .unwrap();
@@ -7663,7 +7740,7 @@ async fn expanding_or_releasing_an_mtty_farm_gates_the_host_that_boots_it() {
     let message = why.to_string();
     assert!(message.contains("host 'local'"), "{message}");
     assert!(message.contains("msb 0.7.8"), "{message}");
-    assert!(message.contains("farm host prepare local"), "{message}");
+    assert!(message.contains("stackbox host prepare local"), "{message}");
     assert_eq!(
         manager.get("grow-mtty").unwrap().plan.unwrap().computes,
         1,
@@ -7688,7 +7765,7 @@ async fn expanding_or_releasing_an_mtty_farm_gates_the_host_that_boots_it() {
             .jobs()
             .unwrap()
             .iter()
-            .all(|job| job.farm_id != "release-mtty")
+            .all(|job| job.stackbox_id != "release-mtty")
     );
     settle(&manager).await;
 }
@@ -7699,12 +7776,12 @@ async fn a_gpu_load_reaches_the_control_vms_metadata_command_unchanged() {
     let backend = Arc::new(Fake::default());
     let manager = open_with(options(dir.path()), backend.clone()).await;
     if !cfg!(target_os = "linux") {
-        *manager.0.guest_agent.write().unwrap() = Some(dir.path().join("farm-agent"));
+        *manager.0.guest_agent.write().unwrap() = Some(dir.path().join("stackbox-agent"));
     }
     backend.run_scripts.store(true, Ordering::SeqCst);
     local_host(&manager);
     let created = manager
-        .create(gpu_farm("gpu", crate::model::GpuMode::Simulated, 1))
+        .create(gpu_stackbox("gpu", crate::model::GpuMode::Simulated, 1))
         .unwrap();
     assert_eq!(done(&manager, &created).await.status, JobStatus::Succeeded);
     let deployed = manager.deploy("gpu", DeployRequest::default()).unwrap();
@@ -7723,8 +7800,8 @@ async fn a_gpu_load_reaches_the_control_vms_metadata_command_unchanged() {
             r#"#!/bin/sh
 printf '%s\n' "$*" >> '{log}'
 case "$*" in
-  *"server list"*) printf '%s\n' '[{{"ID":"{server}","Name":"demo","Status":"ACTIVE","Flavor":"farm.vgpu"}}]' ;;
-  *"server show"*) printf '%s\n' '{{"id":"{server}","name":"demo","status":"ACTIVE","flavor":"farm.vgpu","properties":{{}}}}' ;;
+  *"server list"*) printf '%s\n' '[{{"ID":"{server}","Name":"demo","Status":"ACTIVE","Flavor":"stackbox.vgpu"}}]' ;;
+  *"server show"*) printf '%s\n' '{{"id":"{server}","name":"demo","status":"ACTIVE","flavor":"stackbox.vgpu","properties":{{}}}}' ;;
   *"flavor show"*) printf '%s\n' '{{"properties":{{"resources:VGPU":"1"}}}}' ;;
   *) printf '{{}}\n' ;;
 esac
@@ -7740,8 +7817,8 @@ esac
         std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
     *backend.script_env.lock().unwrap() = BTreeMap::from([
-        ("FARM_ADMIN_OPENRC".into(), admin.display().to_string()),
-        ("FARM_OPENSTACK_CLI".into(), cli.display().to_string()),
+        ("STACKBOX_ADMIN_OPENRC".into(), admin.display().to_string()),
+        ("STACKBOX_OPENSTACK_CLI".into(), cli.display().to_string()),
     ]);
 
     let load = crate::model::GpuLoad {
@@ -7780,7 +7857,7 @@ esac
             "missing {key}={value} in:\n{set}"
         );
     }
-    assert!(set.contains("farm_gpu_0=v1;p:sim-16g;q:triangle;n:5;x:95;d:30;m:40;u:"));
+    assert!(set.contains("stackbox_gpu_0=v1;p:sim-16g;q:triangle;n:5;x:95;d:30;m:40;u:"));
 
     // Clearing removes the same keys and forgets the coordinator's copy.
     let cleared = manager.clear_gpu_load("gpu", server).await.unwrap();
@@ -7799,12 +7876,12 @@ esac
 }
 
 #[tokio::test]
-async fn gpu_load_control_is_refused_with_409_outside_a_deployed_gpu_farm() {
+async fn gpu_load_control_is_refused_with_409_outside_a_deployed_gpu_stackbox() {
     let dir = tempfile::tempdir().unwrap();
     let backend = Arc::new(Fake::default());
     let manager = open_with(options(dir.path()), backend).await;
     if !cfg!(target_os = "linux") {
-        *manager.0.guest_agent.write().unwrap() = Some(dir.path().join("farm-agent"));
+        *manager.0.guest_agent.write().unwrap() = Some(dir.path().join("stackbox-agent"));
     }
     local_host(&manager);
     let plain = manager.create(request("plain")).unwrap();
@@ -7813,28 +7890,28 @@ async fn gpu_load_control_is_refused_with_409_outside_a_deployed_gpu_farm() {
     let response = app
         .clone()
         .oneshot(
-            Request::get("/api/v1/farms/plain/instances")
+            Request::get("/api/v1/stackboxes/plain/instances")
                 .body(Body::empty())
                 .unwrap(),
         )
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::CONFLICT);
-    let put = |farm: &str| {
+    let put = |stackbox: &str| {
         Request::put(format!(
-            "/api/v1/farms/{farm}/instances/11111111-2222-3333-4444-555555555555/gpu-load"
+            "/api/v1/stackboxes/{stackbox}/instances/11111111-2222-3333-4444-555555555555/gpu-load"
         ))
         .header("content-type", "application/json")
         .body(Body::from("{}"))
         .unwrap()
     };
-    // A farm without the gpu option has no virtual GPU to load.
+    // A stackbox without the gpu option has no virtual GPU to load.
     let response = app.clone().oneshot(put("plain")).await.unwrap();
     assert_eq!(response.status(), StatusCode::CONFLICT);
 
-    // A GPU farm that is only created has no control VM services to write metadata yet.
+    // A GPU stackbox that is only created has no control VM services to write metadata yet.
     let gpu = manager
-        .create(gpu_farm("gpu", crate::model::GpuMode::Simulated, 1))
+        .create(gpu_stackbox("gpu", crate::model::GpuMode::Simulated, 1))
         .unwrap();
     assert_eq!(done(&manager, &gpu).await.status, JobStatus::Succeeded);
     let response = app.clone().oneshot(put("gpu")).await.unwrap();
@@ -7844,7 +7921,7 @@ async fn gpu_load_control_is_refused_with_409_outside_a_deployed_gpu_farm() {
     let response = app
         .clone()
         .oneshot(
-            Request::get("/api/v1/farms/gpu/gpu/guest-script")
+            Request::get("/api/v1/stackboxes/gpu/gpu/guest-script")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -7858,10 +7935,10 @@ async fn gpu_load_control_is_refused_with_409_outside_a_deployed_gpu_farm() {
     let body = to_bytes(response.into_body(), 100_000).await.unwrap();
     assert!(String::from_utf8_lossy(&body).contains("nvsmi_device_v11.dtd"));
 
-    // A non-GPU farm cannot download it either.
+    // A non-GPU stackbox cannot download it either.
     let response = app
         .oneshot(
-            Request::get("/api/v1/farms/plain/gpu/guest-script")
+            Request::get("/api/v1/stackboxes/plain/gpu/guest-script")
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -7909,18 +7986,18 @@ async fn a_state_write_still_works_on_a_current_thread_runtime() {
     assert_eq!(manager.update(|_| Ok(7)).unwrap(), 7);
 }
 
-/// A PCI farm needs an msb that takes `--pci`/`--iommu`. The upstream msb reports the same
+/// A PCI stackbox needs an msb that takes `--pci`/`--iommu`. The upstream msb reports the same
 /// version as the fork, so the inspection's own flag decides: without it the create is refused
 /// by name, and with it the same device is accepted.
 #[tokio::test]
-async fn a_pci_farm_needs_an_msb_with_the_pci_flags() {
+async fn a_pci_stackbox_needs_an_msb_with_the_pci_flags() {
     let dir = tempfile::tempdir().unwrap();
     let backend = Arc::new(Fake::default());
     let manager = open_with(options(dir.path()), backend.clone()).await;
     if !cfg!(target_os = "linux") {
-        *manager.0.guest_agent.write().unwrap() = Some(dir.path().join("farm-agent"));
+        *manager.0.guest_agent.write().unwrap() = Some(dir.path().join("stackbox-agent"));
     }
-    let kernel = "/home/user/.local/share/farm/libkrunfw/0123456789abcdef/libkrunfw.so.5.6.1";
+    let kernel = "/home/user/.local/share/stackbox/libkrunfw/0123456789abcdef/libkrunfw.so.5.6.1";
     let set_msb = |capable: bool| {
         manager
             .update(|state| {
@@ -7975,18 +8052,18 @@ fn pci_device(bdf: &str, ready: bool) -> crate::remote::HostPciDevice {
     }
 }
 
-/// A PCI farm needs its device on the compute host, bound to vfio-pci and ready; one device
-/// serves one live farm; a deleted farm gives its device back; a farm without a compute
+/// A PCI stackbox needs its device on the compute host, bound to vfio-pci and ready; one device
+/// serves one live stackbox; a deleted stackbox gives its device back; a stackbox without a compute
 /// cannot hold one.
 #[tokio::test]
-async fn a_pci_farm_needs_a_vfio_ready_device_that_no_live_farm_holds() {
+async fn a_pci_stackbox_needs_a_vfio_ready_device_that_no_live_stackbox_holds() {
     let dir = tempfile::tempdir().unwrap();
     let backend = Arc::new(Fake::default());
     let manager = open_with(options(dir.path()), backend.clone()).await;
     if !cfg!(target_os = "linux") {
-        *manager.0.guest_agent.write().unwrap() = Some(dir.path().join("farm-agent"));
+        *manager.0.guest_agent.write().unwrap() = Some(dir.path().join("stackbox-agent"));
     }
-    let kernel = "/home/user/.local/share/farm/libkrunfw/0123456789abcdef/libkrunfw.so.5.6.1";
+    let kernel = "/home/user/.local/share/stackbox/libkrunfw/0123456789abcdef/libkrunfw.so.5.6.1";
     manager
         .update(|state| {
             let host = &mut state.hosts.get_mut("local").unwrap().host;
@@ -8030,7 +8107,7 @@ async fn a_pci_farm_needs_a_vfio_ready_device_that_no_live_farm_holds() {
         );
     }
 
-    // The first farm takes the device; the address is matched in its normalized form.
+    // The first stackbox takes the device; the address is matched in its normalized form.
     let first = manager
         .create(CreateRequest {
             computes: 1,
@@ -8040,7 +8117,7 @@ async fn a_pci_farm_needs_a_vfio_ready_device_that_no_live_farm_holds() {
         .expect("a vfio-ready device on the compute host is accepted");
     done(&manager, &first).await;
 
-    // A second farm asking for the same device is in conflict.
+    // A second stackbox asking for the same device is in conflict.
     let why = manager
         .create(CreateRequest {
             computes: 1,
@@ -8050,15 +8127,15 @@ async fn a_pci_farm_needs_a_vfio_ready_device_that_no_live_farm_holds() {
         .unwrap_err();
     assert!(
         why.to_string()
-            .contains("already passed through to farm 'first'"),
+            .contains("already passed through to stackbox 'first'"),
         "{why:#}"
     );
     assert!(why.downcast_ref::<Conflict>().is_some(), "{why:#}");
 
-    // Deleting the holder frees the device for the next farm.
+    // Deleting the holder frees the device for the next stackbox.
     manager
         .update(|state| {
-            state.farms.get_mut("first").unwrap().status = FarmStatus::Deleted;
+            state.stackboxes.get_mut("first").unwrap().status = StackboxStatus::Deleted;
             Ok(())
         })
         .unwrap();
@@ -8068,15 +8145,15 @@ async fn a_pci_farm_needs_a_vfio_ready_device_that_no_live_farm_holds() {
             pci_devices: vec!["0000:04:00.3".into()],
             ..request("third")
         })
-        .expect("a deleted farm releases its device");
+        .expect("a deleted stackbox releases its device");
     done(&manager, &third).await;
     settle(&manager).await;
 }
 
-/// A host with no farm kernel built locally takes the one farm publishes for its platform:
+/// A host with no stackbox kernel built locally takes the one stackbox publishes for its platform:
 /// preparation downloads it from the bucket, verifies it, caches it, and uploads it over SSH.
 #[tokio::test]
-async fn ssh_host_preparation_downloads_the_published_farm_kernel_without_a_local_build() {
+async fn ssh_host_preparation_downloads_the_published_stackbox_kernel_without_a_local_build() {
     use crate::remote::{HostJobKind, MSB_VERSION, test_server::Fixture};
     use sha2::{Digest, Sha256};
     let fixture = Fixture::start().await;
@@ -8152,7 +8229,7 @@ async fn ssh_host_preparation_downloads_the_published_farm_kernel_without_a_loca
         finished
             .events
             .iter()
-            .any(|event| event.message.starts_with("Installing the farm kernel")),
+            .any(|event| event.message.starts_with("Installing the stackbox kernel")),
         "{:?}",
         finished
             .events

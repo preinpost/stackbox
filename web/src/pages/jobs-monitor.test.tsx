@@ -35,13 +35,13 @@ afterEach(() => {
 const now = Math.floor(Date.now() / 1000);
 function job(
   id: string,
-  farm_id: string,
+  stackbox_id: string,
   status: Job["status"],
   created_at = now - 60,
 ): Job {
   return {
     id,
-    farm_id,
+    stackbox_id,
     status,
     kind: "deploy",
     phase: "deploy",
@@ -58,7 +58,7 @@ function setup(jobs: Job[], hosts: HostJob[] = [], logs: unknown[] = []) {
   clients.push(client);
   client.setQueryData(keys.jobs, jobs);
   client.setQueryData(keys.hostJobs, hosts);
-  client.setQueryData(keys.farms, []);
+  client.setQueryData(keys.stackboxes, []);
   vi.stubGlobal(
     "fetch",
     vi.fn(async (url: string) => {
@@ -79,7 +79,7 @@ function setup(jobs: Job[], hosts: HostJob[] = [], logs: unknown[] = []) {
 test("separates live work, groups history, reveals prior failures and scopes detail logs to the selected job", async () => {
   const { user } = setup(
     [
-      job("active", "live-farm", "running"),
+      job("active", "live-stackbox", "running"),
       job("latest", "demo", "succeeded"),
       job("failed", "demo", "failed", now - 120),
     ],
@@ -91,11 +91,11 @@ test("separates live work, groups history, reveals prior failures and scopes det
   );
   expect(
     within(screen.getByRole("region", { name: "진행 중 작업" })).getByText(
-      "live-farm",
+      "live-stackbox",
     ),
   ).toBeTruthy();
   const table = screen.getByRole("table");
-  expect(within(table).queryByText("live-farm")).toBeNull();
+  expect(within(table).queryByText("live-stackbox")).toBeNull();
   expect(within(table).getAllByRole("row")).toHaveLength(2);
   expect(screen.queryByText("private failure detail for failed")).toBeNull();
   await user.click(screen.getByRole("button", { name: "demo 이전 작업 1개" }));
@@ -111,9 +111,9 @@ test("separates live work, groups history, reveals prior failures and scopes det
     expect(within(dialog).getByText(/selected job log/)).toBeTruthy(),
   );
   expect(within(dialog).queryByText(/unrelated job log/)).toBeNull();
-  expect(within(dialog).queryByRole("link", { name: /Farm 상세/ })).toBeNull();
+  expect(within(dialog).queryByRole("link", { name: /Stackbox 상세/ })).toBeNull();
   expect(
-    within(dialog).getByText("삭제된 Farm의 작업 기록입니다."),
+    within(dialog).getByText("삭제된 Stackbox의 작업 기록입니다."),
   ).toBeTruthy();
   await user.keyboard("{Escape}");
   await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
@@ -121,7 +121,7 @@ test("separates live work, groups history, reveals prior failures and scopes det
 
 test("keeps host work in its own tab and exposes host event details", async () => {
   const { user } = setup(
-    [job("farm", "farm-only", "succeeded")],
+    [job("stackbox", "stackbox-only", "succeeded")],
     [
       {
         id: "host-job",
@@ -136,7 +136,7 @@ test("keeps host work in its own tab and exposes host event details", async () =
   expect(screen.queryByText("remote01")).toBeNull();
   await user.click(screen.getByRole("tab", { name: /호스트 작업/ }));
   expect(await screen.findByText("remote01")).toBeTruthy();
-  expect(screen.queryByText("farm-only")).toBeNull();
+  expect(screen.queryByText("stackbox-only")).toBeNull();
   await user.click(
     screen.getByRole("button", { name: "remote01 진행 중 작업 상세" }),
   );
@@ -151,7 +151,7 @@ test("keeps host work in its own tab and exposes host event details", async () =
 
 test("paginates twenty groups, preserves the page during polling, resets on search and shows zero results", async () => {
   const data = Array.from({ length: 25 }, (_, i) =>
-    job("id-" + i, "farm-" + String(i).padStart(2, "0"), "succeeded", now - i),
+    job("id-" + i, "stackbox-" + String(i).padStart(2, "0"), "succeeded", now - i),
   );
   const { user, client } = setup(data);
   expect(within(screen.getByRole("table")).getAllByRole("row")).toHaveLength(
@@ -166,10 +166,10 @@ test("paginates twenty groups, preserves the page during polling, resets on sear
   await waitFor(() => expect(screen.getByText(/2 \/ 2 페이지/)).toBeTruthy());
   await user.type(
     screen.getByRole("textbox", { name: "작업 검색" }),
-    "farm-00",
+    "stackbox-00",
   );
   expect(
-    await screen.findByText(/1개 작업 · 1개 Farm · 1 \/ 1 페이지/),
+    await screen.findByText(/1개 작업 · 1개 Stackbox · 1 \/ 1 페이지/),
   ).toBeTruthy();
   await user.clear(screen.getByRole("textbox", { name: "작업 검색" }));
   await user.type(screen.getByRole("textbox", { name: "작업 검색" }), "absent");
@@ -180,9 +180,9 @@ test("paginates twenty groups, preserves the page during polling, resets on sear
 
 test("filtering finds older failures after a newer success without losing timestamps or active work", () => {
   const activities: Activity[] = [
-    { scope: "farm", job: job("old", "demo", "failed", now - 2 * 86400) },
-    { scope: "farm", job: job("new", "demo", "succeeded", now - 60) },
-    { scope: "farm", job: job("live", "other", "running") },
+    { scope: "stackbox", job: job("old", "demo", "failed", now - 2 * 86400) },
+    { scope: "stackbox", job: job("new", "demo", "succeeded", now - 60) },
+    { scope: "stackbox", job: job("live", "other", "running") },
   ];
   const all = { search: "", status: "all", kind: "all", days: "all" };
   expect(historyRows(activities, all, true, now)[0].previous).toHaveLength(1);

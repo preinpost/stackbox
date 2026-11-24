@@ -1,11 +1,11 @@
 #!/bin/sh
-# farm virtual GPU: a stand-in for `nvidia-smi` on an instance that has no GPU.
+# stackbox virtual GPU: a stand-in for `nvidia-smi` on an instance that has no GPU.
 #
-# farm writes the load into Nova instance metadata as `farm_gpu_count` and
-# `farm_gpu_<i>` (`v1;p:sim-8g;q:sine;n:10;x:90;d:60;m:30;u:...;id:GPU-...`).
+# stackbox writes the load into Nova instance metadata as `stackbox_gpu_count` and
+# `stackbox_gpu_<i>` (`v1;p:sim-8g;q:sine;n:10;x:90;d:60;m:30;u:...;id:GPU-...`).
 # The values change slowly (Nova caches metadata for about 15 seconds), so this
-# script reads the metadata document at most once every FARM_GPU_CACHE_TTL
-# seconds and keeps the last document in /run/farm-gpu when a read fails.
+# script reads the metadata document at most once every STACKBOX_GPU_CACHE_TTL
+# seconds and keeps the last document in /run/stackbox-gpu when a read fails.
 #
 # Supported:
 #   nvidia-smi -q -x                  XML, schema v11 (Telegraf inputs.nvidia_smi)
@@ -21,14 +21,14 @@
 
 exec 2>/dev/null
 
-META_URL=${FARM_GPU_METADATA_URL:-http://169.254.169.254/openstack/latest/meta_data.json}
+META_URL=${STACKBOX_GPU_METADATA_URL:-http://169.254.169.254/openstack/latest/meta_data.json}
 # A file overrides the metadata service, for tests and for images without curl/wget.
-META_FILE=${FARM_GPU_METADATA_FILE:-}
-CACHE_DIR=${FARM_GPU_CACHE_DIR:-/run/farm-gpu}
-CACHE_TTL=${FARM_GPU_CACHE_TTL:-2}
+META_FILE=${STACKBOX_GPU_METADATA_FILE:-}
+CACHE_DIR=${STACKBOX_GPU_CACHE_DIR:-/run/stackbox-gpu}
+CACHE_TTL=${STACKBOX_GPU_CACHE_TTL:-2}
 DRIVER=550.54.14
 CUDA=12.4
-PRODUCT=farm-virtual-gpu
+PRODUCT=stackbox-virtual-gpu
 
 # ---------------------------------------------------------------------------
 # metadata
@@ -76,7 +76,7 @@ fetch_doc() {
 
 doc=$(fetch_doc)
 # Nova pretty-prints the document; one line lets each key be read with one sed
-# expression. Values farm writes never contain quotes or newlines.
+# expression. Values stackbox writes never contain quotes or newlines.
 flat=$(printf '%s' "$doc" | tr '\n\r\t' '   ')
 
 # The string value of a metadata key, or nothing.
@@ -91,7 +91,7 @@ meta_num() {
     printf '%s' "$value"
 }
 
-# `key:value` inside a farm_gpu_<i> value.
+# `key:value` inside a stackbox_gpu_<i> value.
 field() {
     printf '%s' "$1" | sed -n 's/.*[;]'"$2"':\([^;]*\).*/\1/p'
 }
@@ -118,7 +118,7 @@ sample_at() {
 instance_uuid=$(meta_str uuid)
 [ -n "$instance_uuid" ] || instance_uuid=00000000-0000-0000-0000-000000000000
 
-count_raw=$(meta_num farm_gpu_count)
+count_raw=$(meta_num stackbox_gpu_count)
 case "$count_raw" in '' | *[!0-9]*) count_raw= ;; esac
 if [ "$count_raw" = 0 ]; then
     printf 'No devices were found\n'
@@ -130,7 +130,7 @@ else
     count=0
     i=0
     while [ "$i" -lt 24 ]; do
-        [ -n "$(meta_str "farm_gpu_$i")" ] && count=$((i + 1))
+        [ -n "$(meta_str "stackbox_gpu_$i")" ] && count=$((i + 1))
         i=$((i + 1))
     done
     [ "$count" -gt 0 ] || count=1
@@ -142,7 +142,7 @@ fi
 
 load_gpu() {
     g_index=$1
-    g_raw=$(meta_str "farm_gpu_$g_index")
+    g_raw=$(meta_str "stackbox_gpu_$g_index")
     g_profile=$(field "$g_raw" p)
     case "$g_profile" in
         sim-8g | sim-16g | sim-40g | sim-80g) ;;
@@ -287,7 +287,7 @@ xml_gpu() {
     cat <<XML
         <gpu id="$g_bus">
                 <product_name>$PRODUCT</product_name>
-                <product_brand>farm</product_brand>
+                <product_brand>stackbox</product_brand>
                 <serial>0000000000000</serial>
                 <uuid>$g_uuid</uuid>
                 <vbios_version>0.0</vbios_version>
@@ -488,8 +488,8 @@ Usage: nvidia-smi [options]
   --version                version information
   -h, --help               this help
 
-farm virtual GPU: the values come from the instance's Nova metadata and are
-controlled from the farm portal. This is not a real GPU.
+stackbox virtual GPU: the values come from the instance's Nova metadata and are
+controlled from the stackbox portal. This is not a real GPU.
 USAGE
 }
 
@@ -532,7 +532,7 @@ elif [ "$xml" -eq 1 ]; then
 elif [ "$mode" = list ]; then
     list_output
 elif [ "$mode" = version ]; then
-    printf 'farm-virtual-gpu version : %s\n' "$DRIVER"
+    printf 'stackbox-virtual-gpu version : %s\n' "$DRIVER"
     printf 'Driver version           : %s\n' "$DRIVER"
     printf 'Compute API version      : %s\n' "$CUDA"
 elif [ "$mode" = help ]; then

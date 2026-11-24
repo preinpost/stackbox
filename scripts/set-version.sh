@@ -22,7 +22,7 @@ rewrite() {
 
 # The first version line is the [package] one; dependency versions never start a line.
 rewrite Cargo.toml '!done && /^version = "/ { $0 = "version = \"" v "\""; done = 1 } 1'
-rewrite Cargo.lock 'prev == "name = \"farm\"" && /^version = "/ { $0 = "version = \"" v "\"" } { prev = $0; print }'
+rewrite Cargo.lock 'prev == "name = \"stackbox\"" && /^version = "/ { $0 = "version = \"" v "\"" } { prev = $0; print }'
 
 node -e '
 const fs = require("fs");

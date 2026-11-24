@@ -7,8 +7,8 @@ use super::{
     protocol::{Frame, Reply, Request, TerminalFrame, deliver},
 };
 use crate::{
-    farm::{TerminalInput, TerminalIo},
     kolla::EventSink,
+    stackbox::{TerminalInput, TerminalIo},
 };
 use anyhow::{Context, Result, anyhow, bail};
 use base64::{Engine, engine::general_purpose::STANDARD};
@@ -179,13 +179,13 @@ impl AgentLink for HubLink {
                         Frame::Terminal { data } => {
                             let bytes = STANDARD
                                 .decode(data)
-                                .map_err(|_| anyhow!("invalid farm-agent terminal output"))?;
+                                .map_err(|_| anyhow!("invalid stackbox-agent terminal output"))?;
                             // A departed client also closes `input`, handled below.
                             let _ = output.send(bytes).await;
                         }
                         Frame::Result { result: Reply::Done } => return Ok(()),
                         Frame::Error { message } => bail!("{message}"),
-                        _ => bail!("unexpected farm-agent frame in a shell session"),
+                        _ => bail!("unexpected stackbox-agent frame in a shell session"),
                     },
                     message = input.recv(), if open => {
                         let id = session.id;

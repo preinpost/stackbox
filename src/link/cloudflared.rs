@@ -1,8 +1,8 @@
 //! The coordinator's own cloudflared, which puts the relay behind a Cloudflare tunnel. It does
 //! not use one installed on the machine: it fetches the latest release from GitHub (or the
-//! version `FARM_CLOUDFLARED_VERSION` pins), checks it against the SHA-256 digest GitHub
+//! version `STACKBOX_CLOUDFLARED_VERSION` pins), checks it against the SHA-256 digest GitHub
 //! publishes for the asset and, on macOS, against Cloudflare's code signature, and keeps it under
-//! `<state dir>/bin/`. `FARM_CLOUDFLARED` names a binary to use instead, unmanaged.
+//! `<state dir>/bin/`. `STACKBOX_CLOUDFLARED` names a binary to use instead, unmanaged.
 //!
 //! [`Tunnel`] runs it until dropped as a quick tunnel (`*.trycloudflare.com`, no account, a new
 //! address each start). It checks for a new release once a day and restarts the tunnel on it.
@@ -42,7 +42,7 @@ pub struct TunnelStatus {
     /// A quick tunnel's address, once Cloudflare gave it.
     pub url: Option<String>,
     pub error: Option<String>,
-    /// `FARM_CLOUDFLARED` names the binary; it is not updated.
+    /// `STACKBOX_CLOUDFLARED` names the binary; it is not updated.
     pub unmanaged: bool,
 }
 
@@ -78,7 +78,7 @@ fn version_key(version: &str) -> Vec<u64> {
 fn client() -> Result<reqwest::Client> {
     Ok(reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(10))
-        .user_agent(concat!("farm/", env!("CARGO_PKG_VERSION")))
+        .user_agent(concat!("stackbox/", env!("CARGO_PKG_VERSION")))
         .build()?)
 }
 
@@ -149,7 +149,7 @@ impl Installer {
         }
     }
     fn unmanaged() -> Option<PathBuf> {
-        std::env::var_os("FARM_CLOUDFLARED")
+        std::env::var_os("STACKBOX_CLOUDFLARED")
             .filter(|p| !p.is_empty())
             .map(PathBuf::from)
     }
@@ -172,8 +172,8 @@ impl Installer {
     /// Install the latest (or pinned) release when it is newer than the installed one.
     /// Returns the installed version and whether it changed.
     pub async fn update(&self) -> Result<(String, bool)> {
-        ensure!(Self::unmanaged().is_none(), "FARM_CLOUDFLARED is set");
-        let pin = std::env::var("FARM_CLOUDFLARED_VERSION")
+        ensure!(Self::unmanaged().is_none(), "STACKBOX_CLOUDFLARED is set");
+        let pin = std::env::var("STACKBOX_CLOUDFLARED_VERSION")
             .ok()
             .filter(|v| !v.is_empty());
         let release = release(pin.as_deref()).await?;

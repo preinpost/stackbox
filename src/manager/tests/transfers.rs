@@ -7,7 +7,12 @@ use crate::{
 };
 
 /// A snapshot the local fake keeps at `fake/<id>`, recorded as ready.
-fn keep_snapshot(manager: &FarmManager, backend: &Fake, id: &str, template: Option<TemplateRole>) {
+fn keep_snapshot(
+    manager: &StackboxManager,
+    backend: &Fake,
+    id: &str,
+    template: Option<TemplateRole>,
+) {
     let mut labels = BTreeMap::from([
         (label::ID.to_string(), id.to_string()),
         (label::ARCH.to_string(), current_arch()),
@@ -43,7 +48,7 @@ fn keep_snapshot(manager: &FarmManager, backend: &Fake, id: &str, template: Opti
                     arch: current_arch(),
                     platform: None,
                     host_id: None,
-                    source_farm: None,
+                    source_stackbox: None,
                     plan,
                     deployed: false,
                     source_exposure: Exposure {
@@ -96,7 +101,7 @@ impl Drop for DialIn {
     }
 }
 /// Host `edge`, whose real agent dials in and runs on its own fake runtime.
-async fn dial_in(manager: &FarmManager, dir: &Path) -> DialIn {
+async fn dial_in(manager: &StackboxManager, dir: &Path) -> DialIn {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let server =
@@ -139,7 +144,7 @@ async fn dial_in(manager: &FarmManager, dir: &Path) -> DialIn {
     }
 }
 
-async fn bucket(manager: &FarmManager) -> Arc<FakeS3> {
+async fn bucket(manager: &StackboxManager) -> Arc<FakeS3> {
     let s3 = Arc::new(FakeS3::default());
     let endpoint = s3.start().await;
     manager
@@ -147,7 +152,7 @@ async fn bucket(manager: &FarmManager) -> Arc<FakeS3> {
             id: "minio".into(),
             endpoint: Some(endpoint),
             region: None,
-            name: "farm".into(),
+            name: "stackbox".into(),
             prefix: Some("snapshots".into()),
             path_style: None,
             ca_pem: None,
@@ -158,14 +163,14 @@ async fn bucket(manager: &FarmManager) -> Arc<FakeS3> {
     s3
 }
 /// Put `bytes` in the bucket as the snapshot's last export, said to hash to `sha256`.
-fn exported(manager: &FarmManager, s3: &FakeS3, id: &str, bytes: Vec<u8>, sha256: String) {
+fn exported(manager: &StackboxManager, s3: &FakeS3, id: &str, bytes: Vec<u8>, sha256: String) {
     let key = format!("snapshots/{id}.msb");
     let size_bytes = bytes.len() as u64;
     s3.objects.lock().unwrap().insert(key.clone(), bytes);
     manager
         .update(|state| {
             state.snapshots.get_mut(id).unwrap().archive = Some(SnapshotArchive {
-                path: format!("s3://farm/{key}"),
+                path: format!("s3://stackbox/{key}"),
                 size_bytes,
                 exported_at: now(),
                 bucket: Some("minio".into()),
@@ -262,7 +267,7 @@ async fn a_snapshot_is_streamed_to_a_host_once_reused_and_removed_with_it() {
         "clean"
     );
 
-    // A farm on that host starts from its copy.
+    // A stackbox on that host starts from its copy.
     let mut on_edge = request("copy");
     on_edge.host_id = Some("edge".into());
     on_edge.snapshot_id = Some("clean".into());
@@ -273,7 +278,7 @@ async fn a_snapshot_is_streamed_to_a_host_once_reused_and_removed_with_it() {
         "{:?}",
         restored.error
     );
-    assert!(edge.remote.farms.lock().unwrap().contains_key("copy"));
+    assert!(edge.remote.stackboxes.lock().unwrap().contains_key("copy"));
     let deleted = manager.delete("copy").unwrap();
     assert_eq!(done(&manager, &deleted).await.status, JobStatus::Succeeded);
 
@@ -376,7 +381,7 @@ async fn an_archive_with_other_bytes_than_announced_is_never_loaded() {
     };
     let emit: crate::remote::agent::Emitter = Arc::new(|_| Ok(()));
     let transfer_id = uuid::Uuid::new_v4().to_string();
-    let body = b"{\"farm.snapshot.id\":\"t\"}".to_vec();
+    let body = b"{\"stackbox.snapshot.id\":\"t\"}".to_vec();
     let line = |bytes: &[u8]| {
         use base64::{Engine, engine::general_purpose::STANDARD};
         let mut line = serde_json::to_vec(&crate::remote::protocol::TerminalFrame::Input {
@@ -462,7 +467,7 @@ async fn an_archive_with_other_bytes_than_announced_is_never_loaded() {
 }
 
 /// An SSH host prepared with the fixture's agent.
-async fn ssh_host(manager: &FarmManager, fixture: &crate::remote::test_server::Fixture) {
+async fn ssh_host(manager: &StackboxManager, fixture: &crate::remote::test_server::Fixture) {
     use crate::remote::{AgentArtifactInfo, HostJobKind, InstalledAgent};
     manager.register_host(fixture.registration("edge")).unwrap();
     let prep = manager
@@ -507,7 +512,7 @@ async fn an_agent_from_before_template_transfers_is_named_and_left_alone() {
     assert!(
         error
             .to_string()
-            .contains("the farm-agent on host 'edge' predates template transfers"),
+            .contains("the stackbox-agent on host 'edge' predates template transfers"),
         "{error}"
     );
     let calls = fixture.observed.calls.lock().unwrap().clone();
@@ -528,7 +533,7 @@ async fn a_compute_on_a_remote_host_boots_from_a_template_the_host_downloads() {
     opts.memory_budget_mib = 64 * 1024;
     let manager = open_with(opts, backend.clone()).await;
     if !cfg!(target_os = "linux") {
-        *manager.0.guest_agent.write().unwrap() = Some(dir.path().join("farm-agent"));
+        *manager.0.guest_agent.write().unwrap() = Some(dir.path().join("stackbox-agent"));
     }
     ssh_host(&manager, &fixture).await;
     use crate::link::relay::{RelaySettings, RelayTlsMode};
@@ -584,7 +589,10 @@ async fn a_compute_on_a_remote_host_boots_from_a_template_the_host_downloads() {
         .iter()
         .find(|call| call.starts_with("fetch:"))
         .expect("the host downloads the archive");
-    assert!(fetched.ends_with("/farm/snapshots/tmpl.msb"), "{fetched}");
+    assert!(
+        fetched.ends_with("/stackbox/snapshots/tmpl.msb"),
+        "{fetched}"
+    );
     assert!(
         calls.contains(&"create-from:ssh/tmpl".to_string()),
         "{calls:?}"
@@ -616,7 +624,7 @@ async fn a_compute_on_a_remote_host_boots_from_a_template_the_host_downloads() {
     );
     assert!(!log.contains("bucket-secret-never-sent"));
 
-    // Deleting the snapshot removes the copy too, while the farm keeps its VM.
+    // Deleting the snapshot removes the copy too, while the stackbox keeps its VM.
     assert!(manager.delete_snapshot("tmpl").await.unwrap().is_empty());
     assert!(fixture.observed.cached.lock().unwrap().is_empty());
     assert!(
@@ -638,7 +646,7 @@ fn foreign_arch() -> String {
         "aarch64".into()
     }
 }
-fn set_arch(manager: &FarmManager, host: &str, arch: &str) {
+fn set_arch(manager: &StackboxManager, host: &str, arch: &str) {
     manager
         .update(|state| {
             let host = &mut state.hosts.get_mut(host).unwrap().host;
@@ -647,8 +655,8 @@ fn set_arch(manager: &FarmManager, host: &str, arch: &str) {
         })
         .unwrap();
 }
-/// Farm `id` on host `edge`, frozen whole into snapshot `snapshot`.
-async fn freeze_on_edge(manager: &FarmManager, id: &str, snapshot: &str) {
+/// Stackbox `id` on host `edge`, frozen whole into snapshot `snapshot`.
+async fn freeze_on_edge(manager: &StackboxManager, id: &str, snapshot: &str) {
     if manager.get(id).is_err() {
         let mut on_edge = request(id);
         on_edge.host_id = Some("edge".into());
@@ -740,7 +748,7 @@ async fn a_snapshot_frozen_on_a_remote_host_stays_there_and_is_copied_and_export
         "{:?}",
         restored.error
     );
-    assert!(backend.farms.lock().unwrap().contains_key("here"));
+    assert!(backend.stackboxes.lock().unwrap().contains_key("here"));
     done(&manager, &manager.delete("here").unwrap()).await;
 
     // An export reads the original on its host.
@@ -856,7 +864,7 @@ async fn purging_a_remote_host_keeps_its_snapshots_unless_asked_and_forgets_copi
     assert!(backend.snapshots.lock().unwrap().contains_key("fake/clean"));
     let kept = manager.snapshot("kept").unwrap();
     assert_eq!(kept.host_id.as_deref(), Some("edge"));
-    // Its copy here still boots farms; the original cannot be read until the host returns.
+    // Its copy here still boots stackboxes; the original cannot be read until the host returns.
     assert_eq!(
         manager
             .ensure_snapshot_on_host("kept", "local", None)
@@ -955,7 +963,7 @@ async fn a_release_plan_follows_the_architecture_of_the_control_vms_host() {
         external_host: "localhost".into(),
         ..Default::default()
     };
-    // The 2024.x images the farm publishes are amd64 only, whichever host coordinates.
+    // The 2024.x images the stackbox publishes are amd64 only, whichever host coordinates.
     set_arch(&manager, "edge", "x86_64");
     let plan = manager
         .preview_release(&request("edge", "2024.1"))
@@ -985,7 +993,7 @@ async fn a_release_plan_follows_the_architecture_of_the_control_vms_host() {
 }
 
 #[tokio::test]
-async fn a_farm_on_a_host_another_coordinator_publishes_on_takes_a_free_port_block() {
+async fn a_stackbox_on_a_host_another_coordinator_publishes_on_takes_a_free_port_block() {
     let fixture = crate::remote::test_server::Fixture::start().await;
     fixture.observed.reserved_ports.lock().unwrap().push(15000);
     let dir = tempfile::tempdir().unwrap();
@@ -996,12 +1004,12 @@ async fn a_farm_on_a_host_another_coordinator_publishes_on_takes_a_free_port_blo
         .create(CreateRequest {
             host_id: Some("edge".into()),
             external_host: "edge.example".into(),
-            ..request("remote-farm")
+            ..request("remote-stackbox")
         })
         .unwrap();
     assert_eq!(done(&manager, &created).await.status, JobStatus::Succeeded);
     let base = manager
-        .get("remote-farm")
+        .get("remote-stackbox")
         .unwrap()
         .exposure
         .unwrap()
@@ -1064,7 +1072,7 @@ async fn multi_node_snapshot_on_remote_host_exports_to_s3_and_imports_back() {
             id: "minio".into(),
             endpoint: Some(endpoint),
             region: None,
-            name: "farm".into(),
+            name: "stackbox".into(),
             prefix: Some("snapshots".into()),
             path_style: None,
             ca_pem: None,
@@ -1250,9 +1258,9 @@ async fn multi_node_snapshot_on_remote_host_exports_to_s3_and_imports_back() {
         "{:?}",
         restored.error
     );
-    let copied_farm = manager.get("mn-copied").unwrap();
-    assert_eq!(copied_farm.host_id.as_deref(), Some("edge-2"));
-    assert_eq!(copied_farm.nodes.len(), 2);
+    let copied_stackbox = manager.get("mn-copied").unwrap();
+    assert_eq!(copied_stackbox.host_id.as_deref(), Some("edge-2"));
+    assert_eq!(copied_stackbox.nodes.len(), 2);
     let copies = manager.snapshot("mn-remote").unwrap().copies;
     assert_eq!(copies.len(), 1);
     assert_eq!(copies[0].host_id, "edge-2");
@@ -1288,7 +1296,7 @@ async fn multi_node_snapshot_on_remote_host_exports_to_s3_and_imports_back() {
     );
 
     // Delete both existing snapshot records on the coordinator so only the S3 bucket holds it,
-    // then start a farm directly from the bucket onto edge-2 without importing first.
+    // then start a stackbox directly from the bucket onto edge-2 without importing first.
     manager.forget_snapshot("mn-remote").await.unwrap();
     manager.forget_snapshot("mn-from-s3").await.unwrap();
     assert!(manager.snapshot("mn-remote").is_err());
@@ -1304,18 +1312,21 @@ async fn multi_node_snapshot_on_remote_host_exports_to_s3_and_imports_back() {
         .unwrap();
     let direct = done(&manager, &direct_job).await;
     assert_eq!(direct.status, JobStatus::Succeeded, "{:?}", direct.error);
-    let direct_farm = manager.get("mn-direct").unwrap();
-    assert_eq!(direct_farm.host_id.as_deref(), Some("edge-2"));
-    assert_eq!(direct_farm.nodes.len(), 2);
-    assert_eq!(direct_farm.status, FarmStatus::Ready);
+    let direct_stackbox = manager.get("mn-direct").unwrap();
+    assert_eq!(direct_stackbox.host_id.as_deref(), Some("edge-2"));
+    assert_eq!(direct_stackbox.nodes.len(), 2);
+    assert_eq!(direct_stackbox.status, StackboxStatus::Ready);
     assert_eq!(
-        direct_farm.plan.as_ref().unwrap().compute,
+        direct_stackbox.plan.as_ref().unwrap().compute,
         original.plan.compute
     );
-    assert_eq!(direct_farm.plan.as_ref().unwrap().gpu, original.plan.gpu);
+    assert_eq!(
+        direct_stackbox.plan.as_ref().unwrap().gpu,
+        original.plan.gpu
+    );
     // The hydrated snapshot record stays registered with edge-2 as its origin.
     let hydrated = manager
-        .snapshot(direct_farm.snapshot_id.as_deref().unwrap())
+        .snapshot(direct_stackbox.snapshot_id.as_deref().unwrap())
         .unwrap();
     assert_eq!(hydrated.host_id.as_deref(), Some("edge-2"));
     assert_eq!(hydrated.nodes.len(), 2);

@@ -11,7 +11,7 @@ afterEach(() => {
 
 const freezing: Job = {
   id: "job-1",
-  farm_id: "src",
+  stackbox_id: "src",
   kind: "snapshot",
   status: "running",
   created_at: 900,
@@ -53,7 +53,7 @@ test("shows nothing once the job ended or before its first step", () => {
 });
 
 test("names the current step in the jobs monitor", () => {
-  expect(activityStep({ scope: "farm", job: freezing })).toBe(
+  expect(activityStep({ scope: "stackbox", job: freezing })).toBe(
     "2/4 capture src-all-in-one",
   );
   // Jobs without numbered steps keep their phase description.

@@ -10,7 +10,7 @@ use std::{
 };
 
 /// Where releases publish their agents, under `<build id>/manifest.json`.
-pub const RELEASE_URL: &str = "https://public-bucket.preinpost.in/farm-agent";
+pub const RELEASE_URL: &str = "https://public-bucket.preinpost.in/stackbox-agent";
 const MAX_SIZE: u64 = 128 * 1024 * 1024;
 
 pub struct Artifact {
@@ -21,10 +21,10 @@ impl Artifact {
     pub fn load(path: &Path) -> Result<Self> {
         ensure!(
             path.metadata()?.len() <= MAX_SIZE,
-            "farm-agent binary exceeds 128 MiB"
+            "stackbox-agent binary exceeds 128 MiB"
         );
         let bytes = std::fs::read(path)
-            .with_context(|| format!("read the farm-agent at {}", path.display()))?;
+            .with_context(|| format!("read the stackbox-agent at {}", path.display()))?;
         Self::parse(bytes).with_context(|| path.display().to_string())
     }
     pub fn parse(bytes: Vec<u8>) -> Result<Self> {
@@ -46,19 +46,19 @@ impl Artifact {
     }
 }
 
-/// The OS and CPU a farm-agent runs on, from its executable header.
+/// The OS and CPU a stackbox-agent runs on, from its executable header.
 fn target(bytes: &[u8]) -> Result<(&'static str, &'static str)> {
     let u16_at = |at: usize| Some(u16::from_le_bytes(bytes.get(at..at + 2)?.try_into().ok()?));
     let u32_at = |at: usize| Some(u32::from_le_bytes(bytes.get(at..at + 4)?.try_into().ok()?));
     if bytes.starts_with(b"\x7fELF") {
         ensure!(
             bytes.len() > 64 && bytes[4] == 2 && bytes[5] == 1,
-            "a Linux farm-agent must be a 64-bit little-endian ELF binary"
+            "a Linux stackbox-agent must be a 64-bit little-endian ELF binary"
         );
         return match u16_at(18) {
             Some(183) => Ok(("linux", "aarch64")),
             Some(62) => Ok(("linux", "x86_64")),
-            _ => bail!("unsupported farm-agent CPU architecture"),
+            _ => bail!("unsupported stackbox-agent CPU architecture"),
         };
     }
     // 64-bit Mach-O; a universal binary is not accepted.
@@ -66,7 +66,7 @@ fn target(bytes: &[u8]) -> Result<(&'static str, &'static str)> {
         return match u32_at(4) {
             Some(0x0100_000c) => Ok(("macos", "aarch64")),
             Some(0x0100_0007) => Ok(("macos", "x86_64")),
-            _ => bail!("unsupported farm-agent CPU architecture"),
+            _ => bail!("unsupported stackbox-agent CPU architecture"),
         };
     }
     if bytes.starts_with(b"MZ")
@@ -76,13 +76,13 @@ fn target(bytes: &[u8]) -> Result<(&'static str, &'static str)> {
         return match u16_at(pe + 4) {
             Some(0xaa64) => Ok(("windows", "aarch64")),
             Some(0x8664) => Ok(("windows", "x86_64")),
-            _ => bail!("unsupported farm-agent CPU architecture"),
+            _ => bail!("unsupported stackbox-agent CPU architecture"),
         };
     }
-    bail!("not a Linux (ELF), macOS (Mach-O) or Windows (PE) farm-agent binary")
+    bail!("not a Linux (ELF), macOS (Mach-O) or Windows (PE) stackbox-agent binary")
 }
 
-/// The agent binaries in each directory under `dir`, such as `dist/agent/<target>/farm-agent`.
+/// The agent binaries in each directory under `dir`, such as `dist/agent/<target>/stackbox-agent`.
 pub fn binaries_in(dir: &Path) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
@@ -91,14 +91,14 @@ pub fn binaries_in(dir: &Path) -> Vec<PathBuf> {
         .flatten()
         .map(|entry| entry.path())
         .filter(|path| path.is_dir())
-        .flat_map(|path| ["farm-agent", "farm-agent.exe"].map(|name| path.join(name)))
+        .flat_map(|path| ["stackbox-agent", "stackbox-agent.exe"].map(|name| path.join(name)))
         .filter(|path| path.is_file())
         .collect();
     paths.sort();
     paths
 }
 
-/// Load every distinct farm-agent, keyed by platform. The same platform may come from an
+/// Load every distinct stackbox-agent, keyed by platform. The same platform may come from an
 /// explicit path and the default directory.
 pub fn load_all(paths: &[PathBuf]) -> Result<BTreeMap<String, Artifact>> {
     let mut artifacts: BTreeMap<String, Artifact> = BTreeMap::new();
@@ -111,7 +111,7 @@ pub fn load_all(paths: &[PathBuf]) -> Result<BTreeMap<String, Artifact>> {
         if let Some(previous) = artifacts.get(&platform)
             && previous.info.sha256 != artifact.info.sha256
         {
-            bail!("two different farm-agent binaries are configured for {platform}");
+            bail!("two different stackbox-agent binaries are configured for {platform}");
         }
         artifacts.insert(platform, artifact);
     }
@@ -180,7 +180,7 @@ fn published(manifest: Manifest, base: &str) -> Result<BTreeMap<String, Publishe
             .filter(|(os, arch)| {
                 ["linux", "macos", "windows"].contains(os) && ["aarch64", "x86_64"].contains(arch)
             })
-            .with_context(|| format!("unknown farm-agent platform {platform}"))?;
+            .with_context(|| format!("unknown stackbox-agent platform {platform}"))?;
         validate_digest(&agent.sha256)?;
         ensure!(
             agent.size <= MAX_SIZE
@@ -189,7 +189,7 @@ fn published(manifest: Manifest, base: &str) -> Result<BTreeMap<String, Publishe
                     .path
                     .split('/')
                     .all(|part| !part.is_empty() && part != ".."),
-            "invalid published farm-agent entry for {platform}"
+            "invalid published stackbox-agent entry for {platform}"
         );
         let info = AgentArtifactInfo {
             sha256: agent.sha256,
@@ -219,9 +219,9 @@ impl Published {
             .get_or_try_init(|| async {
                 let dir = cache.join(&self.info.sha256);
                 let file = dir.join(if self.info.os == "windows" {
-                    "farm-agent.exe"
+                    "stackbox-agent.exe"
                 } else {
-                    "farm-agent"
+                    "stackbox-agent"
                 });
                 let cached = std::fs::read(&file)
                     .ok()
@@ -241,7 +241,7 @@ impl Published {
                 ensure!(
                     artifact.info.platform() == self.info.platform()
                         && artifact.info.build_id == self.info.build_id,
-                    "the published {} farm-agent is a {} binary of build {}",
+                    "the published {} stackbox-agent is a {} binary of build {}",
                     self.info.platform(),
                     artifact.info.platform(),
                     artifact.info.build_id
@@ -331,7 +331,7 @@ mod tests {
             assert_eq!(artifact.info.platform(), platform);
             assert_eq!(artifact.info.build_id, crate::BUILD_ID);
         }
-        assert!(Artifact::parse(b"#!/bin/sh\necho farm-agent\n".to_vec()).is_err());
+        assert!(Artifact::parse(b"#!/bin/sh\necho stackbox-agent\n".to_vec()).is_err());
         assert!(Artifact::parse(elf(40)).is_err());
         // A PE header pointer past the end of the file is not a Windows binary.
         let mut cut = pe(0x8664);
@@ -343,9 +343,9 @@ mod tests {
     fn finds_agents_in_every_target_directory() {
         let dir = tempfile::tempdir().unwrap();
         for (target, name, bytes) in [
-            ("x86_64", "farm-agent", elf(62)),
-            ("macos-aarch64", "farm-agent", mach_o(0x0100_000c)),
-            ("windows-x86_64", "farm-agent.exe", pe(0x8664)),
+            ("x86_64", "stackbox-agent", elf(62)),
+            ("macos-aarch64", "stackbox-agent", mach_o(0x0100_000c)),
+            ("windows-x86_64", "stackbox-agent.exe", pe(0x8664)),
         ] {
             std::fs::create_dir(dir.path().join(target)).unwrap();
             std::fs::write(dir.path().join(target).join(name), bytes).unwrap();
@@ -377,16 +377,16 @@ mod tests {
             manifest(
                 id,
                 "macos-aarch64",
-                &format!("{id}/macos-aarch64/farm-agent"),
+                &format!("{id}/macos-aarch64/stackbox-agent"),
             ),
-            "https://example.test/farm-agent",
+            "https://example.test/stackbox-agent",
         )
         .unwrap();
         let agent = &agents["macos-aarch64"];
         assert_eq!(agent.info.os, "macos");
         assert_eq!(
             agent.url,
-            format!("https://example.test/farm-agent/{id}/macos-aarch64/farm-agent")
+            format!("https://example.test/stackbox-agent/{id}/macos-aarch64/stackbox-agent")
         );
         assert!(published(manifest("other", "linux-x86_64", "a"), "b").is_err());
         assert!(published(manifest(id, "darwin-aarch64", "a"), "b").is_err());
@@ -396,7 +396,7 @@ mod tests {
 
     #[test]
     fn reads_the_build_marker_embedded_in_an_artifact() {
-        let stamp = crate::remote::agent::FARM_AGENT_BUILD_STAMP;
+        let stamp = crate::remote::agent::STACKBOX_AGENT_BUILD_STAMP;
         let mut bytes = b"\x7fELF".to_vec();
         bytes.extend_from_slice(&stamp);
         bytes.extend_from_slice(b"\0trailing");
@@ -405,7 +405,7 @@ mod tests {
             Some(crate::BUILD_ID)
         );
         // A PE binary also holds the bare prefix ahead of the stamp.
-        let mut pe = b"MZ farm-agent-build:\0\0\0:\0?\xa6 ".to_vec();
+        let mut pe = b"MZ stackbox-agent-build:\0\0\0:\0?\xa6 ".to_vec();
         pe.extend_from_slice(&stamp);
         assert_eq!(
             crate::remote::agent::artifact_build_id(&pe).as_deref(),
@@ -413,7 +413,7 @@ mod tests {
         );
         // An artifact from before the marker, or a truncated one, is reported as unknown.
         assert!(crate::remote::agent::artifact_build_id(b"\x7fELF nothing here").is_none());
-        let mut cut = b"farm-agent-build:".to_vec();
+        let mut cut = b"stackbox-agent-build:".to_vec();
         cut.extend_from_slice(b"abc");
         assert!(crate::remote::agent::artifact_build_id(&cut).is_none());
     }

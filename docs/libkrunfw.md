@@ -1,6 +1,6 @@
 # 커스텀 게스트 커널(VFIO/mdev, Netfilter) 빌드
 
-farm이 쓰는 msb 게스트 커널(libkrunfw)에는 모듈 로딩이 없고 VFIO·mdev도 들어 있지 않다.
+stackbox가 쓰는 msb 게스트 커널(libkrunfw)에는 모듈 로딩이 없고 VFIO·mdev도 들어 있지 않다.
 그래서 Nova의 vGPU 경로(`[devices]/enabled_mdev_types = mtty-1`)를 GPU 없이 시험할 수 없다.
 이 문서는 커널 설정 조각(`scripts/libkrunfw/fragments/`)을 얹어 커널을 직접 빌드하는 방법과,
 새 기능이 필요할 때 조각을 하나 더하는 방법을 다룬다. 지금 들어 있는 조각은 셋이다.
@@ -14,9 +14,9 @@ farm이 쓰는 msb 게스트 커널(libkrunfw)에는 모듈 로딩이 없고 VFI
 - `pci-passthrough` (x86_64만): ACPI VIOT, MSI, virtio IOMMU와 USB xHCI(PCI)를 켜고, PCIe 포트/capability 지원을 위한 커널 옵션(PCIEPORTBUS)을 켠다. libkrun은 PCIe 루트 포트를 만들지 않고 통과시키는 endpoint를 bus 0에 직접 배치한다.
   PCI·IOMMU_SUPPORT·VFIO_PCI는 `vfio-mtty`가 이미 켜므로 이 조각은 그 밖의 설정만 담는다.
 
-이 커널은 **시험용**이다(실제 GPU 대신 vGPU 경로만 확인한다). farm은 이 커널을 기본 게스트
+이 커널은 **시험용**이다(실제 GPU 대신 vGPU 경로만 확인한다). stackbox는 이 커널을 기본 게스트
 커널로 쓴다. `task dev`가 커널을 빌드하고, 호스트를 준비할 때마다 그 호스트의
-`~/.local/share/farm/libkrunfw/<id>/`에 설치한 뒤 그 커널로 VM을 부팅한다. `FARM_LIBKRUNFW_PATH`는
+`~/.local/share/stackbox/libkrunfw/<id>/`에 설치한 뒤 그 커널로 VM을 부팅한다. `STACKBOX_LIBKRUNFW_PATH`는
 다른 곳에 둔 커널을 한 프로세스에서만 시험할 때 쓰는 override다. 저장소에는 바이너리를 두지
 않는다. GPU 기능과 조건은 [docs/gpu.md](gpu.md)에 정리했다.
 
@@ -55,8 +55,8 @@ sh scripts/build-libkrunfw.sh --arch all --revision 56bf194627a07996dc4ce21211fe
 읽어 정한다. 그래서 설치된 msb와 같은 커널을 고치게 되고, 네트워크가 없거나 답이 다르면
 `--revision`으로 직접 지정한다. 리비전을 직접 주면 그 리비전이 설치된 msb가 고정한 것과 같은지
 한 번 더 확인해 같을 때만 `msb`를 기록하고, 다르거나 확인할 수 없으면 `msb none`을 기록한다.
-그런 커널은 farm이 호스트에 기본으로 설치하지 않으며 `--msb`로 대상을 선언하거나
-`FARM_LIBKRUNFW_PATH`로만 쓸 수 있다.
+그런 커널은 stackbox가 호스트에 기본으로 설치하지 않으며 `--msb`로 대상을 선언하거나
+`STACKBOX_LIBKRUNFW_PATH`로만 쓸 수 있다.
 
 빌드는 다음 순서로 진행된다.
 
@@ -84,7 +84,7 @@ sh scripts/build-libkrunfw.sh --arch all --revision 56bf194627a07996dc4ce21211fe
 컴파일러는 네이티브 속도로 돈다. `ARCH`는 kbuild와 libkrunfw Makefile이 함께 읽어서, 컨테이너
 환경변수로는 `GUEST_ARCH`·`KBUILD_ARCH`를 쓰고 `make`에만 `ARCH=`를 준다.
 
-커널 소스는 호스트 볼륨에 풀지 않고 컨테이너 볼륨(`farm-libkrunfw-<arch>`) 안에서만 다룬다.
+커널 소스는 호스트 볼륨에 풀지 않고 컨테이너 볼륨(`stackbox-libkrunfw-<arch>`) 안에서만 다룬다.
 리눅스 커널에는 대소문자만 다른 파일(`xt_CONNMARK.c`와 `xt_connmark.c`)이 있어서, 기본 macOS
 볼륨에 풀면 트리가 깨진다. 같은 볼륨에 커널 트리·타르볼이 남으므로 재빌드는 그대로 이어서 한다.
 
@@ -104,11 +104,11 @@ arm64 기준 2분 안쪽이고, 첫 실행은 컨테이너 패키지 설치 때�
 | `<out>/aarch64/libkrunfw.5.dylib` | macOS 호스트가 arm64일 때 | macOS arm64의 msb |
 | `<out>/x86_64/libkrunfw.5.dylib` | macOS 호스트가 x86_64일 때 | macOS x86_64의 msb |
 | `<out>/<arch>/libkrunfw.so.<버전>` | 항상(두 아키텍처 모두) | Linux 호스트의 msb |
-| `<out>/<arch>/manifest.txt` | 항상 | 이 커널이 무엇으로 만들어졌는지 확인할 때(farm 포함) |
+| `<out>/<arch>/manifest.txt` | 항상 | 이 커널이 무엇으로 만들어졌는지 확인할 때(stackbox 포함) |
 
 `manifest.txt`는 한 줄에 `키 값` 꼴로 적는다. 리비전, 이 커널을 쓸 msb 버전(`msb`), 커널 버전,
 아키텍처, kbuild 아키텍처, 툴체인, 적용한 조각 파일과 각 파일의 sha256, 그리고 그 아키텍처
-산출물의 sha256이 들어간다. farm은 `msb`가 호스트의 msb와 같을 때만 이 커널을 부팅에 쓴다.
+산출물의 sha256이 들어간다. stackbox는 `msb`가 호스트의 msb와 같을 때만 이 커널을 부팅에 쓴다.
 같은 조각·리비전이면 다시 빌드해도 같은 해시가 나오므로, 산출물과 manifest를 비교해 지금
 로드하는 커널이 어느 빌드인지 확인할 수 있다.
 
@@ -118,36 +118,36 @@ dylib은 링크한 머신의 아키텍처로만 만들고, 다른 아키텍처�
 
 ## 사용
 
-### farm의 기본 커널
+### stackbox의 기본 커널
 
-`task dev`는 커널을 빌드한 뒤 데몬과 포탈을 띄우고, `farm host prepare`(로컬은 `farm host local`)는
+`task dev`는 커널을 빌드한 뒤 데몬과 포탈을 띄우고, `stackbox host prepare`(로컬은 `stackbox host local`)는
 호스트의 msb를 맞춘 다음 그 호스트 아키텍처의 커널을 설치한다. 설치 위치는
-`~/.local/share/farm/libkrunfw/<id>/`이고 `id`는 `manifest.txt`의 sha256 앞 16자다. 새 커널을
+`~/.local/share/stackbox/libkrunfw/<id>/`이고 `id`는 `manifest.txt`의 sha256 앞 16자다. 새 커널을
 설치하면 그 호스트의 이전 설치는 지운다. `~/.microsandbox`는 절대 쓰지 않는다.
 
 ```bash
 task dev                                  # 커널 빌드(실패해도 계속) + 데몬 + 포탈
-farm host local                           # 이 머신을 준비: msb, farm 커널, 검증 VM
-farm host list                            # · custom kernel …/libkrunfw/<id>/… · kernel 6.12.113 · VFIO · mdev · mtty-1×24
+stackbox host local                           # 이 머신을 준비: msb, stackbox 커널, 검증 VM
+stackbox host list                            # · custom kernel …/libkrunfw/<id>/… · kernel 6.12.113 · VFIO · mdev · mtty-1×24
 ```
 
-coordinator(로컬 호스트를 실행하는 프로세스)와 각 호스트의 farm-agent는 시작할 때 이 설치를
+coordinator(로컬 호스트를 실행하는 프로세스)와 각 호스트의 stackbox-agent는 시작할 때 이 설치를
 찾아 microsandbox SDK에 `msb`와 라이브러리 짝을 넣는다. 설치된 커널의 `msb`가 그 호스트의 msb와
-다르면 쓰지 않고 stock 커널로 부팅하며, 이유를 `farm host list`와 호스트 정보의
+다르면 쓰지 않고 stock 커널로 부팅하며, 이유를 `stackbox host list`와 호스트 정보의
 `custom_kernel_reason`에 남긴다. 호스트 준비가 msb를 먼저 맞추므로 보통은 그다음 요청부터
-커널이 쓰인다. SSH 호스트도 준비 단계에서 같은 경로로 Linux `.so`를 업로드하므로 mtty farm을
+커널이 쓰인다. SSH 호스트도 준비 단계에서 같은 경로로 Linux `.so`를 업로드하므로 mtty stackbox를
 그 호스트에 만들 수 있다.
 
-`FARM_LIBKRUNFW_PATH`는 최우선 override다. 저장소 밖에서 만든 커널을 그 프로세스에서만 시험할
-때 쓴다. `FARM_LIBKRUNFW_DIR`은 빌드 산출물 디렉터리를 바꾸며, 기본값은 실행 파일 위의
-`libkrunfw`(예: `target/release/farm`이면 `target/libkrunfw`)다. `MSB_PATH`는 그대로 msb 실행
+`STACKBOX_LIBKRUNFW_PATH`는 최우선 override다. 저장소 밖에서 만든 커널을 그 프로세스에서만 시험할
+때 쓴다. `STACKBOX_LIBKRUNFW_DIR`은 빌드 산출물 디렉터리를 바꾸며, 기본값은 실행 파일 위의
+`libkrunfw`(예: `target/release/stackbox`이면 `target/libkrunfw`)다. `MSB_PATH`는 그대로 msb 실행
 파일을 정한다.
 
 ### msb CLI로 직접 시험
 
 `msb` CLI로 직접 시험할 때는 `MSB_LIBKRUNFW_PATH`와 `MSB_PATH`를 함께 준다. microsandbox SDK가
 `MSB_LIBKRUNFW_PATH`만 있는 환경을 거절하기 때문이다(설치된 커널과 짝이 맞지 않은 채로 도는 것을
-막으려는 규칙). farm은 그 짝을 스스로 맞춘다.
+막으려는 규칙). stackbox는 그 짝을 스스로 맞춘다.
 
 ```bash
 export MSB_PATH="$HOME/.microsandbox/bin/msb"
@@ -168,7 +168,7 @@ msb run --no-tty alpine:3.20 -- sh -c '
   ip6tables -t mangle -S PREROUTING'
 ```
 
-다른 farm 명령(`plan`, `catalog`, `openapi`)은 msb가 필요 없어서 override 경로가 틀려도 동작하고,
+다른 stackbox 명령(`plan`, `catalog`, `openapi`)은 msb가 필요 없어서 override 경로가 틀려도 동작하고,
 VM을 만드는 명령만 파일이 아니면 실패한다.
 
 기대하는 결과는 다음과 같다.
@@ -257,14 +257,14 @@ VM을 만드는 명령만 파일이 아니면 실패한다.
 ## 릴리스 배포 (TODO)
 
 지금 커널은 **개발 산출물**(`target/libkrunfw`)에서만 설치된다. 릴리스 빌드에는 이 디렉터리가
-없으므로 `farm host prepare`는 "farm 커널 없음" 이벤트를 남기고 stock 커널로 동작한다. agent
+없으므로 `stackbox host prepare`는 "stackbox 커널 없음" 이벤트를 남기고 stock 커널로 동작한다. agent
 아티팩트처럼 릴리스 버킷에서 받아 오려면 다음이 필요하다.
 
-- 릴리스 파이프라인이 `farm-agent` 매니페스트와 같은 버킷(`public-bucket.preinpost.in`)에
+- 릴리스 파이프라인이 `stackbox-agent` 매니페스트와 같은 버킷(`public-bucket.preinpost.in`)에
   `<kernel-id>/<arch>/manifest.txt`와 산출물을 게시한다. `<kernel-id>`는 이 문서의 manifest
   sha256 앞 16자다. macOS dylib은 coordinator와 같은 아키텍처에만 필요하고, SSH 호스트는 Linux
   `.so`만 받는다.
-- farm은 `FARM_LIBKRUNFW_DIR`이 없거나 로컬 산출물이 없을 때 그 버킷을 조회해, 이 빌드의
+- stackbox는 `STACKBOX_LIBKRUNFW_DIR`이 없거나 로컬 산출물이 없을 때 그 버킷을 조회해, 이 빌드의
   `msb`와 맞는 커널만 내려받아 설치 전에 sha256을 확인한다.
 - 게시 경로와 공개 여부는 agent 매니페스트와 같게 두고, 서명·만료 정책도 함께 정한다.
 
@@ -273,13 +273,13 @@ VM을 만드는 명령만 파일이 아니면 실패한다.
 ## 한계
 
 - **기본 커널은 개발 산출물에서 설치된다.** 릴리스 바이너리에는 커널 산출물이 함께 실리지
-  않으므로 위의 배포 훅이 먼저 필요하다. `FARM_LIBKRUNFW_PATH`는 그 전에도 쓸 수 있는 override다.
-  호스트 준비 단계의 msb 설치는 `~/.microsandbox/{bin,lib}`만 쓰므로 farm이
-  `~/.local/share/farm/libkrunfw`에 둔 커널은 덮이지 않는다. 다만 override가
-  `~/.microsandbox/lib` 안을 가리키면 farm은 msb 재설치를 건너뛰고 손으로 설치하라고 안내한다.
-- **dial-in agent 호스트는 coordinator가 커널을 밀어 넣을 수 없다.** `farm agent connect`로 붙는
-  호스트는 그 머신에 설치된 커널이나 `FARM_LIBKRUNFW_PATH`를 스스로 쓴다. 설치되어 있지 않으면
-  stock 커널로 부팅하고 mtty farm의 게이트에서 거절된다.
+  않으므로 위의 배포 훅이 먼저 필요하다. `STACKBOX_LIBKRUNFW_PATH`는 그 전에도 쓸 수 있는 override다.
+  호스트 준비 단계의 msb 설치는 `~/.microsandbox/{bin,lib}`만 쓰므로 stackbox가
+  `~/.local/share/stackbox/libkrunfw`에 둔 커널은 덮이지 않는다. 다만 override가
+  `~/.microsandbox/lib` 안을 가리키면 stackbox는 msb 재설치를 건너뛰고 손으로 설치하라고 안내한다.
+- **dial-in agent 호스트는 coordinator가 커널을 밀어 넣을 수 없다.** `stackbox agent connect`로 붙는
+  호스트는 그 머신에 설치된 커널이나 `STACKBOX_LIBKRUNFW_PATH`를 스스로 쓴다. 설치되어 있지 않으면
+  stock 커널로 부팅하고 mtty stackbox의 게이트에서 거절된다.
 - 모듈이 없으므로 필요한 기능은 모두 내장(`=y`)이어야 한다. 커널 이미지가 그만큼 커진다
   (arm64 설치 커널 24,933,536 → 25,461,920 bytes, 약 2%).
 - 커널은 자기가 컴파일된 아키텍처에서만 부팅한다. 게스트 아키텍처는 호스트 아키텍처와 같아야
@@ -289,21 +289,21 @@ VM을 만드는 명령만 파일이 아니면 실패한다.
 - `nova_libvirt` 컨테이너의 mdev 시야는 PoC에서 확인했다(`target/gpupoc-report/REPORT.md` 2.4).
   privileged·host `/dev` 바인드로 도는 컨테이너가 `/sys/class/mdev_bus/mtty`를 보고 `create`에
   쓸 수 있으며 `/dev/vfio`도 보인다. 다른 방식으로 배포한다면 그 컨테이너 마운트를 다시 확인한다.
-- mdev 인스턴스는 재부팅하면 사라진다. farm의 재배포·스냅샷 복원 뒤에 Nova가 다시 만드는지는
+- mdev 인스턴스는 재부팅하면 사라진다. stackbox의 재배포·스냅샷 복원 뒤에 Nova가 다시 만드는지는
   이 커널만으로 정해지지 않는다.
 
 ## 배포본 자동 다운로드
 
-로컬에 빌드 산출물(`<dir>/<arch>/manifest.txt`)이 없는 호스트는 farm이 배포한 커널을 받는다.
-대상 URL은 `FARM_LIBKRUNFW_URL`(기본 `https://public-bucket.preinpost.in/farm-libkrunfw`)이고,
+로컬에 빌드 산출물(`<dir>/<arch>/manifest.txt`)이 없는 호스트는 stackbox가 배포한 커널을 받는다.
+대상 URL은 `STACKBOX_LIBKRUNFW_URL`(기본 `https://public-bucket.preinpost.in/stackbox-libkrunfw`)이고,
 빈 값이면 끈다. 준비 순서는 로컬 산출물 → 배포본이며, 받은 커널은 SHA-256·크기·매니페스트 해시
 (`kernel::id_for`)·msb·arch를 모두 확인한 뒤 `<state-dir>/libkrunfw-cache/<kid>/`에 캐시하고
 기존 설치 경로로 호스트에 올린다. 같은 kid가 캐시에 있으면 매니페스트와 라이브러리는 다시 받지 않는다.
 
 ```
-farm-libkrunfw/<kid>/manifest.txt                  immutable
-farm-libkrunfw/<kid>/<os>-<arch>/<library>         immutable (예: linux-x86_64/libkrunfw.so.5.6.1)
-farm-libkrunfw/msb-<msb>/<os>-<arch>.json          max-age=60 (인덱스: kid, sha256, size, 경로)
+stackbox-libkrunfw/<kid>/manifest.txt                  immutable
+stackbox-libkrunfw/<kid>/<os>-<arch>/<library>         immutable (예: linux-x86_64/libkrunfw.so.5.6.1)
+stackbox-libkrunfw/msb-<msb>/<os>-<arch>.json          max-age=60 (인덱스: kid, sha256, size, 경로)
 ```
 
 `<kid>`는 `manifest.txt` 바이트의 SHA-256 앞 16자리다. 업로드는

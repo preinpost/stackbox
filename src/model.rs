@@ -1,6 +1,6 @@
 use crate::{
-    farm::{ALL_IN_ONE, COMPUTE, CONTROL, FarmNode, MAX_COMPUTES, NodeSpec},
     kolla::Phase,
+    stackbox::{ALL_IN_ONE, COMPUTE, CONTROL, MAX_COMPUTES, NodeSpec, StackboxNode},
 };
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
@@ -22,24 +22,24 @@ pub fn now() -> u64 {
 #[serde(default, deny_unknown_fields)]
 pub struct PlanRequest {
     pub components: Vec<String>,
-    /// Compute VMs beside a control VM, 1-3. A farm always runs Nova and Neutron; a
+    /// Compute VMs beside a control VM, 1-3. A stackbox always runs Nova and Neutron; a
     /// request with none is refused, as are the legacy layouts below.
     pub computes: u8,
-    /// Size of every compute VM; omitted for the default. Only for farms with compute VMs.
+    /// Size of every compute VM; omitted for the default. Only for stackboxes with compute VMs.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub compute: Option<ComputeSize>,
     /// OpenStack release to install; omitted installs this coordinator's own release.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub release: Option<String>,
-    /// Layout of a farm without computes: read only, for farms and snapshots made before
-    /// every farm gained computes. New farms leave it out; [`require_multi_node`] refuses it.
+    /// Layout of a stackbox without computes: read only, for stackboxes and snapshots made before
+    /// every stackbox gained computes. New stackboxes leave it out; [`require_multi_node`] refuses it.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub layout: Option<FarmLayout>,
+    pub layout: Option<StackboxLayout>,
     /// A virtual GPU on every compute VM; omitted for none. Not hardware: see [`GpuConfig`].
     #[serde(skip_serializing_if = "Option::is_none")]
     pub gpu: Option<GpuConfig>,
     /// Host PCI devices passed through to compute-1 (`DDDD:BB:DD.F`). Each must already be
-    /// bound to `vfio-pci` on the farm's host; see [`normalize_pci_devices`].
+    /// bound to `vfio-pci` on the stackbox's host; see [`normalize_pci_devices`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pci_devices: Vec<String>,
 }
@@ -83,7 +83,7 @@ pub fn normalize_pci_devices(devices: &[String]) -> Result<Vec<String>> {
 }
 
 impl PlanRequest {
-    /// The release the farm installs: the request's, or this coordinator's own.
+    /// The release the stackbox installs: the request's, or this coordinator's own.
     pub fn release_or_default(&self) -> &str {
         self.release
             .as_deref()
@@ -91,29 +91,29 @@ impl PlanRequest {
     }
 }
 
-/// The layout of a farm without computes, kept readable for farms and snapshots made
-/// before every new farm ran a control VM with computes.
+/// The layout of a stackbox without computes, kept readable for stackboxes and snapshots made
+/// before every new stackbox ran a control VM with computes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "kebab-case")]
-pub enum FarmLayout {
+pub enum StackboxLayout {
     /// Every selected service in one VM; it cannot gain compute VMs.
     AllInOne,
     /// A control VM alone, ready for computes to be added one at a time.
     Control,
 }
 
-/// A new farm always runs a control VM and at least one compute VM, so a compute can be
-/// added to it from a template at any time. The layouts in [`FarmLayout`] stay readable on
-/// existing farms and snapshots but no request makes one; a snapshot restore keeps the
+/// A new stackbox always runs a control VM and at least one compute VM, so a compute can be
+/// added to it from a template at any time. The layouts in [`StackboxLayout`] stay readable on
+/// existing stackboxes and snapshots but no request makes one; a snapshot restore keeps the
 /// layout it was frozen with.
-pub fn require_multi_node(computes: u8, layout: Option<FarmLayout>) -> Result<()> {
+pub fn require_multi_node(computes: u8, layout: Option<StackboxLayout>) -> Result<()> {
     if layout.is_some() {
         bail!(
-            "a new farm runs computes beside a control VM; omit layout (all-in-one and control-only farms can no longer be created)"
+            "a new stackbox runs computes beside a control VM; omit layout (all-in-one and control-only stackboxes can no longer be created)"
         );
     }
     if computes == 0 {
-        bail!("a new farm has at least one compute VM; set computes to 1-3");
+        bail!("a new stackbox has at least one compute VM; set computes to 1-3");
     }
     Ok(())
 }
@@ -138,12 +138,12 @@ impl Default for ComputeSize {
         }
     }
 }
-/// How a farm gets a GPU when the host has none. Both modes are virtual devices: no guest
+/// How a stackbox gets a GPU when the host has none. Both modes are virtual devices: no guest
 /// sees a real GPU, and nothing computes on one.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum GpuMode {
-    /// farm advertises the standard `VGPU` inventory on a child resource provider of every
+    /// stackbox advertises the standard `VGPU` inventory on a child resource provider of every
     /// compute, under the name a vGPU deployment's Nova gives one: `<host>_pci_<address>`.
     /// The flavor asks for that class plus the traits the request names, so Placement
     /// schedules and allocates a virtual GPU, and the instance boots without one: Nova's
@@ -153,7 +153,7 @@ pub enum GpuMode {
     Simulated,
     /// Nova binds the guest kernel's `mtty` mediated device as a `VGPU` (OpenStack 2025.1 and
     /// newer, on a compute VM booted with a VFIO/mdev libkrunfw). Releases before 2026.2 get
-    /// Nova's own `mtty` support from farm's backport, which the container applies at start
+    /// Nova's own `mtty` support from stackbox's backport, which the container applies at start
     /// (see [`crate::kolla::config::nova_mtty_patch`]). The guest sees a `4348:3253` serial
     /// controller through VFIO.
     Mtty,
@@ -164,17 +164,17 @@ pub const MAX_GPU_COUNT: u32 = 24;
 /// Fake physical GPUs a compute VM splits its virtual GPUs over at most.
 pub const MAX_GPU_DEVICES: u32 = 24;
 /// The trait `simulated` requires when the request names none.
-pub const DEFAULT_VGPU_TRAIT: &str = "CUSTOM_FARM_VGPU";
+pub const DEFAULT_VGPU_TRAIT: &str = "CUSTOM_STACKBOX_VGPU";
 /// The resource class both modes advertise unless the request picks another one: the standard
 /// class Nova inventories a mediated device's virtual GPU under.
 pub const DEFAULT_RESOURCE_CLASS: &str = "VGPU";
 /// The PCI bus number of the first fake GPU on a compute. Any bus would do: the address is
-/// farm's, not read from a device, and exists to give the provider a vGPU host's name.
+/// stackbox's, not read from a device, and exists to give the provider a vGPU host's name.
 const VGPU_BUS_FIRST: u32 = 0x84;
 
-/// A farm's GPU: `count` virtual devices on every compute VM.
+/// A stackbox's GPU: `count` virtual devices on every compute VM.
 ///
-/// The `simulated` mode's provider layout is farm's own, so a request can describe the
+/// The `simulated` mode's provider layout is stackbox's own, so a request can describe the
 /// contract another deployment's flavor expects: the resource class, the traits it requires
 /// and how many cards the host has. `mtty` advertises what Nova finds and takes none of them.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -197,7 +197,7 @@ pub struct GpuConfig {
     #[schema(minimum = 1, maximum = 24)]
     pub devices: Option<u32>,
     /// The resource class the flavor asks for. Omitted: [`DEFAULT_RESOURCE_CLASS`]. `PGPU`
-    /// and `CUSTOM_*` build another deployment's contract; the inventory is farm's either
+    /// and `CUSTOM_*` build another deployment's contract; the inventory is stackbox's either
     /// way, so no driver checks it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schema(value_type = Option<String>, example = "VGPU")]
@@ -247,7 +247,7 @@ impl GpuConfig {
             GpuMode::Mtty => DEFAULT_RESOURCE_CLASS,
         }
     }
-    /// The traits the flavor requires. The kernel's mediated device carries none of farm's:
+    /// The traits the flavor requires. The kernel's mediated device carries none of stackbox's:
     /// Nova sets that provider's traits itself.
     pub fn traits(&self) -> Vec<String> {
         match (self.mode, &self.traits) {
@@ -256,16 +256,16 @@ impl GpuConfig {
             (GpuMode::Simulated, None) => vec![DEFAULT_VGPU_TRAIT.to_owned()],
         }
     }
-    /// The flavor farm creates for both modes: one virtual GPU, whatever class it is.
+    /// The flavor stackbox creates for both modes: one virtual GPU, whatever class it is.
     pub fn flavor(&self) -> &'static str {
-        "farm.vgpu"
+        "stackbox.vgpu"
     }
     /// The oldest OpenStack release that can offer this mode.
     pub fn min_release(&self) -> &'static str {
         match self.mode {
             // `simulated` needs the Placement microversion that gives a provider a parent
             // (1.14), and `mtty` needs Nova's mediated-device support, which 2025.1's Nova
-            // gains from the backport farm installs at container start.
+            // gains from the backport stackbox installs at container start.
             GpuMode::Simulated | GpuMode::Mtty => "2025.1",
         }
     }
@@ -302,7 +302,7 @@ impl GpuConfig {
     /// be a series name; it is compared after [`crate::kolla::releases::info`] resolves it.
     ///
     /// What the device binds is the *VM host's* kernel, which a plan does not know: every
-    /// `mtty` farm is judged by each compute host's inspection when it is created or expanded
+    /// `mtty` stackbox is judged by each compute host's inspection when it is created or expanded
     /// (see `ensure_mtty_host` in `src/manager/mod.rs`). This coordinator's own kernel says
     /// nothing about a remote host, so it is deliberately not consulted here.
     pub fn validate(&self, release: &str, components: &[String]) -> Result<()> {
@@ -310,11 +310,11 @@ impl GpuConfig {
             bail!("a compute VM can offer 1-{MAX_GPU_COUNT} virtual GPUs");
         }
         if !components.iter().any(|c| c == "nova") {
-            bail!("the GPU option needs Nova in the farm's components");
+            bail!("the GPU option needs Nova in the stackbox's components");
         }
         self.check_release(release)?;
         if self.mode == GpuMode::Mtty {
-            // Nova owns that provider, so its inventory, traits and class are not farm's to
+            // Nova owns that provider, so its inventory, traits and class are not stackbox's to
             // shape: nothing would carry them.
             if self.traits.is_some()
                 || self.devices.is_some()
@@ -428,7 +428,7 @@ impl GpuProfile {
     pub const ALL: [Self; 4] = [Self::Sim8g, Self::Sim16g, Self::Sim40g, Self::Sim80g];
 }
 
-/// How a virtual GPU's utilization moves through one period. farm samples the
+/// How a virtual GPU's utilization moves through one period. stackbox samples the
 /// pattern into a small table; the guest picks a sample from the current second, so
 /// the guest needs no trigonometry and the portal's preview draws the same table.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -483,7 +483,7 @@ impl GpuPattern {
     ];
 }
 
-/// The load a portal sets on one instance. farm turns it into a sample table and
+/// The load a portal sets on one instance. stackbox turns it into a sample table and
 /// writes it to the instance's Nova metadata; the guest script reads that table.
 /// Nothing computes on the values: this exists to exercise monitoring paths.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -521,7 +521,7 @@ impl Default for GpuLoad {
 /// from the flavor's resource class (or 1 when it asks for none, because the guest
 /// script defaults to one virtual GPU).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
-pub struct FarmInstance {
+pub struct StackboxInstance {
     pub id: String,
     pub name: String,
     pub status: String,
@@ -532,24 +532,24 @@ pub struct FarmInstance {
     pub gpu_count: u32,
     /// Resource classes the flavor requires, `VGPU: 1`.
     pub resources: BTreeMap<String, u32>,
-    /// The load farm applied, or one decoded from the instance's metadata after a
+    /// The load stackbox applied, or one decoded from the instance's metadata after a
     /// coordinator lost its state.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub load: Option<GpuLoad>,
-    /// Whether the instance's metadata currently carries `farm_gpu_*`.
+    /// Whether the instance's metadata currently carries `stackbox_gpu_*`.
     pub applied: bool,
-    /// The `farm_gpu_*` keys currently set on the instance.
+    /// The `stackbox_gpu_*` keys currently set on the instance.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub properties: Vec<String>,
 }
 
-/// One instance's load plus the metadata keys farm found on it.
+/// One instance's load plus the metadata keys stackbox found on it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct GpuLoadView {
     pub server: String,
     pub load: GpuLoad,
     pub applied: bool,
-    /// `farm_gpu_*` keys currently set on the instance.
+    /// `stackbox_gpu_*` keys currently set on the instance.
     pub properties: Vec<String>,
 }
 
@@ -590,13 +590,13 @@ pub struct Plan {
     /// read as [`crate::kolla::OPENSTACK_RELEASE`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub release: Option<String>,
-    /// Compute VMs beside the control VM; 0 for an all-in-one farm.
+    /// Compute VMs beside the control VM; 0 for an all-in-one stackbox.
     #[serde(default)]
     pub computes: u8,
     /// The compute VMs' size when it is not the default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compute: Option<ComputeSize>,
-    /// The virtual GPU every compute VM offers; absent on farms without one, and on plans
+    /// The virtual GPU every compute VM offers; absent on stackboxes without one, and on plans
     /// recorded before the option existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gpu: Option<GpuConfig>,
@@ -611,12 +611,12 @@ pub struct Plan {
     pub warnings: Vec<String>,
 }
 impl Plan {
-    /// Whether the farm runs a control VM, with or without computes yet, rather than one
+    /// Whether the stackbox runs a control VM, with or without computes yet, rather than one
     /// all-in-one VM.
     pub fn multinode(&self) -> bool {
         self.nodes
             .first()
-            .is_some_and(|spec| spec.role == crate::farm::Role::Control)
+            .is_some_and(|spec| spec.role == crate::stackbox::Role::Control)
     }
 }
 
@@ -633,7 +633,7 @@ pub struct Component {
     pub min_release: Option<String>,
     /// Guest memory the service adds to the VM that runs it, in MiB.
     pub footprint_mib: u32,
-    /// True while `footprint_mib` is a planning estimate that no farm has measured yet.
+    /// True while `footprint_mib` is a planning estimate that no stackbox has measured yet.
     pub estimated: bool,
     /// Why the service cannot run in the requested release; `None` when it can, or when the
     /// catalog was asked without a release.
@@ -647,7 +647,7 @@ pub struct Catalog {
 
 /// A service published on the all-in-one guest at `port_base + offset`.
 pub struct PublicPort {
-    /// The key the URL is listed under in a farm's `services`. Kolla names the service's
+    /// The key the URL is listed under in a stackbox's `services`. Kolla names the service's
     /// public URL variable after it.
     pub id: &'static str,
     pub offset: u16,
@@ -655,26 +655,26 @@ pub struct PublicPort {
     pub path: &'static str,
 }
 
-/// Host ports reserved per farm: `[port_base, port_base + PUBLIC_PORT_BLOCK)`.
+/// Host ports reserved per stackbox: `[port_base, port_base + PUBLIC_PORT_BLOCK)`.
 ///
 /// Twenty holds the published offsets: 0 through 5 are the six original services, 6 through 8
 /// are the infrastructure ports (MariaDB, RabbitMQ, and the RabbitMQ management console), and
 /// 9 through 15 are the 2025.1 services (heat, barbican, designate, magnum, skyline). Offsets
 /// 16 through 19 are spare. It still yields 450 blocks in `15000..24000` —
 /// more than a host's memory budget can hold. Every [`PublicPort::offset`] must stay below
-/// this, and offsets are append-only so an existing farm's public URLs never move when the
+/// this, and offsets are append-only so an existing stackbox's public URLs never move when the
 /// catalog grows. Raising the block also changes the grid of port blocks, so `allocate_ports`
 /// rejects any overlap, not just an equal base.
 pub const PUBLIC_PORT_BLOCK: u16 = 20;
 
-/// A data store installed in every farm and published for integrations.
+/// A data store installed in every stackbox and published for integrations.
 pub struct InfraPort {
     pub id: &'static str,
     pub label: &'static str,
     pub offset: u16,
     pub guest_port: u16,
 }
-/// MariaDB and RabbitMQ come with `enable_mariadb`/`enable_rabbitmq`, so every farm owns
+/// MariaDB and RabbitMQ come with `enable_mariadb`/`enable_rabbitmq`, so every stackbox owns
 /// these ports. Their offsets continue the service catalog's 0..5.
 pub const INFRA_PORTS: &[InfraPort] = &[
     InfraPort {
@@ -935,7 +935,7 @@ pub const COMPONENTS: &[ComponentDef] = &[
         ],
     },
 ];
-/// Farms recorded before component selection, and imported farms, run the original pair.
+/// Stackboxes recorded before component selection, and imported stackboxes, run the original pair.
 pub const BASE_COMPONENTS: &[&str] = &["keystone", "glance"];
 
 /// The service catalog. With a `release`, each service says whether that release can run it;
@@ -960,16 +960,16 @@ pub fn catalog(release: Option<&str>) -> Catalog {
             })
             .collect(),
         constraints: vec![
-            "Each farm runs all selected OpenStack services in one all-in-one VM.".into(),
+            "Each stackbox runs all selected OpenStack services in one all-in-one VM.".into(),
             "Open vSwitch uses the userspace datapath, so tenant traffic is slower than on a kernel datapath.".into(),
             "Nova uses KVM when microsandbox exposes nested /dev/kvm in the guest, otherwise qemu TCG with slow instance boots.".into(),
-            "A GPU farm gets a virtual device, not a real GPU. Both modes advertise the standard VGPU scheduling contract: 'simulated' puts a VGPU inventory and the requested traits on one child resource provider per fake GPU of each compute (OpenStack 2025.1 and newer), 'mtty' binds the guest kernel's mtty mediated device (2025.1 and newer, on a host prepared with farm's kernel; farm patches Nova's driver itself up to 2026.1).".into(),
+            "A GPU stackbox gets a virtual device, not a real GPU. Both modes advertise the standard VGPU scheduling contract: 'simulated' puts a VGPU inventory and the requested traits on one child resource provider per fake GPU of each compute (OpenStack 2025.1 and newer), 'mtty' binds the guest kernel's mtty mediated device (2025.1 and newer, on a host prepared with stackbox's kernel; stackbox patches Nova's driver itself up to 2026.1).".into(),
             "Guest software in a GPU instance sees a device it cannot compute on: the device is a contract for scheduling tests, not hardware.".into(),
         ],
     }
 }
 
-/// Required services plus the request and every dependency, in catalog order, for a farm that
+/// Required services plus the request and every dependency, in catalog order, for a stackbox that
 /// installs `release` (a series name is resolved as [`catalog`] does).
 pub fn resolve_components(
     requested: &[String],
@@ -1009,14 +1009,14 @@ pub fn resolve_components(
 }
 
 /// Of Nova's footprint, what nova-compute, libvirt and a small guest take; on a multi-node
-/// farm the compute VMs carry it.
+/// stackbox the compute VMs carry it.
 const NOVA_COMPUTE_MIB: u32 = 1024;
 
-/// Plans a new farm. Nova always gets a compute VM apart from the network node: on one VM,
+/// Plans a new stackbox. Nova always gets a compute VM apart from the network node: on one VM,
 /// Neutron's userspace firewall drops instance TCP (see the OVS patch in kolla).
 pub fn plan(request: &PlanRequest) -> Result<Plan> {
     let mut request = request.clone();
-    // An explicit layout owns the VM count: an all-in-one farm stays one VM even with Nova,
+    // An explicit layout owns the VM count: an all-in-one stackbox stays one VM even with Nova,
     // and a control VM stays alone until computes are added.
     if request.computes == 0
         && request.layout.is_none()
@@ -1042,7 +1042,7 @@ impl PlanRequest {
     }
 }
 
-/// A multi-node farm's control VM alone, as a control template restores it: its farm's
+/// A multi-node stackbox's control VM alone, as a control template restores it: its stackbox's
 /// plan without the compute VMs, which are added one at a time afterwards. The compute size
 /// is kept for them.
 pub fn control_layout(
@@ -1056,30 +1056,30 @@ pub fn control_layout(
         computes: 0,
         compute,
         release: release.map(str::to_owned),
-        layout: Some(FarmLayout::Control),
+        layout: Some(StackboxLayout::Control),
         gpu: None,
     })
 }
 
-/// Lays out the VMs exactly as requested, so farms and snapshots made before [`plan`] moved
+/// Lays out the VMs exactly as requested, so stackboxes and snapshots made before [`plan`] moved
 /// Nova off the all-in-one VM keep their layout.
 pub fn layout(request: &PlanRequest) -> Result<Plan> {
     if request.computes > MAX_COMPUTES {
-        bail!("a farm has at most {MAX_COMPUTES} compute VMs");
+        bail!("a stackbox has at most {MAX_COMPUTES} compute VMs");
     }
     if request.layout.is_some() && request.computes > 0 {
         bail!(
-            "a farm layout chooses the VMs when it has no compute VMs; leave layout out to run computes beside a control VM"
+            "a stackbox layout chooses the VMs when it has no compute VMs; leave layout out to run computes beside a control VM"
         );
     }
-    let control_only = request.layout == Some(FarmLayout::Control);
-    if request.layout == Some(FarmLayout::AllInOne)
+    let control_only = request.layout == Some(StackboxLayout::Control);
+    if request.layout == Some(StackboxLayout::AllInOne)
         && resolve_components(&request.components, request.release_or_default())?
             .iter()
             .any(|c| c.id == "nova")
     {
         bail!(
-            "Nova needs a compute VM, so an all-in-one farm cannot run it; create a control VM that gains computes instead"
+            "Nova needs a compute VM, so an all-in-one stackbox cannot run it; create a control VM that gains computes instead"
         );
     }
     let mut requested = request.components.clone();
@@ -1089,7 +1089,7 @@ pub fn layout(request: &PlanRequest) -> Result<Plan> {
     }
     let components = resolve_components(&requested, request.release_or_default())?;
     let computes = request.computes;
-    // The default size is stored as none, so a farm planned before sizes keeps its plan.
+    // The default size is stored as none, so a stackbox planned before sizes keeps its plan.
     let compute = match request.compute {
         Some(_) if computes == 0 && !control_only => bail!("compute size needs compute VMs"),
         Some(size) => Some(size.validate()?).filter(|size| *size != ComputeSize::default()),
@@ -1147,11 +1147,11 @@ pub fn layout(request: &PlanRequest) -> Result<Plan> {
     let mut warnings = catalog(None).constraints;
     if computes > 0 {
         warnings[0] = format!(
-            "The farm runs its control plane, network node and Kolla on one control VM and Nova instances on {} compute VM(s), joined by the host's link switch.",
+            "The stackbox runs its control plane, network node and Kolla on one control VM and Nova instances on {} compute VM(s), joined by the host's link switch.",
             computes
         );
     } else if control_only {
-        warnings[0] = "The farm runs its control plane, network node and Kolla on one control VM; Nova instances need a compute VM added to it.".into();
+        warnings[0] = "The stackbox runs its control plane, network node and Kolla on one control VM; Nova instances need a compute VM added to it.".into();
     }
     if let Some(gpu) = &gpu {
         let what = match gpu.mode {
@@ -1200,7 +1200,7 @@ pub fn layout(request: &PlanRequest) -> Result<Plan> {
 #[serde(deny_unknown_fields)]
 pub struct CreateRequest {
     pub id: String,
-    /// Registered host that runs the farm: this machine's local host or a remote one.
+    /// Registered host that runs the stackbox: this machine's local host or a remote one.
     /// Required; it is optional only so the error can say how to register one.
     #[serde(default)]
     pub host_id: Option<String>,
@@ -1215,9 +1215,9 @@ pub struct CreateRequest {
     /// OpenStack release to install (see [`PlanRequest::release`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub release: Option<String>,
-    /// VMs of a farm without computes (see [`PlanRequest::layout`]).
+    /// VMs of a stackbox without computes (see [`PlanRequest::layout`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub layout: Option<FarmLayout>,
+    pub layout: Option<StackboxLayout>,
     /// A virtual GPU on every compute VM (see [`GpuConfig`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gpu: Option<GpuConfig>,
@@ -1232,8 +1232,8 @@ pub struct CreateRequest {
     #[serde(default)]
     pub expires_at: Option<u64>,
     /// Start from this snapshot instead of an empty VM. Its services replace `components`.
-    /// A control template starts a multi-node farm with its control VM alone, ready for
-    /// computes to be added; a compute template cannot start a farm.
+    /// A control template starts a multi-node stackbox with its control VM alone, ready for
+    /// computes to be added; a compute template cannot start a stackbox.
     #[serde(default)]
     pub snapshot_id: Option<String>,
     /// Start directly from an archive in a registered S3 bucket (requires `key`; mutually
@@ -1255,11 +1255,11 @@ fn default_host() -> String {
 impl CreateRequest {
     pub fn validate(&self) -> Result<Plan> {
         validate_id(&self.id)?;
-        // Older all-in-one VMs are named `<farm>-all-in-one`; such an id would read as one of them.
-        if self.id.ends_with(crate::farm::LEGACY_ALL_IN_ONE_SUFFIX) {
+        // Older all-in-one VMs are named `<stackbox>-all-in-one`; such an id would read as one of them.
+        if self.id.ends_with(crate::stackbox::LEGACY_ALL_IN_ONE_SUFFIX) {
             bail!(
-                "farm id must not end with '{}'",
-                crate::farm::LEGACY_ALL_IN_ONE_SUFFIX
+                "stackbox id must not end with '{}'",
+                crate::stackbox::LEGACY_ALL_IN_ONE_SUFFIX
             );
         }
         if let Some(id) = &self.host_id {
@@ -1302,7 +1302,7 @@ impl CreateRequest {
         }
         if self.snapshot_id.is_some() || self.bucket.is_some() {
             if !self.placement.is_empty() {
-                bail!("a farm restored from a snapshot runs on one host; omit placement");
+                bail!("a stackbox restored from a snapshot runs on one host; omit placement");
             }
             if !self.components.is_empty()
                 || self.computes > 0
@@ -1312,7 +1312,7 @@ impl CreateRequest {
                 || !self.pci_devices.is_empty()
             {
                 bail!(
-                    "a farm restored from a snapshot runs the snapshot's services and layout; omit components, computes, compute, layout, gpu and pci_devices"
+                    "a stackbox restored from a snapshot runs the snapshot's services and layout; omit components, computes, compute, layout, gpu and pci_devices"
                 );
             }
         }
@@ -1351,7 +1351,7 @@ pub fn validate_id(id: &str) -> Result<()> {
         || id.ends_with('-')
     {
         bail!(
-            "farm id must be 1-48 lowercase letters, digits or hyphens, starting and ending with a letter or digit"
+            "stackbox id must be 1-48 lowercase letters, digits or hyphens, starting and ending with a letter or digit"
         );
     }
     Ok(())
@@ -1366,11 +1366,11 @@ pub struct DeployRequest {
 #[derive(Clone, Debug, Default, Serialize, Deserialize, ToSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct AddComputeRequest {
-    /// Host for the new compute VM; omitted for the farm's primary host. A compute on
-    /// another host joins the farm through its link relay.
+    /// Host for the new compute VM; omitted for the stackbox's primary host. A compute on
+    /// another host joins the stackbox through its link relay.
     pub host_id: Option<String>,
     /// Compute template snapshot to boot the new VM from instead of installing it clean.
-    /// Kolla then only reconfigures it; the template must match the farm's OpenStack
+    /// Kolla then only reconfigures it; the template must match the stackbox's OpenStack
     /// release, components and CPU architecture.
     pub from_snapshot: Option<String>,
 }
@@ -1383,7 +1383,7 @@ pub struct Exposure {
     pub port_base: u16,
 }
 impl Exposure {
-    /// Public URLs of the given components; `None` means a farm without a recorded plan.
+    /// Public URLs of the given components; `None` means a stackbox without a recorded plan.
     pub fn urls(&self, components: Option<&[String]>) -> BTreeMap<String, String> {
         COMPONENTS
             .iter()
@@ -1409,19 +1409,19 @@ impl Exposure {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "snake_case")]
-pub enum FarmStatus {
+pub enum StackboxStatus {
     Creating,
     Created,
     Deploying,
-    /// Waiting for a deployed farm's services to answer after its VM started from disk
+    /// Waiting for a deployed stackbox's services to answer after its VM started from disk
     Settling,
     Ready,
     Failed,
     Broken,
     Deleting,
     Deleted,
-    /// Its VM is stopping for a snapshot; [`FarmRecord::resume`] says what it was, so the
-    /// freeze leaves the farm as ready (or as failed) as it found it.
+    /// Its VM is stopping for a snapshot; [`StackboxRecord::resume`] says what it was, so the
+    /// freeze leaves the stackbox as ready (or as failed) as it found it.
     Snapshotting,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -1429,16 +1429,16 @@ pub enum FarmStatus {
 pub enum JobKind {
     Create,
     Deploy,
-    /// Add the next compute VM to an existing multi-node farm
+    /// Add the next compute VM to an existing multi-node stackbox
     Expand,
     Delete,
-    /// Freeze the farm's VM into a snapshot
+    /// Freeze the stackbox's VM into a snapshot
     Snapshot,
-    /// Create the farm's VM from a snapshot
+    /// Create the stackbox's VM from a snapshot
     Restore,
-    /// Check that a deployed farm's services answer again, without deploying
+    /// Check that a deployed stackbox's services answer again, without deploying
     Settle,
-    /// Start a farm of an OpenStack release from its templates: restore the control VM,
+    /// Start a stackbox of an OpenStack release from its templates: restore the control VM,
     /// then add each compute, each step a job of its own
     Assemble,
 }
@@ -1458,7 +1458,7 @@ impl JobStatus {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
-pub struct FarmRecord {
+pub struct StackboxRecord {
     pub id: String,
     #[serde(default)]
     pub host_id: Option<String>,
@@ -1470,12 +1470,12 @@ pub struct FarmRecord {
     pub observation_error: Option<String>,
     #[serde(default)]
     pub last_seen_at: Option<u64>,
-    pub status: FarmStatus,
+    pub status: StackboxStatus,
     pub plan: Option<Plan>,
     pub exposure: Option<Exposure>,
     pub owner: Option<String>,
     pub expires_at: Option<u64>,
-    pub nodes: Vec<FarmNode>,
+    pub nodes: Vec<StackboxNode>,
     pub phase: Option<Phase>,
     pub error: Option<String>,
     pub active_job: Option<String>,
@@ -1484,35 +1484,35 @@ pub struct FarmRecord {
     pub step: Option<String>,
     pub created_at: u64,
     pub updated_at: u64,
-    /// Snapshot this farm was restored from.
+    /// Snapshot this stackbox was restored from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub snapshot_id: Option<String>,
-    /// The status the farm had before a snapshot job stopped its VM. Set only while the
-    /// farm is `snapshotting`; the daemon keeps it with itself, not in the API.
+    /// The status the stackbox had before a snapshot job stopped its VM. Set only while the
+    /// stackbox is `snapshotting`; the daemon keeps it with itself, not in the API.
     #[serde(skip)]
-    pub resume: Option<FarmStatus>,
-    /// Faults set on a multi-node farm's links, by VM (`control`, `compute-1`, ...).
+    pub resume: Option<StackboxStatus>,
+    /// Faults set on a multi-node stackbox's links, by VM (`control`, `compute-1`, ...).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub faults: BTreeMap<String, crate::link::Impair>,
     /// Virtual GPU loads the portal applied, by Nova server UUID. The guest reads the
     /// same values from instance metadata; this copy keeps the pattern the portal shows
-    /// after a coordinator restart. A farm restored from a snapshot recovers the load
+    /// after a coordinator restart. A stackbox restored from a snapshot recovers the load
     /// from the instance's metadata instead.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub gpu_loads: BTreeMap<String, GpuLoad>,
-    /// Other hosts that run some of a multi-node farm's compute VMs. `host_id` runs the rest.
+    /// Other hosts that run some of a multi-node stackbox's compute VMs. `host_id` runs the rest.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub shares: Vec<HostShare>,
-    /// SHA-256 of the token `host_id`'s switch joins the relay with, for a farm with shares.
+    /// SHA-256 of the token `host_id`'s switch joins the relay with, for a stackbox with shares.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub uplink_sha256: Option<String>,
 }
 
-/// The OpenStack release a farm installs, named as the images and documents name it: the code
+/// The OpenStack release a stackbox installs, named as the images and documents name it: the code
 /// name beside the number (`2022.2` is `zed`), and whether this coordinator still supports it.
 #[derive(Clone, Debug, PartialEq, Serialize, ToSchema)]
-pub struct FarmOpenStack {
-    /// What the farm records, `2022.2`.
+pub struct StackboxOpenStack {
+    /// What the stackbox records, `2022.2`.
     pub release: String,
     /// Its series name, `zed`; the same as `release` from 2023.1 on, where the names became
     /// `year.release`.
@@ -1524,31 +1524,31 @@ pub struct FarmOpenStack {
     /// kolla-ansible keeps no branch for it any more, so it installs from the series' last tag.
     pub eol: bool,
     /// False below the oldest supported release, whatever the host's
-    /// `FARM_ALLOW_UNSUPPORTED_RELEASES` says: such a farm keeps working but is out of support.
+    /// `STACKBOX_ALLOW_UNSUPPORTED_RELEASES` says: such a stackbox keeps working but is out of support.
     pub supported: bool,
 }
 
-/// A farm as the API returns it: the stored record plus the release facts the portal labels the
-/// farm with. Only the record is kept; the release comes from the release tables, so the names
-/// live in one place and a farm's state stays what it was created with.
+/// A stackbox as the API returns it: the stored record plus the release facts the portal labels the
+/// stackbox with. Only the record is kept; the release comes from the release tables, so the names
+/// live in one place and a stackbox's state stays what it was created with.
 #[derive(Clone, Debug, Serialize, ToSchema)]
-pub struct FarmView {
+pub struct StackboxView {
     #[serde(flatten)]
-    pub farm: FarmRecord,
-    /// Absent on a farm created before plans kept their release.
+    pub stackbox: StackboxRecord,
+    /// Absent on a stackbox created before plans kept their release.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub openstack: Option<FarmOpenStack>,
+    pub openstack: Option<StackboxOpenStack>,
 }
 
-impl FarmView {
-    pub fn of(farm: FarmRecord) -> Self {
-        let openstack = farm
+impl StackboxView {
+    pub fn of(stackbox: StackboxRecord) -> Self {
+        let openstack = stackbox
             .plan
             .as_ref()
             .and_then(|plan| plan.release.as_deref())
             .map(|release| {
                 let info = crate::kolla::releases::info(release);
-                FarmOpenStack {
+                StackboxOpenStack {
                     release: info.release,
                     series: info.series,
                     codename: info.codename,
@@ -1556,11 +1556,14 @@ impl FarmView {
                     supported: crate::kolla::releases::in_supported_range(release),
                 }
             });
-        Self { farm, openstack }
+        Self {
+            stackbox,
+            openstack,
+        }
     }
 }
 
-/// The compute VMs of a farm that one other host runs.
+/// The compute VMs of a stackbox that one other host runs.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct HostShare {
@@ -1574,7 +1577,7 @@ pub struct HostShare {
     pub uplink_sha256: String,
 }
 
-impl FarmRecord {
+impl StackboxRecord {
     pub fn memory_mib(&self) -> u64 {
         self.plan
             .as_ref()
@@ -1589,7 +1592,7 @@ impl FarmRecord {
             .map(|share| share.host_id.as_str())
             .or(self.host_id.as_deref())
     }
-    /// Every host the farm has VMs on: `host_id` first.
+    /// Every host the stackbox has VMs on: `host_id` first.
     pub fn hosts(&self) -> Vec<&str> {
         self.host_id
             .as_deref()
@@ -1597,7 +1600,7 @@ impl FarmRecord {
             .chain(self.shares.iter().map(|share| share.host_id.as_str()))
             .collect()
     }
-    /// Memory the farm reserves on `host`.
+    /// Memory the stackbox reserves on `host`.
     pub fn memory_on(&self, host: &str) -> u64 {
         if self.shares.is_empty() {
             return if self.host_id.as_deref() == Some(host) {
@@ -1617,7 +1620,7 @@ pub fn memory_on(plan: &Plan, primary: Option<&str>, shares: &[HostShare], host:
     plan.nodes
         .iter()
         .filter(|spec| {
-            let suffix = crate::farm::suffix(spec.role, spec.index).unwrap_or_default();
+            let suffix = crate::stackbox::suffix(spec.role, spec.index).unwrap_or_default();
             shares
                 .iter()
                 .find(|share| share.nodes.contains(&suffix))
@@ -1631,7 +1634,7 @@ pub fn memory_on(plan: &Plan, primary: Option<&str>, shares: &[HostShare], host:
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
 pub struct Job {
     pub id: String,
-    pub farm_id: String,
+    pub stackbox_id: String,
     pub kind: JobKind,
     pub status: JobStatus,
     pub phase: Option<Phase>,
@@ -1721,14 +1724,14 @@ pub struct AssemblyStep {
     pub host_id: Option<String>,
     pub description: String,
     pub status: JobStatus,
-    /// The farm job that ran it; none for an import, which the snapshot shows.
+    /// The stackbox job that ran it; none for an import, which the snapshot shows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub job_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
 
-/// Create a farm of an OpenStack release from saved templates: the control VM from a
+/// Create a stackbox of an OpenStack release from saved templates: the control VM from a
 /// control template, each compute from a compute template of the same release when one
 /// can boot on its host, otherwise installed clean.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, ToSchema)]
@@ -1740,23 +1743,23 @@ pub struct ReleaseCreateRequest {
     /// Registered host of the control VM. Required; optional only for the error message.
     #[serde(default)]
     pub host_id: Option<String>,
-    /// Services the farm runs; empty takes the control template's.
+    /// Services the stackbox runs; empty takes the control template's.
     #[serde(default)]
     pub components: Vec<String>,
     /// Compute VMs, up to 3.
     #[serde(default)]
     pub computes: u8,
-    /// VMs of a farm without computes: `all-in-one` for one VM that runs everything, or
+    /// VMs of a stackbox without computes: `all-in-one` for one VM that runs everything, or
     /// `control` for a control VM alone, ready for computes from compute templates to join
-    /// it later. Omitted keeps the previous behaviour (a control template starts its farm
+    /// it later. Omitted keeps the previous behaviour (a control template starts its stackbox
     /// with the control VM alone, a clean install runs all-in-one).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub layout: Option<FarmLayout>,
+    pub layout: Option<StackboxLayout>,
     /// Host of each compute VM in order (`compute-1` first); a missing or empty entry is
     /// the control VM's host.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub compute_hosts: Vec<String>,
-    /// Size of the compute VMs this farm installs clean, and of the ones added to it later.
+    /// Size of the compute VMs this stackbox installs clean, and of the ones added to it later.
     /// A compute that boots from a compute template keeps the template's size.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compute: Option<ComputeSize>,
@@ -1807,10 +1810,10 @@ pub enum NodeSource {
     Clean,
 }
 
-/// How one VM of a release farm will be made, and why.
+/// How one VM of a release stackbox will be made, and why.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct PlannedNode {
-    /// `control`, `compute-1`, ... or `all-in-one` for a clean farm without computes.
+    /// `control`, `compute-1`, ... or `all-in-one` for a clean stackbox without computes.
     pub node: String,
     pub host_id: String,
     pub source: NodeSource,
@@ -1828,7 +1831,7 @@ pub struct PlannedNode {
 /// The resolved plan of a [`ReleaseCreateRequest`].
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]
 pub struct ReleasePlan {
-    pub farm_id: String,
+    pub stackbox_id: String,
     pub release: String,
     pub arch: String,
     pub components: Vec<String>,
@@ -1866,7 +1869,7 @@ pub struct ReleaseTemplates {
     pub arches: Vec<String>,
 }
 
-/// Releases a farm can be created with on one architecture, newest first.
+/// Releases a stackbox can be created with on one architecture, newest first.
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
 pub struct ReleaseCatalog {
     pub arch: String,
@@ -1883,9 +1886,9 @@ pub struct SnapshotRequest {
     pub id: String,
     #[serde(default)]
     pub note: Option<String>,
-    /// Freeze only this VM of a deployed multi-node farm as a template: a compute VM
+    /// Freeze only this VM of a deployed multi-node stackbox as a template: a compute VM
     /// (`compute-1`, ...) that later expansions boot new computes from, or `control`, which
-    /// new farms start from without computes.
+    /// new stackboxes start from without computes.
     #[serde(default)]
     pub node: Option<String>,
 }
@@ -1897,7 +1900,7 @@ impl SnapshotRequest {
                 .strip_prefix("compute-")
                 .and_then(|index| index.parse::<u8>().ok());
             if node != "control"
-                && !index.is_some_and(|index| (1..=crate::farm::MAX_COMPUTES).contains(&index))
+                && !index.is_some_and(|index| (1..=crate::stackbox::MAX_COMPUTES).contains(&index))
             {
                 bail!(
                     "only the control VM or a compute VM (compute-1, ...) can be frozen as a template"
@@ -1945,7 +1948,7 @@ pub fn current_arch() -> String {
     std::env::consts::ARCH.into()
 }
 
-/// Host OS of the running daemon; a farm frozen elsewhere says where it came from.
+/// Host OS of the running daemon; a stackbox frozen elsewhere says where it came from.
 pub fn current_platform() -> String {
     std::env::consts::OS.into()
 }
@@ -2007,22 +2010,22 @@ pub struct SnapshotRecord {
     /// host, which keeps imported snapshots and every snapshot recorded before this field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host_id: Option<String>,
-    /// Farm the snapshot was frozen from; `None` when imported from an archive.
-    pub source_farm: Option<String>,
+    /// Stackbox the snapshot was frozen from; `None` when imported from an archive.
+    pub source_stackbox: Option<String>,
     pub plan: Plan,
-    /// Whether OpenStack was deployed when frozen. Restored farms then start `ready`.
+    /// Whether OpenStack was deployed when frozen. Restored stackboxes then start `ready`.
     pub deployed: bool,
-    /// Public ports the source farm's catalog was registered with; restores rewrite them.
+    /// Public ports the source stackbox's catalog was registered with; restores rewrite them.
     pub source_exposure: Exposure,
     pub note: Option<String>,
     /// msb snapshot reference; set once captured or imported. A multi-node snapshot's is
     /// its control VM's, and `nodes` holds every VM's.
     pub reference: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub nodes: Vec<crate::farm::NodeSnapshot>,
-    /// The one VM a template holds: `control`, which new farms start from without
+    pub nodes: Vec<crate::stackbox::NodeSnapshot>,
+    /// The one VM a template holds: `control`, which new stackboxes start from without
     /// computes, or `compute`, which expansions boot new computes from. None for a snapshot
-    /// of a whole farm.
+    /// of a whole stackbox.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub template: Option<TemplateRole>,
     /// The VM a template was frozen from (`control`, `compute-1`, ...).
@@ -2040,7 +2043,7 @@ pub struct SnapshotRecord {
     pub archive: Option<SnapshotArchive>,
     #[serde(default)]
     pub transfer: Option<SnapshotTransfer>,
-    /// Copies kept on hosts other than the original's, which farms and computes there boot
+    /// Copies kept on hosts other than the original's, which stackboxes and computes there boot
     /// from.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub copies: Vec<SnapshotCopy>,
@@ -2057,7 +2060,7 @@ pub struct SnapshotCopy {
     /// `nodes` holds every VM's.
     pub reference: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub nodes: Vec<crate::farm::NodeSnapshot>,
+    pub nodes: Vec<crate::stackbox::NodeSnapshot>,
     /// How the archive got there.
     pub via: CopySource,
     pub size_bytes: Option<u64>,
@@ -2076,22 +2079,22 @@ pub enum CopySource {
 
 /// Snapshot metadata kept in msb labels, which travel inside exported archives.
 pub mod snapshot_labels {
-    pub const ID: &str = "farm.snapshot.id";
-    pub const SOURCE: &str = "farm.snapshot.source";
-    pub const COMPONENTS: &str = "farm.snapshot.components";
-    pub const DEPLOYED: &str = "farm.snapshot.deployed";
-    pub const EXPOSURE_HOST: &str = "farm.snapshot.exposure.host";
-    pub const EXPOSURE_PORT_BASE: &str = "farm.snapshot.exposure.port-base";
-    pub const RELEASE: &str = "farm.snapshot.openstack-release";
-    pub const ARCH: &str = "farm.snapshot.arch";
-    pub const PLATFORM: &str = "farm.snapshot.platform";
-    pub const NOTE: &str = "farm.snapshot.note";
-    /// Compute VMs of a multi-node snapshot's farm; absent on all-in-one snapshots.
-    pub const COMPUTES: &str = "farm.snapshot.computes";
+    pub const ID: &str = "stackbox.snapshot.id";
+    pub const SOURCE: &str = "stackbox.snapshot.source";
+    pub const COMPONENTS: &str = "stackbox.snapshot.components";
+    pub const DEPLOYED: &str = "stackbox.snapshot.deployed";
+    pub const EXPOSURE_HOST: &str = "stackbox.snapshot.exposure.host";
+    pub const EXPOSURE_PORT_BASE: &str = "stackbox.snapshot.exposure.port-base";
+    pub const RELEASE: &str = "stackbox.snapshot.openstack-release";
+    pub const ARCH: &str = "stackbox.snapshot.arch";
+    pub const PLATFORM: &str = "stackbox.snapshot.platform";
+    pub const NOTE: &str = "stackbox.snapshot.note";
+    /// Compute VMs of a multi-node snapshot's stackbox; absent on all-in-one snapshots.
+    pub const COMPUTES: &str = "stackbox.snapshot.computes";
     /// The VM a multi-node snapshot's disk was taken from (`control`, `compute-1`, ...).
-    pub const NODE: &str = "farm.snapshot.node";
-    /// `control` or `compute` on a template; absent on farm snapshots.
-    pub const ROLE: &str = "farm.snapshot.role";
+    pub const NODE: &str = "stackbox.snapshot.node";
+    /// `control` or `compute` on a template; absent on stackbox snapshots.
+    pub const ROLE: &str = "stackbox.snapshot.role";
 }
 
 /// The VM a template snapshot was frozen from.
@@ -2152,7 +2155,7 @@ pub struct Datastore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::farm::Role;
+    use crate::stackbox::Role;
     #[test]
     fn rejects_unsafe_names_and_unknown_components() {
         for id in ["../escape", "a;true", "UPPER", "", "-a"] {
@@ -2222,14 +2225,14 @@ mod tests {
         assert_eq!(all.memory_mib, 6144);
         assert_eq!(all.disk_mib, 20480 + 2 * 32768);
         let exposure = Exposure {
-            host: "farm.example".into(),
+            host: "stackbox.example".into(),
             bind: [0, 0, 0, 0].into(),
             port_base: 15020,
         };
         let urls = exposure.urls(Some(&all.components));
-        assert_eq!(urls["placement"], "http://farm.example:15022");
-        assert_eq!(urls["horizon"], "http://farm.example:15023/");
-        assert_eq!(urls["neutron"], "http://farm.example:15024");
+        assert_eq!(urls["placement"], "http://stackbox.example:15022");
+        assert_eq!(urls["horizon"], "http://stackbox.example:15023/");
+        assert_eq!(urls["neutron"], "http://stackbox.example:15024");
         // Nova gets a compute VM; snapshots from before that keep their all-in-one layout.
         let with_nova = plan(&request(&["nova"])).unwrap();
         assert_eq!(
@@ -2243,7 +2246,7 @@ mod tests {
         assert_eq!(old_nova.memory_mib, 3072 + 256 + 2304 + 2048);
         assert_eq!(
             exposure.urls(Some(&with_nova.components))["nova"],
-            "http://farm.example:15025/v2.1"
+            "http://stackbox.example:15025/v2.1"
         );
         assert_eq!(
             exposure.urls(None).keys().collect::<Vec<_>>(),
@@ -2252,7 +2255,7 @@ mod tests {
     }
 
     #[test]
-    fn multi_node_farms_split_nova_between_control_and_computes() {
+    fn multi_node_stackboxes_split_nova_between_control_and_computes() {
         let request = |components: &[&str], computes| PlanRequest {
             pci_devices: Vec::new(),
             components: components.iter().map(|c| (*c).into()).collect(),
@@ -2283,7 +2286,7 @@ mod tests {
         assert_eq!(two.memory_mib, 6656 + 2 * 3072);
         assert_eq!(two.disk_mib, 3 * (20480 + 2 * 32768));
         assert!(two.warnings.iter().any(|w| w.contains("2 compute VM")));
-        crate::farm::layout(&two.nodes).unwrap();
+        crate::stackbox::layout(&two.nodes).unwrap();
         let horizon = plan(&request(&["horizon"], 1)).unwrap();
         assert_eq!(horizon.nodes[0].memory_mib, 6656 + 512);
         assert!(plan(&request(&[], 4)).is_err());
@@ -2313,13 +2316,13 @@ mod tests {
     }
 
     #[test]
-    fn a_control_template_keeps_its_farms_control_vm_and_compute_size() {
+    fn a_control_template_keeps_its_stackboxes_control_vm_and_compute_size() {
         let size = ComputeSize {
             cpus: 4,
             memory_mib: 8192,
             disk_mib: 32768,
         };
-        let farm = layout(&PlanRequest {
+        let stackbox = layout(&PlanRequest {
             pci_devices: Vec::new(),
             components: vec!["horizon".into()],
             computes: 2,
@@ -2329,18 +2332,18 @@ mod tests {
             gpu: None,
         })
         .unwrap();
-        let alone = control_layout(&farm.components, farm.compute, None).unwrap();
+        let alone = control_layout(&stackbox.components, stackbox.compute, None).unwrap();
         assert!(alone.multinode() && !layout(&PlanRequest::default()).unwrap().multinode());
         assert_eq!(alone.computes, 0);
         assert_eq!(alone.compute, Some(size));
-        assert_eq!(alone.components, farm.components);
+        assert_eq!(alone.components, stackbox.components);
         assert_eq!(
             serde_json::to_value(&alone.nodes).unwrap(),
-            serde_json::to_value(&farm.nodes[..1]).unwrap()
+            serde_json::to_value(&stackbox.nodes[..1]).unwrap()
         );
-        assert_eq!(alone.memory_mib, u64::from(farm.nodes[0].memory_mib));
-        crate::farm::layout(&alone.nodes).unwrap();
-        // Its first compute comes back as the farm's had it.
+        assert_eq!(alone.memory_mib, u64::from(stackbox.nodes[0].memory_mib));
+        crate::stackbox::layout(&alone.nodes).unwrap();
+        // Its first compute comes back as the stackbox's had it.
         let next = layout(&PlanRequest {
             pci_devices: Vec::new(),
             components: alone.components.clone(),
@@ -2357,7 +2360,7 @@ mod tests {
         );
         assert_eq!(
             serde_json::to_value(next.nodes[1]).unwrap(),
-            serde_json::to_value(farm.nodes[1]).unwrap()
+            serde_json::to_value(stackbox.nodes[1]).unwrap()
         );
 
         let freeze = |node: &str| SnapshotRequest {
@@ -2373,7 +2376,7 @@ mod tests {
     }
 
     #[test]
-    fn a_new_farm_needs_a_control_vm_and_a_compute() {
+    fn a_new_stackbox_needs_a_control_vm_and_a_compute() {
         // Any count a form offers makes the same shape: a control VM and computes.
         for computes in 1..=3 {
             assert!(require_multi_node(computes, None).is_ok());
@@ -2381,7 +2384,7 @@ mod tests {
         let none = require_multi_node(0, None).unwrap_err();
         assert!(none.to_string().contains("at least one compute VM"));
         // The legacy layouts have no count to give them, and no request makes one.
-        for layout in [FarmLayout::AllInOne, FarmLayout::Control] {
+        for layout in [StackboxLayout::AllInOne, StackboxLayout::Control] {
             let error = require_multi_node(0, Some(layout)).unwrap_err();
             assert!(error.to_string().contains("omit layout"));
             assert!(require_multi_node(1, Some(layout)).is_err());
@@ -2389,8 +2392,8 @@ mod tests {
     }
 
     #[test]
-    fn a_control_layout_is_not_an_all_in_one_farm() {
-        let alone = |form: FarmLayout| {
+    fn a_control_layout_is_not_an_all_in_one_stackbox() {
+        let alone = |form: StackboxLayout| {
             crate::model::layout(&PlanRequest {
                 pci_devices: Vec::new(),
                 components: vec![],
@@ -2403,12 +2406,12 @@ mod tests {
             .unwrap()
         };
         // All-in-one is one VM that runs everything and cannot gain computes.
-        let one = alone(FarmLayout::AllInOne);
+        let one = alone(StackboxLayout::AllInOne);
         assert_eq!(one.nodes.len(), 1);
         assert_eq!(one.nodes[0].role, Role::AllInOne);
         assert!(!one.multinode());
-        // A control VM alone is a multi-node farm that waits for its computes.
-        let control = alone(FarmLayout::Control);
+        // A control VM alone is a multi-node stackbox that waits for its computes.
+        let control = alone(StackboxLayout::Control);
         assert_eq!(control.nodes.len(), 1);
         assert_eq!(control.nodes[0].role, Role::Control);
         assert_eq!(control.computes, 0);
@@ -2452,7 +2455,7 @@ mod tests {
                 components: vec![],
                 computes: 1,
                 compute: None,
-                layout: Some(FarmLayout::Control),
+                layout: Some(StackboxLayout::Control),
                 release: None,
                 gpu: None,
             })
@@ -2465,7 +2468,7 @@ mod tests {
                 components: vec!["nova".into()],
                 computes: 0,
                 compute: None,
-                layout: Some(FarmLayout::AllInOne),
+                layout: Some(StackboxLayout::AllInOne),
                 release: None,
                 gpu: None,
             })
@@ -2502,7 +2505,7 @@ mod tests {
         assert_eq!(big.nodes[0].memory_mib, 6656);
         assert_eq!(big.memory_mib, 6656 + 2 * 8192);
         assert_eq!(big.disk_mib, (20480 + 2 * 32768) + 2 * (20480 + 2 * 65536));
-        // The default size plans like an unsized farm, so its plan stays as before.
+        // The default size plans like an unsized stackbox, so its plan stays as before.
         let default = sized(1, Some(ComputeSize::default())).unwrap();
         assert_eq!(default.compute, None);
         assert_eq!(
@@ -2541,7 +2544,7 @@ mod tests {
     }
 
     #[test]
-    fn public_port_offsets_stay_inside_one_farm_block() {
+    fn public_port_offsets_stay_inside_one_stackbox_block() {
         let mut offsets: Vec<u16> = COMPONENTS
             .iter()
             .flat_map(|c| c.public.iter().map(|p| p.offset))
@@ -2558,7 +2561,7 @@ mod tests {
         let highest = *offsets.last().expect("the catalog publishes keystone");
         assert!(
             highest < PUBLIC_PORT_BLOCK,
-            "offset {highest} would spill into the next farm's block of {PUBLIC_PORT_BLOCK} ports; raise PUBLIC_PORT_BLOCK or reuse an offset"
+            "offset {highest} would spill into the next stackbox's block of {PUBLIC_PORT_BLOCK} ports; raise PUBLIC_PORT_BLOCK or reuse an offset"
         );
         // Offsets 16..19 are free for optional services such as cinder and swift.
         assert_eq!(
@@ -2566,7 +2569,7 @@ mod tests {
             "the published set ends with the skyline console"
         );
         assert_eq!(PUBLIC_PORT_BLOCK, 20, "the block is capped at twenty ports");
-        // The grid still holds more farms than one host's memory can admit.
+        // The grid still holds more stackboxes than one host's memory can admit.
         let blocks = (24_000 - 15_000) / PUBLIC_PORT_BLOCK;
         assert_eq!(blocks, 450);
         assert!(u16::try_from(published).unwrap() < PUBLIC_PORT_BLOCK);
@@ -2581,15 +2584,15 @@ mod tests {
     }
 
     #[test]
-    fn the_api_view_names_the_release_a_farm_installs() {
-        let farm = |release: Option<&str>| FarmRecord {
+    fn the_api_view_names_the_release_a_stackbox_installs() {
+        let stackbox = |release: Option<&str>| StackboxRecord {
             id: "demo".into(),
             host_id: Some("local".into()),
             remote_generation: None,
             agent_sha256: None,
             observation_error: None,
             last_seen_at: None,
-            status: FarmStatus::Created,
+            status: StackboxStatus::Created,
             plan: Some(Plan {
                 pci_devices: Vec::new(),
                 components: vec!["keystone".into()],
@@ -2621,23 +2624,27 @@ mod tests {
         };
         // The series carries the name the images and release notes use, and an end-of-life
         // series below the supported minimum is flagged as both.
-        let openstack = FarmView::of(farm(Some("2022.2")))
+        let openstack = StackboxView::of(stackbox(Some("2022.2")))
             .openstack
             .expect("the plan kept its release");
         assert_eq!(openstack.release, "2022.2");
         assert_eq!(openstack.series, "zed");
         assert!(openstack.eol && !openstack.supported);
         // A `year.release` names its own series, and the supported range starts at Caracal.
-        let openstack = FarmView::of(farm(Some("2026.2"))).openstack.unwrap();
+        let openstack = StackboxView::of(stackbox(Some("2026.2")))
+            .openstack
+            .unwrap();
         assert_eq!(openstack.series, "2026.2");
         assert!(!openstack.eol && openstack.supported);
         // 2023.x has neither images nor a branch: outside support, but not end of life.
-        let openstack = FarmView::of(farm(Some("2023.1"))).openstack.unwrap();
+        let openstack = StackboxView::of(stackbox(Some("2023.1")))
+            .openstack
+            .unwrap();
         assert!(!openstack.eol && !openstack.supported);
         // A plan recorded before releases were kept says nothing rather than guessing one.
-        assert!(FarmView::of(farm(None)).openstack.is_none());
-        // The recorded farm is still flat in the response, so clients read it as a farm.
-        let value = serde_json::to_value(FarmView::of(farm(Some("2024.1")))).unwrap();
+        assert!(StackboxView::of(stackbox(None)).openstack.is_none());
+        // The recorded stackbox is still flat in the response, so clients read it as a stackbox.
+        let value = serde_json::to_value(StackboxView::of(stackbox(Some("2024.1")))).unwrap();
         assert_eq!(value["id"], "demo");
         assert_eq!(value["plan"]["release"], "2024.1");
         assert_eq!(value["openstack"]["release"], "2024.1");
@@ -2677,7 +2684,7 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(why.contains("2025.1"), "{why}");
-        // mtty's Nova support comes from farm's backport on 2025.1–2026.1 and from Nova itself
+        // mtty's Nova support comes from stackbox's backport on 2025.1–2026.1 and from Nova itself
         // on 2026.2; a series name resolves to its release number.
         for release in ["2025.1", "2025.2", "2026.1", "2026.2"] {
             assert!(
@@ -2748,7 +2755,7 @@ mod tests {
             computes: 0,
             compute: None,
             release: None,
-            layout: Some(FarmLayout::Control),
+            layout: Some(StackboxLayout::Control),
             gpu: Some(gpu(GpuMode::Simulated, 1)),
         })
         .unwrap_err()
@@ -2761,8 +2768,13 @@ mod tests {
         let with_nova = nova_components();
         let check = |gpu: GpuConfig| gpu.validate("2026.2", &with_nova).map(|_| ());
 
-        // Every placement name farm writes is one Placement accepts: CUSTOM_ and capitals.
-        for name in ["CUSTOM_FARM_VGPU", "CUSTOM_A", "CUSTOM_A1_B2", "CUSTOM__"] {
+        // Every placement name stackbox writes is one Placement accepts: CUSTOM_ and capitals.
+        for name in [
+            "CUSTOM_STACKBOX_VGPU",
+            "CUSTOM_A",
+            "CUSTOM_A1_B2",
+            "CUSTOM__",
+        ] {
             assert!(
                 check(GpuConfig {
                     traits: traits(&[name]),
@@ -2772,7 +2784,7 @@ mod tests {
                 "{name}"
             );
         }
-        for name in ["CUSTOM_", "farm_vgpu", "CUSTOM-lower", "CUSTOM_bad", ""] {
+        for name in ["CUSTOM_", "stackbox_vgpu", "CUSTOM-lower", "CUSTOM_bad", ""] {
             let why = check(GpuConfig {
                 traits: traits(&[name]),
                 ..gpu(GpuMode::Simulated, 2)
@@ -2855,12 +2867,12 @@ mod tests {
     fn a_simulated_gpu_is_advertised_on_one_provider_per_fake_card() {
         // Nova names a card's provider <host>_pci_<domain>_<bus>_<slot>_<func>.
         assert_eq!(
-            GpuConfig::provider_name("farm-compute-1", 0),
-            "farm-compute-1_pci_0000_84_00_0"
+            GpuConfig::provider_name("stackbox-compute-1", 0),
+            "stackbox-compute-1_pci_0000_84_00_0"
         );
         assert_eq!(
-            GpuConfig::provider_name("farm-compute-2", 1),
-            "farm-compute-2_pci_0000_85_00_0"
+            GpuConfig::provider_name("stackbox-compute-2", 1),
+            "stackbox-compute-2_pci_0000_85_00_0"
         );
         // The count is split over the cards, the first ones taking the remainder.
         let totals = |count, devices| {
@@ -2884,7 +2896,7 @@ mod tests {
         let plain = gpu(GpuMode::Simulated, 2);
         assert_eq!(plain.resource_class(), "VGPU");
         assert_eq!(plain.traits(), [DEFAULT_VGPU_TRAIT]);
-        assert_eq!(plain.flavor(), "farm.vgpu");
+        assert_eq!(plain.flavor(), "stackbox.vgpu");
         assert_eq!(plain.device_count(), 1);
         let shaped = GpuConfig {
             traits: traits(&["CUSTOM_A", "CUSTOM_B"]),
@@ -2904,17 +2916,17 @@ mod tests {
             .traits()
             .is_empty()
         );
-        // The mediated device carries no farm trait and always advertises VGPU.
+        // The mediated device carries no stackbox trait and always advertises VGPU.
         let mtty = gpu(GpuMode::Mtty, 24);
         assert_eq!(mtty.resource_class(), "VGPU");
         assert!(mtty.traits().is_empty());
-        assert_eq!(mtty.flavor(), "farm.vgpu");
+        assert_eq!(mtty.flavor(), "stackbox.vgpu");
     }
 
     #[test]
     fn a_plan_offers_mtty_without_asking_the_coordinators_kernel() {
         // The device is the VM host's kernel's, and planning does not know the host. Each
-        // target host's inspection decides when the farm is created or expanded
+        // target host's inspection decides when the stackbox is created or expanded
         // (`ensure_mtty_host` in src/manager/mod.rs); this process's kernel never does.
         let planned = plan(&PlanRequest {
             pci_devices: Vec::new(),
@@ -2958,7 +2970,7 @@ mod tests {
         assert!(warnings.contains(DEFAULT_VGPU_TRAIT), "{warnings}");
         assert!(warnings.contains("not a real GPU"), "{warnings}");
         assert!(warnings.contains("fake GPU device"), "{warnings}");
-        // The count is part of the request; a farm without one keeps no field at all.
+        // The count is part of the request; a stackbox without one keeps no field at all.
         assert_eq!(
             serde_json::to_value(planned.gpu).unwrap(),
             serde_json::json!({"mode": "simulated", "count": 4})
@@ -2985,7 +2997,7 @@ mod tests {
 
     #[test]
     fn a_gpu_reads_with_a_default_count_and_old_state_reads_without_one() {
-        // `gpu: {mode: simulated}` takes the default count of one and farm's own contract.
+        // `gpu: {mode: simulated}` takes the default count of one and stackbox's own contract.
         let parsed: GpuConfig = serde_json::from_str(r#"{"mode":"simulated"}"#).unwrap();
         assert_eq!(parsed, gpu(GpuMode::Simulated, 1));
         assert_eq!(parsed.resource_class(), "VGPU");
@@ -2993,7 +3005,7 @@ mod tests {
         assert_eq!(parsed.device_count(), 1);
         let parsed: GpuConfig = serde_json::from_str(r#"{"count":3}"#).unwrap();
         assert_eq!(parsed, gpu(GpuMode::Simulated, 3));
-        // A farm recorded before the knobs existed keeps the defaults.
+        // A stackbox recorded before the knobs existed keeps the defaults.
         let parsed: GpuConfig = serde_json::from_str(r#"{"mode":"simulated","count":2}"#).unwrap();
         assert_eq!(
             (parsed.traits, parsed.devices, parsed.resource_class),
@@ -3023,17 +3035,17 @@ mod tests {
             serde_json::json!({"mode": "mtty", "count": 1})
         );
 
-        // A plan and a farm written before the option existed deserialize with no GPU.
+        // A plan and a stackbox written before the option existed deserialize with no GPU.
         let plan: Plan = serde_json::from_str(
             r#"{"components":["keystone"],"computes":0,"nodes":[],"memory_mib":0,"disk_mib":0,"warnings":[]}"#,
         )
         .unwrap();
         assert!(plan.gpu.is_none());
-        let farm: FarmRecord = serde_json::from_str(
+        let stackbox: StackboxRecord = serde_json::from_str(
             r#"{"id":"old","status":"created","plan":{"components":["keystone"],"computes":1,"nodes":[],"memory_mib":0,"disk_mib":0,"warnings":[]},"exposure":null,"owner":null,"expires_at":null,"nodes":[],"phase":null,"error":null,"active_job":null,"created_at":0,"updated_at":0}"#,
         )
         .unwrap();
-        assert!(farm.plan.unwrap().gpu.is_none());
+        assert!(stackbox.plan.unwrap().gpu.is_none());
     }
 
     fn names(components: &[&str]) -> Vec<String> {
@@ -3250,7 +3262,7 @@ mod pci_tests {
     }
 
     #[test]
-    fn a_restored_farm_refuses_passthrough() {
+    fn a_restored_stackbox_refuses_passthrough() {
         let request: CreateRequest =
             serde_json::from_str(r#"{"id":"restored","host_id":"local","snapshot_id":"snap-1","pci_devices":["0000:04:00.3"]}"#)
                 .unwrap();

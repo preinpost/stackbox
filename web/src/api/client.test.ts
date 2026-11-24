@@ -8,10 +8,10 @@ describe("API transport", () => {
       .mockResolvedValue(new Response('{"id":"job"}', { status: 202 }));
     vi.stubGlobal("fetch", fetch);
     expect(
-      await request("/farms", { method: "POST", body: '{"id":"demo"}' }),
+      await request("/stackboxes", { method: "POST", body: '{"id":"demo"}' }),
     ).toEqual({ id: "job" });
     expect(fetch).toHaveBeenCalledWith(
-      "/api/v1/farms",
+      "/api/v1/stackboxes",
       expect.objectContaining({
         headers: { "Content-Type": "application/json" },
         cache: "no-store",
@@ -27,7 +27,7 @@ describe("API transport", () => {
           new Response('{"error":"memory budget exceeded"}', { status: 409 }),
         ),
     );
-    await expect(request("/farms")).rejects.toMatchObject({
+    await expect(request("/stackboxes")).rejects.toMatchObject({
       status: 409,
       message: "memory budget exceeded",
     });

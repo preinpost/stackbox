@@ -15,8 +15,8 @@ async function setup(t, handler) {
   const url = await listen(upstream);
   const portal = http.createServer((req, res) =>
     proxyApi(req, res, {
-      FARM_API_URL: url,
-      FARM_API_TOKEN: "server-only-token",
+      STACKBOX_API_URL: url,
+      STACKBOX_API_TOKEN: "server-only-token",
     }),
   );
   const address = await listen(portal);
@@ -41,7 +41,7 @@ test("injects server token and forwards method, JSON body, status and Location",
     });
     res.end('{"id":"abc"}');
   });
-  const response = await fetch(`${address}/api/v1/farms`, {
+  const response = await fetch(`${address}/api/v1/stackboxes`, {
     method: "POST",
     headers: {
       "content-type": "application/json",
@@ -84,7 +84,7 @@ test("forwards the Horizon login and drops unrelated endpoint secrets", async (t
       }),
     );
   });
-  const response = await fetch(`${address}/api/v1/farms/demo/endpoints`);
+  const response = await fetch(`${address}/api/v1/stackboxes/demo/endpoints`);
   assert.deepEqual(await response.json(), {
     services: { keystone: "http://localhost:15000/v3" },
     credentials: {
@@ -110,7 +110,7 @@ test("forwards the Horizon login and drops unrelated endpoint secrets", async (t
   assert.deepEqual(
     JSON.parse(
       JSON.stringify(
-        await (await fetch(`${address}/api/v1/farms/demo/endpoints`)).json(),
+        await (await fetch(`${address}/api/v1/stackboxes/demo/endpoints`)).json(),
       ),
     ).datastores[0].internal_address,
     undefined,
@@ -166,18 +166,18 @@ test("forwards host registration credentials only in the upstream request and pe
 });
 test("rejects cross-origin mutations, unsupported routes and encoded credential-route spellings", async (t) => {
   const address = await setup(t, () => {
-    assert.fail("request must not reach farmd");
+    assert.fail("request must not reach stackboxd");
   });
   for (const path of [
-    "/api/v1/farms/demo/%65ndpoints",
+    "/api/v1/stackboxes/demo/%65ndpoints",
     "/api/v1/unknown",
-    "/api/v1/farms/demo/credentials",
+    "/api/v1/stackboxes/demo/credentials",
   ]) {
     assert.equal((await fetch(address + path)).status, 404);
   }
   assert.equal(
     (
-      await fetch(`${address}/api/v1/farms`, {
+      await fetch(`${address}/api/v1/stackboxes`, {
         method: "POST",
         headers: { origin: "https://other.example" },
       })
@@ -193,7 +193,7 @@ test("forwards snapshot routes and keeps others closed", async (t) => {
     res.end("{}");
   });
   for (const [method, path] of [
-    ["POST", "/api/v1/farms/demo/snapshots"],
+    ["POST", "/api/v1/stackboxes/demo/snapshots"],
     ["GET", "/api/v1/snapshots"],
     ["POST", "/api/v1/snapshots/import"],
     ["DELETE", "/api/v1/snapshots/demo-clean"],
@@ -209,7 +209,7 @@ test("forwards snapshot routes and keeps others closed", async (t) => {
     "/api/v1/snapshots/Demo",
     "/api/v1/snapshots/demo/copies",
     "/api/v1/snapshots/demo/copies/Edge",
-    "/api/v1/farms/demo/snapshots/x",
+    "/api/v1/stackboxes/demo/snapshots/x",
   ]) {
     assert.equal((await fetch(address + path)).status, 404, path);
   }
@@ -255,7 +255,7 @@ test("forwards release routes and keeps others closed", async (t) => {
   const allowed = [
     ["GET", "/api/v1/releases"],
     ["POST", "/api/v1/releases/plan"],
-    ["POST", "/api/v1/releases/farms"],
+    ["POST", "/api/v1/releases/stackboxes"],
   ];
   for (const [method, path] of allowed) {
     const response = await fetch(address + path, { method });
@@ -265,7 +265,7 @@ test("forwards release routes and keeps others closed", async (t) => {
   for (const path of [
     "/api/v1/releases/Demo",
     "/api/v1/releases/plan/x",
-    "/api/v1/releases/farms/x",
+    "/api/v1/releases/stackboxes/x",
   ]) {
     assert.equal((await fetch(address + path)).status, 404, path);
   }
@@ -302,28 +302,28 @@ test("forwards local host registration and service checks", async (t) => {
   });
   for (const path of [
     "/api/v1/local-host",
-    "/api/v1/farms/demo/settle",
-    "/api/v1/farms/demo/computes",
+    "/api/v1/stackboxes/demo/settle",
+    "/api/v1/stackboxes/demo/computes",
   ]) {
     const response = await fetch(address + path, { method: "POST" });
     assert.equal(response.status, 202, path);
   }
   assert.deepEqual(seen, [
     "POST /api/v1/local-host",
-    "POST /api/v1/farms/demo/settle",
-    "POST /api/v1/farms/demo/computes",
+    "POST /api/v1/stackboxes/demo/settle",
+    "POST /api/v1/stackboxes/demo/computes",
   ]);
 });
 test("streams SSE and propagates resume cursors without buffering", async (t) => {
   const address = await setup(t, (req, res) => {
     assert.equal(req.headers["last-event-id"], "12");
-    assert.equal(req.url, "/api/v1/farms/demo/logs/stream?after=12");
+    assert.equal(req.url, "/api/v1/stackboxes/demo/logs/stream?after=12");
     res.writeHead(200, { "content-type": "text/event-stream" });
     res.write('event: log\nid: 13\ndata: {"id":13,"message":"hello"}\n\n');
     // Keep the upstream stream open: the client must receive the event immediately.
   });
   const response = await fetch(
-    `${address}/api/v1/farms/demo/logs/stream?after=12`,
+    `${address}/api/v1/stackboxes/demo/logs/stream?after=12`,
     { headers: { "last-event-id": "12" }, signal: AbortSignal.timeout(2000) },
   );
   assert.equal(response.headers.get("content-type"), "text/event-stream");
@@ -332,21 +332,21 @@ test("streams SSE and propagates resume cursors without buffering", async (t) =>
   assert.match(new TextDecoder().decode(value), /id: 13/);
   await reader.cancel();
 });
-test("returns an actionable error when farmd is unreachable", async (t) => {
+test("returns an actionable error when stackboxd is unreachable", async (t) => {
   const upstream = http.createServer();
   const url = await listen(upstream);
   await new Promise((resolve) => upstream.close(resolve));
   const portal = http.createServer((req, res) =>
-    proxyApi(req, res, { FARM_API_URL: url }),
+    proxyApi(req, res, { STACKBOX_API_URL: url }),
   );
   const address = await listen(portal);
   t.after(() => {
     portal.closeAllConnections();
     portal.close();
   });
-  const response = await fetch(`${address}/api/v1/farms`);
+  const response = await fetch(`${address}/api/v1/stackboxes`);
   assert.equal(response.status, 502);
-  assert.match((await response.json()).error, /farmd/);
+  assert.match((await response.json()).error, /stackboxd/);
 });
 
 test("flushes SSE headers before the first event or keepalive", async (t) => {
@@ -354,7 +354,7 @@ test("flushes SSE headers before the first event or keepalive", async (t) => {
     res.writeHead(200, { "content-type": "text/event-stream" });
     res.flushHeaders();
   });
-  const response = await fetch(`${address}/api/v1/farms/demo/logs/stream`, {
+  const response = await fetch(`${address}/api/v1/stackboxes/demo/logs/stream`, {
     signal: AbortSignal.timeout(1500),
   });
   assert.equal(response.status, 200);
@@ -364,15 +364,15 @@ test("flushes SSE headers before the first event or keepalive", async (t) => {
 async function upgradeSetup(t, onUpgrade) {
   const upstream = http.createServer((_req, res) => {
     res.writeHead(409, { "content-type": "application/json" });
-    res.end('{"error":"the shell needs the farm\'s VM to be running"}');
+    res.end('{"error":"the shell needs the stackbox\'s VM to be running"}');
   });
   if (onUpgrade) upstream.on("upgrade", onUpgrade);
   const url = await listen(upstream);
   const portal = http.createServer();
   portal.on("upgrade", (req, socket, head) =>
     proxyUpgrade(req, socket, head, {
-      FARM_API_URL: url,
-      FARM_API_TOKEN: "server-only-token",
+      STACKBOX_API_URL: url,
+      STACKBOX_API_TOKEN: "server-only-token",
     }),
   );
   const address = await listen(portal);
@@ -404,7 +404,7 @@ function openSocket(address, path, origin = address) {
 test("tunnels the shell WebSocket with the server token and normalized query", async (t) => {
   const address = await upgradeSetup(t, (req, socket) => {
     assert.equal(req.headers.authorization, "Bearer server-only-token");
-    assert.equal(req.url, "/api/v1/farms/demo/shell?rows=24&cols=80");
+    assert.equal(req.url, "/api/v1/stackboxes/demo/shell?rows=24&cols=80");
     assert.equal(req.headers.origin, undefined);
     socket.write(
       "HTTP/1.1 101 Switching Protocols\r\nupgrade: websocket\r\nconnection: Upgrade\r\nsec-websocket-accept: fixture\r\n\r\n",
@@ -413,7 +413,7 @@ test("tunnels the shell WebSocket with the server token and normalized query", a
   });
   const { response, socket } = await openSocket(
     address,
-    "/api/v1/farms/demo/shell?rows=24&cols=80&token=leak",
+    "/api/v1/stackboxes/demo/shell?rows=24&cols=80&token=leak",
   );
   assert.equal(response.statusCode, 101);
   assert.equal(response.headers["sec-websocket-accept"], "fixture");
@@ -426,7 +426,7 @@ test("keeps the shell's multi-node VM in the upstream query", async (t) => {
   const address = await upgradeSetup(t, (req, socket) => {
     assert.equal(
       req.url,
-      "/api/v1/farms/demo/shell?rows=24&cols=80&node=compute-1",
+      "/api/v1/stackboxes/demo/shell?rows=24&cols=80&node=compute-1",
     );
     socket.write(
       "HTTP/1.1 101 Switching Protocols\r\nupgrade: websocket\r\nconnection: Upgrade\r\n\r\n",
@@ -435,21 +435,21 @@ test("keeps the shell's multi-node VM in the upstream query", async (t) => {
   });
   const { response } = await openSocket(
     address,
-    "/api/v1/farms/demo/shell?rows=24&cols=80&node=compute-1",
+    "/api/v1/stackboxes/demo/shell?rows=24&cols=80&node=compute-1",
   );
   assert.equal(response.statusCode, 101);
 });
-test("refuses cross-origin, origin-less and unknown shell upgrades and relays farmd refusals", async (t) => {
+test("refuses cross-origin, origin-less and unknown shell upgrades and relays stackboxd refusals", async (t) => {
   const address = await upgradeSetup(t);
-  const path = "/api/v1/farms/demo/shell?rows=24&cols=80";
+  const path = "/api/v1/stackboxes/demo/shell?rows=24&cols=80";
   for (const origin of ["https://evil.example", null]) {
     const { response } = await openSocket(address, path, origin);
     assert.equal(response.statusCode, 403);
   }
   for (const other of [
-    "/api/v1/farms/demo/logs?rows=24&cols=80",
-    "/api/v1/farms/demo/shell?rows=x&cols=80",
-    "/api/v1/farms/demo/shell?rows=24&cols=80&node=../x",
+    "/api/v1/stackboxes/demo/logs?rows=24&cols=80",
+    "/api/v1/stackboxes/demo/shell?rows=x&cols=80",
+    "/api/v1/stackboxes/demo/shell?rows=24&cols=80&node=../x",
   ]) {
     const { response } = await openSocket(address, other);
     assert.equal(response.statusCode, 404);
@@ -478,13 +478,13 @@ function rawRequest(address, path, headers) {
 }
 async function apiPortal(t, env, handler) {
   const upstream = http.createServer(
-    handler ?? (() => assert.fail("request must not reach farmd")),
+    handler ?? (() => assert.fail("request must not reach stackboxd")),
   );
   const url = await listen(upstream);
   const portal = http.createServer((req, res) =>
     proxyApi(req, res, {
-      FARM_API_URL: url,
-      FARM_API_TOKEN: "server-only-token",
+      STACKBOX_API_URL: url,
+      STACKBOX_API_TOKEN: "server-only-token",
       ...env,
     }),
   );
@@ -501,20 +501,20 @@ test("refuses a rebound Host name even when Origin matches it (DNS rebinding)", 
   const address = await apiPortal(t, {});
   const port = new URL(address).port;
   for (const host of [`evil.test:${port}`, "evil.test", `[::ffff:1.2.3.4]:${port}`]) {
-    const withOrigin = await rawRequest(address, "/api/v1/farms", {
+    const withOrigin = await rawRequest(address, "/api/v1/stackboxes", {
       host,
       origin: `http://${host}`,
       "content-type": "application/json",
     });
     assert.equal(withOrigin.status, 403, host);
-    const withoutOrigin = await rawRequest(address, "/api/v1/farms", { host });
+    const withoutOrigin = await rawRequest(address, "/api/v1/stackboxes", { host });
     assert.equal(withoutOrigin.status, 403, host);
   }
 });
 test("accepts loopback Host names, PORTAL_HOST and PORTAL_ALLOWED_HOSTS", async (t) => {
   const address = await apiPortal(t, {
     PORTAL_HOST: "portal.lan",
-    PORTAL_ALLOWED_HOSTS: "farm.example, [fd00::5]",
+    PORTAL_ALLOWED_HOSTS: "stackbox.example, [fd00::5]",
   }, (_req, res) => {
     res.writeHead(200, { "content-type": "application/json" });
     res.end("[]");
@@ -525,22 +525,22 @@ test("accepts loopback Host names, PORTAL_HOST and PORTAL_ALLOWED_HOSTS", async 
     `127.0.0.1:${port}`,
     `[::1]:${port}`,
     `portal.lan:${port}`,
-    `farm.example:${port}`,
+    `stackbox.example:${port}`,
     `[fd00::5]:${port}`,
   ]) {
-    const withOrigin = await rawRequest(address, "/api/v1/farms", {
+    const withOrigin = await rawRequest(address, "/api/v1/stackboxes", {
       host,
       origin: `http://${host}`,
     });
     assert.equal(withOrigin.status, 200, host);
-    const withoutOrigin = await rawRequest(address, "/api/v1/farms", { host });
+    const withoutOrigin = await rawRequest(address, "/api/v1/stackboxes", { host });
     assert.equal(withoutOrigin.status, 200, host);
   }
 });
 test("ignores wildcard bind addresses as Host names", async (t) => {
   const address = await apiPortal(t, { PORTAL_HOST: "0.0.0.0" });
   const port = new URL(address).port;
-  const r = await rawRequest(address, "/api/v1/farms", { host: `0.0.0.0:${port}` });
+  const r = await rawRequest(address, "/api/v1/stackboxes", { host: `0.0.0.0:${port}` });
   assert.equal(r.status, 403);
 });
 test("refuses shell upgrades from a rebound Host name", async (t) => {
@@ -550,7 +550,7 @@ test("refuses shell upgrades from a rebound Host name", async (t) => {
     const req = http.request({
       host: "127.0.0.1",
       port,
-      path: "/api/v1/farms/demo/shell?rows=24&cols=80",
+      path: "/api/v1/stackboxes/demo/shell?rows=24&cols=80",
       headers: {
         host: `evil.test:${port}`,
         origin: `http://evil.test:${port}`,
@@ -580,13 +580,13 @@ test("forwards the GPU routes and keeps others closed", async (t) => {
   });
   const server = "4c4b1c0e-1f4a-4c40-9c39-2b5a3f7c0f11";
   const allowed = [
-    ["GET", "/api/v1/farms/demo/instances"],
-    ["GET", `/api/v1/farms/demo/instances/${server}/gpu-load`],
-    ["PUT", `/api/v1/farms/demo/instances/${server}/gpu-load`],
-    ["DELETE", `/api/v1/farms/demo/instances/${server}/gpu-load`],
-    ["GET", "/api/v1/farms/demo/gpu/user-data"],
-    ["GET", "/api/v1/farms/demo/gpu/guest-script"],
-    ["PUT", "/api/v1/farms/demo/nodes/control/faults"],
+    ["GET", "/api/v1/stackboxes/demo/instances"],
+    ["GET", `/api/v1/stackboxes/demo/instances/${server}/gpu-load`],
+    ["PUT", `/api/v1/stackboxes/demo/instances/${server}/gpu-load`],
+    ["DELETE", `/api/v1/stackboxes/demo/instances/${server}/gpu-load`],
+    ["GET", "/api/v1/stackboxes/demo/gpu/user-data"],
+    ["GET", "/api/v1/stackboxes/demo/gpu/guest-script"],
+    ["PUT", "/api/v1/stackboxes/demo/nodes/control/faults"],
   ];
   for (const [method, path] of allowed) {
     const response = await fetch(address + path, { method });
@@ -594,18 +594,18 @@ test("forwards the GPU routes and keeps others closed", async (t) => {
   }
   assert.equal(seen.length, allowed.length);
   for (const path of [
-    "/api/v1/farms/demo/instances/secret",
-    "/api/v1/farms/demo/instances/../gpu-load",
-    "/api/v1/farms/demo/gpu/secret",
-    "/api/v1/farms/demo/gpu/user-data/x",
-    "/api/v1/farms/Demo/instances",
+    "/api/v1/stackboxes/demo/instances/secret",
+    "/api/v1/stackboxes/demo/instances/../gpu-load",
+    "/api/v1/stackboxes/demo/gpu/secret",
+    "/api/v1/stackboxes/demo/gpu/user-data/x",
+    "/api/v1/stackboxes/Demo/instances",
   ]) {
     assert.equal((await fetch(address + path)).status, 404, path);
   }
   assert.equal(seen.length, allowed.length);
 });
 test("keeps every documented API path reachable and closes the rest", async (t) => {
-  // The portal and farmd share docs/openapi.json, so a route added there but not here
+  // The portal and stackboxd share docs/openapi.json, so a route added there but not here
   // would pass every unit test and still fail in the browser as a 404.
   const document = JSON.parse(
     readFileSync(new URL("../../docs/openapi.json", import.meta.url), "utf8"),
@@ -614,7 +614,7 @@ test("keeps every documented API path reachable and closes the rest", async (t) 
   const notForThePortal = new Set(["/api/v1/buckets/{id}/index"]);
   for (const path of Object.keys(document.paths)) {
     if (notForThePortal.has(path)) continue;
-    // Job ids are UUIDs and farm ids are canonical, so one UUID stands for every id.
+    // Job ids are UUIDs and stackbox ids are canonical, so one UUID stands for every id.
     const concrete = path
       .replaceAll("{id}", "4c4b1c0e-1f4a-4c40-9c39-2b5a3f7c0f11")
       .replaceAll("{host_id}", "edge-1")
@@ -624,10 +624,10 @@ test("keeps every documented API path reachable and closes the rest", async (t) 
   }
   // An unknown route still is not: the surface is a list, not a prefix.
   for (const path of [
-    "/api/v1/farms/demo/instances/x",
-    "/api/v1/farms/demo/credentials",
+    "/api/v1/stackboxes/demo/instances/x",
+    "/api/v1/stackboxes/demo/credentials",
     "/api/v1/hosts/demo/credentials",
-    "/api/v1/farms/demo/gpu/secret",
+    "/api/v1/stackboxes/demo/gpu/secret",
   ]) {
     assert.equal(portalApiPath.test(path), false, path);
   }

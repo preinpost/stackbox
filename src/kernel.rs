@@ -1,10 +1,10 @@
-//! The guest kernel farms boot from.
+//! The guest kernel stackboxes boot from.
 //!
 //! microsandbox ships a libkrunfw whose kernel has neither VFIO nor mdev, so the kernel's
-//! `mtty` mediated device cannot be bound as a vGPU. farm therefore boots every VM from a
+//! `mtty` mediated device cannot be bound as a vGPU. stackbox therefore boots every VM from a
 //! libkrunfw built from the fragments in `scripts/libkrunfw/fragments` (see
 //! `docs/libkrunfw.md`): preparing a host installs it under
-//! `~/.local/share/farm/libkrunfw/<id>/`, and the coordinator and every host agent hand the
+//! `~/.local/share/stackbox/libkrunfw/<id>/`, and the coordinator and every host agent hand the
 //! pair `msb` + that library to the SDK by themselves. The microsandbox install at
 //! `~/.microsandbox` is never written.
 //!
@@ -19,17 +19,17 @@ use anyhow::{Context, Result, bail, ensure};
 use sha2::{Digest, Sha256};
 
 /// Environment variable naming the libkrunfw library this process boots from, overriding the
-/// installed kernel. Hosts prepared by farm get their own installation instead.
-pub const LIBKRUNFW_VAR: &str = "FARM_LIBKRUNFW_PATH";
+/// installed kernel. Hosts prepared by stackbox get their own installation instead.
+pub const LIBKRUNFW_VAR: &str = "STACKBOX_LIBKRUNFW_PATH";
 
 /// Directory holding built kernels, laid out as `scripts/build-libkrunfw.sh` writes them:
 /// `<dir>/<arch>/manifest.txt` with the artifacts beside it. Defaults to the build output
-/// above the running binary (`target/libkrunfw` for `target/<profile>/farm`).
-pub const ARTIFACTS_VAR: &str = "FARM_LIBKRUNFW_DIR";
+/// above the running binary (`target/libkrunfw` for `target/<profile>/stackbox`).
+pub const ARTIFACTS_VAR: &str = "STACKBOX_LIBKRUNFW_DIR";
 
 /// Where a host keeps installed kernels, under its home directory. One directory per kernel
 /// id, a hash of the manifest, so two builds never share an installation.
-pub const INSTALL_DIR: &str = ".local/share/farm/libkrunfw";
+pub const INSTALL_DIR: &str = ".local/share/stackbox/libkrunfw";
 
 /// Where this process's kernel came from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -146,7 +146,7 @@ pub fn validate_id(id: &str) -> Result<()> {
             && id
                 .bytes()
                 .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
-        "invalid farm kernel id"
+        "invalid stackbox kernel id"
     );
     Ok(())
 }
@@ -160,7 +160,7 @@ pub fn validate_filename(name: &str) -> Result<()> {
             && name
                 .bytes()
                 .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-' || b == b'_'),
-        "invalid farm kernel library name"
+        "invalid stackbox kernel library name"
     );
     Ok(())
 }
@@ -171,7 +171,7 @@ fn hex(bytes: &[u8]) -> String {
 
 fn sha256_file(path: &Path) -> Result<String> {
     let mut file = std::fs::File::open(path)
-        .with_context(|| format!("read the farm kernel at {}", path.display()))?;
+        .with_context(|| format!("read the stackbox kernel at {}", path.display()))?;
     let mut hash = Sha256::new();
     std::io::copy(&mut file, &mut hash)?;
     Ok(hex(&hash.finalize()))
@@ -185,7 +185,7 @@ pub fn id_for(manifest: &str) -> String {
 }
 
 /// The build root for this binary: [`ARTIFACTS_VAR`], else a `libkrunfw` directory above the
-/// executable (`target/libkrunfw` for `target/<profile>/farm`).
+/// executable (`target/libkrunfw` for `target/<profile>/stackbox`).
 pub fn artifacts_dir() -> Option<PathBuf> {
     if let Some(dir) = std::env::var_os(ARTIFACTS_VAR).filter(|dir| !dir.is_empty()) {
         return Some(PathBuf::from(dir));
@@ -229,7 +229,7 @@ pub fn artifact_for(dir: &Path, os: &str, arch: &str) -> Result<Option<Artifact>
     };
     ensure!(
         msb == crate::remote::MSB_VERSION,
-        "the kernel in {} was built for msb {msb}, and this farm runs msb {}; rebuild it against this msb or keep it as {LIBKRUNFW_VAR}",
+        "the kernel in {} was built for msb {msb}, and this stackbox runs msb {}; rebuild it against this msb or keep it as {LIBKRUNFW_VAR}",
         base.display(),
         crate::remote::MSB_VERSION
     );
@@ -383,7 +383,7 @@ pub fn choose(
             Ok(manifest) => manifest,
             Err(error) => {
                 reason = Some(format!(
-                    "The farm kernel in {} has an unreadable manifest: {error}",
+                    "The stackbox kernel in {} has an unreadable manifest: {error}",
                     dir.display()
                 ));
                 continue;
@@ -391,7 +391,7 @@ pub fn choose(
         };
         if manifest.arch != arch {
             reason = Some(format!(
-                "The farm kernel in {} is built for {}, and this host is {arch}",
+                "The stackbox kernel in {} is built for {}, and this host is {arch}",
                 dir.display(),
                 manifest.arch
             ));
@@ -399,7 +399,7 @@ pub fn choose(
         }
         if manifest.msb.as_deref() != msb_version {
             reason = Some(format!(
-                "The farm kernel in {} was built for msb {}, and this host runs {}",
+                "The stackbox kernel in {} was built for msb {}, and this host runs {}",
                 dir.display(),
                 manifest.msb.as_deref().unwrap_or("no msb"),
                 msb_version.unwrap_or("no msb")
@@ -408,7 +408,7 @@ pub fn choose(
         }
         let Some((relative, _)) = manifest.artifact_for(os) else {
             reason = Some(format!(
-                "The farm kernel in {} has no {os} library",
+                "The stackbox kernel in {} has no {os} library",
                 dir.display()
             ));
             continue;
@@ -417,7 +417,7 @@ pub fn choose(
         let library = dir.join(filename);
         if !library.is_file() {
             reason = Some(format!(
-                "The farm kernel in {} names {}, which is missing; prepare the host again",
+                "The stackbox kernel in {} names {}, which is missing; prepare the host again",
                 dir.display(),
                 library.display()
             ));
@@ -482,7 +482,7 @@ pub fn configure_sdk() -> Result<Option<PathBuf>> {
     let selection = select_in_process();
     if let Some(reason) = &selection.reason {
         eprintln!(
-            "farm: {reason}; booting the stock microsandbox kernel, so mtty GPUs and mdev devices are unavailable"
+            "stackbox: {reason}; booting the stock microsandbox kernel, so mtty GPUs and mdev devices are unavailable"
         );
     }
     let Some(library) = selection.path else {
@@ -497,7 +497,7 @@ pub fn configure_sdk() -> Result<Option<PathBuf>> {
                 library.display()
             ),
             _ => format!(
-                "the installed farm kernel {} is missing; prepare the host again (docs/libkrunfw.md)",
+                "the installed stackbox kernel {} is missing; prepare the host again (docs/libkrunfw.md)",
                 library.display()
             ),
         }
@@ -505,7 +505,7 @@ pub fn configure_sdk() -> Result<Option<PathBuf>> {
     let msb = msb_path();
     ensure!(
         msb.is_file(),
-        "a farm kernel needs an msb executable beside it; {} is not a file (set MSB_PATH)",
+        "a stackbox kernel needs an msb executable beside it; {} is not a file (set MSB_PATH)",
         msb.display()
     );
     microsandbox::config::set_sdk_msb_path(&msb);
@@ -514,7 +514,7 @@ pub fn configure_sdk() -> Result<Option<PathBuf>> {
 }
 
 /// The artifact id an installed kernel's library path names, as in
-/// `~/.local/share/farm/libkrunfw/<id>/libkrunfw.so.5.6.1`. A kernel kept anywhere else,
+/// `~/.local/share/stackbox/libkrunfw/<id>/libkrunfw.so.5.6.1`. A kernel kept anywhere else,
 /// such as an override under `~/.microsandbox/lib`, has no installation id.
 pub fn installed_id(library: &Path) -> Option<String> {
     let dir = library.parent()?;
@@ -527,8 +527,8 @@ pub fn installed_id(library: &Path) -> Option<String> {
 /// Whether installing msb on a host would write over the kernel at `library`.
 ///
 /// The installer only touches `~/.microsandbox/bin` and `~/.microsandbox/lib`; a kernel kept
-/// anywhere else survives an msb install. Farm's own installations live in
-/// `~/.local/share/farm/libkrunfw`, but [`LIBKRUNFW_VAR`] may still point into the install
+/// anywhere else survives an msb install. Stackbox's own installations live in
+/// `~/.local/share/stackbox/libkrunfw`, but [`LIBKRUNFW_VAR`] may still point into the install
 /// directory. The host's home is not part of its inspection, so any `.microsandbox/lib` path
 /// counts: it belongs to some host's install.
 pub fn install_would_replace(library: &Path) -> bool {
@@ -544,12 +544,12 @@ pub fn install_would_replace(library: &Path) -> bool {
         .any(|pair| pair[0] == ".microsandbox" && pair[1] == "lib")
 }
 
-/// Where kernels published by farm are served from: `<kid>/manifest.txt`, the library under
+/// Where kernels published by stackbox are served from: `<kid>/manifest.txt`, the library under
 /// `<kid>/<os>-<arch>/`, and per-msb indexes under `msb-<version>/<os>-<arch>.json`.
-pub const RELEASE_URL: &str = "https://public-bucket.preinpost.in/farm-libkrunfw";
+pub const RELEASE_URL: &str = "https://public-bucket.preinpost.in/stackbox-libkrunfw";
 
 /// Environment variable overriding [`RELEASE_URL`]. Empty turns the published kernels off.
-pub const URL_VAR: &str = "FARM_LIBKRUNFW_URL";
+pub const URL_VAR: &str = "STACKBOX_LIBKRUNFW_URL";
 
 /// The published kernel base URL the environment selects: unset means [`RELEASE_URL`], an
 /// empty value means none, anything else is used without trailing slashes.
@@ -860,7 +860,7 @@ mod tests {
         assert_eq!(chosen.source, KernelSource::Override);
         assert_eq!(chosen.path.as_deref(), Some(override_path));
 
-        // Without either, the stock kernel boots and the host says why it is not the farm's.
+        // Without either, the stock kernel boots and the host says why it is not the stackbox's.
         let empty = tempfile::tempdir().unwrap();
         let stock = choose(
             None,
@@ -920,7 +920,7 @@ mod tests {
     }
 
     #[test]
-    fn installing_puts_the_manifest_hash_under_the_farm_data_directory() {
+    fn installing_puts_the_manifest_hash_under_the_stackbox_data_directory() {
         let dir = tempfile::tempdir().unwrap();
         let artifact = build(dir.path(), "aarch64", "macos", MSB, b"first kernel");
         assert!(artifact.id.len() == 16);
@@ -1041,9 +1041,9 @@ mod tests {
     #[test]
     fn a_kernel_inside_the_msb_install_would_be_replaced() {
         // Host preparation asks this of the path an agent host reports, whose home it does
-        // not know. Farm's own kernels live outside the install and survive.
+        // not know. Stackbox's own kernels live outside the install and survive.
         assert!(install_would_replace(Path::new(
-            "/home/farm/.microsandbox/lib/libkrunfw.dylib"
+            "/home/stackbox/.microsandbox/lib/libkrunfw.dylib"
         )));
         assert!(install_would_replace(Path::new(
             "~/.microsandbox/lib/libkrunfw.so.5.6.1"
@@ -1052,10 +1052,10 @@ mod tests {
             "/srv/kernels/libkrunfw.5.dylib"
         )));
         assert!(!install_would_replace(Path::new(
-            "/home/farm/.local/share/farm/libkrunfw/0123456789abcdef/libkrunfw.5.dylib"
+            "/home/stackbox/.local/share/stackbox/libkrunfw/0123456789abcdef/libkrunfw.5.dylib"
         )));
         assert!(!install_would_replace(Path::new(
-            "/home/farm/.microsandbox/bin/libkrunfw.5.dylib"
+            "/home/stackbox/.microsandbox/bin/libkrunfw.5.dylib"
         )));
     }
 }

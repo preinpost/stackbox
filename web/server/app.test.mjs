@@ -7,7 +7,7 @@ import { once } from "node:events";
 import { createPortalServer } from "./app.mjs";
 
 async function fixture(t) {
-  const root = await mkdtemp(path.join(tmpdir(), "farm-portal-server-"));
+  const root = await mkdtemp(path.join(tmpdir(), "stackbox-portal-server-"));
   await mkdir(path.join(root, "assets"));
   await writeFile(
     path.join(root, "index.html"),
@@ -27,13 +27,13 @@ async function fixture(t) {
 }
 test("serves the root and SPA deep links with a trailing-slash asset root", async (t) => {
   const base = await fixture(t);
-  for (const route of ["/", "/jobs", "/host", "/farms/demo"]) {
+  for (const route of ["/", "/jobs", "/host", "/stackboxes/demo"]) {
     const response = await fetch(base + route);
     assert.equal(response.status, 200);
     assert.match(response.headers.get("content-type"), /text\/html/);
     assert.match(await response.text(), /id="root"/);
   }
-  const head = await fetch(base + "/farms/demo", { method: "HEAD" });
+  const head = await fetch(base + "/stackboxes/demo", { method: "HEAD" });
   assert.equal(head.status, 200);
   assert.equal(await head.text(), "");
 });

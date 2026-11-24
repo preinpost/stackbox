@@ -1,12 +1,12 @@
-//! A farm's L2 networks between its VMs. msb does not carry traffic from one VM to another,
+//! A stackbox's L2 networks between its VMs. msb does not carry traffic from one VM to another,
 //! so each guest bridges a TAP device to a port of a learning switch on its host, over a
 //! WebSocket to the host's loopback (`host.microsandbox.internal`).
 //!
 //! - [`switch`] runs on the host as a process of its own, started by the agent ([`host`]).
 //!   Ports belong to segments; frames never cross from one segment to another, so each
-//!   farm network is its own broadcast domain. Ports, their tokens and impairments come from
+//!   stackbox network is its own broadcast domain. Ports, their tokens and impairments come from
 //!   a file the agent edits.
-//! - [`guest`] runs in the guest (`farm-agent agent link <conf>`) under `farm-link@.service`.
+//! - [`guest`] runs in the guest (`stackbox-agent agent link <conf>`) under `stackbox-link@.service`.
 //!
 //! A guest opens `GET /link?port=<port>` with `Authorization: Bearer <token>`; the switch
 //! answers 401 to an unknown port or a wrong token. WebSocket keeps the link able to cross
@@ -15,9 +15,9 @@
 //! every frame queued so far in one message, which keeps the per-frame cost low at the
 //! 1500-byte MTU.
 //!
-//! A farm whose VMs sit on several hosts joins their switches through the coordinator
-//! ([`relay`]): each switch keeps an uplink per such farm open to `GET /api/v1/link-relay`,
-//! and the coordinator passes every message to the farm's other hosts. An uplink carries
+//! A stackbox whose VMs sit on several hosts joins their switches through the coordinator
+//! ([`relay`]): each switch keeps an uplink per such stackbox open to `GET /api/v1/link-relay`,
+//! and the coordinator passes every message to the stackbox's other hosts. An uplink carries
 //! several segments, so each of its messages starts with the segment's name (see
 //! [`encode_trunk`]); the switches learn the MACs beyond it as they do a port's. Uplinks
 //! always use TLS, with the coordinator's own CA ([`tls`]).
@@ -48,7 +48,7 @@ pub const BATCH: usize = 256 * 1024;
 pub const MAX_MESSAGE: usize = BATCH + MAX_FRAME + 2;
 /// Guests reach the host's loopback under this name.
 pub const HOST_NAME: &str = "host.microsandbox.internal";
-/// Farm networks are virtual, so they use jumbo frames.
+/// Stackbox networks are virtual, so they use jumbo frames.
 pub const DEFAULT_MTU: u16 = 9000;
 
 /// Ports the switch accepts, by name. The agent writes it; the switch follows its changes.
@@ -57,16 +57,16 @@ pub const DEFAULT_MTU: u16 = 9000;
 pub struct Config {
     #[serde(default)]
     pub ports: BTreeMap<String, PortConfig>,
-    /// Uplinks to the coordinator's relay, by farm id.
+    /// Uplinks to the coordinator's relay, by stackbox id.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub uplinks: BTreeMap<String, UplinkConfig>,
 }
 
-/// A switch's connection to the relay for one farm that spans hosts.
+/// A switch's connection to the relay for one stackbox that spans hosts.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UplinkConfig {
-    /// `wss://<coordinator>/api/v1/link-relay?farm=<id>&host=<host>`.
+    /// `wss://<coordinator>/api/v1/link-relay?stackbox=<id>&host=<host>`.
     pub url: String,
     /// The coordinator's relay CA in PEM, which the uplink alone trusts; empty for a relay
     /// behind a TLS proxy, whose certificate comes from a public CA.
@@ -76,14 +76,14 @@ pub struct UplinkConfig {
     pub token: String,
     /// Seals the uplink's messages end to end with the relay, in hex ([`seal`]).
     pub key: String,
-    /// The farm's segments this host carries over the uplink.
+    /// The stackbox's segments this host carries over the uplink.
     pub segments: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PortConfig {
-    /// Broadcast domain, such as `<farm>/<network>`.
+    /// Broadcast domain, such as `<stackbox>/<network>`.
     pub segment: String,
     /// SHA-256 of the port's token, in hex; the token itself lives only in the guest.
     pub token_sha256: String,
@@ -113,7 +113,7 @@ impl Impair {
     }
 }
 
-/// Port and segment names: lowercase segments joined by `/`, as farm ids are.
+/// Port and segment names: lowercase segments joined by `/`, as stackbox ids are.
 pub fn validate_name(name: &str) -> Result<()> {
     ensure!(
         !name.is_empty()

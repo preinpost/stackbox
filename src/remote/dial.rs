@@ -35,7 +35,7 @@ pub fn connect_url(coordinator: &str) -> Result<String> {
     let base = coordinator.trim_end_matches('/');
     let (scheme, rest) = base
         .split_once("://")
-        .context("coordinator URL needs a scheme, such as https://farm.example")?;
+        .context("coordinator URL needs a scheme, such as https://stackbox.example")?;
     let scheme = match scheme {
         "http" | "ws" => "ws",
         "https" | "wss" => "wss",
@@ -53,10 +53,10 @@ pub async fn run(coordinator: &str, token: &str, agent: Arc<Agent>) -> Result<()
     loop {
         match serve(&url, token, agent.clone()).await {
             Ok(()) => {
-                eprintln!("farm agent: coordinator closed the connection");
+                eprintln!("stackbox agent: coordinator closed the connection");
                 delay = Duration::from_secs(1);
             }
-            Err(error) => eprintln!("farm agent: {error:#}"),
+            Err(error) => eprintln!("stackbox agent: {error:#}"),
         }
         tokio::time::sleep(delay).await;
         delay = (delay * 2).min(Duration::from_secs(30));
@@ -74,7 +74,7 @@ pub async fn serve(url: &str, token: &str, agent: Arc<Agent>) -> Result<()> {
     let (socket, _) = tokio_tungstenite::connect_async(request)
         .await
         .with_context(|| format!("cannot connect to {url}"))?;
-    eprintln!("farm agent: connected to {url}");
+    eprintln!("stackbox agent: connected to {url}");
     let (mut sink, mut stream) = socket.split();
     let (outgoing, mut outbox) = mpsc::unbounded_channel::<Envelope>();
     let writer = async move {

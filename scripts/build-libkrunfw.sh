@@ -11,7 +11,7 @@
 # --list-fragments prints what there is.
 #
 # The kernel is the one libkrunfw already ships: only settings change. The revision defaults
-# to the one the installed msb pins, so the result matches the runtime farm runs on today.
+# to the one the installed msb pins, so the result matches the runtime stackbox runs on today.
 #
 # Either architecture is built from any host: the kernel is cross-compiled inside the build
 # container with the distribution's cross toolchain, never under docker --platform emulation.
@@ -50,7 +50,7 @@ Usage: scripts/build-libkrunfw.sh [options]
   --revision SHA  libkrunfw revision to build (default: the one the installed msb's
                   microsandbox version pins in vendor/libkrunfw)
   --msb VERSION   msb version the built kernel is for, recorded in the manifest (default:
-                  the installed msb when it pins this revision). farm installs a kernel
+                  the installed msb when it pins this revision). stackbox installs a kernel
                   only on hosts whose msb matches, so pass this with a custom --revision.
   --arch ARCH     aarch64, x86_64 or all (default: this machine). An architecture other
                   than this machine's is cross-compiled in the build container.
@@ -455,7 +455,7 @@ toolchain_package() {
     fi
 }
 
-# $1 arch: what the artifacts next to this manifest were built from, so farm or a person can
+# $1 arch: what the artifacts next to this manifest were built from, so stackbox or a person can
 # tell later which kernel a library is.
 write_manifest() {
     {
@@ -475,7 +475,7 @@ write_manifest() {
     } >"$out/$1/manifest.txt"
 }
 
-# The installed msb pins the revision farm should build against; its version also goes into
+# The installed msb pins the revision stackbox should build against; its version also goes into
 # the manifest, which is how a host decides whether it may boot the kernel.
 msb_bin=${MSB_PATH:-msb}
 msb_installed=
@@ -660,7 +660,7 @@ CONTAINER
             docker cp "$cid:/out/." "$work/" || die "cannot copy the $arch kernel out of the container"
             docker rm -f "$cid" >/dev/null 2>&1 || true
         else
-            docker run --rm "$@" -v "$src:/host:ro" -v "$work:/out" -v "farm-libkrunfw-$arch:/work" \
+            docker run --rm "$@" -v "$src:/host:ro" -v "$work:/out" -v "stackbox-libkrunfw-$arch:/work" \
                 -w /work "$image" bash -eu -c "$build_script" || die "the $arch kernel build failed"
         fi
 
@@ -742,11 +742,11 @@ else
 fi
 echo '  msb run --no-tty -n mdev-check alpine:3.20 -- sh -c "ls /sys/class/mdev_bus"'
 echo
-echo 'farm installs this kernel on a host as it prepares it, under'
+echo 'stackbox installs this kernel on a host as it prepares it, under'
 # shellcheck disable=SC2088 # printed documentation, not a path this script expands
-echo '~/.local/share/farm/libkrunfw/<id>, and boots every VM of that host from it'
+echo '~/.local/share/stackbox/libkrunfw/<id>, and boots every VM of that host from it'
 echo '(docs/gpu.md). The manifest states the msb it was built for, and a host whose msb'
 echo 'does not match keeps booting the stock kernel until preparation upgrades msb.'
 echo
-echo 'FARM_LIBKRUNFW_PATH overrides the kernel for one process, for a kernel kept elsewhere;'
+echo 'STACKBOX_LIBKRUNFW_PATH overrides the kernel for one process, for a kernel kept elsewhere;'
 echo 'scripts/libkrunfw-path.sh prints the built path on its own.'

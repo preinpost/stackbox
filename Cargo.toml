@@ -1,8 +1,8 @@
 [package]
-name = "farm"
+name = "stackbox"
 version = "0.1.9"
 edition = "2024"
-default-run = "farm"
+default-run = "stackbox"
 
 [dependencies]
 anyhow = "1.0.104"

@@ -1,10 +1,10 @@
 //! TLS for the relay. The coordinator keeps a private CA of its own and serves the relay with a
 //! certificate it signs for the relay URL's host. Switches trust that CA alone: it comes with
-//! each farm's uplink configuration, over the same authenticated channel the coordinator
+//! each stackbox's uplink configuration, over the same authenticated channel the coordinator
 //! already reaches the host's agent through, so no public CA and no extra exchange is needed.
 //!
 //! Files under `<state dir>/relay-tls/`: `ca.key` and `ca.pem`, made once and kept, since the
-//! switches of existing farms hold the CA; and `server.key`, `server.pem`, signed anew at every
+//! switches of existing stackboxes hold the CA; and `server.key`, `server.pem`, signed anew at every
 //! start for the current relay URL.
 
 use std::{
@@ -38,7 +38,7 @@ pub struct RelayTls {
 fn ca_params() -> CertificateParams {
     let mut params = CertificateParams::default();
     let mut name = DistinguishedName::new();
-    name.push(DnType::CommonName, "farm relay CA");
+    name.push(DnType::CommonName, "stackbox relay CA");
     params.distinguished_name = name;
     params.is_ca = IsCa::Ca(BasicConstraints::Constrained(0));
     params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];

@@ -1,4 +1,4 @@
-//! The switch on each host. The agent starts it as a process of its own, so farm networks stay
+//! The switch on each host. The agent starts it as a process of its own, so stackbox networks stay
 //! up while agents, deploy workers and the coordinator come and go. Its files live under
 //! `<agent dir>/switch/`: `switch.lock` (held while it runs), `pid`, `addr` (its loopback address,
 //! kept across restarts because guests have it in their link configuration), `ports.json`
@@ -124,7 +124,7 @@ impl Switch {
         })?;
         Ok(token)
     }
-    /// Remove `prefix` and every port under it (`<prefix>/...`), and the uplink of the farm
+    /// Remove `prefix` and every port under it (`<prefix>/...`), and the uplink of the stackbox
     /// `prefix`; returns how many ports.
     pub fn remove_ports(&self, prefix: &str) -> Result<usize> {
         let under = format!("{prefix}/");
@@ -137,26 +137,26 @@ impl Switch {
             Ok(before - config.ports.len())
         })
     }
-    /// Point the farm's uplink at the relay's new address, keeping its token and CA.
-    pub fn set_uplink_url(&self, farm: &str, url: &str) -> Result<()> {
+    /// Point the stackbox's uplink at the relay's new address, keeping its token and CA.
+    pub fn set_uplink_url(&self, stackbox: &str, url: &str) -> Result<()> {
         anyhow::ensure!(url.starts_with("wss://"), "the relay URL must be wss://");
         self.edit(|config| {
             config
                 .uplinks
-                .get_mut(farm)
-                .with_context(|| format!("no uplink for farm {farm}"))?
+                .get_mut(stackbox)
+                .with_context(|| format!("no uplink for stackbox {stackbox}"))?
                 .url = url.to_owned();
             Ok(())
         })
     }
-    /// Join the farm's segments on this host to its other hosts through the relay.
-    pub fn set_uplink(&self, farm: &str, uplink: UplinkConfig) -> Result<()> {
-        validate_name(farm)?;
+    /// Join the stackbox's segments on this host to its other hosts through the relay.
+    pub fn set_uplink(&self, stackbox: &str, uplink: UplinkConfig) -> Result<()> {
+        validate_name(stackbox)?;
         for segment in &uplink.segments {
             validate_name(segment)?;
             anyhow::ensure!(
-                segment.starts_with(&format!("{farm}/")),
-                "segment {segment} is not farm {farm}'s"
+                segment.starts_with(&format!("{stackbox}/")),
+                "segment {segment} is not stackbox {stackbox}'s"
             );
         }
         anyhow::ensure!(
@@ -171,7 +171,7 @@ impl Switch {
             "invalid uplink key"
         );
         self.edit(|config| {
-            config.uplinks.insert(farm.to_owned(), uplink);
+            config.uplinks.insert(stackbox.to_owned(), uplink);
             Ok(())
         })
     }
@@ -334,17 +334,17 @@ pub async fn serve_dir(dir: &Path) -> Result<()> {
     Switch::new(agent_dir).serve().await
 }
 
-/// The Linux farm-agent binary guests run their links with: `FARM_GUEST_AGENT`, or on a
+/// The Linux stackbox-agent binary guests run their links with: `STACKBOX_GUEST_AGENT`, or on a
 /// Linux host this very binary, which is built for the guests' architecture.
 pub fn guest_agent() -> Result<PathBuf> {
-    if let Some(path) = std::env::var_os("FARM_GUEST_AGENT").filter(|p| !p.is_empty()) {
+    if let Some(path) = std::env::var_os("STACKBOX_GUEST_AGENT").filter(|p| !p.is_empty()) {
         return Ok(path.into());
     }
     if cfg!(target_os = "linux") {
         return std::env::current_exe().context("cannot locate the agent binary");
     }
     bail!(
-        "links need a Linux farm-agent for the guests; set FARM_GUEST_AGENT (task agent-build builds dist/agent/<arch>/farm-agent)"
+        "links need a Linux stackbox-agent for the guests; set STACKBOX_GUEST_AGENT (task agent-build builds dist/agent/<arch>/stackbox-agent)"
     )
 }
 

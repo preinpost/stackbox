@@ -1,4 +1,4 @@
-# farm: OpenStack Nova's "Add mtty support for testing fake mdevs", backported to
+# stackbox: OpenStack Nova's "Add mtty support for testing fake mdevs", backported to
 # 2026.1. The hunks are the upstream ones, unchanged.
 #
 # Upstream: OpenStack Nova commit f412fac1ae1e78e91b8b7c2c4b0cf2be4f63ceb2, "Add mtty
@@ -8,7 +8,7 @@
 #
 # Only the two files the running service needs are here; the upstream unit tests are
 # not. src/kolla/patches/apply.py applies this file inside the nova_compute container,
-# matching hunks by their text, and farm's verify phase checks that it is in place. A
+# matching hunks by their text, and stackbox's verify phase checks that it is in place. A
 # hunk that no longer matches fails the container start rather than letting
 # nova-compute run with half the backport.
 #

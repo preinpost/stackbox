@@ -1,7 +1,7 @@
 use crate::{
-    farm::{FarmNode, FrozenSnapshot, ImportedSnapshot, TerminalSize},
     kolla::Phase,
     model::{Endpoints, Exposure, Plan},
+    stackbox::{FrozenSnapshot, ImportedSnapshot, StackboxNode, TerminalSize},
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -20,34 +20,34 @@ pub struct Request {
 pub enum Operation {
     Hello,
     Scan,
-    /// The public port bases this host reserves for farms of every coordinator.
+    /// The public port bases this host reserves for stackboxes of every coordinator.
     PublicPorts,
     Create {
-        farm_id: String,
+        stackbox_id: String,
         generation: String,
         plan: Plan,
         exposure: Exposure,
-        /// For a farm that spans hosts: the part this host runs.
+        /// For a stackbox that spans hosts: the part this host runs.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         share: Option<Box<Share>>,
         /// Compute template snapshot on this host to boot the share's one compute from.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         source: Option<String>,
     },
-    /// Ready this host's compute VMs of a farm that spans hosts for Kolla, which the
+    /// Ready this host's compute VMs of a stackbox that spans hosts for Kolla, which the
     /// control VM's host deploys afterwards.
     Prepare {
-        farm_id: String,
+        stackbox_id: String,
         generation: String,
     },
-    /// Add a compute VM to an existing multi-node farm on this host, or update the
+    /// Add a compute VM to an existing multi-node stackbox on this host, or update the
     /// reservation's plan and the VMs this host runs after another host gained one.
     /// `uplink` is set when the control VM's host joins the relay for the first time.
     Expand {
-        farm_id: String,
+        stackbox_id: String,
         generation: String,
         plan: Plan,
-        /// Suffixes of the farm's VMs this host runs after the change.
+        /// Suffixes of the stackbox's VMs this host runs after the change.
         nodes: Vec<String>,
         /// Suffixes to create here; the others already exist or run elsewhere.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -58,34 +58,34 @@ pub enum Operation {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         source: Option<String>,
     },
-    /// Return the SSH key pair the control VM uses to reach the farm's computes.
+    /// Return the SSH key pair the control VM uses to reach the stackbox's computes.
     SshKeys {
-        farm_id: String,
+        stackbox_id: String,
         generation: String,
     },
-    /// Deploy one new compute VM of a multi-node farm with Kolla, limited to that VM.
+    /// Deploy one new compute VM of a multi-node stackbox with Kolla, limited to that VM.
     DeployCompute {
-        farm_id: String,
+        stackbox_id: String,
         generation: String,
         index: u8,
         /// The VM was booted from a compute template, so Kolla only reconfigures it.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         from_template: bool,
     },
-    /// Point this host's switch at the relay's new address for a farm that spans hosts.
+    /// Point this host's switch at the relay's new address for a stackbox that spans hosts.
     Relink {
-        farm_id: String,
+        stackbox_id: String,
         generation: String,
         url: String,
     },
     /// Runs as the host-side job `job_id`, which outlives this request; repeating the
     /// request with the same `job_id` attaches to that job instead of deploying again.
     Deploy {
-        farm_id: String,
+        stackbox_id: String,
         generation: String,
         from: Phase,
         job_id: String,
-        /// The kolla-ansible ref the coordinator resolved for the farm's release, such as
+        /// The kolla-ansible ref the coordinator resolved for the stackbox's release, such as
         /// `unmaintained/2025.1`. The agent's own process never reads the release catalog,
         /// so a coordinator built before this field sends none and the install script falls
         /// back to `stable/<release>`. An older agent never sees such a request: the
@@ -101,53 +101,53 @@ pub enum Operation {
         offset: u64,
     },
     Delete {
-        farm_id: String,
+        stackbox_id: String,
         generation: String,
     },
     Endpoints {
-        farm_id: String,
+        stackbox_id: String,
         generation: String,
     },
-    /// Wait for a deployed farm's services after its VM started from disk, first moving
+    /// Wait for a deployed stackbox's services after its VM started from disk, first moving
     /// the public catalog entries from `rebind.0` to `rebind.1`.
     Settle {
-        farm_id: String,
+        stackbox_id: String,
         generation: String,
         #[serde(default)]
         rebind: Option<(Exposure, Exposure)>,
     },
-    /// Drop the registrations of the source farm's computes from a farm restored from a
+    /// Drop the registrations of the source stackbox's computes from a stackbox restored from a
     /// control template, and list no compute in its Kolla inventory.
     ForgetComputes {
-        farm_id: String,
+        stackbox_id: String,
         generation: String,
     },
-    /// Stop the farm's VM, capture its disks as `snapshot_id`, and start it again. With
+    /// Stop the stackbox's VM, capture its disks as `snapshot_id`, and start it again. With
     /// `node`, only that VM is captured, as a control or compute template.
     Freeze {
-        farm_id: String,
+        stackbox_id: String,
         generation: String,
         snapshot_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         node: Option<String>,
         labels: BTreeMap<String, String>,
     },
-    /// Set the faults of a multi-node farm VM's links (`node` is `control`, `compute-1`, ...);
+    /// Set the faults of a multi-node stackbox VM's links (`node` is `control`, `compute-1`, ...);
     /// no delay and no loss heals them.
     Impair {
-        farm_id: String,
+        stackbox_id: String,
         generation: String,
         node: String,
         impair: crate::link::Impair,
     },
-    /// Reserve like `Create`, but boot the farm's VM from a snapshot on this host.
+    /// Reserve like `Create`, but boot the stackbox's VM from a snapshot on this host.
     Restore {
-        farm_id: String,
+        stackbox_id: String,
         generation: String,
         reference: String,
         /// A multi-node snapshot's VMs.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        nodes: Vec<crate::farm::NodeSnapshot>,
+        nodes: Vec<crate::stackbox::NodeSnapshot>,
         plan: Plan,
         exposure: Exposure,
     },
@@ -207,10 +207,10 @@ pub enum Operation {
     SendArchive {
         transfer_id: String,
     },
-    /// Interactive shell in the farm's VM. After the request line, the coordinator keeps
+    /// Interactive shell in the stackbox's VM. After the request line, the coordinator keeps
     /// stdin open and writes one `TerminalFrame` per line until the session ends.
     Shell {
-        farm_id: String,
+        stackbox_id: String,
         generation: String,
         /// A multi-node VM's suffix (`control`, `compute-1`); absent for the default VM.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -231,75 +231,75 @@ impl Operation {
     pub fn scope(&self) -> Option<(&str, &str)> {
         match self {
             Self::Create {
-                farm_id,
+                stackbox_id,
                 generation,
                 ..
             }
             | Self::Deploy {
-                farm_id,
+                stackbox_id,
                 generation,
                 ..
             }
             | Self::Delete {
-                farm_id,
+                stackbox_id,
                 generation,
             }
             | Self::Prepare {
-                farm_id,
+                stackbox_id,
                 generation,
             }
             | Self::Expand {
-                farm_id,
+                stackbox_id,
                 generation,
                 ..
             }
             | Self::SshKeys {
-                farm_id,
+                stackbox_id,
                 generation,
             }
             | Self::DeployCompute {
-                farm_id,
+                stackbox_id,
                 generation,
                 ..
             }
             | Self::Relink {
-                farm_id,
+                stackbox_id,
                 generation,
                 ..
             }
             | Self::Endpoints {
-                farm_id,
+                stackbox_id,
                 generation,
             }
             | Self::Shell {
-                farm_id,
+                stackbox_id,
                 generation,
                 ..
             }
             | Self::Settle {
-                farm_id,
+                stackbox_id,
                 generation,
                 ..
             }
             | Self::ForgetComputes {
-                farm_id,
+                stackbox_id,
                 generation,
             }
             | Self::Freeze {
-                farm_id,
+                stackbox_id,
                 generation,
                 ..
             }
             | Self::Impair {
-                farm_id,
+                stackbox_id,
                 generation,
                 ..
             }
             | Self::Restore {
-                farm_id,
+                stackbox_id,
                 generation,
                 ..
-            } => Some((farm_id, generation)),
+            } => Some((stackbox_id, generation)),
             _ => None,
         }
     }
@@ -307,10 +307,10 @@ impl Operation {
         match self {
             // An attach follows a deploy, which stops itself after the same time.
             Self::Deploy { .. } | Self::Attach { .. } => 7200,
-            // The host's first farm also builds the golden image, mostly package downloads.
+            // The host's first stackbox also builds the golden image, mostly package downloads.
             Self::Create { .. } => 1800,
             Self::Delete { .. } => 180,
-            // A host can hold several farms, each destroyed VM by VM.
+            // A host can hold several stackboxes, each destroyed VM by VM.
             Self::Purge => 1800,
             Self::Shell { .. } => 12 * 3600,
             Self::Settle { .. }
@@ -338,13 +338,13 @@ impl Operation {
         }
     }
 }
-/// The part of a farm that spans hosts which one host runs.
+/// The part of a stackbox that spans hosts which one host runs.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Share {
-    /// Suffixes of the farm's VMs on this host (`control`, `compute-1`, ...).
+    /// Suffixes of the stackbox's VMs on this host (`control`, `compute-1`, ...).
     pub nodes: Vec<String>,
-    /// This host's switch joins the farm's segments on the other hosts through it.
+    /// This host's switch joins the stackbox's segments on the other hosts through it.
     pub uplink: crate::link::UplinkConfig,
     /// Key Kolla on the control VM reaches the computes with, in OpenSSH format; only the
     /// control VM's host gets the private half.
@@ -353,20 +353,20 @@ pub struct Share {
     pub ssh_private_key: Option<String>,
 }
 impl Share {
-    /// Check the share against the farm's plan.
-    pub fn validate(&self, farm_id: &str, plan: &Plan) -> anyhow::Result<()> {
+    /// Check the share against the stackbox's plan.
+    pub fn validate(&self, stackbox_id: &str, plan: &Plan) -> anyhow::Result<()> {
         use anyhow::ensure;
         let suffixes: Vec<String> = plan
             .nodes
             .iter()
-            .filter_map(|spec| crate::farm::suffix(spec.role, spec.index))
+            .filter_map(|spec| crate::stackbox::suffix(spec.role, spec.index))
             .collect();
-        ensure!(plan.computes > 0, "only multi-node farms span hosts");
+        ensure!(plan.computes > 0, "only multi-node stackboxes span hosts");
         ensure!(
             !self.nodes.is_empty()
                 && self.nodes.len() < suffixes.len()
                 && self.nodes.iter().all(|n| suffixes.contains(n)),
-            "the share names VMs the farm does not have"
+            "the share names VMs the stackbox does not have"
         );
         let control = self.nodes.iter().any(|n| n == "control");
         ensure!(
@@ -378,16 +378,16 @@ impl Share {
                 && !self.ssh_public_key.contains(['\'', '\n']),
             "invalid SSH public key"
         );
-        let mut segments: Vec<String> = crate::farm::NETWORKS
+        let mut segments: Vec<String> = crate::stackbox::NETWORKS
             .iter()
-            .map(|(_, network, _)| format!("{farm_id}/{network}"))
+            .map(|(_, network, _)| format!("{stackbox_id}/{network}"))
             .collect();
         let mut carried = self.uplink.segments.clone();
         segments.sort();
         carried.sort();
         ensure!(
             carried == segments,
-            "the uplink carries other segments than the farm's"
+            "the uplink carries other segments than the stackbox's"
         );
         // An empty CA trusts the public ones, for a relay behind a TLS proxy.
         if !self.uplink.ca.is_empty() {
@@ -416,7 +416,7 @@ pub enum Frame {
     Phase {
         phase: Phase,
     },
-    /// A finer step inside the phase, forwarded to the coordinator's farm record.
+    /// A finer step inside the phase, forwarded to the coordinator's stackbox record.
     Step {
         step: String,
     },
@@ -461,13 +461,13 @@ pub enum Reply {
         supports_template_transfer: bool,
     },
     Inventory {
-        farms: BTreeMap<String, Vec<FarmNode>>,
+        stackboxes: BTreeMap<String, Vec<StackboxNode>>,
     },
     PublicPorts {
         bases: Vec<u16>,
     },
     Nodes {
-        nodes: Vec<FarmNode>,
+        nodes: Vec<StackboxNode>,
     },
     Endpoints {
         endpoints: Endpoints,
@@ -497,7 +497,7 @@ pub enum Reply {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reference: Option<String>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        nodes: Vec<crate::farm::NodeSnapshot>,
+        nodes: Vec<crate::stackbox::NodeSnapshot>,
     },
     SshKeys {
         public_key: String,
@@ -505,8 +505,8 @@ pub enum Reply {
     },
     Done,
     Purged {
-        /// Farms whose VMs were destroyed, including ones already deleted from the registry.
-        farms: usize,
+        /// Stackboxes whose VMs were destroyed, including ones already deleted from the registry.
+        stackboxes: usize,
     },
 }
 
@@ -565,7 +565,7 @@ pub fn deliver(
         Frame::Result { result } => return Ok(Some(Ok(result))),
         Frame::Error { message } => return Ok(Some(Err(AgentError(message).into()))),
         Frame::Attached | Frame::Terminal { .. } => {
-            anyhow::bail!("unexpected farm-agent terminal event")
+            anyhow::bail!("unexpected stackbox-agent terminal event")
         }
         Frame::Phase { phase } if operation.reports_progress() => DeployEvent::Phase(phase),
         Frame::Step { step } if operation.reports_progress() => DeployEvent::Step(step),
@@ -573,7 +573,7 @@ pub fn deliver(
             DeployEvent::Progress(crate::kolla::StepProgress { step, index, total })
         }
         Frame::Output { message } if operation.reports_output() => DeployEvent::Output(message),
-        _ => anyhow::bail!("unexpected farm-agent progress event"),
+        _ => anyhow::bail!("unexpected stackbox-agent progress event"),
     };
     if let Some(sink) = sink {
         sink(event)?;
@@ -611,19 +611,19 @@ mod tests {
             serde_json::from_str::<Frame>(&step).unwrap(),
             Frame::Step { ref step } if step.contains("nova")
         ));
-        let purged: Reply = serde_json::from_str(r#"{"result":"purged","farms":3}"#).unwrap();
-        assert!(matches!(purged, Reply::Purged { farms: 3 }));
+        let purged: Reply = serde_json::from_str(r#"{"result":"purged","stackboxes":3}"#).unwrap();
+        assert!(matches!(purged, Reply::Purged { stackboxes: 3 }));
     }
 
     #[test]
     fn freeze_reports_numbered_steps_and_others_do_not() {
         use std::sync::{Arc, Mutex};
         let frame: Frame = serde_json::from_str(
-            r#"{"type":"progress","step":"capture farm-a-control (1/2)","index":3,"total":7}"#,
+            r#"{"type":"progress","step":"capture stackbox-a-control (1/2)","index":3,"total":7}"#,
         )
         .unwrap();
         let freeze = Operation::Freeze {
-            farm_id: "a".into(),
+            stackbox_id: "a".into(),
             generation: "g".into(),
             snapshot_id: "s".into(),
             node: None,
@@ -645,13 +645,13 @@ mod tests {
         assert_eq!(
             seen.lock().unwrap()[0],
             crate::kolla::StepProgress {
-                step: "capture farm-a-control (1/2)".into(),
+                step: "capture stackbox-a-control (1/2)".into(),
                 index: 3,
                 total: 7,
             }
         );
         let delete = Operation::Delete {
-            farm_id: "a".into(),
+            stackbox_id: "a".into(),
             generation: "g".into(),
         };
         assert!(deliver(frame, &delete, Some(&sink)).is_err());
@@ -661,7 +661,7 @@ mod tests {
     fn a_deploy_request_from_before_the_resolved_ref_still_parses() {
         // An older coordinator sends no ref, and the agent deploys as it did before.
         let legacy: Request = serde_json::from_str(
-            r#"{"version":1,"coordinator_id":"c","operation":{"operation":"deploy","farm_id":"f","generation":"g","from":"install","job_id":"j"}}"#,
+            r#"{"version":1,"coordinator_id":"c","operation":{"operation":"deploy","stackbox_id":"f","generation":"g","from":"install","job_id":"j"}}"#,
         )
         .unwrap();
         assert!(matches!(
@@ -676,7 +676,7 @@ mod tests {
             version: VERSION,
             coordinator_id: "c".into(),
             operation: Operation::Deploy {
-                farm_id: "f".into(),
+                stackbox_id: "f".into(),
                 generation: "g".into(),
                 from: Phase::Install,
                 job_id: "j".into(),

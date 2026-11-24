@@ -13,7 +13,7 @@ esac
 if [ -n "$platform" ]; then
     docker buildx build --platform "$platform" -f docker/agent.Dockerfile \
         --target artifact --output "type=local,dest=dist/agent/$arch" .
-    printf '\nFARM_AGENT_PATH=%s/dist/agent/%s/farm-agent cargo run -- serve\n' "$PWD" "$arch"
+    printf '\nSTACKBOX_AGENT_PATH=%s/dist/agent/%s/stackbox-agent cargo run -- serve\n' "$PWD" "$arch"
     exit 0
 fi
 # The macOS link needs a MacOSX.sdk (only its .tbd stubs are read); on a Mac, Xcode's.

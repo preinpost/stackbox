@@ -1,6 +1,6 @@
 import type {
   ArchiveMetadata,
-  Farm,
+  Stackbox,
   Job,
   Phase,
   RemoteHost,
@@ -9,7 +9,7 @@ export const jobKindLabels: Record<Job["kind"], string> = {
   create: "VM 생성",
   deploy: "OpenStack 배포",
   expand: "Compute 추가",
-  delete: "Farm 삭제",
+  delete: "Stackbox 삭제",
   snapshot: "스냅샷 얼리기",
   restore: "스냅샷에서 복원",
   settle: "서비스 응답 확인",
@@ -88,69 +88,69 @@ export const transferRate = (bytesPerSecond: number) =>
 const osLabels: Record<string, string> = { macos: "macOS", linux: "Linux" };
 export const platform = (os: string, arch: string) =>
   `${osLabels[os] ?? os} / ${arch}`;
-export const farmMemory = (farm: Farm) =>
-  farm.plan?.memory_mib ?? farm.nodes.reduce((sum, n) => sum + n.memory_mib, 0);
-/** Recorded roles are preserved for legacy farms; only new all-in-one farms support deployment. */
-export const isAllInOneFarm = (farm: Farm) => {
-  const roles = farm.plan?.nodes ?? farm.nodes;
+export const stackboxMemory = (stackbox: Stackbox) =>
+  stackbox.plan?.memory_mib ?? stackbox.nodes.reduce((sum, n) => sum + n.memory_mib, 0);
+/** Recorded roles are preserved for legacy stackboxes; only new all-in-one stackboxes support deployment. */
+export const isAllInOneStackbox = (stackbox: Stackbox) => {
+  const roles = stackbox.plan?.nodes ?? stackbox.nodes;
   return roles.length === 1 && String(roles[0].role) === "all-in-one";
 };
-export const farmNodeCount = (farm: Farm) =>
-  farm.plan?.nodes.length ?? farm.nodes.length;
-/** What a farm is doing now. A coordinator that predates `snapshotting` keeps a farm ready
+export const stackboxNodeCount = (stackbox: Stackbox) =>
+  stackbox.plan?.nodes.length ?? stackbox.nodes.length;
+/** What a stackbox is doing now. A coordinator that predates `snapshotting` keeps a stackbox ready
  * while its snapshot job stops the VMs, so the job names the state the badge should show. */
-export const farmState = (farm: Farm, job?: Job) =>
-  ["ready", "created"].includes(farm.status) && job?.kind === "snapshot"
+export const stackboxState = (stackbox: Stackbox, job?: Job) =>
+  ["ready", "created"].includes(stackbox.status) && job?.kind === "snapshot"
     ? "snapshotting"
-    : farm.status;
-/** A farm whose deployment still stands: ready, or holding still while its VM is captured.
+    : stackbox.status;
+/** A stackbox whose deployment still stands: ready, or holding still while its VM is captured.
  * Its services cannot answer during a snapshot, so only labels use this, not requests. */
-export const farmDeployed = (farm: Farm) =>
-  ["ready", "snapshotting"].includes(farm.status);
-/** `2 / 2 running` for a farm's VMs. A compute being added is already observed on its host
+export const stackboxDeployed = (stackbox: Stackbox) =>
+  ["ready", "snapshotting"].includes(stackbox.status);
+/** `2 / 2 running` for a stackbox's VMs. A compute being added is already observed on its host
  * before the plan keeps it, so the count says which one that is. */
-export const runningVms = (farm: Farm, job?: Job) => {
-  const running = farm.nodes.filter((node) => node.status === "running").length;
-  const adding = pendingCompute(farm, job) ? " · 1대 추가 중" : "";
-  return `${running} / ${farmNodeCount(farm)} running${adding}`;
+export const runningVms = (stackbox: Stackbox, job?: Job) => {
+  const running = stackbox.nodes.filter((node) => node.status === "running").length;
+  const adding = pendingCompute(stackbox, job) ? " · 1대 추가 중" : "";
+  return `${running} / ${stackboxNodeCount(stackbox)} running${adding}`;
 };
 /** Memory of a compute VM made without a chosen size, as the API plans it. */
 const DEFAULT_COMPUTE_MIB = 3072;
 /** The compute VM an expansion job is adding. Its plan is committed only once Kolla accepts
- * it, so until then the farm still shows the computes it had; this names the one on its way. */
-export const pendingCompute = (farm: Farm, job?: Job) => {
+ * it, so until then the stackbox still shows the computes it had; this names the one on its way. */
+export const pendingCompute = (stackbox: Stackbox, job?: Job) => {
   if (job?.kind !== "expand" || !job.target_node) return undefined;
   const index = Number(job.target_node.slice("compute-".length));
   if (!Number.isInteger(index) || index < 1) return undefined;
-  if ((farm.plan?.computes ?? 0) >= index) return undefined;
+  if ((stackbox.plan?.computes ?? 0) >= index) return undefined;
   return {
     role: "compute" as const,
     index,
-    host: job.target_host ?? farm.host_id ?? "",
-    memory_mib: farm.plan?.compute?.memory_mib ?? DEFAULT_COMPUTE_MIB,
+    host: job.target_host ?? stackbox.host_id ?? "",
+    memory_mib: stackbox.plan?.compute?.memory_mib ?? DEFAULT_COMPUTE_MIB,
   };
 };
-/** A control VM and compute VMs joined by the host's link switch. A farm made from a
+/** A control VM and compute VMs joined by the host's link switch. A stackbox made from a
  * control template has its control VM alone until a compute is added. */
-export const isMultiNodeFarm = (farm: Farm) =>
-  String(farm.plan?.nodes[0]?.role) === "control";
-/** A multi-node farm made from a control template that has no compute VM yet. */
-export const awaitsCompute = (farm: Farm) =>
-  isMultiNodeFarm(farm) && (farm.plan?.computes ?? 0) === 0;
-/** All-in-one and multi-node farms deploy; legacy multi-VM layouts do not. */
-export const isDeployableFarm = (farm: Farm) =>
-  isAllInOneFarm(farm) || isMultiNodeFarm(farm);
+export const isMultiNodeStackbox = (stackbox: Stackbox) =>
+  String(stackbox.plan?.nodes[0]?.role) === "control";
+/** A multi-node stackbox made from a control template that has no compute VM yet. */
+export const awaitsCompute = (stackbox: Stackbox) =>
+  isMultiNodeStackbox(stackbox) && (stackbox.plan?.computes ?? 0) === 0;
+/** All-in-one and multi-node stackboxes deploy; legacy multi-VM layouts do not. */
+export const isDeployableStackbox = (stackbox: Stackbox) =>
+  isAllInOneStackbox(stackbox) || isMultiNodeStackbox(stackbox);
 /** Every planned VM exists and runs. */
-export const farmNodesRunning = (farm: Farm) =>
-  farm.nodes.length === farmNodeCount(farm) &&
-  farm.nodes.every((n) => n.status === "running");
+export const stackboxNodesRunning = (stackbox: Stackbox) =>
+  stackbox.nodes.length === stackboxNodeCount(stackbox) &&
+  stackbox.nodes.every((n) => n.status === "running");
 type NodeRef = { role?: string | null; index?: number | null };
-/** A multi-node VM's name after `<farm>-`, and its fault target: `control`, `compute-2`. */
+/** A multi-node VM's name after `<stackbox>-`, and its fault target: `control`, `compute-2`. */
 export const nodeSuffix = ({ role, index }: NodeRef) =>
   index ? `${role}-${index}` : String(role);
-/** The fixed hostname and management address every farm gives this VM. */
+/** The fixed hostname and management address every stackbox gives this VM. */
 export const nodeHostname = (node: NodeRef) =>
-  String(node.role) === "all-in-one" ? "farm-aio" : `farm-${nodeSuffix(node)}`;
+  String(node.role) === "all-in-one" ? "stackbox-aio" : `stackbox-${nodeSuffix(node)}`;
 export const nodeAddress = ({ role, index }: NodeRef) =>
   String(role) === "compute" && index
     ? `10.254.0.${10 + index}`
@@ -227,8 +227,8 @@ export function archiveSummary(metadata?: ArchiveMetadata | null) {
   const role = metadata.role
     ? `${metadata.role === "control" ? "Control" : "Compute"} 템플릿`
     : (metadata.computes ?? 0) > 0
-      ? `멀티노드 farm 스냅샷 (compute ${metadata.computes}대)`
-      : "farm 스냅샷";
+      ? `멀티노드 stackbox 스냅샷 (compute ${metadata.computes}대)`
+      : "stackbox 스냅샷";
   return {
     title: [
       metadata.release ? `OpenStack ${metadata.release}` : "릴리스 미상",
@@ -284,10 +284,10 @@ export const componentPorts: Record<string, string[]> = {
   magnum: ["magnum"],
   skyline: ["skyline", "skyline-console"],
 };
-/** Offsets of the data stores every farm publishes in its block (`model::INFRA_PORTS`). */
+/** Offsets of the data stores every stackbox publishes in its block (`model::INFRA_PORTS`). */
 export const dataStoreOffsets = [6, 7, 8];
 /** The public ports a service list publishes, in offset order, each with its component. */
-export function farmPublicPorts(components: string[]) {
+export function stackboxPublicPorts(components: string[]) {
   return components
     .flatMap((component) =>
       (componentPorts[component] ?? []).map((id) => ({
@@ -298,9 +298,9 @@ export function farmPublicPorts(components: string[]) {
     )
     .sort((a, b) => a.offset - b.offset);
 }
-/** Farms without a recorded plan run the original Keystone and Glance pair. */
-export const farmComponents = (farm: Farm) =>
-  farm.plan?.components ?? ["keystone", "glance"];
+/** Stackboxes without a recorded plan run the original Keystone and Glance pair. */
+export const stackboxComponents = (stackbox: Stackbox) =>
+  stackbox.plan?.components ?? ["keystone", "glance"];
 /** Required components, the selection and all their dependencies, in catalog order. */
 export function resolveComponents(
   catalog: { id: string; required: boolean; depends_on: string[] }[],
@@ -321,8 +321,8 @@ export function resolveComponents(
 }
 export const remoteAgentNeedsUpdate = (host: RemoteHost) =>
   Boolean(host.agent && !host.agent.artifact?.supports_single_vm);
-/** Whether a farm can be created on the host now. A remote host also needs an agent
- * from this coordinator's build; the farm's job re-inspects it if the last check is old. */
+/** Whether a stackbox can be created on the host now. A remote host also needs an agent
+ * from this coordinator's build; the stackbox's job re-inspects it if the last check is old. */
 export function hostReady(host: RemoteHost, coordinatorBuildId?: string) {
   if (host.status !== "ready" || host.active_job) return false;
   if (host.reachability?.reachable === false) return false;
@@ -349,22 +349,22 @@ export function hostLink(
     return "stale";
   return reach.reachable ? "reachable" : "disconnected";
 }
-/** What still stands between the host and a new farm. Preparation installs the runner,
- * the farm kernel and the verification VM in one job, so there is one button to press. */
+/** What still stands between the host and a new stackbox. Preparation installs the runner,
+ * the stackbox kernel and the verification VM in one job, so there is one button to press. */
 export function hostNotice(host: RemoteHost, coordinatorBuildId?: string) {
   if (host.kind === "local")
     return `Hosts에서 로컬 호스트를 점검하고 환경 준비를 마치세요. msb ${MSB_REQUIRED_VERSION}이 필요합니다.`;
   if (host.kind === "agent")
     return host.connected
       ? `Hosts에서 이 호스트를 점검하고 환경 준비를 마치세요. 호스트에 msb ${MSB_REQUIRED_VERSION}이 필요합니다.`
-      : "에이전트가 연결되어 있지 않습니다. 호스트에서 `farm agent connect`를 실행하세요.";
+      : "에이전트가 연결되어 있지 않습니다. 호스트에서 `stackbox agent connect`를 실행하세요.";
   if (agentBuildMismatch(host.agent?.artifact, coordinatorBuildId))
-    return "설치된 Farm 실행기가 이 coordinator와 다른 소스에서 빌드되었습니다. 환경 준비를 다시 실행하면 이 빌드의 실행기로 바뀝니다. 그래도 실패하면 `task agent-build` 후 Coordinator를 재시작하세요.";
+    return "설치된 Stackbox 실행기가 이 coordinator와 다른 소스에서 빌드되었습니다. 환경 준비를 다시 실행하면 이 빌드의 실행기로 바뀝니다. 그래도 실패하면 `task agent-build` 후 Coordinator를 재시작하세요.";
   if (remoteAgentNeedsUpdate(host))
-    return "설치된 Farm 실행기는 단일 VM 생성을 지원하지 않습니다. Hosts에서 환경 준비를 실행하면 최신 실행기까지 함께 설치합니다. 기존 Farm의 조회와 삭제는 계속 사용할 수 있습니다.";
-  return "Hosts에서 환경 준비를 실행하면 단일 VM Farm 실행기까지 함께 설치됩니다. 준비 상태를 확인하세요.";
+    return "설치된 Stackbox 실행기는 단일 VM 생성을 지원하지 않습니다. Hosts에서 환경 준비를 실행하면 최신 실행기까지 함께 설치합니다. 기존 Stackbox의 조회와 삭제는 계속 사용할 수 있습니다.";
+  return "Hosts에서 환경 준비를 실행하면 단일 VM Stackbox 실행기까지 함께 설치됩니다. 준비 상태를 확인하세요.";
 }
-/** The id of the kernel farm installed on a host: its directory under libkrunfw. */
+/** The id of the kernel stackbox installed on a host: its directory under libkrunfw. */
 export const customKernelId = (path?: string | null) =>
   path?.split("/").filter(Boolean).slice(-2, -1)[0];
 /** One line about the guest kernel a host runs, for places that explain the mtty gate. */
@@ -373,11 +373,11 @@ export function hostKernelNote(host: RemoteHost) {
   if (!inspection) return "호스트를 아직 점검하지 않았습니다.";
   if (inspection.custom_kernel) {
     const id = customKernelId(inspection.custom_kernel);
-    return `farm 커널${id ? ` ${id}` : ""}로 부팅합니다.`;
+    return `stackbox 커널${id ? ` ${id}` : ""}로 부팅합니다.`;
   }
   return inspection.custom_kernel_reason
     ? `stock 커널로 부팅합니다: ${inspection.custom_kernel_reason}`
-    : "stock 커널로 부팅합니다. farm 커널을 설치하지 않았습니다.";
+    : "stock 커널로 부팅합니다. stackbox 커널을 설치하지 않았습니다.";
 }
 export const hostLabel = (host: RemoteHost) =>
   `${host.id} · ${host.kind === "local" ? "로컬" : host.kind === "agent" ? "에이전트" : "원격"}`;

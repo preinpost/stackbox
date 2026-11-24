@@ -1,7 +1,7 @@
 /** Light/dark theme: one attribute on <html>, remembered in localStorage, following the OS by default. */
 export type Theme = "light" | "dark";
 
-const STORAGE_KEY = "farm-theme";
+const STORAGE_KEY = "stackbox-theme";
 const DARK_QUERY = "(prefers-color-scheme: dark)";
 
 /** The operator's own choice, or null when the theme still follows the OS. */

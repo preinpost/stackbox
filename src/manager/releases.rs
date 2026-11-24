@@ -1,10 +1,10 @@
-//! Farms created by OpenStack release: the control VM from a control template, each compute
+//! Stackboxes created by OpenStack release: the control VM from a control template, each compute
 //! from a compute template of the same release when one can boot on its host, otherwise
-//! installed clean. Without a control template the farm is installed clean, which only the
+//! installed clean. Without a control template the stackbox is installed clean, which only the
 //! release this coordinator deploys can be. The steps run as ordinary jobs, one at a time,
-//! so a step that fails leaves a farm the usual jobs can retry, expand or delete.
+//! so a step that fails leaves a stackbox the usual jobs can retry, expand or delete.
 
-use super::{FarmManager, NotFound, bad_request, conflict, new_job, store::State};
+use super::{NotFound, StackboxManager, bad_request, conflict, new_job, store::State};
 use crate::{
     model::*,
     s3::catalog::{ArchiveMetadata, TemplateQuery},
@@ -91,7 +91,7 @@ fn ready(snapshot: &SnapshotRecord) -> bool {
 }
 
 /// Whether a template can boot a VM on `host`. Any registered host can: the restore or
-/// expand step copies the template there first ([`FarmManager::ensure_snapshot_on_host`]),
+/// expand step copies the template there first ([`StackboxManager::ensure_snapshot_on_host`]),
 /// and reuses a copy the host already keeps.
 fn template_on_host(state: &State, host: &str) -> std::result::Result<(), String> {
     match state.hosts.get(host) {
@@ -100,12 +100,12 @@ fn template_on_host(state: &State, host: &str) -> std::result::Result<(), String
     }
 }
 
-/// Marks an assemble job the daemon stopped during. Its farm and step jobs are left to
+/// Marks an assemble job the daemon stopped during. Its stackbox and step jobs are left to
 /// their own recovery.
 pub(super) fn interrupt(job: &mut Job) {
     job.status = JobStatus::Interrupted;
     job.error = Some(
-        "daemon stopped during this job; the steps that finished stay, add the remaining computes or delete the farm"
+        "daemon stopped during this job; the steps that finished stay, add the remaining computes or delete the stackbox"
             .into(),
     );
     job.finished_at = Some(now());
@@ -114,8 +114,8 @@ pub(super) fn interrupt(job: &mut Job) {
     }
 }
 
-impl FarmManager {
-    /// The releases farms can be created with on `arch` (this host's by default), with the
+impl StackboxManager {
+    /// The releases stackboxes can be created with on `arch` (this host's by default), with the
     /// templates of each kept here and in `bucket`, or in every bucket.
     pub async fn release_catalog(
         &self,
@@ -127,7 +127,7 @@ impl FarmManager {
         let mut counts: BTreeMap<String, ReleaseTemplates> = BTreeMap::new();
         let mut add = |release: &str, role: Option<TemplateRole>, local: bool| {
             // Releases below the minimum stay reachable only through the opt-in; their
-            // templates are hidden too, so a new farm cannot pick one by accident.
+            // templates are hidden too, so a new stackbox cannot pick one by accident.
             if !crate::kolla::releases::supported(release) {
                 return;
             }
@@ -338,9 +338,9 @@ impl FarmManager {
         Ok(snapshot.clone())
     }
 
-    /// Which template or clean install makes each VM of the farm, and why.
+    /// Which template or clean install makes each VM of the stackbox, and why.
     pub async fn preview_release(&self, request: &ReleaseCreateRequest) -> Result<ReleasePlan> {
-        // Requested services resolved as a multi-node farm's, the way templates record them.
+        // Requested services resolved as a multi-node stackbox's, the way templates record them.
         let requested = if request.components.is_empty() {
             None
         } else {
@@ -383,7 +383,7 @@ impl FarmManager {
             // that there are none to pull.
             let images = match &info.images {
                 Some(images) => format!(
-                    "its images are the farm's own {}/{}, built for amd64 only",
+                    "its images are the stackbox's own {}/{}, built for amd64 only",
                     images.registry, images.namespace
                 ),
                 None => "no public images exist for it, so its install stops at the image pull"
@@ -418,23 +418,26 @@ impl FarmManager {
                 "a layout chooses the VMs when there are no compute VMs; omit it to run computes beside a control VM",
             ));
         }
-        if request.layout == Some(FarmLayout::AllInOne) {
+        if request.layout == Some(StackboxLayout::AllInOne) {
             if request.control_template.is_some() {
                 return Err(bad_request(
-                    "an all-in-one farm is installed clean; omit control_template or choose the control layout",
+                    "an all-in-one stackbox is installed clean; omit control_template or choose the control layout",
                 ));
             }
             if request.compute_template.is_some() {
                 return Err(bad_request(
-                    "an all-in-one farm has no compute VMs; omit compute_template",
+                    "an all-in-one stackbox has no compute VMs; omit compute_template",
                 ));
             }
         }
         validate_id(&request.id).map_err(bad)?;
-        if request.id.ends_with(crate::farm::LEGACY_ALL_IN_ONE_SUFFIX) {
+        if request
+            .id
+            .ends_with(crate::stackbox::LEGACY_ALL_IN_ONE_SUFFIX)
+        {
             return Err(bad_request(format!(
-                "farm id must not end with '{}'",
-                crate::farm::LEGACY_ALL_IN_ONE_SUFFIX
+                "stackbox id must not end with '{}'",
+                crate::stackbox::LEGACY_ALL_IN_ONE_SUFFIX
             )));
         }
         let release = request.release.trim();
@@ -451,10 +454,10 @@ impl FarmManager {
         if let Some(why) = crate::kolla::releases::unsupported(release) {
             return Err(bad_request(why));
         }
-        if request.computes > crate::farm::MAX_COMPUTES {
+        if request.computes > crate::stackbox::MAX_COMPUTES {
             return Err(bad_request(format!(
-                "a farm has at most {} compute VMs",
-                crate::farm::MAX_COMPUTES
+                "a stackbox has at most {} compute VMs",
+                crate::stackbox::MAX_COMPUTES
             )));
         }
         if request.compute_hosts.len() > usize::from(request.computes) {
@@ -504,22 +507,22 @@ impl FarmManager {
     ) -> Result<ReleasePlan> {
         let release = request.release.trim();
         let id = &request.id;
-        // An all-in-one farm runs every service in one VM, so no template of a control or
+        // An all-in-one stackbox runs every service in one VM, so no template of a control or
         // compute VM applies to it.
-        if request.layout == Some(FarmLayout::AllInOne) {
+        if request.layout == Some(StackboxLayout::AllInOne) {
             return self.clean_plan(
                 arch,
                 request,
-                "an all-in-one farm runs every selected service in one VM".into(),
+                "an all-in-one stackbox runs every selected service in one VM".into(),
                 notes,
             );
         }
         if state
-            .farms
+            .stackboxes
             .get(id)
-            .is_some_and(|f| f.status != FarmStatus::Deleted)
+            .is_some_and(|f| f.status != StackboxStatus::Deleted)
         {
-            return Err(conflict(format!("farm '{id}' already exists")));
+            return Err(conflict(format!("stackbox '{id}' already exists")));
         }
         let control_host = request.host_id.clone().context("no control host")?;
         for host in std::iter::once(&control_host).chain(&request.compute_hosts) {
@@ -527,7 +530,7 @@ impl FarmManager {
                 return Err(NotFound(format!("host '{host}'")).into());
             }
         }
-        // A GPU farm's settings go into the compute configuration Kolla writes at deploy
+        // A GPU stackbox's settings go into the compute configuration Kolla writes at deploy
         // time; a template's VMs boot with the plan they were frozen with, so it installs
         // clean.
         // Passed-through devices are installed clean for the same reason: a template's compute
@@ -535,33 +538,34 @@ impl FarmManager {
         if !request.pci_devices.is_empty() {
             if !installable {
                 return Err(conflict(format!(
-                    "a PCI passthrough farm installs OpenStack {} clean, and this coordinator cannot install that release clean",
+                    "a PCI passthrough stackbox installs OpenStack {} clean, and this coordinator cannot install that release clean",
                     request.release.trim()
                 )));
             }
             return self.clean_plan(
                 arch,
                 request,
-                "a PCI passthrough farm is installed clean so its devices reach compute-1".into(),
+                "a PCI passthrough stackbox is installed clean so its devices reach compute-1"
+                    .into(),
                 notes,
             );
         }
         if let Some(gpu) = &request.gpu {
             // The GPU's release window is about the release itself, so name it before this
-            // coordinator's images: a 2025.1 farm with a GPU is refused for the GPU, not for
+            // coordinator's images: a 2025.1 stackbox with a GPU is refused for the GPU, not for
             // an install this coordinator happens to lack.
             gpu.check_release(release)
                 .map_err(|e| bad_request(e.to_string()))?;
             if !installable {
                 return Err(conflict(format!(
-                    "a GPU farm installs OpenStack {} clean, and this coordinator cannot install that release clean",
+                    "a GPU stackbox installs OpenStack {} clean, and this coordinator cannot install that release clean",
                     request.release.trim()
                 )));
             }
             return self.clean_plan(
                 arch,
                 request,
-                "a GPU farm is installed clean so its GPU settings reach every compute".into(),
+                "a GPU stackbox is installed clean so its GPU settings reach every compute".into(),
                 notes,
             );
         }
@@ -658,7 +662,7 @@ impl FarmManager {
             "control".into(),
             control_host.clone(),
             format!(
-                "{why}; the farm starts with this control VM and gains its computes one at a time"
+                "{why}; the stackbox starts with this control VM and gains its computes one at a time"
             ),
         );
 
@@ -731,7 +735,7 @@ impl FarmManager {
             );
         }
         Ok(ReleasePlan {
-            farm_id: id.clone(),
+            stackbox_id: id.clone(),
             release: release.into(),
             arch: arch.into(),
             components,
@@ -741,7 +745,7 @@ impl FarmManager {
         })
     }
 
-    /// The plan of a farm installed clean with its computes, as `POST /farms` does.
+    /// The plan of a stackbox installed clean with its computes, as `POST /stackboxes` does.
     fn clean_plan(
         &self,
         arch: &str,
@@ -750,7 +754,7 @@ impl FarmManager {
         notes: &mut Vec<String>,
     ) -> Result<ReleasePlan> {
         let control_host = request.host_id.clone().context("no control host")?;
-        let farm = CreateRequest {
+        let stackbox = CreateRequest {
             components: request.components.clone(),
             computes: request.computes,
             compute: request.compute,
@@ -758,7 +762,9 @@ impl FarmManager {
             pci_devices: request.pci_devices.clone(),
             ..self.clean_request(request)
         };
-        let planned = farm.validate().map_err(|e| bad_request(e.to_string()))?;
+        let planned = stackbox
+            .validate()
+            .map_err(|e| bad_request(e.to_string()))?;
         if request.compute_template.is_some() {
             return Err(conflict(
                 "a compute template boots a compute beside a control VM from a control template; without one the computes are installed clean",
@@ -770,7 +776,7 @@ impl FarmManager {
             "all-in-one"
         };
         Ok(ReleasePlan {
-            farm_id: request.id.clone(),
+            stackbox_id: request.id.clone(),
             release: request.release.trim().into(),
             arch: arch.into(),
             components: planned.components.clone(),
@@ -778,7 +784,7 @@ impl FarmManager {
                 node.into(),
                 control_host.clone(),
                 format!(
-                    "{why}; the farm is installed clean with OpenStack {}",
+                    "{why}; the stackbox is installed clean with OpenStack {}",
                     request.release.trim()
                 ),
             ),
@@ -797,7 +803,7 @@ impl FarmManager {
         })
     }
 
-    /// CPU architecture the farm runs on: its control VM's host's, which every compute host
+    /// CPU architecture the stackbox runs on: its control VM's host's, which every compute host
     /// must share since Kolla images cannot mix architectures. A remote host not checked yet
     /// is taken to match this coordinator.
     fn plan_arch(&self, state: &State, request: &ReleaseCreateRequest) -> Result<String> {
@@ -819,7 +825,7 @@ impl FarmManager {
         Ok(arch)
     }
 
-    /// A create request carrying the farm's ID, host and metadata, for either path.
+    /// A create request carrying the stackbox's ID, host and metadata, for either path.
     fn clean_request(&self, request: &ReleaseCreateRequest) -> CreateRequest {
         let host = request.host_id.clone();
         let placement = (1..=request.computes)
@@ -848,11 +854,11 @@ impl FarmManager {
         }
     }
 
-    /// Start the farm the plan of `request` describes, as one assemble job whose steps run
+    /// Start the stackbox the plan of `request` describes, as one assemble job whose steps run
     /// as jobs of their own: imports, the control VM, then each compute in order.
     pub async fn create_release(&self, request: ReleaseCreateRequest) -> Result<Job> {
         let plan = self.preview_release(&request).await?;
-        // A GPU farm always installs clean, so the plan's compute hosts are the ones that
+        // A GPU stackbox always installs clean, so the plan's compute hosts are the ones that
         // will boot the mtty device. Refuse here, naming the host, rather than in step 1.
         if request
             .gpu
@@ -873,7 +879,7 @@ impl FarmManager {
                 .iter()
                 .find(|node| node.node == "compute-1")
                 .map(|node| node.host_id.clone())
-                .context("a PCI farm needs compute-1")?;
+                .context("a PCI stackbox needs compute-1")?;
             let devices = crate::model::normalize_pci_devices(&request.pci_devices)?;
             self.read(|state| super::ensure_pci_host(state, &host, &devices))??;
         }
@@ -882,15 +888,14 @@ impl FarmManager {
             self.ensure_accepting()?;
             let id = &request.id;
             if state
-                .farms
+                .stackboxes
                 .get(id)
-                .is_some_and(|f| f.status != FarmStatus::Deleted)
-                || state
-                    .jobs
-                    .values()
-                    .any(|j| j.kind == JobKind::Assemble && &j.farm_id == id && j.status.active())
+                .is_some_and(|f| f.status != StackboxStatus::Deleted)
+                || state.jobs.values().any(|j| {
+                    j.kind == JobKind::Assemble && &j.stackbox_id == id && j.status.active()
+                })
             {
-                return Err(conflict(format!("farm '{id}' already exists")));
+                return Err(conflict(format!("stackbox '{id}' already exists")));
             }
             let mut job = new_job(id, JobKind::Assemble);
             job.assembly = steps;
@@ -898,7 +903,7 @@ impl FarmManager {
             Ok(job)
         })?;
         for line in describe(&plan) {
-            self.log(&job.farm_id, &job.id, None, format!("{line}\n"))?;
+            self.log(&job.stackbox_id, &job.id, None, format!("{line}\n"))?;
         }
         let manager = self.clone();
         let spawned = job.clone();
@@ -933,7 +938,7 @@ impl FarmManager {
         for (index, step) in job.assembly.iter().enumerate() {
             self.set_step(&job.id, index, |s| s.status = JobStatus::Running)?;
             self.log(
-                &job.farm_id,
+                &job.stackbox_id,
                 &job.id,
                 None,
                 format!(
@@ -953,19 +958,19 @@ impl FarmManager {
                 s.error = error.clone();
             })?;
             if let Err(error) = result {
-                let farm = self.get(&job.farm_id).ok();
-                let hint = match (step.action.as_str(), farm) {
+                let stackbox = self.get(&job.stackbox_id).ok();
+                let hint = match (step.action.as_str(), stackbox) {
                     (_, None) => "nothing was created; start it again".to_owned(),
                     ("expand", Some(_)) => format!(
-                        "the farm keeps its other VMs; add {} again{} to retry, or delete the farm",
+                        "the stackbox keeps its other VMs; add {} again{} to retry, or delete the stackbox",
                         step.node.as_deref().unwrap_or("the compute"),
                         step.snapshot_id
                             .as_ref()
                             .map(|s| format!(" from compute template '{s}'"))
                             .unwrap_or_else(|| " as a clean install".into())
                     ),
-                    ("deploy", Some(_)) => "deploy the farm again, or delete it".into(),
-                    (_, Some(_)) => "delete the farm and start it again".into(),
+                    ("deploy", Some(_)) => "deploy the stackbox again, or delete it".into(),
+                    (_, Some(_)) => "delete the stackbox and start it again".into(),
                 };
                 for skipped in index + 1..job.assembly.len() {
                     self.set_step(&job.id, skipped, |s| s.status = JobStatus::Interrupted)?;
@@ -985,7 +990,7 @@ impl FarmManager {
         plan: &ReleasePlan,
         nodes: &[&PlannedNode],
     ) -> Result<()> {
-        let farm = &job.farm_id;
+        let stackbox = &job.stackbox_id;
         let child = match step.action.as_str() {
             "import" => {
                 let id = step.snapshot_id.clone().context("import has no snapshot")?;
@@ -1020,13 +1025,13 @@ impl FarmManager {
                 pci_devices: request.pci_devices.clone(),
                 ..self.clean_request(request)
             })?,
-            "deploy" => self.deploy(farm, DeployRequest::default())?,
+            "deploy" => self.deploy(stackbox, DeployRequest::default())?,
             "expand" => {
                 if let (Some(snapshot), Some(host)) = (&step.snapshot_id, &step.host_id) {
                     self.ensure_template_on_host(snapshot, host).await?;
                 }
                 self.add_compute(
-                    farm,
+                    stackbox,
                     AddComputeRequest {
                         host_id: step.host_id.clone(),
                         from_snapshot: step.snapshot_id.clone(),
@@ -1094,7 +1099,7 @@ impl FarmManager {
     fn finish_assembly(&self, job: &Job, result: Result<()>) -> Result<()> {
         let error = result.err().map(|e| format!("{e:#}"));
         let logged = self.log(
-            &job.farm_id,
+            &job.stackbox_id,
             &job.id,
             None,
             error.clone().unwrap_or_else(|| "job succeeded".into()),

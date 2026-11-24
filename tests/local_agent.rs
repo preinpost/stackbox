@@ -1,14 +1,14 @@
-//! The daemon reaches this machine's host by running its own binary as `farm agent`.
-use farm::remote::{
+//! The daemon reaches this machine's host by running its own binary as `stackbox agent`.
+use stackbox::remote::{
     link::{AgentLink, ProcessLink},
     protocol::{Frame, Operation, Reply, Request, VERSION},
 };
 
 #[tokio::test]
-async fn the_farm_binary_answers_as_the_local_agent() {
+async fn the_stackbox_binary_answers_as_the_local_agent() {
     let link = ProcessLink {
         guest_agent: Default::default(),
-        program: env!("CARGO_BIN_EXE_farm").into(),
+        program: env!("CARGO_BIN_EXE_stackbox").into(),
     };
     let reply = link
         .call(
@@ -22,7 +22,7 @@ async fn the_farm_binary_answers_as_the_local_agent() {
         .await
         .unwrap();
     assert!(
-        matches!(reply, Reply::Hello { version: VERSION, ref build_id, .. } if build_id == farm::BUILD_ID)
+        matches!(reply, Reply::Hello { version: VERSION, ref build_id, .. } if build_id == stackbox::BUILD_ID)
     );
     let refused = link
         .call(
@@ -40,11 +40,11 @@ async fn the_farm_binary_answers_as_the_local_agent() {
 
 /// Deploy jobs live under the agent's home; the binary follows and runs them from there.
 #[test]
-fn the_farm_binary_looks_for_jobs_under_its_own_home() {
+fn the_stackbox_binary_looks_for_jobs_under_its_own_home() {
     use std::{io::Write, process::Stdio};
     let home = tempfile::tempdir().unwrap();
     let job_id = uuid::Uuid::new_v4().to_string();
-    let mut agent = std::process::Command::new(env!("CARGO_BIN_EXE_farm"))
+    let mut agent = std::process::Command::new(env!("CARGO_BIN_EXE_stackbox"))
         .arg("agent")
         .env("HOME", home.path())
         .stdin(Stdio::piped())
@@ -75,9 +75,9 @@ fn the_farm_binary_looks_for_jobs_under_its_own_home() {
     );
     let job_dir = home
         .path()
-        .join(".local/share/farm/worker-v1/jobs")
+        .join(".local/share/stackbox/worker-v1/jobs")
         .join(&job_id);
-    let worker = std::process::Command::new(env!("CARGO_BIN_EXE_farm"))
+    let worker = std::process::Command::new(env!("CARGO_BIN_EXE_stackbox"))
         .args(["agent", "worker"])
         .arg(&job_dir)
         .env("HOME", home.path())
@@ -87,16 +87,19 @@ fn the_farm_binary_looks_for_jobs_under_its_own_home() {
     assert!(String::from_utf8_lossy(&worker.stderr).contains("unknown on this host"));
 }
 
-/// Planning and schema commands run without microsandbox, so a path farm cannot use must
+/// Planning and schema commands run without microsandbox, so a path stackbox cannot use must
 /// not stop them; only the commands that boot VMs read the override as a path.
 #[test]
 fn a_bad_custom_kernel_path_only_fails_the_commands_that_boot_vms() {
     let run = |args: &[&str]| {
-        std::process::Command::new(env!("CARGO_BIN_EXE_farm"))
+        std::process::Command::new(env!("CARGO_BIN_EXE_stackbox"))
             .args(args)
-            .env(farm::kernel::LIBKRUNFW_VAR, "/nonexistent/libkrunfw.dylib")
+            .env(
+                stackbox::kernel::LIBKRUNFW_VAR,
+                "/nonexistent/libkrunfw.dylib",
+            )
             .output()
-            .expect("run the farm binary")
+            .expect("run the stackbox binary")
     };
     for args in [
         vec!["plan", "--components", "nova"],
@@ -106,13 +109,13 @@ fn a_bad_custom_kernel_path_only_fails_the_commands_that_boot_vms() {
         let output = run(&args);
         assert!(
             output.status.success(),
-            "farm {} failed with a bad custom kernel: {}",
+            "stackbox {} failed with a bad custom kernel: {}",
             args.join(" "),
             String::from_utf8_lossy(&output.stderr)
         );
     }
     // A plan is host-free, so it takes `mtty` whatever kernel this machine has: the host
-    // that boots the VM is judged by its own inspection when the farm is created.
+    // that boots the VM is judged by its own inspection when the stackbox is created.
     let output = run(&["plan", "--components", "nova", "--gpu", "mtty", "--json"]);
     assert!(
         output.status.success(),
@@ -122,15 +125,15 @@ fn a_bad_custom_kernel_path_only_fails_the_commands_that_boot_vms() {
     assert!(String::from_utf8_lossy(&output.stdout).contains("mtty"));
     // The same with no kernel at all, as on a coordinator that was never prepared.
     let home = tempfile::tempdir().unwrap();
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_farm"))
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_stackbox"))
         .args(["plan", "--components", "nova", "--gpu", "mtty", "--json"])
-        .env_remove(farm::kernel::LIBKRUNFW_VAR)
+        .env_remove(stackbox::kernel::LIBKRUNFW_VAR)
         .env("HOME", home.path())
         .output()
-        .expect("run the farm binary");
+        .expect("run the stackbox binary");
     assert!(
         output.status.success(),
-        "a coordinator without a kernel cannot plan an mtty farm: {}",
+        "a coordinator without a kernel cannot plan an mtty stackbox: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(String::from_utf8_lossy(&output.stdout).contains("mtty"));
@@ -138,7 +141,7 @@ fn a_bad_custom_kernel_path_only_fails_the_commands_that_boot_vms() {
     let output = run(&["golden", "--check"]);
     assert!(!output.status.success());
     assert!(
-        String::from_utf8_lossy(&output.stderr).contains(farm::kernel::LIBKRUNFW_VAR),
+        String::from_utf8_lossy(&output.stderr).contains(stackbox::kernel::LIBKRUNFW_VAR),
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );

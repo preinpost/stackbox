@@ -1,4 +1,4 @@
-"""Apply farm's Nova backport to a Nova source tree, matching hunks by their text.
+"""Apply stackbox's Nova backport to a Nova source tree, matching hunks by their text.
 
 The nova_compute image is not guaranteed to ship `patch`, and its Nova revision can
 move with every image rebuild, so hunks are located by their exact old text instead
@@ -111,7 +111,7 @@ def stage(source, text):
     Keeping the temporary file beside the source makes the final move atomic.
     """
     directory = os.path.dirname(source) or "."
-    descriptor, temporary = tempfile.mkstemp(dir=directory, prefix=".farm-patch-")
+    descriptor, temporary = tempfile.mkstemp(dir=directory, prefix=".stackbox-patch-")
     try:
         with os.fdopen(descriptor, "w") as handle:
             handle.write(text)

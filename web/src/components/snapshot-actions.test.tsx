@@ -23,7 +23,7 @@ test("lists bucket archives by what their metadata files say", async () => {
     vi.fn(async (path: string, options?: RequestInit) => {
       if (path.endsWith("/buckets"))
         return Response.json([
-          { id: "minio", name: "farm", prefix: "snapshots/", region: "auto" },
+          { id: "minio", name: "stackbox", prefix: "snapshots/", region: "auto" },
         ]);
       if (path.endsWith("/buckets/minio/objects"))
         return Response.json([
@@ -85,10 +85,10 @@ test("enables export for multi-node snapshots and shows compute count in bucket 
     "fetch",
     vi.fn(async (path: string, options?: RequestInit) => {
       if (path.endsWith("/host"))
-        return Response.json({ state_dir: "/tmp/farm", arch: "x86_64" });
+        return Response.json({ state_dir: "/tmp/stackbox", arch: "x86_64" });
       if (path.endsWith("/buckets"))
         return Response.json([
-          { id: "s3", name: "farm-snapshots", prefix: "", region: "us-east-1" },
+          { id: "s3", name: "stackbox-snapshots", prefix: "", region: "us-east-1" },
         ]);
       if (options?.method === "POST" && path.endsWith("/snapshots/mn-snap/export")) {
         exportedBody = JSON.parse(String(options.body));
@@ -146,12 +146,12 @@ test("lets RestoreSnapshotDialog choose any compatible ready host and updates ex
     "fetch",
     vi.fn(async (path: string, options?: RequestInit) => {
       if (path.endsWith("/host"))
-        return Response.json({ state_dir: "/tmp/farm", arch: "aarch64", build_id: "b1" });
-      if (path.endsWith("/farms") && options?.method === "POST") {
+        return Response.json({ state_dir: "/tmp/stackbox", arch: "aarch64", build_id: "b1" });
+      if (path.endsWith("/stackboxes") && options?.method === "POST") {
         createdBody = JSON.parse(String(options.body));
-        return Response.json({ id: "job-1", farm_id: "restored-on-02", status: "queued" });
+        return Response.json({ id: "job-1", stackbox_id: "restored-on-02", status: "queued" });
       }
-      if (path.endsWith("/farms")) return Response.json([]);
+      if (path.endsWith("/stackboxes")) return Response.json([]);
       if (path.endsWith("/hosts"))
         return Response.json([
           {
@@ -209,15 +209,15 @@ test("lets RestoreSnapshotDialog choose any compatible ready host and updates ex
             capacity: { memory_budget_mib: 32768, memory_reserved_mib: 0 },
           },
         ]);
-      if (options?.method === "POST" && path.endsWith("/farms")) {
+      if (options?.method === "POST" && path.endsWith("/stackboxes")) {
         createdBody = JSON.parse(String(options.body));
-        return Response.json({ id: "job-1", farm_id: "restored-on-02", status: "queued" });
+        return Response.json({ id: "job-1", stackbox_id: "restored-on-02", status: "queued" });
       }
       return Response.json([]);
     }),
   );
   const snapshot = {
-    id: "dev-farm-001-clean",
+    id: "dev-stackbox-001-clean",
     status: "ready" as const,
     arch: "x86_64",
     host_id: "dev-01",
@@ -236,11 +236,11 @@ test("lets RestoreSnapshotDialog choose any compatible ready host and updates ex
       { node: "compute-1", reference: "ref-cmp", size_bytes: 100 },
     ],
     archive: {
-      path: "s3://farm-snapshots/dev-farm-001-clean.msb",
+      path: "s3://stackbox-snapshots/dev-stackbox-001-clean.msb",
       size_bytes: 9000,
       exported_at: 10,
       bucket: "s3",
-      key: "dev-farm-001-clean.msb",
+      key: "dev-stackbox-001-clean.msb",
       sha256: "00",
     },
     created_at: 1,
@@ -252,7 +252,7 @@ test("lets RestoreSnapshotDialog choose any compatible ready host and updates ex
       <RestoreSnapshotDialog snapshot={snapshot} />
     </QueryClientProvider>,
   );
-  await user.click(await screen.findByRole("button", { name: "Farm 만들기" }));
+  await user.click(await screen.findByRole("button", { name: "Stackbox 만들기" }));
   const hostSelect = await screen.findByRole("combobox", { name: "실행 호스트" });
   expect(hostSelect.textContent).toContain("dev-01");
   await user.click(hostSelect);
@@ -264,13 +264,13 @@ test("lets RestoreSnapshotDialog choose any compatible ready host and updates ex
   const extInput = screen.getByLabelText(/외부 접속 호스트/) as HTMLInputElement;
   expect(extInput.value).toBe("10.0.0.21");
   await user.type(screen.getByPlaceholderText("dev-openstack"), "restored-on-02");
-  const submit = screen.getAllByRole("button", { name: "Farm 만들기" }).at(-1)!;
+  const submit = screen.getAllByRole("button", { name: "Stackbox 만들기" }).at(-1)!;
   await user.click(submit);
   await vi.waitFor(() =>
     expect(createdBody).toEqual({
       id: "restored-on-02",
       host_id: "dev-02",
-      snapshot_id: "dev-farm-001-clean",
+      snapshot_id: "dev-stackbox-001-clean",
       external_host: "10.0.0.21",
     }),
   );
@@ -286,15 +286,15 @@ test("CreateFromBucketDialog shows only usable images with metadata matching reg
     "fetch",
     vi.fn(async (path: string, options?: RequestInit) => {
       if (path.endsWith("/host"))
-        return Response.json({ state_dir: "/tmp/farm", arch: "aarch64", build_id: "b1" });
-      if (path.endsWith("/farms") && options?.method === "POST") {
+        return Response.json({ state_dir: "/tmp/stackbox", arch: "aarch64", build_id: "b1" });
+      if (path.endsWith("/stackboxes") && options?.method === "POST") {
         createdBody = JSON.parse(String(options.body));
-        return Response.json({ id: "job-2", farm_id: "from-s3", status: "queued" });
+        return Response.json({ id: "job-2", stackbox_id: "from-s3", status: "queued" });
       }
-      if (path.endsWith("/farms")) return Response.json([]);
+      if (path.endsWith("/stackboxes")) return Response.json([]);
       if (path.endsWith("/buckets"))
         return Response.json([
-          { id: "s3", name: "farm-snapshots", prefix: "", region: "us-east-1" },
+          { id: "s3", name: "stackbox-snapshots", prefix: "", region: "us-east-1" },
         ]);
       if (path.endsWith("/hosts"))
         return Response.json([
@@ -323,14 +323,14 @@ test("CreateFromBucketDialog shows only usable images with metadata matching reg
       if (path.endsWith("/buckets/s3/objects"))
         return Response.json([
           {
-            key: "dev-farm-001-clean.msb",
+            key: "dev-stackbox-001-clean.msb",
             size_bytes: 9_000_000_000,
             metadata: {
               schema: 1,
-              key: "dev-farm-001-clean.msb",
+              key: "dev-stackbox-001-clean.msb",
               size_bytes: 9_000_000_000,
               sha256: "ab",
-              snapshot_id: "dev-farm-001-clean",
+              snapshot_id: "dev-stackbox-001-clean",
               release: "2026.2",
               role: null,
               components: ["keystone", "nova"],
@@ -397,24 +397,24 @@ test("CreateFromBucketDialog shows only usable images with metadata matching reg
       <CreateFromBucketDialog />
     </QueryClientProvider>,
   );
-  const trigger = await screen.findByRole("button", { name: /버킷에서 Farm 만들기/ });
+  const trigger = await screen.findByRole("button", { name: /버킷에서 Stackbox 만들기/ });
   await vi.waitFor(() => expect((trigger as HTMLButtonElement).disabled).toBe(false));
   await user.click(trigger);
 
-  expect(await screen.findByText("dev-farm-001-clean.msb")).toBeTruthy();
+  expect(await screen.findByText("dev-stackbox-001-clean.msb")).toBeTruthy();
   expect(screen.queryByText("cmp.msb")).toBeNull();
   expect(screen.queryByText("arm.msb")).toBeNull();
   expect(screen.queryByText("legacy.msb")).toBeNull();
 
   await user.type(screen.getByPlaceholderText("dev-openstack"), "from-s3");
-  const submit = screen.getByRole("button", { name: "Farm 만들기" });
+  const submit = screen.getByRole("button", { name: "Stackbox 만들기" });
   await user.click(submit);
   await vi.waitFor(() =>
     expect(createdBody).toEqual({
       id: "from-s3",
       host_id: "dev-01",
       bucket: "s3",
-      key: "dev-farm-001-clean.msb",
+      key: "dev-stackbox-001-clean.msb",
       external_host: "10.0.0.21",
     }),
   );

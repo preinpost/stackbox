@@ -66,7 +66,7 @@ struct Uplink {
 struct State {
     config: Config,
     ports: HashMap<String, Live>,
-    /// Running uplinks by farm id.
+    /// Running uplinks by stackbox id.
     uplinks: HashMap<String, Uplink>,
     /// MAC → port, per segment.
     macs: HashMap<String, HashMap<[u8; 6], String>>,
@@ -401,24 +401,24 @@ fn sync_uplinks(state: &Shared) {
     let stale: Vec<String> = guard
         .uplinks
         .iter()
-        .filter(|(farm, running)| wanted.get(*farm) != Some(&running.config))
-        .map(|(farm, _)| farm.clone())
+        .filter(|(stackbox, running)| wanted.get(*stackbox) != Some(&running.config))
+        .map(|(stackbox, _)| stackbox.clone())
         .collect();
-    for farm in stale {
-        let running = guard.uplinks.remove(&farm).expect("listed above");
+    for stackbox in stale {
+        let running = guard.uplinks.remove(&stackbox).expect("listed above");
         running.task.abort();
         for segment in &running.config.segments {
             guard.drop_port(&format!("{UPLINK}{segment}"));
         }
-        eprintln!("uplink {farm} removed");
+        eprintln!("uplink {stackbox} removed");
     }
-    for (farm, config) in wanted {
-        if guard.uplinks.contains_key(&farm) {
+    for (stackbox, config) in wanted {
+        if guard.uplinks.contains_key(&stackbox) {
             continue;
         }
-        let task = tokio::spawn(uplink(state.clone(), farm.clone(), config.clone()));
+        let task = tokio::spawn(uplink(state.clone(), stackbox.clone(), config.clone()));
         guard.uplinks.insert(
-            farm,
+            stackbox,
             Uplink {
                 config,
                 task: task.abort_handle(),
@@ -428,13 +428,13 @@ fn sync_uplinks(state: &Shared) {
 }
 
 /// Keep the uplink to the relay open, reconnecting with backoff, until it is aborted.
-async fn uplink(state: Shared, farm: String, config: UplinkConfig) {
+async fn uplink(state: Shared, stackbox: String, config: UplinkConfig) {
     let mut delay = Duration::from_secs(1);
     loop {
         let started = Instant::now();
         match uplink_session(&state, &config).await {
-            Ok(()) => eprintln!("uplink {farm}: the relay closed the connection"),
-            Err(error) => eprintln!("uplink {farm}: {error:#}"),
+            Ok(()) => eprintln!("uplink {stackbox}: the relay closed the connection"),
+            Err(error) => eprintln!("uplink {stackbox}: {error:#}"),
         }
         if started.elapsed() > Duration::from_secs(30) {
             delay = Duration::from_secs(1);
@@ -804,7 +804,7 @@ pub(crate) mod tests {
         assert!(a.closed().await);
     }
 
-    /// Two hosts' switches, joined through the relay, carry one farm's segment between them.
+    /// Two hosts' switches, joined through the relay, carry one stackbox's segment between them.
     #[tokio::test]
     async fn uplinks_join_switches_through_the_relay() {
         use crate::link::relay::Relay;
@@ -818,7 +818,7 @@ pub(crate) mod tests {
         relay.authorize("f", "h2", &token_hash("u2"), &k2);
         #[derive(Deserialize)]
         struct Q {
-            farm: String,
+            stackbox: String,
             host: String,
         }
         let app = Router::new()
@@ -834,7 +834,7 @@ pub(crate) mod tests {
                             .and_then(|v| v.to_str().ok())
                             .and_then(|v| v.strip_prefix("Bearer "))
                             .unwrap_or_default();
-                        match relay.accept(&q.farm, &q.host, token) {
+                        match relay.accept(&q.stackbox, &q.host, token) {
                             Ok(accepted) => ws
                                 .on_upgrade(move |socket| relay.serve(accepted, socket))
                                 .into_response(),
@@ -857,7 +857,7 @@ pub(crate) mod tests {
         let uplink = |host: &str, token: &str, ca: &str, key: &str| crate::link::UplinkConfig {
             key: key.into(),
             url: format!(
-                "wss://{relay_addr}{}?farm=f&host={host}",
+                "wss://{relay_addr}{}?stackbox=f&host={host}",
                 crate::link::RELAY_PATH
             ),
             ca: ca.into(),
@@ -917,7 +917,7 @@ pub(crate) mod tests {
         // Segments without an uplink stay on their host.
         x.send(&[frame(BROADCAST, 9, b"local")]).await;
         assert!(y.recv().await.is_none());
-        // Forgetting the farm cuts the hosts apart.
+        // Forgetting the stackbox cuts the hosts apart.
         relay.forget("f");
         tokio::time::sleep(Duration::from_millis(100)).await;
         a.send(&[frame(BROADCAST, 1, b"gone")]).await;

@@ -129,7 +129,7 @@ test("registers this machine as a host and checks it right away", async () => {
     </QueryClientProvider>,
   );
   const user = userEvent.setup();
-  await screen.findByText(/Farm을 실행할 호스트가 없습니다/);
+  await screen.findByText(/Stackbox를 실행할 호스트가 없습니다/);
   await user.click(
     screen.getAllByRole("button", { name: "로컬 호스트 등록" })[0],
   );
@@ -142,7 +142,7 @@ test("registers this machine as a host and checks it right away", async () => {
   client.clear();
 });
 
-test("can delete the local host's snapshots along with its farms", async () => {
+test("can delete the local host's snapshots along with its stackboxes", async () => {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
@@ -208,7 +208,7 @@ test("shows a dial-in host's token once, in the command to run on it", async () 
       return Response.json(
         {
           host: { id: "edge-01", kind: "agent", connected: false },
-          token: "farm_secret-token",
+          token: "stackbox_secret-token",
         },
         { status: 201 },
       );
@@ -228,7 +228,7 @@ test("shows a dial-in host's token once, in the command to run on it", async () 
   await user.click(screen.getByRole("button", { name: "등록하고 토큰 받기" }));
   expect(
     await screen.findByText(
-      "FARM_AGENT_TOKEN=farm_secret-token farm agent connect <coordinator URL>",
+      "STACKBOX_AGENT_TOKEN=stackbox_secret-token stackbox agent connect <coordinator URL>",
     ),
   ).toBeTruthy();
   expect(onRegistered).toHaveBeenCalledWith("edge-01");
@@ -236,6 +236,6 @@ test("shows a dial-in host's token once, in the command to run on it", async () 
   await user.click(
     screen.getByRole("button", { name: "에이전트 호스트 등록" }),
   );
-  expect(screen.queryByText(/farm_secret-token/)).toBeNull();
+  expect(screen.queryByText(/stackbox_secret-token/)).toBeNull();
   client.clear();
 });

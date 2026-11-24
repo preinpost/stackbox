@@ -17,14 +17,14 @@ test("a long job kind label is truncated in its column and its full text is offe
       {
         at: 1_700_000_001,
         message:
-          "Uploading farm-agent, verifying its SHA256 and checking the protocol",
+          "Uploading stackbox-agent, verifying its SHA256 and checking the protocol",
       },
     ],
   } as HostJob;
   const { container } = render(<HostJobHistory job={job} />);
   const label = container.querySelector("summary .job-kind") as HTMLElement;
-  expect(label.textContent).toBe("Farm 실행기 업데이트");
-  expect(label.getAttribute("title")).toBe("Farm 실행기 업데이트");
+  expect(label.textContent).toBe("Stackbox 실행기 업데이트");
+  expect(label.getAttribute("title")).toBe("Stackbox 실행기 업데이트");
   expect(label.classList.contains("job-kind-label")).toBe(true);
 });
 

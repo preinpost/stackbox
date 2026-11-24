@@ -147,8 +147,8 @@ impl Client {
     /// Lists, writes and deletes a small object under `prefix`, which is what exports and imports need.
     pub async fn check(&self, prefix: &str) -> Result<()> {
         self.list(prefix, 1).await?;
-        let key = format!("{prefix}.farm-check-{}", uuid::Uuid::new_v4());
-        let call = Call::new(Method::PUT, Some(&key)).body(Bytes::from_static(b"farm"));
+        let key = format!("{prefix}.stackbox-check-{}", uuid::Uuid::new_v4());
+        let call = Call::new(Method::PUT, Some(&key)).body(Bytes::from_static(b"stackbox"));
         expect(self.send(call).await?, "write a test object").await?;
         self.delete(&key)
             .await
@@ -932,7 +932,7 @@ mod tests {
         for bad in ["", "/a", "a/", "a//b", "a/../b", "./a", "a\nb"] {
             assert!(validate_key(bad).is_err(), "{bad:?}");
         }
-        validate_key("farm/dev-clean.msb").unwrap();
+        validate_key("stackbox/dev-clean.msb").unwrap();
         assert_eq!(part_size(0, 64 * MIB), 64 * MIB);
         assert_eq!(part_size(1024 * 1024 * MIB, 64 * MIB), 105 * MIB);
         assert!(certificates("not a certificate").is_err());
@@ -1003,23 +1003,23 @@ mod tests {
         assert!(fake.objects.lock().unwrap().is_empty());
     }
 
-    /// Against a real service: `FARM_S3_BUCKET`, `FARM_S3_ACCESS_KEY`, `FARM_S3_SECRET_KEY`, and
-    /// optionally `FARM_S3_ENDPOINT`, `FARM_S3_REGION`, `FARM_S3_PREFIX`, `FARM_S3_PATH_STYLE`,
-    /// `FARM_S3_CA_FILE`. Run with `cargo test s3_live -- --ignored`.
+    /// Against a real service: `STACKBOX_S3_BUCKET`, `STACKBOX_S3_ACCESS_KEY`, `STACKBOX_S3_SECRET_KEY`, and
+    /// optionally `STACKBOX_S3_ENDPOINT`, `STACKBOX_S3_REGION`, `STACKBOX_S3_PREFIX`, `STACKBOX_S3_PATH_STYLE`,
+    /// `STACKBOX_S3_CA_FILE`. Run with `cargo test s3_live -- --ignored`.
     #[tokio::test]
     #[ignore]
     async fn s3_live() {
         let var = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
         let request = super::super::RegisterBucket {
             id: "live".into(),
-            endpoint: var("FARM_S3_ENDPOINT"),
-            region: var("FARM_S3_REGION"),
-            name: var("FARM_S3_BUCKET").expect("FARM_S3_BUCKET"),
-            prefix: var("FARM_S3_PREFIX"),
-            path_style: var("FARM_S3_PATH_STYLE").map(|v| v == "true"),
-            ca_pem: var("FARM_S3_CA_FILE").map(|f| std::fs::read_to_string(f).unwrap()),
-            access_key_id: var("FARM_S3_ACCESS_KEY").expect("FARM_S3_ACCESS_KEY"),
-            secret_access_key: var("FARM_S3_SECRET_KEY"),
+            endpoint: var("STACKBOX_S3_ENDPOINT"),
+            region: var("STACKBOX_S3_REGION"),
+            name: var("STACKBOX_S3_BUCKET").expect("STACKBOX_S3_BUCKET"),
+            prefix: var("STACKBOX_S3_PREFIX"),
+            path_style: var("STACKBOX_S3_PATH_STYLE").map(|v| v == "true"),
+            ca_pem: var("STACKBOX_S3_CA_FILE").map(|f| std::fs::read_to_string(f).unwrap()),
+            access_key_id: var("STACKBOX_S3_ACCESS_KEY").expect("STACKBOX_S3_ACCESS_KEY"),
+            secret_access_key: var("STACKBOX_S3_SECRET_KEY"),
         };
         let bucket = request.bucket(0).unwrap();
         let secret = request.secret_access_key.clone().unwrap();

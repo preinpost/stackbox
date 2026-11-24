@@ -1,0 +1,14 @@
+[Unit]
+Description=Stackbox guest hostname and service address
+After=network-online.target disable-ipv6.service
+Wants=network-online.target
+Before=stackbox-hostname.service stackbox-external.service docker.service
+ConditionPathExists=/etc/stackbox/identity.conf
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/stackbox-identity
+
+[Install]
+WantedBy=multi-user.target

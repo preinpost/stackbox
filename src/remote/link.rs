@@ -1,4 +1,4 @@
-//! How the coordinator reaches a host's farm-agent. Every host speaks the same protocol;
+//! How the coordinator reaches a host's stackbox-agent. Every host speaks the same protocol;
 //! only the transport differs: SSH for a remote host, a child process for this machine.
 
 use super::{
@@ -8,8 +8,8 @@ use super::{
     ssh::Session,
 };
 use crate::{
-    farm::{TerminalInput, TerminalIo},
     kolla::EventSink,
+    stackbox::{TerminalInput, TerminalIo},
 };
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use base64::{Engine, engine::general_purpose::STANDARD};
@@ -45,25 +45,25 @@ impl AgentLink for SshLink {
     }
 }
 
-/// This machine's agent: the coordinator's own binary, run as `farm agent` per request.
+/// This machine's agent: the coordinator's own binary, run as `stackbox agent` per request.
 pub struct ProcessLink {
     pub program: PathBuf,
-    /// Linux farm-agent for multi-node guests, passed as `FARM_GUEST_AGENT` once known.
+    /// Linux stackbox-agent for multi-node guests, passed as `STACKBOX_GUEST_AGENT` once known.
     pub guest_agent: Arc<std::sync::OnceLock<PathBuf>>,
 }
 impl ProcessLink {
     pub fn current() -> Result<Self> {
         Ok(Self {
-            program: std::env::current_exe().context("cannot locate the farm binary")?,
+            program: std::env::current_exe().context("cannot locate the stackbox binary")?,
             guest_agent: Default::default(),
         })
     }
     fn spawn(&self) -> Result<tokio::process::Child> {
         let mut command = tokio::process::Command::new(&self.program);
         if let Some(path) = self.guest_agent.get()
-            && std::env::var_os("FARM_GUEST_AGENT").is_none()
+            && std::env::var_os("STACKBOX_GUEST_AGENT").is_none()
         {
-            command.env("FARM_GUEST_AGENT", path);
+            command.env("STACKBOX_GUEST_AGENT", path);
         }
         command
             .arg("agent")
@@ -74,7 +74,7 @@ impl ProcessLink {
             .stderr(std::process::Stdio::inherit())
             .kill_on_drop(true)
             .spawn()
-            .context("cannot start the local farm agent")
+            .context("cannot start the local stackbox agent")
     }
 }
 fn request_line(request: &Request) -> Result<Vec<u8>> {
@@ -93,9 +93,12 @@ async fn next_frame<R: tokio::io::AsyncBufRead + Unpin>(reader: &mut R) -> Resul
     {
         return Ok(None);
     }
-    ensure!(line.len() <= MAX_FRAME, "farm-agent frame exceeds limit");
+    ensure!(
+        line.len() <= MAX_FRAME,
+        "stackbox-agent frame exceeds limit"
+    );
     Ok(Some(serde_json::from_slice(&line).map_err(|_| {
-        anyhow!("invalid farm-agent protocol frame")
+        anyhow!("invalid stackbox-agent protocol frame")
     })?))
 }
 impl AgentLink for ProcessLink {
@@ -113,7 +116,7 @@ impl AgentLink for ProcessLink {
                         return outcome;
                     }
                 }
-                bail!("the local farm agent exited without a result")
+                bail!("the local stackbox agent exited without a result")
             };
             tokio::time::timeout(Duration::from_secs(seconds), execute)
                 .await
@@ -135,14 +138,14 @@ impl AgentLink for ProcessLink {
                         Some(Frame::Terminal { data }) => {
                             let bytes = STANDARD
                                 .decode(data)
-                                .map_err(|_| anyhow!("invalid farm-agent terminal output"))?;
+                                .map_err(|_| anyhow!("invalid stackbox-agent terminal output"))?;
                             // A departed client also closes `input`, handled below.
                             let _ = output.send(bytes).await;
                         }
                         Some(Frame::Result { result: Reply::Done }) => return Ok(()),
                         Some(Frame::Error { message }) => bail!("{message}"),
-                        Some(_) => bail!("unexpected farm-agent frame in a shell session"),
-                        None => bail!("the local farm agent ended the shell without a result"),
+                        Some(_) => bail!("unexpected stackbox-agent frame in a shell session"),
+                        None => bail!("the local stackbox agent ended the shell without a result"),
                     },
                     message = input.recv(), if stdin.is_some() => {
                         let Some(message) = message else {

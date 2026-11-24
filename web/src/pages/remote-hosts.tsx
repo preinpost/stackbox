@@ -24,7 +24,7 @@ import { useRef, useState } from "react";
 import { RelaySettingsDialog } from "../components/relay-settings";
 import {
   api,
-  farmsQuery,
+  stackboxesQuery,
   hostsQuery,
   hostJobsQuery,
   keys,
@@ -36,7 +36,7 @@ import {
   type HostPciDevice,
   type RemoteHost,
 } from "../api/client";
-import { CreateFarmDialog } from "../components/farm-actions";
+import { CreateStackboxDialog } from "../components/stackbox-actions";
 import {
   Button,
   CopyText,
@@ -63,7 +63,7 @@ export function RemoteHostsPage() {
   const hosts = useQuery(hostsQuery());
   const jobs = useQuery(hostJobsQuery());
   const coordinator = useQuery(hostQuery());
-  const farms = useQuery(farmsQuery());
+  const stackboxes = useQuery(stackboxesQuery());
   const snapshots = useQuery(snapshotsQuery());
   const client = useQueryClient();
   const buildId = coordinator.data?.build_id;
@@ -79,8 +79,8 @@ export function RemoteHostsPage() {
   // Only SSH hosts have credentials, a host key and an installed agent.
   const ssh = selected?.kind === "ssh";
   const localRegistered = hosts.data?.some((h) => h.kind === "local");
-  const farmCount = (hostId: string) =>
-    farms.data?.filter((f) => f.status !== "deleted" && f.host_id === hostId)
+  const stackboxCount = (hostId: string) =>
+    stackboxes.data?.filter((f) => f.status !== "deleted" && f.host_id === hostId)
       .length ?? 0;
   const refresh = async () => {
     await Promise.all([
@@ -131,14 +131,14 @@ export function RemoteHostsPage() {
     { label: "등록", done: hostCount > 0 },
     { label: "SSH 점검", done: checked > 0 },
     { label: "환경 준비", done: ready > 0 },
-    { label: "Farm 만들기", done: false },
+    { label: "Stackbox 만들기", done: false },
   ];
   return (
     <>
       <PageHeading
         eyebrow="INFRASTRUCTURE"
         title="Hosts"
-        description="Farm을 실행할 호스트를 등록하고 준비하세요. 로컬 호스트와 원격 서버를 같은 방식으로 관리합니다."
+        description="Stackbox를 실행할 호스트를 등록하고 준비하세요. 로컬 호스트와 원격 서버를 같은 방식으로 관리합니다."
         actions={
           <>
             <Button onClick={() => void refresh()} disabled={hosts.isFetching}>
@@ -273,7 +273,7 @@ export function RemoteHostsPage() {
                         : `${host.address}:${host.port}`}
                     {host.inspection &&
                       ` · ${platform(host.inspection.os, host.inspection.arch)}`}
-                    {` · Farm ${farmCount(host.id)}개`}
+                    {` · Stackbox ${stackboxCount(host.id)}개`}
                   </code>
                   {remoteAgentNeedsUpdate(host) && (
                     <span className="cellnote">실행기 업데이트 필요</span>
@@ -303,7 +303,7 @@ export function RemoteHostsPage() {
           )}
           {hosts.isSuccess && !hosts.data.length && (
             <p className="remote-unchecked">
-              Farm을 실행할 호스트가 없습니다. coordinator가 실행 중인 머신에서
+              Stackbox를 실행할 호스트가 없습니다. coordinator가 실행 중인 머신에서
               실행하려면{" "}
               <button
                 className="text-link"
@@ -342,12 +342,12 @@ export function RemoteHostsPage() {
                 <h2>{selected.id}</h2>
                 <code>
                   {local
-                    ? "localhost · coordinator(farmd)가 실행 중인 머신"
+                    ? "localhost · coordinator(stackboxd)가 실행 중인 머신"
                     : ssh
                       ? `${selected.username}@${selected.address}:${selected.port}`
                       : selected.connected
                         ? "에이전트 연결됨 · 호스트가 coordinator로 접속해 있습니다"
-                        : "에이전트 연결 끊김 · 호스트에서 farm agent connect를 실행하세요"}
+                        : "에이전트 연결 끊김 · 호스트에서 stackbox agent connect를 실행하세요"}
                 </code>
               </div>
               <HostStateBadge host={selected} />
@@ -376,7 +376,7 @@ export function RemoteHostsPage() {
             {selected.inspection ? (
               <HostInspection
                 host={selected}
-                farms={farmCount(selected.id)}
+                stackboxes={stackboxCount(selected.id)}
                 coordinatorBuildId={buildId}
               />
             ) : (
@@ -387,10 +387,10 @@ export function RemoteHostsPage() {
               </p>
             )}
             <div className="remote-actions">
-              <CreateFarmDialog
-                key={`${selected.id}-farm`}
+              <CreateStackboxDialog
+                key={`${selected.id}-stackbox`}
                 hostId={selected.id}
-                label="이 호스트에 Farm 만들기"
+                label="이 호스트에 Stackbox 만들기"
                 disabled={!hostReady(selected, buildId)}
               />
               {ssh && (
@@ -419,7 +419,7 @@ export function RemoteHostsPage() {
                 host={selected}
                 kind="prepare"
                 disabled={!!selected.active_job || action.isPending}
-                farms={farmCount(selected.id)}
+                stackboxes={stackboxCount(selected.id)}
                 run={() =>
                   action.mutateAsync({ id: selected.id, kind: "prepare" })
                 }
@@ -429,7 +429,7 @@ export function RemoteHostsPage() {
                 host={selected}
                 kind="remove"
                 disabled={!!selected.active_job || action.isPending}
-                farms={farmCount(selected.id)}
+                stackboxes={stackboxCount(selected.id)}
                 snapshots={
                   snapshots.data?.filter((s) =>
                     local ? !s.host_id : s.host_id === selected.id,
@@ -509,7 +509,7 @@ export function RegisterAgentHostDialog({
   });
   const token = register.data?.token;
   const command = token
-    ? `FARM_AGENT_TOKEN=${token} farm agent connect <coordinator URL>`
+    ? `STACKBOX_AGENT_TOKEN=${token} stackbox agent connect <coordinator URL>`
     : "";
   return (
     <Dialog.Root
@@ -547,9 +547,9 @@ export function RegisterAgentHostDialog({
               </label>
               <p className="field-hint">
                 <code>&lt;coordinator URL&gt;</code>에는 호스트에서 접근할 수
-                있는 farmd 주소(예: <code>https://farm.example</code>)를
-                넣으세요. 호스트에는 같은 빌드의 <code>farm</code>
-                (Linux 서버는 <code>farm-agent connect</code>)이 필요합니다.
+                있는 stackboxd 주소(예: <code>https://stackbox.example</code>)를
+                넣으세요. 호스트에는 같은 빌드의 <code>stackbox</code>
+                (Linux 서버는 <code>stackbox-agent connect</code>)이 필요합니다.
                 연결되면 이 호스트를 점검하고 환경 준비를 실행하세요.
               </p>
               <div className="modal-footer justify-end">
@@ -652,7 +652,7 @@ function HostLinkNotice({ host }: { host: RemoteHost }) {
   );
 }
 
-/** How much of a host's memory budget its farms have reserved, as a percentage. */
+/** How much of a host's memory budget its stackboxes have reserved, as a percentage. */
 function capacityPercent(capacity: HostCapacity) {
   return capacity.memory_budget_mib
     ? Math.min(
@@ -681,7 +681,7 @@ function HostResources({
   hostId,
   resources: r,
   capacity,
-  farms,
+  stackboxes,
 }: {
   hostId: string;
   resources: {
@@ -692,7 +692,7 @@ function HostResources({
     disk_available_mib?: number | null;
   };
   capacity?: HostCapacity | null;
-  farms: number;
+  stackboxes: number;
 }) {
   const percent = capacity ? capacityPercent(capacity) : 0;
   return (
@@ -718,7 +718,7 @@ function HostResources({
       {capacity ? (
         <div className="remote-capacity">
           <div className="remote-capacity-top">
-            <span>Farm 예약 메모리</span>
+            <span>Stackbox 예약 메모리</span>
             <strong>
               {memory(capacity.memory_reserved_mib)} /{" "}
               {memory(capacity.memory_budget_mib)} · {percent}%
@@ -734,7 +734,7 @@ function HostResources({
           <div className="remote-capacity-legend">
             <span>
               <i />
-              Farm 예약 {memory(capacity.memory_reserved_mib)}
+              Stackbox 예약 {memory(capacity.memory_reserved_mib)}
             </span>
             <span>
               <i className="ghost" />
@@ -746,17 +746,17 @@ function HostResources({
                 ),
               )}
             </span>
-            <span className="right">Farm {farms}개</span>
+            <span className="right">Stackbox {stackboxes}개</span>
           </div>
         </div>
       ) : (
-        <p className="field-hint">Farm {farms}개</p>
+        <p className="field-hint">Stackbox {stackboxes}개</p>
       )}
     </>
   );
 }
 
-/** Why a host cannot take a PCI passthrough farm yet, from the inspection's own fields. */
+/** Why a host cannot take a PCI passthrough stackbox yet, from the inspection's own fields. */
 function pciPassthroughNote(i: Inspection): string | undefined {
   if (i.pci_passthrough_available) return undefined;
   if (!i.msb_pci_capable) return "msb --pci/--iommu 미지원";
@@ -812,11 +812,11 @@ function PciDevices({ devices }: { devices: HostPciDevice[] }) {
 
 function HostInspection({
   host,
-  farms,
+  stackboxes,
   coordinatorBuildId,
 }: {
   host: RemoteHost;
-  farms: number;
+  stackboxes: number;
   coordinatorBuildId?: string;
 }) {
   const i = host.inspection!;
@@ -834,28 +834,28 @@ function HostInspection({
       ready: i.kvm_available,
     },
     { label: `msb ${MSB_REQUIRED_VERSION}`, ready: i.msb_compatible },
-    // PCI passthrough needs msb's --pci/--iommu, the farm kernel, and a vfio-pci device.
+    // PCI passthrough needs msb's --pci/--iommu, the stackbox kernel, and a vfio-pci device.
     {
       label: "PCI passthrough",
       ready: Boolean(i.pci_passthrough_available),
       note: pciPassthroughNote(i),
     },
-    // msb builds the golden image with the host's first farm, so a missing one is not a gap.
+    // msb builds the golden image with the host's first stackbox, so a missing one is not a gap.
     {
       label: "Golden image",
       ready: i.golden_image_available,
-      pending: i.golden_image_available ? undefined : "첫 Farm 생성 때 빌드",
+      pending: i.golden_image_available ? undefined : "첫 Stackbox 생성 때 빌드",
     },
     { label: "VM 부팅·실행 검증", ready: i.vm_boot_verified },
   ];
-  // What that verification VM read from the kernel it booted. State written before farm
+  // What that verification VM read from the kernel it booted. State written before stackbox
   // probed it has no `gpu_kernel`, so the checks ask for another preparation.
   const gpu = i.gpu_kernel;
   const kernelId = customKernelId(i.custom_kernel);
   const mttyType = gpu?.mdev_types?.find((type) => type.name === "mtty-1");
   const kernel = [
     {
-      label: "Farm 게스트 커널",
+      label: "Stackbox 게스트 커널",
       ready: Boolean(i.custom_kernel),
       note: i.custom_kernel ? `${kernelId ?? "설치됨"} 확인됨` : "stock 커널",
     },
@@ -890,14 +890,14 @@ function HostInspection({
   const agent = [
     {
       label: remoteAgentNeedsUpdate(host)
-        ? "Farm 실행기 · 업데이트 필요"
-        : "단일 VM Farm 실행기",
+        ? "Stackbox 실행기 · 업데이트 필요"
+        : "단일 VM Stackbox 실행기",
       ready: host.agent?.artifact?.supports_single_vm === true,
     },
     {
       label: agentBuildMismatch(host.agent?.artifact, coordinatorBuildId)
-        ? "Farm 실행기 버전 · 재설치 필요"
-        : "Farm 실행기 버전",
+        ? "Stackbox 실행기 버전 · 재설치 필요"
+        : "Stackbox 실행기 버전",
       ready:
         Boolean(host.agent) &&
         !agentBuildMismatch(host.agent?.artifact, coordinatorBuildId),
@@ -915,7 +915,7 @@ function HostInspection({
         hostId={host.id}
         resources={i}
         capacity={host.capacity}
-        farms={farms}
+        stackboxes={stackboxes}
       />
       <ul className="remote-checks">
         {checks.map((check) => (
@@ -948,7 +948,7 @@ function HostInspection({
         <p className="field-hint remote-kernel-stock">
           {i.custom_kernel_reason
             ? `stock 커널로 부팅합니다: ${i.custom_kernel_reason}.`
-            : "stock 커널로 부팅합니다. farm 커널이 설치되지 않았습니다."}{" "}
+            : "stock 커널로 부팅합니다. stackbox 커널이 설치되지 않았습니다."}{" "}
           mtty GPU를 쓰려면 환경 준비를 실행하세요.
         </p>
       )}
@@ -958,7 +958,7 @@ function HostInspection({
           <div>
             <dt>게스트 커널</dt>
             <dd className={i.custom_kernel ? "" : "build-mismatch"}>
-              {i.custom_kernel ? "farm 커널" : "stock 커널"}
+              {i.custom_kernel ? "stackbox 커널" : "stock 커널"}
             </dd>
           </div>
           {i.custom_kernel && (
@@ -1021,7 +1021,7 @@ function HostInspection({
           ))}
         </dl>
         <p className="field-hint">
-          farm 커널은 VFIO·mdev를 내장(built-in)으로 넣으므로 모듈을 적재하지
+          stackbox 커널은 VFIO·mdev를 내장(built-in)으로 넣으므로 모듈을 적재하지
           않습니다. 위 값은 검증 VM의 게스트 커널에서 읽은 내장 기능의 활성
           상태입니다.
         </p>
@@ -1079,7 +1079,7 @@ export function HostJobHistory({ job }: { job: HostJob }) {
     job.kind === "check"
       ? "점검"
       : job.kind === "install_agent"
-        ? "Farm 실행기 업데이트"
+        ? "Stackbox 실행기 업데이트"
         : "환경 준비";
   return (
     <details
@@ -1120,7 +1120,7 @@ function HostActionDialog({
   host,
   kind,
   disabled,
-  farms,
+  stackboxes,
   snapshots = 0,
   coordinatorBuildId,
   run,
@@ -1128,7 +1128,7 @@ function HostActionDialog({
   host: RemoteHost;
   kind: "prepare" | "remove";
   disabled: boolean;
-  farms: number;
+  stackboxes: number;
   /** Snapshots whose original this host keeps: the ones frozen there, and on the local
    * host also imported and older ones. */
   snapshots?: number;
@@ -1173,7 +1173,7 @@ function HostActionDialog({
                 ? `${place}에서 다음 작업을 실행합니다.`
                 : "이 서버에서 다음 작업을 실행합니다."
               : local
-                ? `Coordinator에 저장된 ${place}의 호스트 정보를 삭제합니다. 필요하면 ${place}의 farm VM과 디스크도 함께 정리합니다.`
+                ? `Coordinator에 저장된 ${place}의 호스트 정보를 삭제합니다. 필요하면 ${place}의 stackbox VM과 디스크도 함께 정리합니다.`
                 : "Coordinator에 저장된 호스트 정보와 인증 정보를 삭제합니다. 필요하면 이 호스트의 VM과 디스크도 함께 정리합니다."
           }
           closeDisabled={pending}
@@ -1186,7 +1186,7 @@ function HostActionDialog({
                     msb {MSB_REQUIRED_VERSION} 설치, 낮은 버전이면 업그레이드
                   </li>
                   <li>
-                    farm 게스트 커널(VFIO · mdev · mtty 내장) 설치, 이 호스트에
+                    stackbox 게스트 커널(VFIO · mdev · mtty 내장) 설치, 이 호스트에
                     설치할 수 없으면 stock 커널로 진행
                   </li>
                   <li>가상화 확인</li>
@@ -1196,7 +1196,7 @@ function HostActionDialog({
                   </li>
                 </ol>
                 <p className="field-hint">
-                  golden image는 첫 Farm을 만들 때 msb가 Rocky Linux 10 이미지로
+                  golden image는 첫 Stackbox를 만들 때 msb가 Rocky Linux 10 이미지로
                   빌드합니다. 패키지를 내려받느라 첫 생성이 몇 분 더 걸릴 수
                   있습니다.
                 </p>
@@ -1208,7 +1208,7 @@ function HostActionDialog({
                     msb {MSB_REQUIRED_VERSION} 설치, 낮은 버전이면 업그레이드
                   </li>
                   <li>
-                    farm 게스트 커널을 이 호스트의 아키텍처용으로 업로드하고
+                    stackbox 게스트 커널을 이 호스트의 아키텍처용으로 업로드하고
                     sha256 확인
                   </li>
                   <li>
@@ -1216,13 +1216,13 @@ function HostActionDialog({
                     VM 삭제
                   </li>
                   <li>
-                    이 빌드의 단일 VM Farm 실행기 업로드 · SHA256 · 프로토콜
+                    이 빌드의 단일 VM Stackbox 실행기 업로드 · SHA256 · 프로토콜
                     확인 (환경 준비 하나로 끝납니다)
                   </li>
                 </ol>
                 <p className="field-hint">
                   Linux, 동일 CPU 아키텍처, /dev/kvm 접근, 가용 메모리 768 MiB와
-                  디스크 8 GiB 이상이 필요합니다. golden image는 첫 Farm을 만들
+                  디스크 8 GiB 이상이 필요합니다. golden image는 첫 Stackbox를 만들
                   때 msb가 빌드하므로 Docker는 필요 없습니다.
                 </p>
               </>
@@ -1233,7 +1233,7 @@ function HostActionDialog({
                   coordinatorBuildId,
                 ) && (
                   <div className="warning-notice">
-                    설치된 Farm 실행기가 coordinator와 다른 빌드입니다
+                    설치된 Stackbox 실행기가 coordinator와 다른 빌드입니다
                     {` (${host.agent?.artifact?.build_id || "버전 미상"} ≠ ${coordinatorBuildId})`}
                     . VM 정리는 새 실행기가 필요하므로, 먼저 환경 준비를 다시
                     실행하거나 이 옵션을 끄고 기록만 지우세요.
@@ -1251,10 +1251,10 @@ function HostActionDialog({
                     </Checkbox.Indicator>
                   </Checkbox.Root>
                   <span>
-                    이 호스트의 Farm {farms}개와 VM·디스크도 삭제
+                    이 호스트의 Stackbox {stackboxes}개와 VM·디스크도 삭제
                     <small>
-                      {farms > 0
-                        ? "farm을 순서대로 삭제한 뒤, 실행기가 보관 중인 남은 VM까지 정리합니다."
+                      {stackboxes > 0
+                        ? "stackbox를 순서대로 삭제한 뒤, 실행기가 보관 중인 남은 VM까지 정리합니다."
                         : "남아 있는 예약 VM이 있으면 함께 정리합니다."}
                     </small>
                   </span>
@@ -1282,14 +1282,14 @@ function HostActionDialog({
                           ? "내보내지 않은 스냅샷은 되돌릴 수 없습니다. 다른 호스트에 복사한 사본도 함께 지웁니다."
                           : host.kind === "local"
                             ? `스냅샷은 ${place}에 남고, 지우려면 ${place}를 다시 등록해야 합니다.`
-                            : "스냅샷은 이 호스트에 남습니다. 다시 등록할 때까지는 다른 호스트에 복사해 둔 사본으로만 farm을 만들 수 있습니다."}
+                            : "스냅샷은 이 호스트에 남습니다. 다시 등록할 때까지는 다른 호스트에 복사해 둔 사본으로만 stackbox를 만들 수 있습니다."}
                       </small>
                     </span>
                   </label>
                 )}
                 <p className="field-hint">
                   {purging
-                    ? `farm이 만든 VM과 디스크만 지웁니다. ${local ? place : "이 서버"}에서 직접 만든 msb 샌드박스는 그대로 둡니다.`
+                    ? `stackbox가 만든 VM과 디스크만 지웁니다. ${local ? place : "이 서버"}에서 직접 만든 msb 샌드박스는 그대로 둡니다.`
                     : local
                       ? `호스트 기록만 지웁니다. ${place}의 VM·디스크는 남습니다.`
                       : "호스트 기록과 인증 정보만 지웁니다. 서버의 VM·디스크는 남습니다."}

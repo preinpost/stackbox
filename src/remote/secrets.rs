@@ -43,7 +43,7 @@ impl Vault {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 ensure!(
                     !has_credentials,
-                    "credentials.key is missing; restore the original key before starting farmd"
+                    "credentials.key is missing; restore the original key before starting stackboxd"
                 );
                 let mut bytes = Zeroizing::new(vec![0u8; 32]);
                 getrandom::getrandom(&mut bytes)

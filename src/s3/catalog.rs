@@ -27,20 +27,20 @@ pub struct ArchiveMetadata {
     /// OpenStack release the guest was deployed with; unknown for older snapshots.
     #[serde(default)]
     pub release: Option<String>,
-    /// `control` or `compute` for a template; absent for a snapshot of a whole farm.
+    /// `control` or `compute` for a template; absent for a snapshot of a whole stackbox.
     #[serde(default)]
     pub role: Option<TemplateRole>,
     /// The VM a template was frozen from (`control`, `compute-1`, ...).
     #[serde(default)]
     pub node: Option<String>,
     pub components: Vec<String>,
-    /// Compute VMs of the farm the snapshot restores; 0 for all-in-one and templates.
+    /// Compute VMs of the stackbox the snapshot restores; 0 for all-in-one and templates.
     #[serde(default)]
     pub computes: u8,
     /// Compute VM size when it differs from the default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compute: Option<ComputeSize>,
-    /// Virtual GPU configuration of the frozen farm, if any.
+    /// Virtual GPU configuration of the frozen stackbox, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gpu: Option<GpuConfig>,
     pub arch: String,
@@ -48,7 +48,7 @@ pub struct ArchiveMetadata {
     pub platform: Option<String>,
     pub deployed: bool,
     #[serde(default)]
-    pub source_farm: Option<String>,
+    pub source_stackbox: Option<String>,
     #[serde(default)]
     pub note: Option<String>,
     /// When the snapshot was frozen.
@@ -114,7 +114,7 @@ fn describe(role: Option<TemplateRole>) -> &'static str {
     match role {
         Some(TemplateRole::Control) => "a control template",
         Some(TemplateRole::Compute) => "a compute template",
-        None => "a farm snapshot",
+        None => "a stackbox snapshot",
     }
 }
 
@@ -136,7 +136,7 @@ pub struct TemplateQuery {
     /// Defaults to this host's, since a guest boots on its own architecture only.
     #[serde(default)]
     pub arch: Option<String>,
-    /// The farm's services; a template matches only the same set, in any order.
+    /// The stackbox's services; a template matches only the same set, in any order.
     #[serde(default)]
     pub components: Option<Vec<String>>,
 }
@@ -183,7 +183,7 @@ mod tests {
             arch: crate::model::current_arch(),
             platform: None,
             deployed: true,
-            source_farm: None,
+            source_stackbox: None,
             note: None,
             created_at: 1,
             exported_at: 2,

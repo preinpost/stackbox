@@ -54,7 +54,7 @@ test("remembers the operator's choice and prefers it over the OS", () => {
   expect(preferredTheme()).toBe("dark");
 
   // Only the two known values count as a choice.
-  localStorage.setItem("farm-theme", "sepia");
+  localStorage.setItem("stackbox-theme", "sepia");
   expect(storedTheme()).toBeNull();
   expect(preferredTheme()).toBe("light");
 });

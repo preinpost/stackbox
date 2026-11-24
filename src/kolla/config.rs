@@ -1,10 +1,10 @@
 use anyhow::{Context, Result, bail};
 
-use crate::farm::{FarmNode, Role};
+use crate::stackbox::{Role, StackboxNode};
 
 pub const OPENSTACK_RELEASE: &str = "2026.2";
 
-/// A multi-node farm's compute VM, as Kolla reaches it over the management link.
+/// A multi-node stackbox's compute VM, as Kolla reaches it over the management link.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Compute {
     /// msb VM name.
@@ -13,13 +13,13 @@ pub struct Compute {
     pub address: String,
 }
 
-/// The VM that runs Kolla and the control plane (all-in-one, or a multi-node farm's control
-/// VM), and a multi-node farm's computes.
+/// The VM that runs Kolla and the control plane (all-in-one, or a multi-node stackbox's control
+/// VM), and a multi-node stackbox's computes.
 #[derive(Debug)]
 pub struct Topology {
     pub name: String,
     pub ip: Option<String>,
-    /// Interface holding `ip`: the fixed `farm0` service address, or eth0 on older farms.
+    /// Interface holding `ip`: the fixed `stackbox0` service address, or eth0 on older stackboxes.
     pub interface: String,
     pub computes: Vec<Compute>,
     /// A control VM and its computes, if any yet, rather than one all-in-one VM.
@@ -27,17 +27,17 @@ pub struct Topology {
 }
 
 impl Topology {
-    pub fn from_nodes(nodes: &[FarmNode]) -> Result<Self> {
-        if crate::farm::observed_layout(nodes).is_none() {
+    pub fn from_nodes(nodes: &[StackboxNode]) -> Result<Self> {
+        if crate::stackbox::observed_layout(nodes).is_none() {
             bail!(
-                "deployment requires one all-in-one VM, or a control VM and its compute VMs; legacy multi-VM farms cannot be deployed with this version (create a new farm)"
+                "deployment requires one all-in-one VM, or a control VM and its compute VMs; legacy multi-VM stackboxes cannot be deployed with this version (create a new stackbox)"
             );
         }
         if let Some(node) = nodes.iter().find(|node| node.status != "running") {
             bail!("{} is {}, expected running", node.name, node.status);
         }
         // A control VM without computes yet, restored from a control template, still deploys
-        // as a multi-node farm.
+        // as a multi-node stackbox.
         let multinode = nodes.iter().any(|node| node.role == Some(Role::Control));
         let deployer = if multinode {
             Role::Control
@@ -53,8 +53,8 @@ impl Topology {
             .filter(|node| node.role == Some(Role::Compute))
             .map(|node| Compute {
                 name: node.name.clone(),
-                hostname: crate::farm::hostname(Role::Compute, node.index),
-                address: crate::farm::address(Role::Compute, node.index),
+                hostname: crate::stackbox::hostname(Role::Compute, node.index),
+                address: crate::stackbox::address(Role::Compute, node.index),
             })
             .collect();
         computes.sort_by(|a, b| a.hostname.cmp(&b.hostname));
@@ -91,7 +91,7 @@ impl Topology {
     }
 }
 
-/// `multinode`: a control VM and computes joined by the farm's links, with tenant networks
+/// `multinode`: a control VM and computes joined by the stackbox's links, with tenant networks
 /// as VLANs on each VM's tenant link.
 #[allow(clippy::too_many_arguments)]
 pub fn globals(
@@ -104,7 +104,7 @@ pub fn globals(
     release: &crate::kolla::releases::ReleaseInfo,
 ) -> String {
     // Only the releases whose Rocky images are published for aarch64 carry the suffix; the
-    // series the farm builds itself and the older maintained ones are amd64 only on Rocky.
+    // series the stackbox builds itself and the older maintained ones are amd64 only on Rocky.
     let tag_suffix = if arch == "aarch64" && release.arm64 {
         "-aarch64"
     } else {
@@ -114,12 +114,12 @@ pub fn globals(
     // year.release name from 2023.1 on.
     let image_tag = &release.series;
     let distro = release.base_distro();
-    // The tag's default registry carries no end-of-life images. A series the farm builds and
+    // The tag's default registry carries no end-of-life images. A series the stackbox builds and
     // publishes itself names its own registry and namespace; the image tag then follows its
     // base distro (`zed-rocky-9`) rather than the tag's default.
     let images = match &release.images {
         Some(images) => format!(
-            "# Kolla images the farm built and published for this series.\ndocker_registry: \"{registry}\"\ndocker_namespace: \"{namespace}\"\n",
+            "# Kolla images the stackbox built and published for this series.\ndocker_registry: \"{registry}\"\ndocker_namespace: \"{namespace}\"\n",
             registry = images.registry,
             namespace = images.namespace,
         ),
@@ -130,30 +130,30 @@ pub fn globals(
         .map(|id| format!("enable_{id}: {}\n", components.iter().any(|c| c == id)))
         .collect::<String>();
     let links = if multinode {
-        // Tenant networks are VLANs on each VM's `farm1` link (physnet1, br-tenant): VXLAN in
+        // Tenant networks are VLANs on each VM's `stackbox1` link (physnet1, br-tenant): VXLAN in
         // the userspace datapath would need the tunnel address on an OVS bridge. The bridges
         // are inventory host variables, which globals.yml (extra vars) would override.
-        "tunnel_interface: \"farm0\"\nneutron_tenant_network_types: \"vlan\"\nenable_neutron_provider_networks: true\n"
+        "tunnel_interface: \"stackbox0\"\nneutron_tenant_network_types: \"vlan\"\nenable_neutron_provider_networks: true\n"
     } else {
         ""
     };
     let external = if components.iter().any(|c| c == "neutron") && !multinode {
-        "neutron_external_interface: \"farm-ext\"\n"
+        "neutron_external_interface: \"stackbox-ext\"\n"
     } else {
         ""
     };
     let neutron = if components.iter().any(|c| c == "neutron") {
         // The guest kernel has no openvswitch datapath, so OVS forwards in userspace.
-        // `farm-ext` is a veth the network node routes and masquerades for the external network.
-        // The Neutron patch lives in the image's own Python: `python3.9` for the farm's Rocky 9
+        // `stackbox-ext` is a veth the network node routes and masquerades for the external network.
+        // The Neutron patch lives in the image's own Python: `python3.9` for the stackbox's Rocky 9
         // build, the release's minor on its other images.
         format!(
             concat!(
                 "neutron_plugin_agent: \"openvswitch\"\n",
                 "ovs_datapath: \"netdev\"\n",
-                "openvswitch_vswitchd_extra_volumes: \"{{{{ default_extra_volumes + ['/etc/farm/ovs-extend-start:/usr/local/bin/kolla_openvswitch_extend_start:ro'] }}}}\"\n",
+                "openvswitch_vswitchd_extra_volumes: \"{{{{ default_extra_volumes + ['/etc/stackbox/ovs-extend-start:/usr/local/bin/kolla_openvswitch_extend_start:ro'] }}}}\"\n",
                 // The kernel lacks xt_connmark; see neutron_sitecustomize.py.
-                "neutron_l3_agent_extra_volumes: \"{{{{ neutron_extra_volumes + ['/etc/farm/neutron-sitecustomize.py:/var/lib/kolla/venv/lib64/python{python}/site-packages/sitecustomize.py:ro'] }}}}\"\n",
+                "neutron_l3_agent_extra_volumes: \"{{{{ neutron_extra_volumes + ['/etc/stackbox/neutron-sitecustomize.py:/var/lib/kolla/venv/lib64/python{python}/site-packages/sitecustomize.py:ro'] }}}}\"\n",
             ),
             python = release.image_python()
         )
@@ -161,7 +161,7 @@ pub fn globals(
         String::new()
     };
     // Releases before 2025.1 predate this guest: their host-OS precheck lists Rocky 9 only,
-    // and their baremetal role imports `selinux` from a venv without the binding. The farm
+    // and their baremetal role imports `selinux` from a venv without the binding. The stackbox
     // chooses the guest, and every other precheck still runs.
     let older_guest_globals = if release.release.as_str() < "2025.1" {
         "# This release's list of supported host distributions predates this guest.\nprechecks_enable_host_os_checks: false\n# This guest has no SELinux, and the venv's Python has no `selinux` binding; the role's\n# no-op would fail importing it.\nchange_selinux: false\n"
@@ -196,11 +196,11 @@ pub fn globals(
     // writes an empty line there, as it deployed before. Each block already ends in a newline,
     // so the placeholder's own line separates them from the comment when they are present.
     let guest_overrides = format!("{older_guest_globals}{eol_docker}{docker_sdk}");
-    // These series derive `enable_heat` from `enable_openstack_core`, which the farm turns off
+    // These series derive `enable_heat` from `enable_openstack_core`, which the stackbox turns off
     // below; naming the flag keeps a series whose published images leave heat out from pulling
     // one anyway. A maintained branch keeps the flag implicit, as it deployed before.
-    // From 2025.1 on, every service the farm can offer gets its flag written out, true when the
-    // farm selected it, so an unselected one stays off whatever the series defaults to.
+    // From 2025.1 on, every service the stackbox can offer gets its flag written out, true when the
+    // stackbox selected it, so an unselected one stays off whatever the series defaults to.
     let newer_services = release.release.as_str() >= "2025.1";
     let flags = if newer_services {
         ["heat", "barbican", "designate", "magnum", "skyline"]
@@ -210,10 +210,10 @@ pub fn globals(
     } else {
         "enable_heat: false\n".to_owned()
     };
-    // Designate runs its bind9 backend inside the farm, with one name server record for its pool.
-    // When Neutron runs beside it, Neutron's DNS domain is the same `farm.local.` zone.
+    // Designate runs its bind9 backend inside the stackbox, with one name server record for its pool.
+    // When Neutron runs beside it, Neutron's DNS domain is the same `stackbox.local.` zone.
     let designate = if newer_services && components.iter().any(|c| c == "designate") {
-        "designate_backend: \"bind9\"\ndesignate_ns_record:\n  - \"ns1.farm.local\"\n"
+        "designate_backend: \"bind9\"\ndesignate_ns_record:\n  - \"ns1.stackbox.local\"\n"
     } else {
         ""
     };
@@ -221,7 +221,7 @@ pub fn globals(
         && components.iter().any(|c| c == "designate")
         && components.iter().any(|c| c == "neutron")
     {
-        "neutron_dns_domain: \"farm.local.\"\n"
+        "neutron_dns_domain: \"stackbox.local.\"\n"
     } else {
         ""
     };
@@ -285,11 +285,11 @@ glance_backend_file: true
 pub const MDEV_NOVA_COMPUTE_CONF: &str =
     "[devices]\nenabled_mdev_types = mtty-1\n\n[mdev_mtty-1]\ndevice_addresses = mtty_mtty\n";
 
-/// The nova-compute.conf of every farm. Without `resume_guests_state_on_host_boot`, Nova
+/// The nova-compute.conf of every stackbox. Without `resume_guests_state_on_host_boot`, Nova
 /// leaves each instance SHUTOFF when its compute VM comes back from a snapshot.
 pub const NOVA_COMPUTE_BASE_CONF: &str = "[DEFAULT]\nresume_guests_state_on_host_boot = True\n";
 
-/// A PCI device the compute-1 guest shows after `farm-vfio-prepare` bound it to `vfio-pci`.
+/// A PCI device the compute-1 guest shows after `stackbox-vfio-prepare` bound it to `vfio-pci`.
 /// `bdf` is the guest's address, which is what Nova's `device_spec` names.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GuestPciDevice {
@@ -308,11 +308,11 @@ pub struct PciAlias {
 }
 
 /// The filters the scheduler runs. OpenStack 2025.1 to 2026.2 leave `PciPassthroughFilter`
-/// out of their default list, so farm names the whole list.
+/// out of their default list, so stackbox names the whole list.
 pub const NOVA_ENABLED_FILTERS: &str = "ComputeFilter, ComputeCapabilitiesFilter, ImagePropertiesFilter, ServerGroupAntiAffinityFilter, ServerGroupAffinityFilter, PciPassthroughFilter";
 
 /// One alias per distinct `(vendor_id, product_id)`, in the order the devices are listed: the
-/// first pair is `farm-pci`, the next `farm-pci-2`, and so on.
+/// first pair is `stackbox-pci`, the next `stackbox-pci-2`, and so on.
 pub fn pci_aliases(devices: &[GuestPciDevice]) -> Vec<PciAlias> {
     let mut pairs: Vec<(String, String)> = Vec::new();
     for device in devices {
@@ -335,18 +335,18 @@ pub fn pci_aliases(devices: &[GuestPciDevice]) -> Vec<PciAlias> {
 /// The alias of the `index`th distinct device pair (zero-based).
 pub fn pci_alias_name(index: usize) -> String {
     if index == 0 {
-        "farm-pci".to_owned()
+        "stackbox-pci".to_owned()
     } else {
-        format!("farm-pci-{}", index + 1)
+        format!("stackbox-pci-{}", index + 1)
     }
 }
 
-/// The first line of every `nova.conf` farm writes. Removal checks for it, so a file an operator
+/// The first line of every `nova.conf` stackbox writes. Removal checks for it, so a file an operator
 /// wrote by hand is never deleted.
-pub const NOVA_GLOBAL_MARKER: &str = "# Managed by farm";
+pub const NOVA_GLOBAL_MARKER: &str = "# Managed by stackbox";
 
 /// The nova.conf that every Nova service merges (`/etc/kolla/config/nova.conf`): the scheduler's
-/// filters and the `[pci]` aliases. `None` when the farm has no passthrough device.
+/// filters and the `[pci]` aliases. `None` when the stackbox has no passthrough device.
 pub fn nova_global_conf(pci_devices: &[GuestPciDevice]) -> Option<String> {
     if pci_devices.is_empty() {
         return None;
@@ -383,19 +383,19 @@ pub fn nova_compute_conf(mdev: bool, pci_devices: &[GuestPciDevice]) -> String {
     conf
 }
 
-/// Where each host keeps the Nova files farm's mtty backport mounts into nova_compute, as
+/// Where each host keeps the Nova files stackbox's mtty backport mounts into nova_compute, as
 /// `<release>/<module>` (see [`NOVA_MTTY_MODULES`]).
-pub const NOVA_MTTY_DIR: &str = "/etc/farm/nova-mtty";
+pub const NOVA_MTTY_DIR: &str = "/etc/stackbox/nova-mtty";
 
 /// Where a host keeps the script that builds those files from the image.
-pub const NOVA_MTTY_PREPARE: &str = "/etc/farm/prepare-nova-mtty.sh";
+pub const NOVA_MTTY_PREPARE: &str = "/etc/stackbox/prepare-nova-mtty.sh";
 
 /// The two Nova modules the backport changes, relative to the Nova package. Each one is
 /// mounted over the image's own copy.
 pub const NOVA_MTTY_MODULES: [&str; 2] =
     ["nova/virt/libvirt/config.py", "nova/virt/libvirt/driver.py"];
 
-/// farm's backport of Nova's `mtty` support for a release whose Nova has none: upstream
+/// stackbox's backport of Nova's `mtty` support for a release whose Nova has none: upstream
 /// merged it on 2026.2 only, so the two older maintained series and 2026.1 get the patch
 /// file for their own source. `None` means the release needs no patch.
 ///
@@ -450,7 +450,7 @@ pub fn nova_mtty_mounts(release: &str) -> Option<Vec<(String, String)>> {
 
 /// The `globals.yml` entry that mounts those copies read-only over nova_compute's modules.
 ///
-/// It extends Kolla's list instead of replacing it: every release farm supports defaults
+/// It extends Kolla's list instead of replacing it: every release stackbox supports defaults
 /// `nova_compute_extra_volumes` to `{{ nova_extra_volumes }}`, which is itself
 /// `{{ default_extra_volumes }}` (`ansible/roles/nova-cell/defaults/main.yml`), so naming
 /// `default_extra_volumes` keeps whatever Kolla or an operator put there.
@@ -476,7 +476,7 @@ pub fn nova_mtty_prepare_script(release: &str) -> Option<String> {
     let modules = NOVA_MTTY_MODULES.join(" ");
     Some(format!(
         r#"#!/bin/bash
-# Written by farm: builds the Nova files nova_compute mounts for farm's mtty backport.
+# Written by stackbox: builds the Nova files nova_compute mounts for stackbox's mtty backport.
 set -o errexit
 set -o pipefail
 set -o nounset
@@ -485,19 +485,19 @@ image='{image}'
 out='{NOVA_MTTY_DIR}/{release}'
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
-cat > "$work/apply.py" <<'FARM_APPLY_PY'
-{apply}FARM_APPLY_PY
-cat > "$work/nova-mtty.patch" <<'FARM_PATCH'
-{patch}FARM_PATCH
+cat > "$work/apply.py" <<'STACKBOX_APPLY_PY'
+{apply}STACKBOX_APPLY_PY
+cat > "$work/nova-mtty.patch" <<'STACKBOX_PATCH'
+{patch}STACKBOX_PATCH
 docker pull "$image" >/dev/null
-docker run --rm --user root --entrypoint bash -v "$work:/farm" "$image" -c '
+docker run --rm --user root --entrypoint bash -v "$work:/stackbox" "$image" -c '
 set -o errexit
 site=$(python3 -c "import os, nova; print(os.path.dirname(os.path.realpath(nova.__path__[0])))")
 [ "$site" = "$1" ] || {{ echo "nova is in $site, not $1" >&2; exit 1; }}
-mkdir -p /farm/src/nova/virt/libvirt
-cp "$site/nova/virt/libvirt/config.py" "$site/nova/virt/libvirt/driver.py" /farm/src/nova/virt/libvirt/
-python3 /farm/apply.py /farm/nova-mtty.patch /farm/src
-' farm '{site}' < /dev/null
+mkdir -p /stackbox/src/nova/virt/libvirt
+cp "$site/nova/virt/libvirt/config.py" "$site/nova/virt/libvirt/driver.py" /stackbox/src/nova/virt/libvirt/
+python3 /stackbox/apply.py /stackbox/nova-mtty.patch /stackbox/src
+' stackbox '{site}' < /dev/null
 mkdir -p "$out/nova/virt/libvirt"
 for module in {modules}; do
   install -m 0644 "$work/src/$module" "$out/$module.new"
@@ -509,10 +509,10 @@ echo "nova-mtty files for {release} in $out"
     ))
 }
 
-/// Neutron on a multi-node farm: tenant VLANs on physnet1 (every VM's `farm1` link, bridged
+/// Neutron on a multi-node stackbox: tenant VLANs on physnet1 (every VM's `stackbox1` link, bridged
 /// as br-tenant) and the external flat network on physnet2 (br-ex on the control VM).
 pub const MULTINODE_ML2: &str = "[ml2_type_vlan]\nnetwork_vlan_ranges = physnet1:100:199\n[ml2_type_flat]\nflat_networks = physnet2\n";
-/// The Open vSwitch agents of a multi-node farm run no tunnels. Kolla's default hybrid
+/// The Open vSwitch agents of a multi-node stackbox run no tunnels. Kolla's default hybrid
 /// iptables firewall needs physdev, which the guest kernel lacks; the OVS firewall uses the
 /// userspace datapath's own conntrack.
 pub const MULTINODE_OVS_AGENT: &str = "[agent]\ntunnel_types =\nl2_population = false\n[securitygroup]\nfirewall_driver = openvswitch\n";
@@ -522,9 +522,9 @@ pub const MULTINODE_OVS_AGENT: &str = "[agent]\ntunnel_types =\nl2_population = 
 /// Keystone for the catalog's `public` endpoint by default (`openstack.interface_type`). On the
 /// control VM that address is a host DNAT the VM cannot reach, so the login fails with 401 while the
 /// password is right. The internal endpoint is the one the VM serves.
-pub const SKYLINE_OVERRIDE: &str = "# Written by farm: the control VM cannot reach the public endpoint (host DNAT), so log in through the internal one.\nopenstack:\n  interface_type: internal\n";
+pub const SKYLINE_OVERRIDE: &str = "# Written by stackbox: the control VM cannot reach the public endpoint (host DNAT), so log in through the internal one.\nopenstack:\n  interface_type: internal\n";
 
-/// The Skyline override for a farm, or `None` when Skyline is not selected.
+/// The Skyline override for a stackbox, or `None` when Skyline is not selected.
 pub fn skyline_override(components: &[String]) -> Option<&'static str> {
     components
         .iter()
@@ -539,7 +539,7 @@ pub fn multinode_inventory(template: &str, control: &str, computes: &[Compute]) 
         .iter()
         .map(|c| {
             format!(
-                "{} ansible_host={} neutron_external_interface=farm1 neutron_bridge_name=br-tenant",
+                "{} ansible_host={} neutron_external_interface=stackbox1 neutron_bridge_name=br-tenant",
                 c.hostname, c.address
             )
         })
@@ -548,7 +548,7 @@ pub fn multinode_inventory(template: &str, control: &str, computes: &[Compute]) 
         (
             "control",
             format!(
-                "{control} ansible_connection=local neutron_external_interface=farm1,farm-ext neutron_bridge_name=br-tenant,br-ex"
+                "{control} ansible_connection=local neutron_external_interface=stackbox1,stackbox-ext neutron_bridge_name=br-tenant,br-ex"
             ),
         ),
         ("network", control.to_owned()),
@@ -583,7 +583,7 @@ pub fn multinode_inventory(template: &str, control: &str, computes: &[Compute]) 
         filled += 1;
     }
     if filled != groups.len() {
-        bail!("unexpected Kolla multinode inventory; review the farm's inventory rewrite");
+        bail!("unexpected Kolla multinode inventory; review the stackbox's inventory rewrite");
     }
     Ok(out)
 }
@@ -595,8 +595,8 @@ pub const GALERA_CONFIG: &str = "[mysqld]\ninnodb_buffer_pool_size = 512M\nmax_c
 mod tests {
     use super::*;
 
-    fn node(role: Role) -> FarmNode {
-        FarmNode {
+    fn node(role: Role) -> StackboxNode {
+        StackboxNode {
             name: format!("demo-{role}"),
             role: Some(role),
             index: None,
@@ -628,13 +628,13 @@ mod tests {
     }
 
     #[test]
-    fn multi_node_farms_deploy_from_their_control_vm_to_numbered_computes() {
-        let compute = |index| FarmNode {
+    fn multi_node_stackboxes_deploy_from_their_control_vm_to_numbered_computes() {
+        let compute = |index| StackboxNode {
             name: format!("demo-compute-{index}"),
             index: Some(index),
             ..node(Role::Compute)
         };
-        let control = FarmNode {
+        let control = StackboxNode {
             name: "demo-control".into(),
             ..node(Role::Control)
         };
@@ -646,12 +646,12 @@ mod tests {
             [
                 Compute {
                     name: "demo-compute-1".into(),
-                    hostname: "farm-compute-1".into(),
+                    hostname: "stackbox-compute-1".into(),
                     address: "10.254.0.11".into(),
                 },
                 Compute {
                     name: "demo-compute-2".into(),
-                    hostname: "farm-compute-2".into(),
+                    hostname: "stackbox-compute-2".into(),
                     address: "10.254.0.12".into(),
                 },
             ]
@@ -668,20 +668,20 @@ mod tests {
         let selected = ["keystone", "glance", "placement", "neutron", "nova"].map(String::from);
         let globals = globals(
             "10.254.0.10",
-            "farm0",
+            "stackbox0",
             "aarch64",
             false,
             &selected,
             true,
             &crate::kolla::releases::info(OPENSTACK_RELEASE),
         );
-        assert!(globals.contains("tunnel_interface: \"farm0\"\n"));
+        assert!(globals.contains("tunnel_interface: \"stackbox0\"\n"));
         assert!(globals.contains("neutron_tenant_network_types: \"vlan\"\n"));
         assert!(globals.contains("enable_neutron_provider_networks: true\n"));
         // Extra vars would override the inventory's per-host bridges.
         assert!(!globals.contains("neutron_external_interface"));
         let single = globals_single(&selected);
-        assert!(single.contains("neutron_external_interface: \"farm-ext\"\n"));
+        assert!(single.contains("neutron_external_interface: \"stackbox-ext\"\n"));
         assert!(!single.contains("tunnel_interface"));
         assert!(MULTINODE_ML2.contains("network_vlan_ranges = physnet1:100:199"));
         assert!(MULTINODE_ML2.contains("flat_networks = physnet2"));
@@ -690,11 +690,11 @@ mod tests {
         // The head of Kolla's inventory/multinode, which the rewrite keys on.
         let template = "# These initial groups are the only groups required to be modified.\n[control]\n# These hostname must be resolvable from your deployment host\ncontrol01\ncontrol02\ncontrol03\n\n# The above can also be specified as follows:\n#control[01:03]     ansible_user=kolla\n\n[network]\nnetwork01\nnetwork02\n\n[compute]\ncompute01\n\n[monitoring]\nmonitoring01\n\n[storage]\nstorage01\n\n[deployment]\nlocalhost       ansible_connection=local\n\n[baremetal:children]\ncontrol\n";
         let inventory =
-            multinode_inventory(template, "farm-control", &topology_computes()).unwrap();
-        assert!(inventory.contains("[control]\nfarm-control ansible_connection=local neutron_external_interface=farm1,farm-ext neutron_bridge_name=br-tenant,br-ex\n\n"));
-        assert!(inventory.contains("[network]\nfarm-control\n\n"));
-        assert!(inventory.contains("[compute]\nfarm-compute-1 ansible_host=10.254.0.11 neutron_external_interface=farm1 neutron_bridge_name=br-tenant\n\n"));
-        assert!(inventory.contains("[storage]\nfarm-control\n\n[deployment]\nlocalhost"));
+            multinode_inventory(template, "stackbox-control", &topology_computes()).unwrap();
+        assert!(inventory.contains("[control]\nstackbox-control ansible_connection=local neutron_external_interface=stackbox1,stackbox-ext neutron_bridge_name=br-tenant,br-ex\n\n"));
+        assert!(inventory.contains("[network]\nstackbox-control\n\n"));
+        assert!(inventory.contains("[compute]\nstackbox-compute-1 ansible_host=10.254.0.11 neutron_external_interface=stackbox1 neutron_bridge_name=br-tenant\n\n"));
+        assert!(inventory.contains("[storage]\nstackbox-control\n\n[deployment]\nlocalhost"));
         assert!(inventory.contains("#control[01:03]"));
         for gone in [
             "control01",
@@ -705,9 +705,9 @@ mod tests {
         ] {
             assert!(!inventory.contains(&format!("\n{gone}\n")), "{gone}");
         }
-        assert!(multinode_inventory("[control]\nx\n", "farm-control", &[]).is_err());
-        let alone = multinode_inventory(template, "farm-control", &[]).unwrap();
-        assert!(alone.contains("[compute]\n\n[monitoring]\nfarm-control\n"));
+        assert!(multinode_inventory("[control]\nx\n", "stackbox-control", &[]).is_err());
+        let alone = multinode_inventory(template, "stackbox-control", &[]).unwrap();
+        assert!(alone.contains("[compute]\n\n[monitoring]\nstackbox-control\n"));
     }
 
     #[test]
@@ -721,10 +721,10 @@ mod tests {
             assert!(rendered.contains(&format!("enable_{id}: false\n")), "{id}");
         }
         assert!(rendered.contains("designate_backend: \"bind9\"\n"));
-        // kolla's pools.yaml.j2 appends the trailing dot itself; a dotted value would render `ns1.farm.local..`.
-        assert!(rendered.contains("designate_ns_record:\n  - \"ns1.farm.local\"\n"));
-        assert!(!rendered.contains("ns1.farm.local.\""));
-        assert!(rendered.contains("neutron_dns_domain: \"farm.local.\"\n"));
+        // kolla's pools.yaml.j2 appends the trailing dot itself; a dotted value would render `ns1.stackbox.local..`.
+        assert!(rendered.contains("designate_ns_record:\n  - \"ns1.stackbox.local\"\n"));
+        assert!(!rendered.contains("ns1.stackbox.local.\""));
+        assert!(rendered.contains("neutron_dns_domain: \"stackbox.local.\"\n"));
 
         // Without Designate, Neutron keeps its own DNS domain and no backend is named.
         let without = ["keystone", "glance", "heat", "neutron"].map(String::from);
@@ -744,7 +744,7 @@ mod tests {
     fn globals_at(selected: &[String], release: &str) -> String {
         globals(
             "10.254.0.2",
-            "farm0",
+            "stackbox0",
             "aarch64",
             false,
             selected,
@@ -756,7 +756,7 @@ mod tests {
     fn globals_single(selected: &[String]) -> String {
         globals(
             "10.254.0.2",
-            "farm0",
+            "stackbox0",
             "aarch64",
             false,
             selected,
@@ -768,7 +768,7 @@ mod tests {
     fn topology_computes() -> Vec<Compute> {
         vec![Compute {
             name: "demo-compute-1".into(),
-            hostname: "farm-compute-1".into(),
+            hostname: "stackbox-compute-1".into(),
             address: "10.254.0.11".into(),
         }]
     }
@@ -801,7 +801,7 @@ mod tests {
         let base = ["keystone", "glance"].map(String::from);
         let globals = globals(
             "10.254.0.2",
-            "farm0",
+            "stackbox0",
             "aarch64",
             false,
             &base,
@@ -813,7 +813,10 @@ mod tests {
             "api_interface",
             "kolla_external_vip_interface",
         ] {
-            assert!(globals.contains(&format!("{key}: \"farm0\"\n")), "{key}");
+            assert!(
+                globals.contains(&format!("{key}: \"stackbox0\"\n")),
+                "{key}"
+            );
         }
         assert!(globals.contains("kolla_internal_vip_address: \"10.254.0.2\""));
         assert!(!globals.contains("eth0"));
@@ -875,7 +878,7 @@ mod tests {
         // The tag's baremetal role would load the `selinux` module in a venv that has no
         // binding for it; the guest kernel has none either.
         assert_eq!(legacy.matches("change_selinux: false").count(), 1);
-        // No kmod in the guest, and Neutron's default is ip6_tables before 2026.1: farm
+        // No kmod in the guest, and Neutron's default is ip6_tables before 2026.1: stackbox
         // empties it for every release, since this kernel cannot load modules at all.
         assert_eq!(legacy.matches("neutron_modules_default: []").count(), 1);
         for release in ["2024.1", "2025.1", "2025.2", "2026.1", OPENSTACK_RELEASE] {
@@ -899,9 +902,9 @@ mod tests {
     #[test]
     fn a_maintained_release_writes_the_globals_it_had() {
         // The end-of-life image work must not change the file a maintained release already
-        // deployed with: only a series the farm builds itself names a registry. The fixture
+        // deployed with: only a series the stackbox builds itself names a registry. The fixture
         // is this function's output at the commit before that work plus the Neutron module
-        // default farm now writes for every release, blank line and all, so an equality
+        // default stackbox now writes for every release, blank line and all, so an equality
         // failure means the shipped file changed rather than the fixture following the code.
         let selected = [
             "keystone",
@@ -914,7 +917,7 @@ mod tests {
         .map(String::from);
         let text = globals(
             "10.254.0.2",
-            "farm0",
+            "stackbox0",
             "x86_64",
             false,
             &selected,
@@ -933,7 +936,7 @@ mod tests {
     fn the_2024_2_globals_are_unchanged_from_the_fixture() {
         // The fixture is this function's output for 2024.2 at HEAD (41caea6), with the same
         // inputs as the 2026.2 golden above. An equality failure means the 2024.2 globals a
-        // deployed farm would get have changed.
+        // deployed stackbox would get have changed.
         let selected = [
             "keystone",
             "glance",
@@ -945,7 +948,7 @@ mod tests {
         .map(String::from);
         let text = globals(
             "10.254.0.2",
-            "farm0",
+            "stackbox0",
             "x86_64",
             false,
             &selected,
@@ -959,7 +962,7 @@ mod tests {
     }
 
     #[test]
-    fn a_series_the_farm_builds_pulls_from_its_registry_on_its_base_distro() {
+    fn a_series_the_stackbox_builds_pulls_from_its_registry_on_its_base_distro() {
         let selected = [
             "keystone",
             "glance",
@@ -986,14 +989,14 @@ mod tests {
         // The L3 patch goes into the Rocky 9 image's venv, not the Ubuntu one's.
         assert!(zed.contains("python3.9/site-packages/sitecustomize.py"));
         assert!(!zed.contains("python3.10/site-packages"));
-        // The guest has no kmod, and Neutron's default is ip6_tables until 2026.1; farm
+        // The guest has no kmod, and Neutron's default is ip6_tables until 2026.1; stackbox
         // empties it for every release, since this kernel cannot load modules at all.
         assert_eq!(zed.matches("neutron_modules_default: []").count(), 1);
         // The series carries no heat image; `enable_openstack_core: false` alone would leave
         // the flag to kolla-ansible's indirection.
         assert_eq!(zed.matches("enable_heat: false").count(), 1);
 
-        // 2024.1/2024.2 are supported, but quay no longer carries them: the farm builds
+        // 2024.1/2024.2 are supported, but quay no longer carries them: the stackbox builds
         // Rocky 9 images and kolla-ansible computes the tag `2024.x-rocky-9`.
         for release in ["2024.1", "2024.2"] {
             let text = globals(
@@ -1056,7 +1059,7 @@ mod tests {
             );
         }
 
-        // A series the farm has not built keeps exactly what it pulled before: the tag's own
+        // A series the stackbox has not built keeps exactly what it pulled before: the tag's own
         // registry and its Ubuntu images.
         let yoga = globals(
             "192.168.127.2",
@@ -1106,13 +1109,13 @@ mod tests {
     }
     #[test]
     fn a_gpu_takes_no_kolla_globals() {
-        // farm writes a simulated GPU's providers through Placement, and reads the mediated
+        // stackbox writes a simulated GPU's providers through Placement, and reads the mediated
         // device's from Nova: neither is a globals entry. Kolla's provider-config file only
         // takes CUSTOM_* classes, which is exactly what the standard VGPU contract is not.
         let selected = ["keystone", "glance", "placement", "neutron", "nova"].map(String::from);
         let text = globals(
             "10.254.0.10",
-            "farm0",
+            "stackbox0",
             "x86_64",
             false,
             &selected,
@@ -1152,7 +1155,7 @@ mod tests {
 
     #[test]
     fn the_mtty_backport_covers_the_releases_that_lack_it() {
-        // Upstream merged `mtty` support on 2026.2 and nothing else; farm carries a patch
+        // Upstream merged `mtty` support on 2026.2 and nothing else; stackbox carries a patch
         // for every older maintained series and lets a newer one use Nova's own code.
         for release in ["2025.1", "2025.2", "2026.1"] {
             let patch = nova_mtty_patch(release).unwrap_or_else(|| panic!("{release}"));
@@ -1213,7 +1216,7 @@ mod tests {
             r#"import importlib.util
 import sys
 
-spec = importlib.util.spec_from_file_location("farm_apply", sys.argv[1])
+spec = importlib.util.spec_from_file_location("stackbox_apply", sys.argv[1])
 applier = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(applier)
 with open(sys.argv[2]) as handle:
@@ -1264,7 +1267,7 @@ print("hunks matched")
     }
 
     /// The same check against the real thing: clone each Nova branch the patches are written
-    /// for (sparse, no blobs outside `nova/virt/libvirt`) and apply farm's file to the branch
+    /// for (sparse, no blobs outside `nova/virt/libvirt`) and apply stackbox's file to the branch
     /// tip and to every release tag on it, which is what an image built at any point of the
     /// series' life carries. Needs the network:
     ///
@@ -1413,7 +1416,7 @@ print("hunks matched")
     }
 
     /// The prepare script is a host shell program that ends up in a root container and on
-    /// the host, so it has to parse and pass `shellcheck`. `FARM_DUMP_NOVA_PREPARE=<path>`
+    /// the host, so it has to parse and pass `shellcheck`. `STACKBOX_DUMP_NOVA_PREPARE=<path>`
     /// writes it out for a manual look.
     #[test]
     fn the_mtty_prepare_script_patches_a_copy_of_the_image_nova() {
@@ -1424,14 +1427,14 @@ print("hunks matched")
                 "{release}"
             );
             assert!(script.contains("--user root"), "{release}");
-            assert!(script.contains("FARM_APPLY_PY"), "{release}");
+            assert!(script.contains("STACKBOX_APPLY_PY"), "{release}");
             assert!(
-                script.contains("/farm/apply.py /farm/nova-mtty.patch"),
+                script.contains("/stackbox/apply.py /stackbox/nova-mtty.patch"),
                 "{release}"
             );
             assert!(
                 script.contains(&format!(
-                    "' farm '{}' < /dev/null",
+                    "' stackbox '{}' < /dev/null",
                     nova_mtty_site(release).unwrap()
                 )),
                 "{release}"
@@ -1444,19 +1447,19 @@ print("hunks matched")
         }
         let script = nova_mtty_prepare_script("2025.1").unwrap();
         // The heredocs hold a program and a diff: a stray delimiter would end one early.
-        let body = script.split_once("<<'FARM_APPLY_PY'\n").unwrap().1;
-        let (applier, rest) = body.split_once("FARM_APPLY_PY\n").unwrap();
+        let body = script.split_once("<<'STACKBOX_APPLY_PY'\n").unwrap().1;
+        let (applier, rest) = body.split_once("STACKBOX_APPLY_PY\n").unwrap();
         assert!(applier.contains("def apply_hunk("));
         let (diff, _) = rest
-            .split_once("<<'FARM_PATCH'\n")
+            .split_once("<<'STACKBOX_PATCH'\n")
             .unwrap()
             .1
-            .split_once("FARM_PATCH\n")
+            .split_once("STACKBOX_PATCH\n")
             .unwrap();
-        assert!(diff.starts_with("# farm: OpenStack Nova"));
+        assert!(diff.starts_with("# stackbox: OpenStack Nova"));
         assert!(nova_mtty_prepare_script("2026.2").is_none());
 
-        if let Ok(path) = std::env::var("FARM_DUMP_NOVA_PREPARE") {
+        if let Ok(path) = std::env::var("STACKBOX_DUMP_NOVA_PREPARE") {
             std::fs::write(path, &script).unwrap();
         }
         let output = match std::process::Command::new("bash")
@@ -1506,7 +1509,7 @@ print("hunks matched")
     fn the_mtty_volumes_mount_the_host_copies_over_the_image_modules() {
         assert_eq!(
             nova_mtty_extra_volumes("2025.1").unwrap(),
-            "nova_compute_extra_volumes: \"{{ default_extra_volumes + ['/etc/farm/nova-mtty/2025.1/nova/virt/libvirt/config.py:/var/lib/kolla/venv/lib/python3.9/site-packages/nova/virt/libvirt/config.py:ro', '/etc/farm/nova-mtty/2025.1/nova/virt/libvirt/driver.py:/var/lib/kolla/venv/lib/python3.9/site-packages/nova/virt/libvirt/driver.py:ro'] }}\"\n"
+            "nova_compute_extra_volumes: \"{{ default_extra_volumes + ['/etc/stackbox/nova-mtty/2025.1/nova/virt/libvirt/config.py:/var/lib/kolla/venv/lib/python3.9/site-packages/nova/virt/libvirt/config.py:ro', '/etc/stackbox/nova-mtty/2025.1/nova/virt/libvirt/driver.py:/var/lib/kolla/venv/lib/python3.9/site-packages/nova/virt/libvirt/driver.py:ro'] }}\"\n"
         );
         let volumes = nova_mtty_extra_volumes("2026.1").unwrap();
         assert!(
@@ -1519,7 +1522,7 @@ print("hunks matched")
         let selected = ["keystone", "glance", "nova"].map(String::from);
         let text = globals(
             "10.254.0.10",
-            "farm0",
+            "stackbox0",
             "x86_64",
             false,
             &selected,
@@ -1619,7 +1622,7 @@ print("hunks matched")
                 .collect::<Vec<_>>(),
             ["openstack:", "  interface_type: internal"]
         );
-        assert!(selected.starts_with("# Written by farm"));
+        assert!(selected.starts_with("# Written by stackbox"));
         assert!(skyline_override(&["keystone".into(), "horizon".into()]).is_none());
         assert!(skyline_override(&[]).is_none());
     }
@@ -1647,7 +1650,7 @@ print("hunks matched")
     }
 
     #[test]
-    fn nova_global_conf_starts_with_the_farm_marker() {
+    fn nova_global_conf_starts_with_the_stackbox_marker() {
         let devices = [guest_pci("0000:00:05.0", "10de", "1eb8", 3)];
         let conf = nova_global_conf(&devices).unwrap();
         assert_eq!(conf.lines().next(), Some(NOVA_GLOBAL_MARKER));
@@ -1690,11 +1693,11 @@ print("hunks matched")
         let conf = nova_global_conf(&devices).unwrap();
         let aliases = json_values(&conf, "alias");
         assert_eq!(aliases.len(), 2, "{conf}");
-        assert_eq!(aliases[0]["name"], "farm-pci");
+        assert_eq!(aliases[0]["name"], "stackbox-pci");
         assert_eq!(aliases[0]["vendor_id"], "10de");
         assert_eq!(aliases[0]["product_id"], "1eb8");
         assert_eq!(aliases[0]["device_type"], "type-PCI");
-        assert_eq!(aliases[1]["name"], "farm-pci-2");
+        assert_eq!(aliases[1]["name"], "stackbox-pci-2");
         assert_eq!(aliases[1]["vendor_id"], "8086");
         assert_eq!(aliases[1]["product_id"], "1521");
     }
@@ -1714,9 +1717,9 @@ print("hunks matched")
         assert_eq!(
             names,
             [
-                ("farm-pci".into(), "8086".into(), "1521".into()),
-                ("farm-pci-2".into(), "10de".into(), "1eb8".into()),
-                ("farm-pci-3".into(), "1002".into(), "73bf".into()),
+                ("stackbox-pci".into(), "8086".into(), "1521".into()),
+                ("stackbox-pci-2".into(), "10de".into(), "1eb8".into()),
+                ("stackbox-pci-3".into(), "1002".into(), "73bf".into()),
             ]
         );
     }

@@ -150,13 +150,13 @@ impl Session {
         let digest = &artifact.info.sha256;
         super::artifact::validate_digest(digest)?;
         let script = format!(
-            "{COMMON}path=\"$HOME/.local/share/farm/agents/{digest}/farm-agent\"\nif [ -f \"$path\" ] && printf '%s  %s\\n' '{digest}' \"$path\" | sha256sum -c --status; then printf cached; else printf missing; fi\n"
+            "{COMMON}path=\"$HOME/.local/share/stackbox/agents/{digest}/stackbox-agent\"\nif [ -f \"$path\" ] && printf '%s  %s\\n' '{digest}' \"$path\" | sha256sum -c --status; then printf cached; else printf missing; fi\n"
         );
         if self.run(&script, 15, "Agent checksum check").await?.trim() != "cached" {
             let command = upload_command(
                 digest,
-                &format!(".local/share/farm/agents/{digest}"),
-                "farm-agent",
+                &format!(".local/share/stackbox/agents/{digest}"),
+                "stackbox-agent",
                 180,
                 "700",
             );
@@ -186,7 +186,7 @@ impl Session {
                 })
             }
             _ => bail!(
-                "the installed farm-agent does not match this artifact (protocol, architecture, build {b}); rebuild with `task agent-build` and install it again",
+                "the installed stackbox-agent does not match this artifact (protocol, architecture, build {b}); rebuild with `task agent-build` and install it again",
                 b = artifact.info.build_id
             ),
         }
@@ -231,7 +231,7 @@ impl Session {
                         for frame in drain_frames(&mut buffer)? {
                             ensure!(
                                 terminal.is_none(),
-                                "farm-agent sent data after a terminal result"
+                                "stackbox-agent sent data after a terminal result"
                             );
                             terminal = deliver(frame, &request.operation, sink.as_ref())?;
                         }
@@ -240,13 +240,13 @@ impl Session {
                     _ => {}
                 }
             }
-            ensure!(buffer.is_empty(), "truncated farm-agent frame");
+            ensure!(buffer.is_empty(), "truncated stackbox-agent frame");
             let result = terminal.context(
-                "farm-agent disconnected without a result; inspect the remote job before retrying",
+                "stackbox-agent disconnected without a result; inspect the remote job before retrying",
             )??;
             ensure!(
                 code == Some(0),
-                "farm-agent exited unsuccessfully; inspect the remote host"
+                "stackbox-agent exited unsuccessfully; inspect the remote host"
             );
             Ok::<_, anyhow::Error>(result)
         };
@@ -256,15 +256,15 @@ impl Session {
                 anyhow!("remote operation timed out; inspect the remote host before retrying")
             })?
     }
-    /// Relay a shell in a remote farm's VM through its farm-agent until either side ends it.
+    /// Relay a shell in a remote stackbox's VM through its stackbox-agent until either side ends it.
     pub async fn terminal(
         &self,
         digest: &str,
         request: &super::protocol::Request,
-        io: crate::farm::TerminalIo,
+        io: crate::stackbox::TerminalIo,
     ) -> Result<()> {
         use super::protocol::{Frame, Reply, TerminalFrame};
-        use crate::farm::TerminalInput;
+        use crate::stackbox::TerminalInput;
         super::artifact::validate_digest(digest)?;
         let channel = self
             .handle
@@ -286,7 +286,7 @@ impl Session {
         let mut line = serde_json::to_vec(request)?;
         line.push(b'\n');
         send(line).await?;
-        let crate::farm::TerminalIo { mut input, output } = io;
+        let crate::stackbox::TerminalIo { mut input, output } = io;
         // An agent from before shell sessions waits for EOF instead of answering.
         let attach = tokio::time::sleep(TERMINAL_ATTACH_TIMEOUT);
         tokio::pin!(attach);
@@ -296,7 +296,7 @@ impl Session {
         loop {
             tokio::select! {
                 _ = &mut attach, if !attached => bail!(
-                    "the farm-agent on this host has no shell sessions; install the agent again"
+                    "the stackbox-agent on this host has no shell sessions; install the agent again"
                 ),
                 // Once the client leaves, the agent hangs the shell up and reports; don't wait forever.
                 _ = tokio::time::sleep(TERMINAL_CLOSE_TIMEOUT), if !client_open => return Ok(()),
@@ -309,18 +309,18 @@ impl Session {
                                 Frame::Terminal { data } if attached => {
                                     let bytes = STANDARD
                                         .decode(data)
-                                        .map_err(|_| anyhow!("invalid farm-agent terminal output"))?;
+                                        .map_err(|_| anyhow!("invalid stackbox-agent terminal output"))?;
                                     // A departed client also closes `input`, handled below.
                                     let _ = output.send(bytes).await;
                                 }
                                 Frame::Result { result: Reply::Done } => return Ok(()),
                                 Frame::Error { message } => bail!("{message}"),
-                                _ => bail!("unexpected farm-agent frame in a shell session"),
+                                _ => bail!("unexpected stackbox-agent frame in a shell session"),
                             }
                         }
                     }
                     Some(_) => {}
-                    None => bail!("farm-agent shell session closed without a result"),
+                    None => bail!("stackbox-agent shell session closed without a result"),
                 },
                 message = input.recv(), if client_open => {
                     let frame = match message {
@@ -487,21 +487,21 @@ impl Session {
     pub async fn inspect(&self) -> Result<HostInspection> {
         parse_inspection(&self.run(&inspect_script(), 45, "Host inspection").await?)
     }
-    /// Install this build's farm kernel on the host, under `~/.local/share/farm/libkrunfw`.
+    /// Install this build's stackbox kernel on the host, under `~/.local/share/stackbox/libkrunfw`.
     /// The library is verified before it is published and the manifest goes last, so an
     /// interrupted upload leaves the stock kernel in place rather than a half kernel.
     pub async fn install_kernel(&self, artifact: &crate::kernel::Artifact) -> Result<()> {
         crate::kernel::validate_id(&artifact.id)?;
         crate::kernel::validate_filename(&artifact.filename)?;
         super::artifact::validate_digest(&artifact.sha256)?;
-        let dir = format!(".local/share/farm/libkrunfw/{}", artifact.id);
+        let dir = format!(".local/share/stackbox/libkrunfw/{}", artifact.id);
         let script = format!(
             "{COMMON}path=\"$HOME/{dir}/{name}\"\nif [ -f \"$path\" ] && printf '%s  %s\\n' '{sha256}' \"$path\" | sha256sum -c --status; then printf cached; else printf missing; fi\n",
             name = artifact.filename,
             sha256 = artifact.sha256
         );
         if self
-            .run(&script, 15, "Farm kernel checksum check")
+            .run(&script, 15, "Stackbox kernel checksum check")
             .await?
             .trim()
             != "cached"
@@ -519,7 +519,7 @@ impl Session {
         let script = format!(
             "set -eu\numask 022\ndir=\"$HOME/{dir}\"\nmkdir -p \"$dir\"\nprintf '%s' '{manifest}' | base64 -d > \"$dir/manifest.txt.tmp\"\nmv -f \"$dir/manifest.txt.tmp\" \"$dir/manifest.txt\"\n"
         );
-        self.run(&script, 30, "Farm kernel manifest").await?;
+        self.run(&script, 30, "Stackbox kernel manifest").await?;
         Ok(())
     }
     pub async fn install(&self) -> Result<()> {
@@ -577,7 +577,7 @@ pub(crate) fn install_script() -> String {
 /// Report the host's facts; `golden` says whether this build's golden image is built yet.
 fn inspect_script() -> String {
     include_str!("inspect.sh")
-        .replace("@GOLDEN@", &crate::farm::golden::current())
+        .replace("@GOLDEN@", &crate::stackbox::golden::current())
         .replace("@MSB_VERSION@", super::MSB_VERSION)
 }
 
@@ -586,25 +586,25 @@ fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
-/// The guest-side probe: one process reads the kernel's GPU stack. farm's kernel carries
+/// The guest-side probe: one process reads the kernel's GPU stack. stackbox's kernel carries
 /// VFIO, mdev and the `mtty` driver built in, so an absent path means the feature did not
 /// come up, not that a module is unloaded. The last line is the marker earlier coordinators
 /// read. No single quotes: this runs inside a single-quoted `sh -c` word.
-const GPU_PROBE: &str = "vfio=0; [ -e /dev/vfio/vfio ] && vfio=1; echo \"FARM-GPU vfio $vfio\"; \
-bus=0; [ -d /sys/class/mdev_bus ] && bus=1; echo \"FARM-GPU mdev $bus\"; \
-mtty=0; [ -d /sys/class/mdev_bus/mtty ] && mtty=1; echo \"FARM-GPU mtty $mtty\"; \
-printf \"FARM-GPU release %s\\n\" \"$(uname -r 2>/dev/null || true)\"; \
+const GPU_PROBE: &str = "vfio=0; [ -e /dev/vfio/vfio ] && vfio=1; echo \"STACKBOX-GPU vfio $vfio\"; \
+bus=0; [ -d /sys/class/mdev_bus ] && bus=1; echo \"STACKBOX-GPU mdev $bus\"; \
+mtty=0; [ -d /sys/class/mdev_bus/mtty ] && mtty=1; echo \"STACKBOX-GPU mtty $mtty\"; \
+printf \"STACKBOX-GPU release %s\\n\" \"$(uname -r 2>/dev/null || true)\"; \
 for t in /sys/class/mdev_bus/*/mdev_supported_types/*; do \
   [ -d \"$t\" ] || continue; \
   n=${t##*/}; c=0; \
   [ -r \"$t/available_instances\" ] && c=$(cat \"$t/available_instances\"); \
-  printf \"FARM-GPU type %s %s\\n\" \"$n\" \"$c\"; \
+  printf \"STACKBOX-GPU type %s %s\\n\" \"$n\" \"$c\"; \
 done; \
-if [ -e /sys/class/mdev_bus/mtty/mdev_supported_types/mtty-1 ]; then echo FARM-MDEV 1; else echo FARM-MDEV 0; fi; \
+if [ -e /sys/class/mdev_bus/mtty/mdev_supported_types/mtty-1 ]; then echo STACKBOX-MDEV 1; else echo STACKBOX-MDEV 0; fi; \
 exit 0";
 
 /// Boot a small VM from the base image the golden image is built from, run a command in it
-/// and remove it. `kernel` is the host's installed farm kernel: without it the CLI boots
+/// and remove it. `kernel` is the host's installed stackbox kernel: without it the CLI boots
 /// the stock microsandbox kernel, and the boot cannot report an mtty device.
 pub(crate) fn smoke_script(token: &str, kernel: Option<&str>) -> Result<String> {
     // Token comes exclusively from a locally generated UUID, never an API field.
@@ -621,8 +621,8 @@ pub(crate) fn smoke_script(token: &str, kernel: Option<&str>) -> Result<String> 
     // stdin over SSH, so an msb that attached to the terminal would swallow the commands
     // after it; that once hid the mdev probe and the cleanup.
     Ok(format!(
-        "{COMMON}\n{kernel}name=farm-check-{token}\ntrap 'msb remove --force \"$name\" < /dev/null >/dev/null 2>&1' EXIT\nmsb create --name \"$name\" --cpus 1 --memory 512M --root-disk 2G --max-duration 120s --no-net {image} < /dev/null\nmsb exec \"$name\" -- /bin/true < /dev/null\n# The farm kernel exposes the kernel's sample mtty mediated device; the stock one has none.\nmsb exec \"$name\" -- /bin/sh -c '{GPU_PROBE}' < /dev/null\nmsb remove --force \"$name\" < /dev/null\ntrap - EXIT\n",
-        image = crate::farm::golden::DEFAULT_OS.base_image
+        "{COMMON}\n{kernel}name=stackbox-check-{token}\ntrap 'msb remove --force \"$name\" < /dev/null >/dev/null 2>&1' EXIT\nmsb create --name \"$name\" --cpus 1 --memory 512M --root-disk 2G --max-duration 120s --no-net {image} < /dev/null\nmsb exec \"$name\" -- /bin/true < /dev/null\n# The stackbox kernel exposes the kernel's sample mtty mediated device; the stock one has none.\nmsb exec \"$name\" -- /bin/sh -c '{GPU_PROBE}' < /dev/null\nmsb remove --force \"$name\" < /dev/null\ntrap - EXIT\n",
+        image = crate::stackbox::golden::DEFAULT_OS.base_image
     ))
 }
 
@@ -640,7 +640,7 @@ pub(crate) fn parse_gpu_kernel(output: &str) -> Result<GpuKernel> {
     let mut gpu = GpuKernel::default();
     let mut probed = false;
     for line in output.lines() {
-        let Some(fields) = line.strip_prefix("FARM-GPU ") else {
+        let Some(fields) = line.strip_prefix("STACKBOX-GPU ") else {
             continue;
         };
         let mut parts = fields.split_whitespace();
@@ -681,11 +681,11 @@ pub(crate) fn parse_gpu_kernel(output: &str) -> Result<GpuKernel> {
 /// never ran, which is different from a boot whose kernel has no such device.
 pub(crate) fn parse_mdev(output: &str) -> Result<bool> {
     ensure!(
-        output.contains("FARM-MDEV 0") || output.contains("FARM-MDEV 1"),
+        output.contains("STACKBOX-MDEV 0") || output.contains("STACKBOX-MDEV 1"),
         "the verification VM booted but its mdev probe did not run: {}",
         output.trim()
     );
-    Ok(output.contains("FARM-MDEV 1"))
+    Ok(output.contains("STACKBOX-MDEV 1"))
 }
 
 const TERMINAL_ATTACH_TIMEOUT: Duration = Duration::from_secs(30);
@@ -693,7 +693,7 @@ const TERMINAL_CLOSE_TIMEOUT: Duration = Duration::from_secs(10);
 
 fn agent_command(digest: &str, seconds: u64) -> String {
     format!(
-        "export PATH=\"$HOME/.microsandbox/bin:$HOME/.local/bin:$PATH\"; export MSB_BACKEND=local; timeout --kill-after=10s {seconds} \"$HOME/.local/share/farm/agents/{digest}/farm-agent\""
+        "export PATH=\"$HOME/.microsandbox/bin:$HOME/.local/bin:$PATH\"; export MSB_BACKEND=local; timeout --kill-after=10s {seconds} \"$HOME/.local/share/stackbox/agents/{digest}/stackbox-agent\""
     )
 }
 
@@ -702,23 +702,26 @@ fn drain_frames(buffer: &mut Vec<u8>) -> Result<Vec<super::protocol::Frame>> {
     use super::protocol::MAX_FRAME;
     let mut frames = Vec::new();
     while let Some(index) = buffer.iter().position(|b| *b == b'\n') {
-        ensure!(index <= MAX_FRAME, "farm-agent frame exceeds limit");
+        ensure!(index <= MAX_FRAME, "stackbox-agent frame exceeds limit");
         let bytes: Vec<u8> = buffer.drain(..=index).collect();
         frames.push(
             serde_json::from_slice(&bytes)
-                .map_err(|_| anyhow!("invalid farm-agent protocol frame"))?,
+                .map_err(|_| anyhow!("invalid stackbox-agent protocol frame"))?,
         );
     }
-    ensure!(buffer.len() <= MAX_FRAME, "farm-agent frame exceeds limit");
+    ensure!(
+        buffer.len() <= MAX_FRAME,
+        "stackbox-agent frame exceeds limit"
+    );
     Ok(frames)
 }
 
-/// The `FARM\tpci_device\t<bdf>,<vendor>,<product>,<class>,<group>,<driver>,<exclusive>,<ready>`
+/// The `STACKBOX\tpci_device\t<bdf>,<vendor>,<product>,<class>,<group>,<driver>,<exclusive>,<ready>`
 /// lines of an inspection. A malformed line is skipped rather than failing the whole inspection.
 pub(crate) fn parse_pci_devices(output: &str) -> Vec<HostPciDevice> {
     output
         .lines()
-        .filter_map(|line| line.strip_prefix("FARM\tpci_device\t"))
+        .filter_map(|line| line.strip_prefix("STACKBOX\tpci_device\t"))
         .filter_map(parse_pci_device)
         .collect()
 }
@@ -751,7 +754,7 @@ fn parse_pci_device(value: &str) -> Option<HostPciDevice> {
 fn parse_inspection(output: &str) -> Result<HostInspection> {
     let mut values = BTreeMap::new();
     for line in output.lines() {
-        if let Some(fields) = line.strip_prefix("FARM\t")
+        if let Some(fields) = line.strip_prefix("STACKBOX\t")
             && let Some((key, value)) = fields.split_once('\t')
         {
             values.insert(key, value);
@@ -809,7 +812,7 @@ fn parse_inspection(output: &str) -> Result<HostInspection> {
         docker_available: field("docker")? == "1",
         golden_image_available: field("golden")? == "1",
         // A kernel the host's agent boots from, installed by preparation or named by
-        // FARM_LIBKRUNFW_PATH; absent when the stock one boots.
+        // STACKBOX_LIBKRUNFW_PATH; absent when the stock one boots.
         msb_pci_capable,
         pci_passthrough_available: crate::remote::pci_passthrough_ready(
             custom_kernel.is_some(),
@@ -852,15 +855,15 @@ mod tests {
         let digest = format!("{:x}", Sha256::digest(payload));
         let command = upload_command(
             &digest,
-            ".local/share/farm/agents/test",
-            "farm-agent",
+            ".local/share/stackbox/agents/test",
+            "stackbox-agent",
             180,
             "700",
         )
         .strip_prefix("timeout 180 ")
         .unwrap()
         .replace(
-            "$HOME/.local/share/farm/agents/test",
+            "$HOME/.local/share/stackbox/agents/test",
             dir.path().to_str().unwrap(),
         );
         let run = |bytes: &[u8]| {
@@ -875,7 +878,7 @@ mod tests {
             child.wait().unwrap()
         };
         assert!(run(payload).success());
-        let installed = dir.path().join("farm-agent");
+        let installed = dir.path().join("stackbox-agent");
         assert_eq!(std::fs::read(&installed).unwrap(), payload);
         assert!(!run(b"corrupted bytes").success());
         assert_eq!(std::fs::read(&installed).unwrap(), payload);
@@ -898,7 +901,7 @@ mod tests {
             assert!(line.contains("< /dev/null"), "{line}");
         }
         assert!(script.contains("export MSB_LIBKRUNFW_PATH='/k/libkrunfw.so.5.6.1'"));
-        assert!(script.contains("FARM-MDEV 1") && script.contains("FARM-MDEV 0"));
+        assert!(script.contains("STACKBOX-MDEV 1") && script.contains("STACKBOX-MDEV 0"));
         // One probe process reads the GPU stack; it is a single-quoted `sh -c` word, so a
         // quote inside would end that word early.
         assert!(!GPU_PROBE.contains('\''), "{GPU_PROBE}");
@@ -934,17 +937,19 @@ mod tests {
         );
         assert!(!script.contains("@MSB_VERSION@"));
         // The fork hook: a custom binary is installed as it is, before any release download.
-        let fork = script.find("FARM_MSB_BIN").expect("FARM_MSB_BIN hook");
+        let fork = script
+            .find("STACKBOX_MSB_BIN")
+            .expect("STACKBOX_MSB_BIN hook");
         let download = script.find("work=$(mktemp -d)").expect("download step");
         assert!(
             fork < download,
             "the fork hook must run before the release download"
         );
-        // The default release is the preinpost/microsandbox fork's, and FARM_MSB_RELEASE_BASE
+        // The default release is the preinpost/microsandbox fork's, and STACKBOX_MSB_RELEASE_BASE
         // still replaces it.
         assert!(
             script.contains(
-                "base=${FARM_MSB_RELEASE_BASE:-https://github.com/preinpost/microsandbox/releases/download/v$want}"
+                "base=${STACKBOX_MSB_RELEASE_BASE:-https://github.com/preinpost/microsandbox/releases/download/v$want}"
             ),
             "{script}"
         );
@@ -964,7 +969,7 @@ mod tests {
     #[test]
     fn the_gpu_probe_reports_types_counts_release_and_kernel() {
         use crate::remote::{GpuKernelKind, MdevType};
-        let output = "FARM-MDEV 1\nFARM-GPU vfio 1\nFARM-GPU mdev 1\nFARM-GPU mtty 1\nFARM-GPU release 6.12.113\nFARM-GPU type mtty-1 24\nFARM-GPU type mtty-0 7\n";
+        let output = "STACKBOX-MDEV 1\nSTACKBOX-GPU vfio 1\nSTACKBOX-GPU mdev 1\nSTACKBOX-GPU mtty 1\nSTACKBOX-GPU release 6.12.113\nSTACKBOX-GPU type mtty-1 24\nSTACKBOX-GPU type mtty-0 7\n";
         assert!(parse_mdev(output).unwrap());
         let gpu = parse_gpu_kernel(output).unwrap().for_kernel(
             true,
@@ -992,7 +997,7 @@ mod tests {
 
         // The stock kernel boots without any of it; the zero markers are still printed.
         let stock = parse_gpu_kernel(
-            "FARM-MDEV 0\nFARM-GPU vfio 0\nFARM-GPU mdev 0\nFARM-GPU mtty 0\nFARM-GPU release 6.1.0\n",
+            "STACKBOX-MDEV 0\nSTACKBOX-GPU vfio 0\nSTACKBOX-GPU mdev 0\nSTACKBOX-GPU mtty 0\nSTACKBOX-GPU release 6.1.0\n",
         )
         .unwrap()
         .for_kernel(false, None, Some("the kernel was built for msb 0.7.12".into()));
@@ -1007,9 +1012,11 @@ mod tests {
 
     #[test]
     fn a_boot_without_the_gpu_probe_is_an_error_not_a_stock_kernel() {
-        let error = parse_gpu_kernel("FARM-MDEV 0\n").unwrap_err().to_string();
+        let error = parse_gpu_kernel("STACKBOX-MDEV 0\n")
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("GPU probe did not run"), "{error}");
-        let error = parse_gpu_kernel("FARM-GPU vfio maybe")
+        let error = parse_gpu_kernel("STACKBOX-GPU vfio maybe")
             .unwrap_err()
             .to_string();
         assert!(error.contains("invalid GPU probe value"), "{error}");
@@ -1028,14 +1035,14 @@ mod tests {
         };
         let script = upload_command(
             &artifact.sha256,
-            &format!(".local/share/farm/libkrunfw/{}", artifact.id),
+            &format!(".local/share/stackbox/libkrunfw/{}", artifact.id),
             &artifact.filename,
             300,
             "644",
         );
         assert!(script.starts_with("timeout 300 bash -c '"), "{script}");
         assert!(
-            script.contains("$HOME/.local/share/farm/libkrunfw/0123456789abcdef"),
+            script.contains("$HOME/.local/share/stackbox/libkrunfw/0123456789abcdef"),
             "{script}"
         );
         assert!(script.contains("chmod 644"), "{script}");
@@ -1047,7 +1054,7 @@ mod tests {
         // The script the kernel check and the manifest write run are plain shell, not a
         // REPL; they must not hide a failure behind a pipe that ends early.
         let check = format!(
-            "{COMMON}path=\"$HOME/.local/share/farm/libkrunfw/{0}/{1}\"\nif [ -f \"$path\" ] && printf '%s  %s\\n' '{2}' \"$path\" | sha256sum -c --status; then printf cached; else printf missing; fi\n",
+            "{COMMON}path=\"$HOME/.local/share/stackbox/libkrunfw/{0}/{1}\"\nif [ -f \"$path\" ] && printf '%s  %s\\n' '{2}' \"$path\" | sha256sum -c --status; then printf cached; else printf missing; fi\n",
             artifact.id, artifact.filename, artifact.sha256
         );
         assert!(!check.contains("grep -q"), "{check}");
@@ -1162,7 +1169,7 @@ mod tests {
     }
     #[tokio::test]
     async fn shell_session_streams_both_ways_and_ends_when_the_client_leaves() {
-        use crate::farm::{TerminalInput, TerminalIo, TerminalSize};
+        use crate::stackbox::{TerminalInput, TerminalIo, TerminalSize};
         let fixture = Fixture::start().await;
         let session = Session::connect(&host(&fixture), fixture.registration("unused").credentials)
             .await
@@ -1173,7 +1180,7 @@ mod tests {
             version: super::super::protocol::VERSION,
             coordinator_id: uuid::Uuid::new_v4().to_string(),
             operation: super::super::protocol::Operation::Shell {
-                farm_id: "demo".into(),
+                stackbox_id: "demo".into(),
                 generation: uuid::Uuid::new_v4().to_string(),
                 node: None,
                 size: TerminalSize { rows: 24, cols: 80 },
@@ -1217,7 +1224,7 @@ mod tests {
     }
     #[test]
     fn rejects_incomplete_untrusted_inspection_output() {
-        assert!(parse_inspection("FARM\tos\tLinux").is_err());
+        assert!(parse_inspection("STACKBOX\tos\tLinux").is_err());
         assert!(parse_inspection("random shell startup output").is_err());
     }
 }
@@ -1227,15 +1234,15 @@ mod pci_inspection_tests {
     use super::*;
     use crate::remote::{group_exclusive, pci_passthrough_ready};
 
-    const DEVICE: &str = "FARM\tpci_device\t0000:04:00.3,1022,1639,0c0330,12,vfio-pci,1,1";
+    const DEVICE: &str = "STACKBOX\tpci_device\t0000:04:00.3,1022,1639,0c0330,12,vfio-pci,1,1";
 
     #[test]
     fn the_inspection_reads_each_vfio_device_and_skips_a_malformed_line() {
         let output = format!(
-            "FARM\tos\tLinux\n{DEVICE}\n\
-             FARM\tpci_device\t0000:05:00.0,10DE,1B06,030000,13,vfio-pci,0,0\n\
-             FARM\tpci_device\tnot-a-device,1022,1639,0c0330,,vfio-pci,1,1\n\
-             FARM\tpci_device\t0000:06:00.0,1022,1639\n"
+            "STACKBOX\tos\tLinux\n{DEVICE}\n\
+             STACKBOX\tpci_device\t0000:05:00.0,10DE,1B06,030000,13,vfio-pci,0,0\n\
+             STACKBOX\tpci_device\tnot-a-device,1022,1639,0c0330,,vfio-pci,1,1\n\
+             STACKBOX\tpci_device\t0000:06:00.0,1022,1639\n"
         );
         let devices = parse_pci_devices(&output);
         assert_eq!(devices.len(), 2);
@@ -1255,7 +1262,7 @@ mod pci_inspection_tests {
 
     #[test]
     fn a_device_without_an_iommu_group_is_never_ready() {
-        let output = "FARM\tpci_device\t0000:04:00.3,1022,1639,0c0330,,vfio-pci,0,0\n";
+        let output = "STACKBOX\tpci_device\t0000:04:00.3,1022,1639,0c0330,,vfio-pci,0,0\n";
         let device = &parse_pci_devices(output)[0];
         assert_eq!(device.iommu_group, None);
         assert!(!device.vfio_ready);
@@ -1268,7 +1275,7 @@ mod pci_inspection_tests {
     }
 
     #[test]
-    fn passthrough_needs_the_farm_kernel_vfio_and_a_ready_device() {
+    fn passthrough_needs_the_stackbox_kernel_vfio_and_a_ready_device() {
         let ready = parse_pci_devices(DEVICE);
         assert!(pci_passthrough_ready(true, true, true, &ready));
         assert!(
@@ -1286,16 +1293,16 @@ mod pci_inspection_tests {
     }
 
     /// An inspection whose `msb` lacks `--pci`/`--iommu` cannot pass a device through, even
-    /// on the farm kernel with a ready device, and its reply says so.
+    /// on the stackbox kernel with a ready device, and its reply says so.
     #[test]
     fn msb_without_pci_flags_is_reported_and_blocks_passthrough() {
         let output = |msb_pci: &str| {
             format!(
-                "FARM\tos\tLinux\nFARM\tarch\tx86_64\nFARM\tkvm\t1\nFARM\tsudo\t1\n\
-                 FARM\tmemory_total\t1\nFARM\tmemory_available\t1\nFARM\tdisk_available\t1\n\
-                 FARM\tmsb\tmsb 0.8.1\nFARM\tdocker\t1\nFARM\tgolden\t1\n\
-                 FARM\tlibkrunfw\t/k/libkrunfw.so\nFARM\tvfio\t1\n\
-                 FARM\tmsb_pci\t{msb_pci}\n{DEVICE}\n"
+                "STACKBOX\tos\tLinux\nSTACKBOX\tarch\tx86_64\nSTACKBOX\tkvm\t1\nSTACKBOX\tsudo\t1\n\
+                 STACKBOX\tmemory_total\t1\nSTACKBOX\tmemory_available\t1\nSTACKBOX\tdisk_available\t1\n\
+                 STACKBOX\tmsb\tmsb 0.8.1\nSTACKBOX\tdocker\t1\nSTACKBOX\tgolden\t1\n\
+                 STACKBOX\tlibkrunfw\t/k/libkrunfw.so\nSTACKBOX\tvfio\t1\n\
+                 STACKBOX\tmsb_pci\t{msb_pci}\n{DEVICE}\n"
             )
         };
         let upstream = parse_inspection(&output("0")).unwrap();

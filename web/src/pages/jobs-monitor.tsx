@@ -40,7 +40,7 @@ import { Fragment, useEffect, useMemo, useState } from "react";
 import {
   activeJob,
   ApiError,
-  farmsQuery,
+  stackboxesQuery,
   hostJobsQuery,
   jobsQuery,
   logsQuery,
@@ -73,9 +73,9 @@ import {
 export function JobsMonitor() {
   const jobs = useQuery(jobsQuery());
   const hostJobs = useQuery(hostJobsQuery());
-  const [scope, setScope] = useState("farm");
-  const farmActivity = useMemo<Activity[]>(
-    () => (jobs.data ?? []).map((job) => ({ scope: "farm", job })),
+  const [scope, setScope] = useState("stackbox");
+  const stackboxActivity = useMemo<Activity[]>(
+    () => (jobs.data ?? []).map((job) => ({ scope: "stackbox", job })),
     [jobs.data],
   );
   const hostActivity = useMemo<Activity[]>(
@@ -94,9 +94,9 @@ export function JobsMonitor() {
         onValueChange={(value) => setScope(String(value))}
       >
         <Tabs.List className="tabs-list jobs-scope" aria-label="작업 범위">
-          <Tabs.Tab value="farm" className="tab">
+          <Tabs.Tab value="stackbox" className="tab">
             <Boxes size={16} />
-            Farm 작업{" "}
+            Stackbox 작업{" "}
             <span className="count-pill">
               {jobs.data?.filter(activeJob).length ?? 0} 진행 중
             </span>
@@ -109,10 +109,10 @@ export function JobsMonitor() {
             </span>
           </Tabs.Tab>
         </Tabs.List>
-        <Tabs.Panel value="farm" className="tab-panel">
+        <Tabs.Panel value="stackbox" className="tab-panel">
           <JobWorkspace
-            scope="farm"
-            activities={farmActivity}
+            scope="stackbox"
+            activities={stackboxActivity}
             pending={jobs.isPending}
             error={jobs.error}
             retry={() => void jobs.refetch()}
@@ -171,7 +171,7 @@ function JobWorkspace({
   error,
   retry,
 }: {
-  scope: "farm" | "host";
+  scope: "stackbox" | "host";
   activities: Activity[];
   pending: boolean;
   error: unknown;
@@ -250,7 +250,7 @@ function JobWorkspace({
                   <code>{activityStep(a)}</code>
                   <ArrowRight size={15} />
                 </div>
-                {a.scope === "farm" &&
+                {a.scope === "stackbox" &&
                   a.job.kind === "deploy" &&
                   a.job.phase && (
                     <>
@@ -279,7 +279,7 @@ function JobWorkspace({
                       </div>
                     </>
                   )}
-                {a.scope === "farm" &&
+                {a.scope === "stackbox" &&
                   (() => {
                     const step = currentStep(a.job);
                     return (
@@ -312,7 +312,7 @@ function JobWorkspace({
           <div className="jobs-idle">
             <CheckCheck size={18} />
             <span>
-              진행 중인 {scope === "farm" ? "Farm" : "호스트"} 작업이 없습니다.
+              진행 중인 {scope === "stackbox" ? "Stackbox" : "호스트"} 작업이 없습니다.
             </span>
           </div>
         )}
@@ -336,7 +336,7 @@ function JobWorkspace({
               onChange={(e) => setGrouped(e.target.checked)}
             />
             <Layers size={14} />
-            {scope === "farm" ? "Farm" : "호스트"}별로 묶기
+            {scope === "stackbox" ? "Stackbox" : "호스트"}별로 묶기
           </label>
         </div>
         <div className="jobs-filters">
@@ -344,7 +344,7 @@ function JobWorkspace({
             <Search size={16} />
             <input
               aria-label="작업 검색"
-              placeholder={`${scope === "farm" ? "Farm" : "호스트"} 이름 또는 작업 ID 검색`}
+              placeholder={`${scope === "stackbox" ? "Stackbox" : "호스트"} 이름 또는 작업 ID 검색`}
               value={filters.search}
               onChange={(e) => setFilter("search", e.target.value)}
             />
@@ -365,7 +365,7 @@ function JobWorkspace({
             value={filters.kind}
             onChange={(v) => setFilter("kind", v)}
             items={
-              scope === "farm"
+              scope === "stackbox"
                 ? [
                     { value: "all", label: "모든 작업" },
                     ...Object.entries(jobKindLabels).map(([value, label]) => ({
@@ -377,7 +377,7 @@ function JobWorkspace({
                     { value: "all", label: "모든 작업" },
                     { value: "check", label: "SSH 점검" },
                     { value: "prepare", label: "환경 준비" },
-                    { value: "install_agent", label: "Farm 실행기 업데이트" },
+                    { value: "install_agent", label: "Stackbox 실행기 업데이트" },
                     { value: "purge", label: "호스트 VM 정리" },
                   ]
             }
@@ -449,7 +449,7 @@ function HistoryTable({
   data: ActivityRow[];
   grouped: boolean;
   now: number;
-  scope: "farm" | "host";
+  scope: "stackbox" | "host";
   count: number;
   select: (a: Activity) => void;
 }) {
@@ -458,7 +458,7 @@ function HistoryTable({
     () => [
       {
         id: "target",
-        header: scope === "farm" ? "Farm" : "호스트",
+        header: scope === "stackbox" ? "Stackbox" : "호스트",
         cell: ({ row }) => (
           <div className={`jobs-target ${row.depth ? "jobs-previous" : ""}`}>
             <button
@@ -617,7 +617,7 @@ function HistoryTable({
         <span>
           {count}개 작업
           {grouped
-            ? ` · ${data.length}개 ${scope === "farm" ? "Farm" : "호스트"}`
+            ? ` · ${data.length}개 ${scope === "stackbox" ? "Stackbox" : "호스트"}`
             : ""}{" "}
           · {table.getState().pagination.pageIndex + 1} /{" "}
           {Math.max(1, table.getPageCount())} 페이지
@@ -652,10 +652,10 @@ function ActivityDetail({
   activity: Activity;
   now: number;
 }) {
-  const farms = useQuery({ ...farmsQuery(), enabled: a.scope === "farm" });
-  const farm =
-    a.scope === "farm"
-      ? farms.data?.find((f) => f.id === a.job.farm_id)
+  const stackboxes = useQuery({ ...stackboxesQuery(), enabled: a.scope === "stackbox" });
+  const stackbox =
+    a.scope === "stackbox"
+      ? stackboxes.data?.find((f) => f.id === a.job.stackbox_id)
       : undefined;
   return (
     <Dialog.Portal>
@@ -665,7 +665,7 @@ function ActivityDetail({
           <div className="job-drawer-heading">
             <div>
               <p className="eyebrow">
-                {a.scope === "farm" ? "FARM JOB" : "HOST JOB"}
+                {a.scope === "stackbox" ? "STACKBOX JOB" : "HOST JOB"}
               </p>
               <Dialog.Title>{subject(a)}</Dialog.Title>
               <Dialog.Description>
@@ -683,7 +683,7 @@ function ActivityDetail({
               <dd className="font-mono">{a.job.id}</dd>
               <dt>생성 시각</dt>
               <dd>{dateTime(a.job.created_at)}</dd>
-              {a.scope === "farm" && a.job.started_at != null && (
+              {a.scope === "stackbox" && a.job.started_at != null && (
                 <>
                   <dt>시작 시각</dt>
                   <dd>{dateTime(a.job.started_at)}</dd>
@@ -707,8 +707,8 @@ function ActivityDetail({
                 <pre>{a.job.error}</pre>
               </section>
             )}
-            {a.scope === "farm" && <StepList job={a.job} now={now} />}
-            {a.scope === "farm" && !!a.job.assembly?.length && (
+            {a.scope === "stackbox" && <StepList job={a.job} now={now} />}
+            {a.scope === "stackbox" && !!a.job.assembly?.length && (
               <AssemblySteps steps={a.job.assembly} />
             )}
             {a.scope === "host" ? (
@@ -728,7 +728,7 @@ function ActivityDetail({
                 )}
               </section>
             ) : (
-              <FarmJobLog activity={a} />
+              <StackboxJobLog activity={a} />
             )}
           </div>
           <div className="job-drawer-footer">
@@ -737,22 +737,22 @@ function ActivityDetail({
                 Hosts로 이동
                 <ArrowRight size={16} />
               </Link>
-            ) : farm && farm.status !== "deleted" ? (
+            ) : stackbox && stackbox.status !== "deleted" ? (
               <Link
-                to="/farms/$farmId"
-                params={{ farmId: a.job.farm_id }}
+                to="/stackboxes/$stackboxId"
+                params={{ stackboxId: a.job.stackbox_id }}
                 className="btn btn-default"
               >
-                Farm 상세로 이동
+                Stackbox 상세로 이동
                 <ArrowRight size={16} />
               </Link>
             ) : (
               <span className="muted">
-                {farms.isPending
-                  ? "Farm 상태 확인 중…"
-                  : farms.error
-                    ? "Farm 상태를 확인하지 못했습니다."
-                    : "삭제된 Farm의 작업 기록입니다."}
+                {stackboxes.isPending
+                  ? "Stackbox 상태 확인 중…"
+                  : stackboxes.error
+                    ? "Stackbox 상태를 확인하지 못했습니다."
+                    : "삭제된 Stackbox의 작업 기록입니다."}
               </span>
             )}
             <Dialog.Close render={<Button />}>닫기</Dialog.Close>
@@ -789,13 +789,13 @@ export function AssemblySteps({ steps }: { steps: AssemblyStep[] }) {
     </section>
   );
 }
-function FarmJobLog({
+function StackboxJobLog({
   activity: a,
 }: {
-  activity: Extract<Activity, { scope: "farm" }>;
+  activity: Extract<Activity, { scope: "stackbox" }>;
 }) {
   const logs = useQuery({
-    ...logsQuery(a.job.farm_id),
+    ...logsQuery(a.job.stackbox_id),
     refetchInterval: activeJob(a.job) ? 1500 : false,
   });
   const entries = logs.data?.filter((log) => log.job_id === a.job.id) ?? [];
@@ -807,7 +807,7 @@ function FarmJobLog({
         <Loading label="로그를 불러오는 중" />
       ) : logs.error instanceof ApiError && logs.error.status === 404 ? (
         <p className="jobs-log-empty">
-          Farm이 삭제되어 작업 로그를 조회할 수 없습니다. 작업 결과와 오류
+          Stackbox가 삭제되어 작업 로그를 조회할 수 없습니다. 작업 결과와 오류
           상세는 위에 보관됩니다.
         </p>
       ) : logs.error ? (

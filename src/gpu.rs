@@ -1,24 +1,24 @@
-//! The virtual GPU guest script and the load farm writes into Nova instance metadata.
+//! The virtual GPU guest script and the load stackbox writes into Nova instance metadata.
 //!
-//! farm does not emulate a GPU: it installs a small `nvidia-smi` that reads its values
-//! from the instance's metadata. The portal writes a load (`GpuLoad`), farm samples its
+//! stackbox does not emulate a GPU: it installs a small `nvidia-smi` that reads its values
+//! from the instance's metadata. The portal writes a load (`GpuLoad`), stackbox samples its
 //! pattern into at most [`MAX_SAMPLES`] utilization values, and the guest derives the
 //! remaining fields (temperature, power, fan, clocks, pstate) with integer arithmetic.
 //! The table fits in one Nova property value (255 characters), so a load travels over
 //! the metadata service that every instance already has.
 //!
-//! The generated shell scripts are run on the control VM by the farm backend. Their
+//! The generated shell scripts are run on the control VM by the stackbox backend. Their
 //! arguments are shell-quoted here; `metadata_properties` is also the value the
 //! coordinator↔agent boundary test follows into the `openstack server set` command.
 
-use crate::model::{FarmInstance, GpuLoad, GpuPattern, GpuProfile, MAX_GPU_COUNT};
+use crate::model::{GpuLoad, GpuPattern, GpuProfile, MAX_GPU_COUNT, StackboxInstance};
 use anyhow::{Result, bail, ensure};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 
 /// The guest script installed as `/usr/bin/nvidia-smi`.
 pub const GUEST_SCRIPT: &str = include_str!("../guest/gpu/nvidia-smi.sh");
-/// The user-data installer; `#__FARM_GPU_SCRIPT__` is replaced with [`GUEST_SCRIPT`].
+/// The user-data installer; `#__STACKBOX_GPU_SCRIPT__` is replaced with [`GUEST_SCRIPT`].
 const INSTALLER_TEMPLATE: &str = include_str!("../guest/gpu/user-data.sh");
 /// A Nova instance property value is at most 255 characters.
 pub const MAX_PROPERTY_VALUE: usize = 255;
@@ -28,26 +28,26 @@ pub const MAX_SAMPLES: u32 = 24;
 /// Where the installer writes the fake tool.
 pub const GUEST_BINARY: &str = "/usr/bin/nvidia-smi";
 /// The key the portal and the guest use for the number of virtual GPUs.
-pub const COUNT_KEY: &str = "farm_gpu_count";
+pub const COUNT_KEY: &str = "stackbox_gpu_count";
 /// The key prefix of one virtual GPU's load.
-pub const LOAD_KEY_PREFIX: &str = "farm_gpu_";
+pub const LOAD_KEY_PREFIX: &str = "stackbox_gpu_";
 /// The metadata version prefix the guest understands.
 const VERSION: &str = "v1";
 
 /// The installer a user can pass as user-data (CirrOS and other images that do not
 /// apply Nova vendor data). It refuses to replace the tool when a real GPU is present.
 pub fn user_data_installer() -> String {
-    INSTALLER_TEMPLATE.replace("#__FARM_GPU_SCRIPT__", GUEST_SCRIPT.trim_end())
+    INSTALLER_TEMPLATE.replace("#__STACKBOX_GPU_SCRIPT__", GUEST_SCRIPT.trim_end())
 }
 
 /// A cloud-config document for Nova's static vendor data: install the script on every
-/// instance of a GPU farm. cloud-init merges it without user-data; images that are not
+/// instance of a GPU stackbox. cloud-init merges it without user-data; images that are not
 /// cloud-init (CirrOS) ignore it and use [`user_data_installer`] instead.
 pub fn vendordata_cloud_config() -> String {
     let mut config = String::from(
         "#cloud-config\n\
          write_files:\n\
-         \x20 - path: /usr/local/sbin/farm-gpu-install\n\
+         \x20 - path: /usr/local/sbin/stackbox-gpu-install\n\
          \x20   permissions: '0755'\n\
          \x20   owner: root:root\n\
          \x20   content: |\n",
@@ -61,7 +61,7 @@ pub fn vendordata_cloud_config() -> String {
             config.push('\n');
         }
     }
-    config.push_str("runcmd:\n  - [sh, /usr/local/sbin/farm-gpu-install]\n");
+    config.push_str("runcmd:\n  - [sh, /usr/local/sbin/stackbox-gpu-install]\n");
     config
 }
 
@@ -121,7 +121,7 @@ impl GpuLoad {
             GpuPattern::Sawtooth => low + span * t,
             GpuPattern::Random => {
                 // Deterministic: applying the same load again draws the same table, and
-                // the portal's preview can compute it without a random seed from farm.
+                // the portal's preview can compute it without a random seed from stackbox.
                 let mut x = (index as u64)
                     .wrapping_mul(6364136223846793005)
                     .wrapping_add(u64::from(self.period_s).wrapping_mul(1442695040888963407))
@@ -170,7 +170,7 @@ impl GpuLoad {
         )
     }
 
-    /// Reads a value farm wrote. A value from another version, or one that no longer
+    /// Reads a value stackbox wrote. A value from another version, or one that no longer
     /// validates, is `None`; the caller then shows the default load.
     pub fn decode(value: &str) -> Option<Self> {
         let mut load = Self::default();
@@ -205,7 +205,7 @@ impl GpuLoad {
 /// The deterministic UUID of a virtual GPU: UUIDv5 over the instance UUID and index,
 /// so every guest of an instance reports the same `GPU-...` after a reboot.
 pub fn gpu_uuid(server_uuid: &str, index: u32) -> String {
-    let name = format!("farm-gpu:{server_uuid}:{index}");
+    let name = format!("stackbox-gpu:{server_uuid}:{index}");
     format!(
         "GPU-{}",
         uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, name.as_bytes())
@@ -240,12 +240,12 @@ pub fn metadata_properties(
 pub fn load_of(stored: Option<&GpuLoad>, properties: &BTreeMap<String, String>) -> Option<GpuLoad> {
     stored.cloned().or_else(|| {
         properties
-            .get("farm_gpu_0")
+            .get("stackbox_gpu_0")
             .and_then(|v| GpuLoad::decode(v))
     })
 }
 
-/// Whether the instance's metadata carries a load farm wrote.
+/// Whether the instance's metadata carries a load stackbox wrote.
 pub fn applied(properties: &BTreeMap<String, String>) -> bool {
     properties
         .keys()
@@ -270,16 +270,16 @@ struct RawInstance {
 }
 
 /// Lists every server and its flavor's GPU resource classes through the control VM's
-/// OpenStack CLI. `farm_gpu_*` metadata comes with each server, so the portal can tell
+/// OpenStack CLI. `stackbox_gpu_*` metadata comes with each server, so the portal can tell
 /// whether a load is applied without a second call.
 pub const INSTANCES_SCRIPT: &str = r#"set -euo pipefail
-. "${FARM_ADMIN_OPENRC:-/etc/kolla/admin-openrc.sh}"
+. "${STACKBOX_ADMIN_OPENRC:-/etc/kolla/admin-openrc.sh}"
 python3 - <<'PY'
 import json
 import os
 import subprocess
 
-OS = os.environ.get('FARM_OPENSTACK_CLI', '/opt/osc/bin/openstack')
+OS = os.environ.get('STACKBOX_OPENSTACK_CLI', '/opt/osc/bin/openstack')
 
 
 def run(*args):
@@ -336,7 +336,7 @@ pub fn instances(
     output: &str,
     resource_class: &str,
     loads: &BTreeMap<String, GpuLoad>,
-) -> Result<Vec<FarmInstance>> {
+) -> Result<Vec<StackboxInstance>> {
     let raw: Vec<RawInstance> = serde_json::from_str(output.trim())
         .map_err(|error| anyhow::anyhow!("cannot read the control VM's instance list: {error}"))?;
     Ok(raw
@@ -347,7 +347,7 @@ pub fn instances(
                 .iter()
                 .filter_map(|(class, count)| Some((class.clone(), count.parse().ok()?)))
                 .collect();
-            // A flavor may ask for a standard class while the farm advertises a custom
+            // A flavor may ask for a standard class while the stackbox advertises a custom
             // one; show whichever GPU class it names.
             let gpu_count = resources
                 .get(resource_class)
@@ -362,7 +362,7 @@ pub fn instances(
                 .filter(|key| key.starts_with(LOAD_KEY_PREFIX))
                 .cloned()
                 .collect();
-            FarmInstance {
+            StackboxInstance {
                 id: instance.id,
                 name: instance.name,
                 status: instance.status,
@@ -382,7 +382,7 @@ pub fn instances(
 /// guest reads; quoting keeps semicolons and commas inside the argument.
 pub fn apply_script(server: &str, properties: &BTreeMap<String, String>) -> String {
     let mut script = String::from(
-        "set -euo pipefail\n. \"${FARM_ADMIN_OPENRC:-/etc/kolla/admin-openrc.sh}\"\nos=${FARM_OPENSTACK_CLI:-/opt/osc/bin/openstack}\n",
+        "set -euo pipefail\n. \"${STACKBOX_ADMIN_OPENRC:-/etc/kolla/admin-openrc.sh}\"\nos=${STACKBOX_OPENSTACK_CLI:-/opt/osc/bin/openstack}\n",
     );
     if properties.is_empty() {
         script.push_str(&format!(
@@ -407,10 +407,10 @@ pub fn apply_script(server: &str, properties: &BTreeMap<String, String>) -> Stri
 /// list is a no-op, so a DELETE is safe on an instance that never got a load.
 pub fn clear_script(server: &str, keys: &[String]) -> String {
     let mut script = String::from(
-        "set -euo pipefail\n. \"${FARM_ADMIN_OPENRC:-/etc/kolla/admin-openrc.sh}\"\nos=${FARM_OPENSTACK_CLI:-/opt/osc/bin/openstack}\n",
+        "set -euo pipefail\n. \"${STACKBOX_ADMIN_OPENRC:-/etc/kolla/admin-openrc.sh}\"\nos=${STACKBOX_OPENSTACK_CLI:-/opt/osc/bin/openstack}\n",
     );
     if keys.is_empty() {
-        script.push_str("# no farm_gpu_* property is set\n");
+        script.push_str("# no stackbox_gpu_* property is set\n");
         return script;
     }
     script.push_str(&format!("$os server unset {} \\\n", sh_quote(server)));
@@ -562,7 +562,7 @@ mod tests {
                 assert_eq!(GpuLoad::decode(&value), Some(load.clone()), "{value}");
             }
         }
-        assert_eq!(GpuLoad::decode("not a farm load"), None);
+        assert_eq!(GpuLoad::decode("not a stackbox load"), None);
         assert_eq!(GpuLoad::decode("v1;p:nope;q:sine"), None);
         assert_eq!(
             GpuLoad::decode("v1;p:sim-8g;q:sine;n:90;x:10"),
@@ -618,7 +618,7 @@ mod tests {
         let installer = user_data_installer();
         assert!(installer.starts_with("#!/bin/sh\n"));
         assert!(installer.contains(GUEST_SCRIPT.trim_end()));
-        assert!(!installer.contains("#__FARM_GPU_SCRIPT__"));
+        assert!(!installer.contains("#__STACKBOX_GPU_SCRIPT__"));
         assert!(installer.contains("10de:"));
         assert!(installer.contains("cat >/usr/bin/nvidia-smi"));
 
@@ -626,12 +626,12 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&vendordata).unwrap();
         let cloud = value["cloud-init"].as_str().unwrap();
         assert!(cloud.starts_with("#cloud-config\n"));
-        assert!(cloud.contains("path: /usr/local/sbin/farm-gpu-install"));
-        assert!(cloud.contains("runcmd:\n  - [sh, /usr/local/sbin/farm-gpu-install]"));
+        assert!(cloud.contains("path: /usr/local/sbin/stackbox-gpu-install"));
+        assert!(cloud.contains("runcmd:\n  - [sh, /usr/local/sbin/stackbox-gpu-install]"));
         // The installer is one YAML literal block: every line is indented, and the
         // block scalar keeps the guest script's own shebang as content.
         assert!(cloud.contains("      #!/bin/sh\n"));
-        assert!(cloud.contains("      FARM_GPU_SCRIPT_EOF\n"));
+        assert!(cloud.contains("      STACKBOX_GPU_SCRIPT_EOF\n"));
     }
 
     #[cfg(unix)]
@@ -674,14 +674,15 @@ mod tests {
         }
         // A quote in a server name cannot end the shell word.
         assert!(apply_script("a'b", &properties).contains("'a'\\''b'"));
-        assert!(clear_script("server-1", &[]).contains("no farm_gpu_* property"));
+        assert!(clear_script("server-1", &[]).contains("no stackbox_gpu_* property"));
         assert!(
-            clear_script("server-1", &["farm_gpu_0".into()]).contains("--property 'farm_gpu_0'")
+            clear_script("server-1", &["stackbox_gpu_0".into()])
+                .contains("--property 'stackbox_gpu_0'")
         );
     }
 
     #[test]
-    fn the_instance_list_reads_the_farm_load_and_its_flavor() {
+    fn the_instance_list_reads_the_stackbox_load_and_its_flavor() {
         let load = GpuLoad {
             pattern: GpuPattern::Square,
             min: 0,
@@ -696,8 +697,8 @@ mod tests {
             "name": "demo",
             "status": "ACTIVE",
             "project": "admin",
-            "flavor": "farm.vgpu",
-            "properties": {"farm_gpu_count": "1", "farm_gpu_0": value},
+            "flavor": "stackbox.vgpu",
+            "properties": {"stackbox_gpu_count": "1", "stackbox_gpu_0": value},
             "resources": {"VGPU": "1", "CUSTOM_OTHER": "2"},
         }])
         .to_string();
@@ -725,7 +726,7 @@ mod tests {
     #[test]
     fn a_state_without_gpu_loads_still_reads() {
         // The field must default so an older state.json keeps loading.
-        let farm: crate::model::FarmRecord = serde_json::from_value(serde_json::json!({
+        let stackbox: crate::model::StackboxRecord = serde_json::from_value(serde_json::json!({
             "id": "old",
             "status": "ready",
             "plan": null,
@@ -740,6 +741,6 @@ mod tests {
             "updated_at": 1,
         }))
         .unwrap();
-        assert!(farm.gpu_loads.is_empty());
+        assert!(stackbox.gpu_loads.is_empty());
     }
 }

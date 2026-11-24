@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Exercise a ready farm's public APIs without printing or saving credentials."""
+"""Exercise a ready stackbox's public APIs without printing or saving credentials."""
 
 import argparse
 import hashlib
@@ -71,7 +71,7 @@ def verify(endpoints, restart=None):
     image_id = None
     try:
         _, _, body = request(glance + "/v2/images", "POST", {
-            "name": "farm-verify-" + str(uuid.uuid4()), "disk_format": "raw",
+            "name": "stackbox-verify-" + str(uuid.uuid4()), "disk_format": "raw",
             "container_format": "bare", "visibility": "private",
         }, token)
         image_id = json.loads(body)["id"]
@@ -243,34 +243,34 @@ def verify_local_containers(nodes, components):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("farm_id")
+    parser.add_argument("stackbox_id")
     parser.add_argument("--state-dir")
-    parser.add_argument("--farm-binary", default="target/debug/farm")
+    parser.add_argument("--stackbox-binary", default="target/debug/stackbox")
     parser.add_argument("--restart-local-vms", action="store_true",
-                        help="restart this local farm's VMs after upload to verify persistence")
+                        help="restart this local stackbox's VMs after upload to verify persistence")
     args = parser.parse_args()
-    command = [args.farm_binary]
+    command = [args.stackbox_binary]
     if args.state_dir:
         command += ["--state-dir", args.state_dir]
     restart = None
     if args.restart_local_vms:
-        farm = json.loads(subprocess.check_output(command + ["status", args.farm_id, "--json"]))
-        if farm.get("host_id") is not None or farm["status"] != "ready":
-            parser.error("--restart-local-vms requires a ready local farm")
-        nodes = [node["name"] for node in farm["nodes"]]
-        if (len(nodes) != 1 or farm["nodes"][0].get("role") != "all-in-one"
-                or nodes[0] not in (args.farm_id, args.farm_id + "-all-in-one")):
-            parser.error("unexpected local farm nodes")
+        stackbox = json.loads(subprocess.check_output(command + ["status", args.stackbox_id, "--json"]))
+        if stackbox.get("host_id") is not None or stackbox["status"] != "ready":
+            parser.error("--restart-local-vms requires a ready local stackbox")
+        nodes = [node["name"] for node in stackbox["nodes"]]
+        if (len(nodes) != 1 or stackbox["nodes"][0].get("role") != "all-in-one"
+                or nodes[0] not in (args.stackbox_id, args.stackbox_id + "-all-in-one")):
+            parser.error("unexpected local stackbox nodes")
 
         def restart():
-            print("Restarting local farm VMs after image upload...", flush=True)
+            print("Restarting local stackbox VMs after image upload...", flush=True)
             subprocess.run(["msb", "restart", "--timeout", "90", *nodes], check=True, timeout=120)
 
-    endpoints = json.loads(subprocess.check_output(command + ["endpoints", args.farm_id, "--json"]))
+    endpoints = json.loads(subprocess.check_output(command + ["endpoints", args.stackbox_id, "--json"]))
     verify(endpoints, restart)
     if args.restart_local_vms:
-        components = farm["plan"]["components"] if farm.get("plan") else ["keystone", "glance"]
-        verify_local_containers(farm["nodes"], components)
+        components = stackbox["plan"]["components"] if stackbox.get("plan") else ["keystone", "glance"]
+        verify_local_containers(stackbox["nodes"], components)
 
 
 if __name__ == "__main__":

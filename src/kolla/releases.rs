@@ -1,6 +1,6 @@
 //! The OpenStack releases this coordinator can install: the one built into the binary, the
 //! branches the public kolla-ansible repository still publishes, and the 2024.x series whose
-//! images the farm publishes itself. Only 2024.1 (Caracal) and newer are supported; the
+//! images the stackbox publishes itself. Only 2024.1 (Caracal) and newer are supported; the
 //! end-of-life series keep their compatibility code but are offered only through an explicit
 //! opt-in. A release with no template of its own is installed clean, so the choice is not
 //! limited to the build's own release.
@@ -20,22 +20,22 @@ const TTL: Duration = Duration::from_secs(600);
 
 static CACHE: Mutex<Option<(Instant, BTreeMap<String, String>)>> = Mutex::new(None);
 
-/// The public registry the farm publishes its own Kolla builds to (the end-of-life series and
+/// The public registry the stackbox publishes its own Kolla builds to (the end-of-life series and
 /// 2024.1/2024.2, which quay no longer carries). A host that keeps a mirror sets
-/// `FARM_EOL_REGISTRY`; the images are pulled anonymously.
+/// `STACKBOX_EOL_REGISTRY`; the images are pulled anonymously.
 pub const EOL_REGISTRY: &str = "ghcr.io";
 /// The namespace of those builds below [`EOL_REGISTRY`], `owner/repository`. A mirror sets
-/// `FARM_EOL_NAMESPACE`.
+/// `STACKBOX_EOL_NAMESPACE`.
 pub const EOL_NAMESPACE: &str = "preinpost/kolla";
 
 /// The oldest OpenStack release this coordinator supports: Caracal, 2024.1. Older series keep
 /// their install code (see [`LEGACY`]) but are neither offered nor accepted unless this host
-/// sets `FARM_ALLOW_UNSUPPORTED_RELEASES=1`.
+/// sets `STACKBOX_ALLOW_UNSUPPORTED_RELEASES=1`.
 pub const MIN_SUPPORTED_RELEASE: &str = "2024.1";
 
-/// The first release whose Kolla images quay publishes for aarch64 on the base the farm uses.
+/// The first release whose Kolla images quay publishes for aarch64 on the base the stackbox uses.
 /// 2025.1–2026.1 have aarch64 images for Debian/Ubuntu only; 2026.2 is the first Rocky 10
-/// `-aarch64` set. The farm does not switch its base distro, so earlier releases run on amd64.
+/// `-aarch64` set. The stackbox does not switch its base distro, so earlier releases run on amd64.
 const ARM64_FROM: &str = "2026.2";
 
 /// Whether `release` is inside the supported range, or this host opted into older series.
@@ -44,18 +44,18 @@ pub fn supported(release: &str) -> bool {
 }
 
 /// Whether `release` is inside the range the project supports at all, [`MIN_SUPPORTED_RELEASE`]
-/// and newer. The opt-in does not move this line: a farm below it keeps working but stays out of
+/// and newer. The opt-in does not move this line: a stackbox below it keeps working but stays out of
 /// support, which is what the portal marks beside its version.
 pub fn in_supported_range(release: &str) -> bool {
     year_release(release) && release >= MIN_SUPPORTED_RELEASE
 }
 
 /// Whether this host allows releases below [`MIN_SUPPORTED_RELEASE`]
-/// (`FARM_ALLOW_UNSUPPORTED_RELEASES=1`). The switch is read per call, so a running daemon
+/// (`STACKBOX_ALLOW_UNSUPPORTED_RELEASES=1`). The switch is read per call, so a running daemon
 /// can change its catalog by restarting with the variable set.
 pub fn allow_unsupported() -> bool {
     allow_unsupported_value(
-        std::env::var("FARM_ALLOW_UNSUPPORTED_RELEASES")
+        std::env::var("STACKBOX_ALLOW_UNSUPPORTED_RELEASES")
             .ok()
             .as_deref(),
     )
@@ -77,7 +77,7 @@ fn unsupported_when(allow_unsupported: bool, release: &str) -> Option<String> {
         let hint = if !year_release(release) {
             "name a release as year.release, such as 2024.1"
         } else if !allow_unsupported && legacy(release).is_some() {
-            "set FARM_ALLOW_UNSUPPORTED_RELEASES=1 on the coordinator to allow it"
+            "set STACKBOX_ALLOW_UNSUPPORTED_RELEASES=1 on the coordinator to allow it"
         } else {
             "no images are published for it"
         };
@@ -96,14 +96,14 @@ fn allow_unsupported_value(value: Option<&str>) -> bool {
     })
 }
 
-/// [`EOL_REGISTRY`], or the one this host's `FARM_EOL_REGISTRY` names.
+/// [`EOL_REGISTRY`], or the one this host's `STACKBOX_EOL_REGISTRY` names.
 pub fn eol_registry() -> String {
-    override_or("FARM_EOL_REGISTRY", EOL_REGISTRY)
+    override_or("STACKBOX_EOL_REGISTRY", EOL_REGISTRY)
 }
 
-/// [`EOL_NAMESPACE`], or the one this host's `FARM_EOL_NAMESPACE` names.
+/// [`EOL_NAMESPACE`], or the one this host's `STACKBOX_EOL_NAMESPACE` names.
 pub fn eol_namespace() -> String {
-    override_or("FARM_EOL_NAMESPACE", EOL_NAMESPACE)
+    override_or("STACKBOX_EOL_NAMESPACE", EOL_NAMESPACE)
 }
 
 fn override_or(variable: &str, default: &str) -> String {
@@ -134,12 +134,12 @@ fn override_value(variable: &str, default: &str, value: &str) -> String {
     value.to_owned()
 }
 
-/// The base distro and Python of a series the farm builds itself. The kolla-ansible tag
+/// The base distro and Python of a series the stackbox builds itself. The kolla-ansible tag
 /// appends its own base distro version to both the image tag and the Python path, so only
 /// the distro is named here (`rocky` becomes `zed-rocky-9`).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Build {
-    /// What the farm built the images on, `rocky`.
+    /// What the stackbox built the images on, `rocky`.
     pub base_distro: &'static str,
     /// Python inside those images, `3.9`; the L3 agent's venv path carries it.
     pub python: &'static str,
@@ -148,7 +148,7 @@ pub struct Build {
 /// A series kolla-ansible no longer keeps a branch for. Its last tag installs the same way,
 /// but the guest needs an older Python and its images belong to an older Kolla.
 pub struct Legacy {
-    /// What a farm records, `2021.1`.
+    /// What a stackbox records, `2021.1`.
     pub release: &'static str,
     /// The series name: the image tag and the constraints name, `wallaby`.
     pub series: &'static str,
@@ -166,7 +166,7 @@ pub struct Legacy {
     pub collection: &'static str,
     /// Python minor the release's Ansible runs on; the guest's own 3.12 is too new.
     pub python: &'static str,
-    /// The series' Kolla build, when the farm publishes one itself: it is pulled from
+    /// The series' Kolla build, when the stackbox publishes one itself: it is pulled from
     /// [`eol_registry`]/[`eol_namespace`] instead of the tag's own registry. `None` leaves the
     /// tag's default images in place.
     pub built: Option<Build>,
@@ -176,9 +176,9 @@ pub struct Legacy {
 /// the tags below are the last release each series had (`openstack/releases` deliverables).
 /// Their images are not on the `quay.io/openstack.kolla` registry these tags default to
 /// (`docker_registry` in their `ansible/group_vars/all.yml`, which carries only 2025.1 and
-/// later), so each series needs another source. zed is the first the farm builds and publishes
+/// later), so each series needs another source. zed is the first the stackbox builds and publishes
 /// itself: `ghcr.io/preinpost/kolla/<service>:zed-rocky-9`, on Rocky 9, for amd64 only. The
-/// older series keep the tag's own registry until the farm builds them too.
+/// older series keep the tag's own registry until the stackbox builds them too.
 ///
 /// `ansible` and `install_deps` come from each tag's own tree, not from guesswork:
 /// `doc/source/user/quickstart.rst` at the tag states the Ansible range in prose and installs
@@ -202,7 +202,7 @@ pub const LEGACY: &[Legacy] = &[
         install_deps: true,
         collection: "zed-eol",
         python: "3.10",
-        // Built and published by the farm: Rocky 9 and its Python 3.9, amd64 only.
+        // Built and published by the stackbox: Rocky 9 and its Python 3.9, amd64 only.
         built: Some(Build {
             base_distro: "rocky",
             python: "3.9",
@@ -312,12 +312,12 @@ fn capitalized(series: &str) -> String {
 /// quay no longer publishes its images. The ref and image source are fixed here, so an
 /// offline coordinator still resolves the release.
 struct Built {
-    /// What a farm records, `2024.1`.
+    /// What a stackbox records, `2024.1`.
     release: &'static str,
     /// kolla-ansible ref to install: `unmaintained/2024.1` while the branch exists, otherwise
     /// the series' last tag (`2024.2-eol`). A fetched branch listing wins when it has one.
     reference: &'static str,
-    /// The farm's Kolla images: Rocky and its Python, built for amd64 only.
+    /// The stackbox's Kolla images: Rocky and its Python, built for amd64 only.
     build: Build,
     /// Python minor its tooling runs on in the guest; the guest's own for both 2024.x.
     python: &'static str,
@@ -329,10 +329,10 @@ struct Built {
     collection: &'static str,
 }
 
-/// Releases the farm builds images for, newest first. Both 2024.x series are inside the
+/// Releases the stackbox builds images for, newest first. Both 2024.x series are inside the
 /// supported range: 2025.1 is the first quay still serves. `.github/workflows/eol-images.yml`
 /// in `github.com/preinpost/kolla` builds `<service>:<release>-rocky-9` with the image groups
-/// from `.github/kolla/groups.json`, and the farm pulls them from [`EOL_REGISTRY`].
+/// from `.github/kolla/groups.json`, and the stackbox pulls them from [`EOL_REGISTRY`].
 const BUILT: &[Built] = &[
     Built {
         release: "2024.2",
@@ -364,12 +364,12 @@ const BUILT: &[Built] = &[
     },
 ];
 
-/// The built entry for `release`, when the farm publishes its images itself.
+/// The built entry for `release`, when the stackbox publishes its images itself.
 fn built(release: &str) -> Option<&'static Built> {
     BUILT.iter().find(|entry| entry.release == release)
 }
 
-/// The images a series is installed from, when the farm builds and publishes them itself.
+/// The images a series is installed from, when the stackbox builds and publishes them itself.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Images {
     /// The registry, `ghcr.io`.
@@ -385,7 +385,7 @@ pub struct Images {
 /// What installing one release takes: which kolla-ansible ref, which Python, which images.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ReleaseInfo {
-    /// The name a farm records, `2021.1` or `2026.2`.
+    /// The name a stackbox records, `2021.1` or `2026.2`.
     pub release: String,
     /// Series name: the image tag and the upper-constraints name.
     pub series: String,
@@ -393,7 +393,7 @@ pub struct ReleaseInfo {
     pub codename: String,
     /// kolla-ansible branch (`stable/2026.2`) or tag (`12.8.0`) to install.
     pub reference: String,
-    /// The farm's own build of this series' images, when it has one. `None` installs the
+    /// The stackbox's own build of this series' images, when it has one. `None` installs the
     /// tag's default images (`quay.io/openstack.kolla` for a legacy tag, the maintained
     /// branch's own default).
     pub images: Option<Images>,
@@ -409,14 +409,14 @@ pub struct ReleaseInfo {
     /// `requirements.yml` names, `zed-eol`; empty when the tag has no Galaxy step.
     pub collection: String,
     /// Kolla-ansible keeps no branch and the series is end of life: it is offered only with
-    /// `FARM_ALLOW_UNSUPPORTED_RELEASES=1`.
+    /// `STACKBOX_ALLOW_UNSUPPORTED_RELEASES=1`.
     pub eol: bool,
     /// Its images are published for aarch64.
     pub arm64: bool,
 }
 
 impl ReleaseInfo {
-    /// Base distro of its images: the farm's own build, or the tag's default (`ubuntu` for the
+    /// Base distro of its images: the stackbox's own build, or the tag's default (`ubuntu` for the
     /// legacy series, `rocky` for a maintained branch).
     pub fn base_distro(&self) -> &str {
         match &self.images {
@@ -427,7 +427,7 @@ impl ReleaseInfo {
     }
 
     /// Python inside its containers. The tag's Ubuntu images and a maintained Rocky 10 build
-    /// carry the same minor as the release's tooling; the farm's Rocky 9 build is older.
+    /// carry the same minor as the release's tooling; the stackbox's Rocky 9 build is older.
     /// 2025.1 is the last series kolla publishes on Rocky 9, whose Python 3.9 differs from
     /// the guest tooling's 3.12.
     pub fn image_python(&self) -> &str {
@@ -547,7 +547,7 @@ pub async fn reference(release: &str) -> Result<String> {
     if let Some(found) = remembered(release) {
         return Ok(found);
     }
-    // A series the farm builds images for, or an end-of-life tag, pins its ref. A fetched
+    // A series the stackbox builds images for, or an end-of-life tag, pins its ref. A fetched
     // listing still wins for a built series while it has a branch (`unmaintained/2024.1`).
     if built(release).is_some() || legacy(release).is_some() {
         return Ok(info(release).reference);
@@ -603,9 +603,9 @@ fn remembered(release: &str) -> Option<String> {
     TEST_REFERENCES.lock().ok()?.as_ref()?.get(release).cloned()
 }
 
-/// Whether the farm's Rocky-based Kolla images of `release` are published for aarch64. The
-/// farm does not switch its base distro for arm64: 2025.1–2026.1 publish aarch64 only on
-/// Debian/Ubuntu, and the series the farm builds itself (zed, 2024.1, 2024.2) are amd64 only.
+/// Whether the stackbox's Rocky-based Kolla images of `release` are published for aarch64. The
+/// stackbox does not switch its base distro for arm64: 2025.1–2026.1 publish aarch64 only on
+/// Debian/Ubuntu, and the series the stackbox builds itself (zed, 2024.1, 2024.2) are amd64 only.
 fn published_for_arm64(release: &str) -> bool {
     year_release(release) && release >= ARM64_FROM
 }
@@ -625,14 +625,14 @@ pub fn arches(release: &str) -> Vec<String> {
 }
 
 /// Releases that can be installed, newest first: the branches kolla-ansible still publishes,
-/// the 2024.x series the farm builds images for, and (with the opt-in) the end-of-life series
+/// the 2024.x series the stackbox builds images for, and (with the opt-in) the end-of-life series
 /// whose last tags remain. Falls back to this build's release when the repository cannot be
-/// read, so a farm can always be created.
+/// read, so a stackbox can always be created.
 pub async fn published() -> Vec<String> {
     if let Some(list) = configured() {
         return list;
     }
-    // Tests never reach the network; `FARM_OPENSTACK_RELEASES` overrides this for air-gapped
+    // Tests never reach the network; `STACKBOX_OPENSTACK_RELEASES` overrides this for air-gapped
     // hosts, which keep working with the release built into the binary.
     if cfg!(test) {
         return with_known(vec![super::OPENSTACK_RELEASE.to_owned()]);
@@ -681,15 +681,15 @@ fn cached() -> Option<Vec<String>> {
     (at.elapsed() < TTL).then(|| with_known(refs.into_keys().collect()))
 }
 
-/// `FARM_OPENSTACK_RELEASES=2026.2,2025.2` pins the list, for hosts without the repository.
+/// `STACKBOX_OPENSTACK_RELEASES=2026.2,2025.2` pins the list, for hosts without the repository.
 fn configured() -> Option<Vec<String>> {
-    let value = std::env::var("FARM_OPENSTACK_RELEASES").ok()?;
+    let value = std::env::var("STACKBOX_OPENSTACK_RELEASES").ok()?;
     let list = normalize(value.split(',').map(str::trim));
     (!list.is_empty()).then_some(list)
 }
 
 /// Adds the releases a branch listing cannot offer: the end-of-life series (only when this
-/// host opted in) and the 2024.x series the farm builds images for.
+/// host opted in) and the 2024.x series the stackbox builds images for.
 fn with_known(mut list: Vec<String>) -> Vec<String> {
     for entry in LEGACY.iter().filter(|entry| supported(entry.release)) {
         list.push(entry.release.into());
@@ -760,7 +760,7 @@ pub fn parse(body: &serde_json::Value) -> Vec<String> {
 }
 
 /// Keeps the supported year.release names (`2024.1` and newer), newest first, and always
-/// offers this build's release. A pinned `FARM_OPENSTACK_RELEASES` list passes through here
+/// offers this build's release. A pinned `STACKBOX_OPENSTACK_RELEASES` list passes through here
 /// too, so it cannot smuggle in an older series without the opt-in.
 fn normalize_owned(mut list: Vec<String>) -> Vec<String> {
     list.retain(|release| supported(release));
@@ -778,7 +778,7 @@ fn normalize<'a>(releases: impl Iterator<Item = &'a str>) -> Vec<String> {
 }
 
 /// `2026.2`: a year and one release number. The legacy series reached before the year names
-/// (`victoria`) are offered from [`LEGACY`] instead, under the names a farm records.
+/// (`victoria`) are offered from [`LEGACY`] instead, under the names a stackbox records.
 pub fn year_release(release: &str) -> bool {
     let (year, number) = release.split_once('.').unwrap_or_default();
     year.len() == 4
@@ -884,12 +884,12 @@ mod tests {
     }
 
     #[test]
-    fn only_the_series_the_farm_builds_carry_an_image_source() {
-        // zed is the first series the farm builds and publishes itself: Rocky 9, amd64 only.
+    fn only_the_series_the_stackbox_builds_carry_an_image_source() {
+        // zed is the first series the stackbox builds and publishes itself: Rocky 9, amd64 only.
         assert_eq!(EOL_REGISTRY, "ghcr.io");
         assert_eq!(EOL_NAMESPACE, "preinpost/kolla");
         let zed = info("2022.2");
-        let images = zed.images.as_ref().expect("zed is built by the farm");
+        let images = zed.images.as_ref().expect("zed is built by the stackbox");
         assert_eq!(images.registry, eol_registry());
         assert_eq!(images.namespace, eol_namespace());
         assert_eq!(images.base_distro, "rocky");
@@ -900,7 +900,7 @@ mod tests {
         assert_eq!(zed.image_python(), "3.9");
         assert_ne!(zed.image_python(), zed.python);
 
-        // 2024.1 and 2024.2 are inside the supported range but no longer on quay: the farm
+        // 2024.1 and 2024.2 are inside the supported range but no longer on quay: the stackbox
         // publishes their Rocky 9 images at `ghcr.io/preinpost/kolla/<service>:2024.x-rocky-9`.
         for (release, reference) in [("2024.1", "unmaintained/2024.1"), ("2024.2", "2024.2-eol")] {
             let info = info(release);
@@ -912,7 +912,7 @@ mod tests {
             let images = info
                 .images
                 .as_ref()
-                .expect("{release} is built by the farm");
+                .expect("{release} is built by the stackbox");
             assert_eq!(images.registry, eol_registry(), "{release}");
             assert_eq!(images.namespace, eol_namespace(), "{release}");
             assert_eq!(images.base_distro, "rocky", "{release}");
@@ -957,16 +957,20 @@ mod tests {
     fn only_a_registry_path_overrides_the_image_source() {
         // A mirror names a registry and a namespace, and both are written into globals.yml.
         assert_eq!(
-            override_value("FARM_EOL_REGISTRY", EOL_REGISTRY, " mirror.example:5000 "),
+            override_value(
+                "STACKBOX_EOL_REGISTRY",
+                EOL_REGISTRY,
+                " mirror.example:5000 "
+            ),
             "mirror.example:5000"
         );
         assert_eq!(
-            override_value("FARM_EOL_NAMESPACE", EOL_NAMESPACE, "team/kolla_mirror"),
+            override_value("STACKBOX_EOL_NAMESPACE", EOL_NAMESPACE, "team/kolla_mirror"),
             "team/kolla_mirror"
         );
         // Unset or blank keeps the public default.
         assert_eq!(
-            override_value("FARM_EOL_REGISTRY", EOL_REGISTRY, "   "),
+            override_value("STACKBOX_EOL_REGISTRY", EOL_REGISTRY, "   "),
             EOL_REGISTRY
         );
         // Anything that could break out of the value keeps the default instead.
@@ -978,7 +982,7 @@ mod tests {
             "hub}docker_registry",
         ] {
             assert_eq!(
-                override_value("FARM_EOL_REGISTRY", EOL_REGISTRY, bad),
+                override_value("STACKBOX_EOL_REGISTRY", EOL_REGISTRY, bad),
                 EOL_REGISTRY,
                 "{bad:?}"
             );
@@ -996,8 +1000,11 @@ mod tests {
             assert!(supported_when(true, release), "{release}");
             let why = unsupported_when(false, release).expect("refused");
             assert!(why.contains(MIN_SUPPORTED_RELEASE), "{why}");
-            assert!(why.contains("FARM_ALLOW_UNSUPPORTED_RELEASES=1"), "{why}");
-            // The opt-in keeps working for a series a farm can still be created from.
+            assert!(
+                why.contains("STACKBOX_ALLOW_UNSUPPORTED_RELEASES=1"),
+                "{why}"
+            );
+            // The opt-in keeps working for a series a stackbox can still be created from.
             assert!(unsupported_when(true, release).is_none(), "{release}");
         }
         // 2023.1 and 2023.2 are neither supported nor reopened by the opt-in.
@@ -1006,9 +1013,12 @@ mod tests {
             assert!(!supported_when(true, release), "{release}");
             let why = unsupported_when(false, release).expect("refused");
             assert!(why.contains("no images are published"), "{why}");
-            assert!(!why.contains("FARM_ALLOW_UNSUPPORTED_RELEASES"), "{why}");
+            assert!(
+                !why.contains("STACKBOX_ALLOW_UNSUPPORTED_RELEASES"),
+                "{why}"
+            );
         }
-        // Code names were never a farm's release name, even with the opt-in.
+        // Code names were never a stackbox's release name, even with the opt-in.
         assert!(!supported_when(true, "zed"));
         assert!(unsupported_when(true, "zed").is_some_and(|why| why.contains("year.release")));
         assert!(!allow_unsupported_value(None));
@@ -1018,7 +1028,7 @@ mod tests {
         for value in ["1", "true", " YES ", "on"] {
             assert!(allow_unsupported_value(Some(value)), "{value}");
         }
-        // The supported range itself never moves with the opt-in: a farm below it stays
+        // The supported range itself never moves with the opt-in: a stackbox below it stays
         // marked as outside support, which is what the portal shows beside its version.
         for release in ["2022.2", "2023.2", "2022.1", "zed", ""] {
             assert!(!in_supported_range(release), "{release}");
@@ -1029,7 +1039,7 @@ mod tests {
     }
 
     #[test]
-    fn arches_follow_the_images_the_farm_would_pull() {
+    fn arches_follow_the_images_the_stackbox_would_pull() {
         // The current release is published for Rocky's aarch64 dataset; nothing older is.
         assert_eq!(
             arches(super::super::OPENSTACK_RELEASE),

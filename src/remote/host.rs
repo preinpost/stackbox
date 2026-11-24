@@ -1,4 +1,4 @@
-//! This machine as a farm host: what the coordinator's own agent runs on.
+//! This machine as a stackbox host: what the coordinator's own agent runs on.
 
 use super::{GpuKernel, HostInspection, HostPciDevice};
 use anyhow::{Context, Result, ensure};
@@ -174,7 +174,7 @@ pub async fn inspect() -> HostInspection {
     // The upstream and fork msb share one version string; the run help tells them apart.
     let msb_pci_capable =
         super::msb_help_supports_pci(&output("msb", &["run", "--help"]).await.unwrap_or_default());
-    let golden = crate::farm::golden::available(&crate::farm::golden::current())
+    let golden = crate::stackbox::golden::available(&crate::stackbox::golden::current())
         .await
         .unwrap_or(false);
     let docker = output("docker", &["version", "--format", "{{.Server.Version}}"])
@@ -282,7 +282,7 @@ pub async fn smoke(token: &str) -> Result<GpuKernel> {
     let stdout = String::from_utf8_lossy(&output.stdout);
     // Two failures are different: an msb that could not boot or run in the VM leaves a broken
     // host, while a boot whose kernel has no mtty leaves a host that is usable but cannot run
-    // an mtty GPU farm. The script prints FARM-MDEV 0 for the second, so a non-zero exit is
+    // an mtty GPU stackbox. The script prints STACKBOX-MDEV 0 for the second, so a non-zero exit is
     // the first and a missing marker is a probe that did not run.
     ensure!(
         output.status.success(),

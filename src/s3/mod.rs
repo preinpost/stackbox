@@ -213,7 +213,7 @@ mod tests {
             id: "minio".into(),
             endpoint: Some(" http://minio:9000/ ".into()),
             region: None,
-            name: "farm".into(),
+            name: "stackbox".into(),
             prefix: Some("/snapshots/dev/".into()),
             path_style: None,
             ca_pem: None,

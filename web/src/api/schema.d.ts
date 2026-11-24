@@ -132,230 +132,6 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
-  "/api/v1/farms": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    get: operations["list"];
-    put?: never;
-    post: operations["create"];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/api/v1/farms/{id}": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    get: operations["detail"];
-    put?: never;
-    post?: never;
-    delete: operations["delete"];
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/api/v1/farms/{id}/computes": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    get?: never;
-    put?: never;
-    post: operations["add_compute"];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/api/v1/farms/{id}/deploy": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    get?: never;
-    put?: never;
-    post: operations["deploy"];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/api/v1/farms/{id}/endpoints": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    get: operations["endpoints"];
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/api/v1/farms/{id}/gpu/guest-script": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    get: operations["gpu_guest_script"];
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/api/v1/farms/{id}/gpu/user-data": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    get: operations["gpu_user_data"];
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/api/v1/farms/{id}/instances": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    get: operations["instances"];
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/api/v1/farms/{id}/instances/{server}/gpu-load": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    get: operations["gpu_load"];
-    put: operations["set_gpu_load"];
-    post?: never;
-    delete: operations["clear_gpu_load"];
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/api/v1/farms/{id}/logs": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    get: operations["logs"];
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/api/v1/farms/{id}/logs/stream": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    get: operations["log_stream"];
-    put?: never;
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/api/v1/farms/{id}/nodes/{node}/faults": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    get?: never;
-    put: operations["set_faults"];
-    post?: never;
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/api/v1/farms/{id}/settle": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    get?: never;
-    put?: never;
-    post: operations["settle"];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
-  "/api/v1/farms/{id}/snapshots": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    get?: never;
-    put?: never;
-    post: operations["freeze"];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
   "/api/v1/host": {
     parameters: {
       query?: never;
@@ -478,7 +254,7 @@ export interface paths {
     get?: never;
     put?: never;
     /**
-     * Install only the agent, without msb, the farm kernel or a verification boot.
+     * Install only the agent, without msb, the stackbox kernel or a verification boot.
      * @deprecated
      * @description Deprecated: `POST /hosts/{id}/prepare` installs the agent too, after the kernel and the
      *     verification VM, so the portal offers one button. This endpoint stays for older callers.
@@ -634,22 +410,6 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
-  "/api/v1/releases/farms": {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    get?: never;
-    put?: never;
-    post: operations["create_release"];
-    delete?: never;
-    options?: never;
-    head?: never;
-    patch?: never;
-    trace?: never;
-  };
   "/api/v1/releases/plan": {
     parameters: {
       query?: never;
@@ -660,6 +420,22 @@ export interface paths {
     get?: never;
     put?: never;
     post: operations["release_plan"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/v1/releases/stackboxes": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    post: operations["create_release"];
     delete?: never;
     options?: never;
     head?: never;
@@ -746,6 +522,230 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/v1/stackboxes": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get: operations["list"];
+    put?: never;
+    post: operations["create"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/v1/stackboxes/{id}": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get: operations["detail"];
+    put?: never;
+    post?: never;
+    delete: operations["delete"];
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/v1/stackboxes/{id}/computes": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    post: operations["add_compute"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/v1/stackboxes/{id}/deploy": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    post: operations["deploy"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/v1/stackboxes/{id}/endpoints": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get: operations["endpoints"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/v1/stackboxes/{id}/gpu/guest-script": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get: operations["gpu_guest_script"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/v1/stackboxes/{id}/gpu/user-data": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get: operations["gpu_user_data"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/v1/stackboxes/{id}/instances": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get: operations["instances"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/v1/stackboxes/{id}/instances/{server}/gpu-load": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get: operations["gpu_load"];
+    put: operations["set_gpu_load"];
+    post?: never;
+    delete: operations["clear_gpu_load"];
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/v1/stackboxes/{id}/logs": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get: operations["logs"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/v1/stackboxes/{id}/logs/stream": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get: operations["log_stream"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/v1/stackboxes/{id}/nodes/{node}/faults": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put: operations["set_faults"];
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/v1/stackboxes/{id}/settle": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    post: operations["settle"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/v1/stackboxes/{id}/snapshots": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    post: operations["freeze"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -753,14 +753,14 @@ export interface components {
     AddComputeRequest: {
       /**
        * @description Compute template snapshot to boot the new VM from instead of installing it clean.
-       *     Kolla then only reconfigures it; the template must match the farm's OpenStack
+       *     Kolla then only reconfigures it; the template must match the stackbox's OpenStack
        *     release, components and CPU architecture.
        * @default null
        */
       from_snapshot: string | null;
       /**
-       * @description Host for the new compute VM; omitted for the farm's primary host. A compute on
-       *     another host joins the farm through its link relay.
+       * @description Host for the new compute VM; omitted for the stackbox's primary host. A compute on
+       *     another host joins the stackbox through its link relay.
        * @default null
        */
       host_id: string | null;
@@ -789,7 +789,7 @@ export interface components {
       compute?: null | components["schemas"]["ComputeSize"];
       /**
        * Format: int32
-       * @description Compute VMs of the farm the snapshot restores; 0 for all-in-one and templates.
+       * @description Compute VMs of the stackbox the snapshot restores; 0 for all-in-one and templates.
        */
       computes?: number;
       /**
@@ -817,7 +817,7 @@ export interface components {
       /** Format: int64 */
       size_bytes: number;
       snapshot_id: string;
-      source_farm?: string | null;
+      source_stackbox?: string | null;
     };
     /** @description One step of an assemble job. */
     AssemblyStep: {
@@ -827,7 +827,7 @@ export interface components {
       error?: string | null;
       /** @description Host the VM runs on. */
       host_id?: string | null;
-      /** @description The farm job that ran it; none for an import, which the snapshot shows. */
+      /** @description The stackbox job that ran it; none for an import, which the snapshot shows. */
       job_id?: string | null;
       /** @description The VM it makes (`control`, `compute-1`, ...); none for an import. */
       node?: string | null;
@@ -888,7 +888,7 @@ export interface components {
        */
       available: boolean;
       depends_on: string[];
-      /** @description True while `footprint_mib` is a planning estimate that no farm has measured yet. */
+      /** @description True while `footprint_mib` is a planning estimate that no stackbox has measured yet. */
       estimated: boolean;
       /**
        * Format: int32
@@ -964,14 +964,14 @@ export interface components {
       external_host?: string;
       gpu?: null | components["schemas"]["GpuConfig"];
       /**
-       * @description Registered host that runs the farm: this machine's local host or a remote one.
+       * @description Registered host that runs the stackbox: this machine's local host or a remote one.
        *     Required; it is optional only so the error can say how to register one.
        */
       host_id?: string | null;
       id: string;
       /** @description Object key in `bucket` to restore from. */
       key?: string | null;
-      layout?: null | components["schemas"]["FarmLayout"];
+      layout?: null | components["schemas"]["StackboxLayout"];
       owner?: string | null;
       /** @description Host PCI devices passed through to compute-1 (see [`PlanRequest::pci_devices`]). */
       pci_devices?: string[];
@@ -986,8 +986,8 @@ export interface components {
       release?: string | null;
       /**
        * @description Start from this snapshot instead of an empty VM. Its services replace `components`.
-       *     A control template starts a multi-node farm with its control VM alone, ready for
-       *     computes to be added; a compute template cannot start a farm.
+       *     A control template starts a multi-node stackbox with its control VM alone, ready for
+       *     computes to be added; a compute template cannot start a stackbox.
        */
       snapshot_id?: string | null;
     };
@@ -1058,145 +1058,9 @@ export interface components {
       port_base: number;
     };
     /**
-     * @description A virtual GPU instance as the portal's load editor lists it. `gpu_count` comes
-     *     from the flavor's resource class (or 1 when it asks for none, because the guest
-     *     script defaults to one virtual GPU).
-     */
-    FarmInstance: {
-      /** @description Whether the instance's metadata currently carries `farm_gpu_*`. */
-      applied: boolean;
-      flavor: string;
-      /**
-       * Format: int32
-       * @description Virtual GPUs the flavor asks for, 0 when it asks for no GPU resource.
-       */
-      gpu_count: number;
-      id: string;
-      load?: null | components["schemas"]["GpuLoad"];
-      name: string;
-      project?: string;
-      /** @description The `farm_gpu_*` keys currently set on the instance. */
-      properties?: string[];
-      /** @description Resource classes the flavor requires, `VGPU: 1`. */
-      resources: {
-        [key: string]: number;
-      };
-      status: string;
-    };
-    /**
-     * @description The layout of a farm without computes, kept readable for farms and snapshots made
-     *     before every new farm ran a control VM with computes.
-     * @enum {string}
-     */
-    FarmLayout: "all-in-one" | "control";
-    FarmNode: {
-      /**
-       * Format: int32
-       * @description A multi-node compute VM's position, from 1.
-       */
-      index?: number | null;
-      /** @description Live eth0 IPv4 for new all-in-one guests; legacy nodes may retain an overlay address. */
-      ip?: string | null;
-      /** Format: int32 */
-      memory_mib: number;
-      name: string;
-      role?: null | components["schemas"]["Role"];
-      status: string;
-    };
-    /**
-     * @description The OpenStack release a farm installs, named as the images and documents name it: the code
-     *     name beside the number (`2022.2` is `zed`), and whether this coordinator still supports it.
-     */
-    FarmOpenStack: {
-      /**
-       * @description The series' code name for display, `Zed` for 2022.2 and `Caracal` for 2024.1; empty
-       *     when it has no published name. Display only: `series` keeps the name the images and
-       *     the upper-constraints path use.
-       */
-      codename: string;
-      /** @description kolla-ansible keeps no branch for it any more, so it installs from the series' last tag. */
-      eol: boolean;
-      /** @description What the farm records, `2022.2`. */
-      release: string;
-      /**
-       * @description Its series name, `zed`; the same as `release` from 2023.1 on, where the names became
-       *     `year.release`.
-       */
-      series: string;
-      /**
-       * @description False below the oldest supported release, whatever the host's
-       *     `FARM_ALLOW_UNSUPPORTED_RELEASES` says: such a farm keeps working but is out of support.
-       */
-      supported: boolean;
-    };
-    FarmRecord: {
-      active_job?: string | null;
-      agent_sha256?: string | null;
-      /** Format: int64 */
-      created_at: number;
-      error?: string | null;
-      /** Format: int64 */
-      expires_at?: number | null;
-      exposure?: null | components["schemas"]["Exposure"];
-      /** @description Faults set on a multi-node farm's links, by VM (`control`, `compute-1`, ...). */
-      faults?: {
-        [key: string]: components["schemas"]["Impair"];
-      };
-      /**
-       * @description Virtual GPU loads the portal applied, by Nova server UUID. The guest reads the
-       *     same values from instance metadata; this copy keeps the pattern the portal shows
-       *     after a coordinator restart. A farm restored from a snapshot recovers the load
-       *     from the instance's metadata instead.
-       */
-      gpu_loads?: {
-        [key: string]: components["schemas"]["GpuLoad"];
-      };
-      host_id?: string | null;
-      id: string;
-      /** Format: int64 */
-      last_seen_at?: number | null;
-      nodes: components["schemas"]["FarmNode"][];
-      observation_error?: string | null;
-      owner?: string | null;
-      phase?: null | components["schemas"]["Phase"];
-      plan?: null | components["schemas"]["Plan"];
-      remote_generation?: string | null;
-      /** @description Other hosts that run some of a multi-node farm's compute VMs. `host_id` runs the rest. */
-      shares?: components["schemas"]["HostShare"][];
-      /** @description Snapshot this farm was restored from. */
-      snapshot_id?: string | null;
-      status: components["schemas"]["FarmStatus"];
-      /** @description Finer progress inside `phase`: our marker or the running Ansible task. */
-      step?: string | null;
-      /** Format: int64 */
-      updated_at: number;
-      /** @description SHA-256 of the token `host_id`'s switch joins the relay with, for a farm with shares. */
-      uplink_sha256?: string | null;
-    };
-    /** @enum {string} */
-    FarmStatus:
-      | "creating"
-      | "created"
-      | "deploying"
-      | "settling"
-      | "ready"
-      | "failed"
-      | "broken"
-      | "deleting"
-      | "deleted"
-      | "snapshotting";
-    /**
-     * @description A farm as the API returns it: the stored record plus the release facts the portal labels the
-     *     farm with. Only the record is kept; the release comes from the release tables, so the names
-     *     live in one place and a farm's state stays what it was created with.
-     */
-    FarmView: components["schemas"]["FarmRecord"] & {
-      openstack?: null | components["schemas"]["FarmOpenStack"];
-    };
-    /**
-     * @description A farm's GPU: `count` virtual devices on every compute VM.
+     * @description A stackbox's GPU: `count` virtual devices on every compute VM.
      *
-     *     The `simulated` mode's provider layout is farm's own, so a request can describe the
+     *     The `simulated` mode's provider layout is stackbox's own, so a request can describe the
      *     contract another deployment's flavor expects: the resource class, the traits it requires
      *     and how many cards the host has. `mtty` advertises what Nova finds and takes none of them.
      */
@@ -1216,7 +1080,7 @@ export interface components {
       mode?: components["schemas"]["GpuMode"];
       /**
        * @description The resource class the flavor asks for. Omitted: [`DEFAULT_RESOURCE_CLASS`]. `PGPU`
-       *     and `CUSTOM_*` build another deployment's contract; the inventory is farm's either
+       *     and `CUSTOM_*` build another deployment's contract; the inventory is stackbox's either
        *     way, so no driver checks it.
        * @example VGPU
        */
@@ -1230,11 +1094,11 @@ export interface components {
     /**
      * @description What the guest kernel of a verification VM reported about the GPU stack. Every flag is
      *     read inside that VM, so it says the kernel came up with the feature, not that the host
-     *     has a module for it: farm's kernel is built with VFIO and mdev included.
+     *     has a module for it: stackbox's kernel is built with VFIO and mdev included.
      */
     GpuKernel: {
       kernel?: components["schemas"]["GpuKernelKind"];
-      /** @description Installed kernel's id: the directory name under `~/.local/share/farm/libkrunfw`. */
+      /** @description Installed kernel's id: the directory name under `~/.local/share/stackbox/libkrunfw`. */
       kernel_id?: string | null;
       /** @description `uname -r` in the guest. */
       kernel_release?: string;
@@ -1256,12 +1120,12 @@ export interface components {
       vfio_mdev?: boolean;
     };
     /**
-     * @description The kernel a verification VM booted: farm's installed kernel, or microsandbox's stock one.
+     * @description The kernel a verification VM booted: stackbox's installed kernel, or microsandbox's stock one.
      * @enum {string}
      */
     GpuKernelKind: "custom" | "stock";
     /**
-     * @description The load a portal sets on one instance. farm turns it into a sample table and
+     * @description The load a portal sets on one instance. stackbox turns it into a sample table and
      *     writes it to the instance's Nova metadata; the guest script reads that table.
      *     Nothing computes on the values: this exists to exercise monitoring paths.
      */
@@ -1295,22 +1159,22 @@ export interface components {
       /** @default sim-8g */
       profile: components["schemas"]["GpuProfile"];
     };
-    /** @description One instance's load plus the metadata keys farm found on it. */
+    /** @description One instance's load plus the metadata keys stackbox found on it. */
     GpuLoadView: {
       applied: boolean;
       load: components["schemas"]["GpuLoad"];
-      /** @description `farm_gpu_*` keys currently set on the instance. */
+      /** @description `stackbox_gpu_*` keys currently set on the instance. */
       properties: string[];
       server: string;
     };
     /**
-     * @description How a farm gets a GPU when the host has none. Both modes are virtual devices: no guest
+     * @description How a stackbox gets a GPU when the host has none. Both modes are virtual devices: no guest
      *     sees a real GPU, and nothing computes on one.
      * @enum {string}
      */
     GpuMode: "simulated" | "mtty";
     /**
-     * @description How a virtual GPU's utilization moves through one period. farm samples the
+     * @description How a virtual GPU's utilization moves through one period. stackbox samples the
      *     pattern into a small table; the guest picks a sample from the current second, so
      *     the guest needs no trigonometry and the portal's preview draws the same table.
      * @enum {string}
@@ -1344,7 +1208,7 @@ export interface components {
       build_id: string;
       /** Format: int64 */
       disk_available_mib?: number | null;
-      /** @description msb snapshot new farms start from; the first farm on the host builds it. */
+      /** @description msb snapshot new stackboxes start from; the first stackbox on the host builds it. */
       golden_image: string;
       golden_image_available: boolean;
       hypervisor: string;
@@ -1359,7 +1223,7 @@ export interface components {
       memory_total_mib: number;
       msb_available: boolean;
       os: string;
-      /** @description The relay farms that span hosts join through (`FARM_RELAY_URL`); none disables them. */
+      /** @description The relay stackboxes that span hosts join through (`STACKBOX_RELAY_URL`); none disables them. */
       relay_url?: string | null;
       state_dir: string;
     };
@@ -1369,8 +1233,8 @@ export interface components {
       checked_at: number;
       compatible: boolean;
       /**
-       * @description `FARM_LIBKRUNFW_PATH` the host's agent boots farm VMs from, or the kernel host
-       *     preparation installed under `~/.local/share/farm/libkrunfw`; absent for the stock kernel.
+       * @description `STACKBOX_LIBKRUNFW_PATH` the host's agent boots stackbox VMs from, or the kernel host
+       *     preparation installed under `~/.local/share/stackbox/libkrunfw`; absent for the stock kernel.
        */
       custom_kernel?: string | null;
       /** @description Why an installed kernel was found but is not used, such as one built for another msb. */
@@ -1378,7 +1242,7 @@ export interface components {
       /** Format: int64 */
       disk_available_mib: number;
       docker_available: boolean;
-      /** @description This build's golden image is built; otherwise the first farm on the host builds it. */
+      /** @description This build's golden image is built; otherwise the first stackbox on the host builds it. */
       golden_image_available: boolean;
       gpu_kernel?: null | components["schemas"]["GpuKernel"];
       kvm_available: boolean;
@@ -1395,21 +1259,21 @@ export interface components {
       msb_pci_capable?: boolean;
       msb_version?: string | null;
       /**
-       * @description The farm kernel ran the host's verification VM and exposed the `mtty` mediated
-       *     device type, which an OpenStack 2025.1 or newer `mtty` GPU farm binds as a vGPU.
+       * @description The stackbox kernel ran the host's verification VM and exposed the `mtty` mediated
+       *     device type, which an OpenStack 2025.1 or newer `mtty` GPU stackbox binds as a vGPU.
        */
       mtty_available?: boolean;
       os: string;
       /**
-       * @description PCI devices on this host bound to `vfio-pci`: the only ones a farm may pass through.
+       * @description PCI devices on this host bound to `vfio-pci`: the only ones a stackbox may pass through.
        *     Only devices in such a state are listed, so a host's chipset devices stay out of its
        *     inspection and `state.json`.
        */
       pci_devices?: components["schemas"]["HostPciDevice"][];
       /**
-       * @description Whether this host can take a PCI passthrough farm now: the farm kernel is installed,
+       * @description Whether this host can take a PCI passthrough stackbox now: the stackbox kernel is installed,
        *     `msb` supports `--pci`/`--iommu` (`msb_pci_capable`), `/dev/vfio/vfio` exists and at
-       *     least one of `pci_devices` is `vfio_ready`. The guest kernel is the farm's, so the
+       *     least one of `pci_devices` is `vfio_ready`. The guest kernel is the stackbox's, so the
        *     stock kernel answers no.
        */
       pci_passthrough_available?: boolean;
@@ -1442,11 +1306,11 @@ export interface components {
       fingerprint: string;
     };
     /**
-     * @description How the coordinator reaches a host's farm-agent.
+     * @description How the coordinator reaches a host's stackbox-agent.
      * @enum {string}
      */
     HostKind: "ssh" | "local" | "agent";
-    /** @description A host PCI device a farm may pass through. Only `vfio-pci`-bound devices are reported. */
+    /** @description A host PCI device a stackbox may pass through. Only `vfio-pci`-bound devices are reported. */
     HostPciDevice: {
       /** @description Lowercase `DDDD:BB:DD.F`, such as `0000:04:00.3`. */
       bdf: string;
@@ -1476,7 +1340,7 @@ export interface components {
     };
     /**
      * @description What the coordinator's last attempts to reach an SSH host found: its inventory scan, or a
-     *     plain connection check for a host that runs no farm.
+     *     plain connection check for a host that runs no stackbox.
      */
     HostReachability: {
       /**
@@ -1499,7 +1363,7 @@ export interface components {
        */
       reachable: boolean;
     };
-    /** @description The compute VMs of a farm that one other host runs. */
+    /** @description The compute VMs of a stackbox that one other host runs. */
     HostShare: {
       /** @description The agent this host's part was created with, for a remote host. */
       agent_sha256?: string | null;
@@ -1552,7 +1416,6 @@ export interface components {
       /** Format: int64 */
       created_at: number;
       error?: string | null;
-      farm_id: string;
       /** Format: int64 */
       finished_at?: number | null;
       /** @description A delete that removes only the coordinator's record and leaves any VM on the host. */
@@ -1572,6 +1435,7 @@ export interface components {
       remote_job_id?: string | null;
       /** @description Snapshot captured by a snapshot job, or restored by a restore job. */
       snapshot_id?: string | null;
+      stackbox_id: string;
       /** Format: int64 */
       started_at?: number | null;
       status: components["schemas"]["JobStatus"];
@@ -1653,7 +1517,7 @@ export interface components {
       disk_mib: number;
       /**
        * Format: int32
-       * @description Position among the farm's compute nodes, from 1; only multi-node compute nodes have one.
+       * @description Position among the stackbox's compute nodes, from 1; only multi-node compute nodes have one.
        */
       index?: number | null;
       /** Format: int32 */
@@ -1675,7 +1539,7 @@ export interface components {
       compute?: null | components["schemas"]["ComputeSize"];
       /**
        * Format: int32
-       * @description Compute VMs beside the control VM; 0 for an all-in-one farm.
+       * @description Compute VMs beside the control VM; 0 for an all-in-one stackbox.
        */
       computes?: number;
       /**
@@ -1706,7 +1570,7 @@ export interface components {
       compute: null | components["schemas"]["ComputeSize"];
       /**
        * Format: int32
-       * @description Compute VMs beside a control VM, 1-3. A farm always runs Nova and Neutron; a
+       * @description Compute VMs beside a control VM, 1-3. A stackbox always runs Nova and Neutron; a
        *     request with none is refused, as are the legacy layouts below.
        * @default 0
        */
@@ -1714,10 +1578,10 @@ export interface components {
       /** @default null */
       gpu: null | components["schemas"]["GpuConfig"];
       /** @default null */
-      layout: null | components["schemas"]["FarmLayout"];
+      layout: null | components["schemas"]["StackboxLayout"];
       /**
        * @description Host PCI devices passed through to compute-1 (`DDDD:BB:DD.F`). Each must already be
-       *     bound to `vfio-pci` on the farm's host; see [`normalize_pci_devices`].
+       *     bound to `vfio-pci` on the stackbox's host; see [`normalize_pci_devices`].
        * @default []
        */
       pci_devices: string[];
@@ -1727,13 +1591,13 @@ export interface components {
        */
       release: string | null;
     };
-    /** @description How one VM of a release farm will be made, and why. */
+    /** @description How one VM of a release stackbox will be made, and why. */
     PlannedNode: {
       bucket?: string | null;
       host_id: string;
       /** @description Object key of a bucket template's archive. */
       key?: string | null;
-      /** @description `control`, `compute-1`, ... or `all-in-one` for a clean farm without computes. */
+      /** @description `control`, `compute-1`, ... or `all-in-one` for a clean stackbox without computes. */
       node: string;
       reason: string;
       /** @description The local template it boots from; for a bucket template, the ID it is imported as. */
@@ -1780,7 +1644,7 @@ export interface components {
     RegisterLocalHost: {
       id?: string;
     };
-    /** @description Where farms that span hosts join, set from the portal or `PUT /api/v1/relay`. */
+    /** @description Where stackboxes that span hosts join, set from the portal or `PUT /api/v1/relay`. */
     RelaySettings: {
       /** @description Where it listens; `0.0.0.0:10011` with `private`, `127.0.0.1:10012` with `proxy`. */
       bind?: string | null;
@@ -1802,10 +1666,10 @@ export interface components {
       /** @description The address it listens on, once the daemon serves. */
       listening?: string | null;
       settings?: null | components["schemas"]["RelaySettings"];
-      /** @description Farms that span hosts; while any lives, the URL and mode stay. */
-      spanning_farms: string[];
+      /** @description Stackboxes that span hosts; while any lives, the URL and mode stay. */
+      spanning_stackboxes: string[];
       tunnel?: null | components["schemas"]["TunnelStatus"];
-      /** @description The URL new farms that span hosts get: the settings', or a quick tunnel's address. */
+      /** @description The URL new stackboxes that span hosts get: the settings', or a quick tunnel's address. */
       url?: string | null;
     };
     /**
@@ -1813,7 +1677,7 @@ export interface components {
      * @enum {string}
      */
     RelayTlsMode: "private" | "proxy" | "quick_tunnel";
-    /** @description Releases a farm can be created with on one architecture, newest first. */
+    /** @description Releases a stackbox can be created with on one architecture, newest first. */
     ReleaseCatalog: {
       arch: string;
       releases: components["schemas"]["ReleaseTemplates"][];
@@ -1821,14 +1685,14 @@ export interface components {
       unreachable?: string[];
     };
     /**
-     * @description Create a farm of an OpenStack release from saved templates: the control VM from a
+     * @description Create a stackbox of an OpenStack release from saved templates: the control VM from a
      *     control template, each compute from a compute template of the same release when one
      *     can boot on its host, otherwise installed clean.
      */
     ReleaseCreateRequest: {
       /** @description Registered bucket to also search for templates; omitted searches every bucket. */
       bucket?: string | null;
-      /** @description Services the farm runs; empty takes the control template's. */
+      /** @description Services the stackbox runs; empty takes the control template's. */
       components?: string[];
       compute?: null | components["schemas"]["ComputeSize"];
       /**
@@ -1852,7 +1716,7 @@ export interface components {
       /** @description Registered host of the control VM. Required; optional only for the error message. */
       host_id?: string | null;
       id: string;
-      layout?: null | components["schemas"]["FarmLayout"];
+      layout?: null | components["schemas"]["StackboxLayout"];
       owner?: string | null;
       /**
        * @description PCI devices passed through to compute-1 (see [`PlanRequest::pci_devices`]); like a GPU,
@@ -1868,10 +1732,10 @@ export interface components {
       components: string[];
       computes: components["schemas"]["PlannedNode"][];
       control: components["schemas"]["PlannedNode"];
-      farm_id: string;
       /** @description Buckets that could not be searched, and other things worth knowing. */
       notes?: string[];
       release: string;
+      stackbox_id: string;
     };
     /** @description Templates of one OpenStack release. */
     ReleaseTemplates: {
@@ -1985,13 +1849,13 @@ export interface components {
       arch?: string;
       archive?: null | components["schemas"]["SnapshotArchive"];
       /**
-       * @description Copies kept on hosts other than the original's, which farms and computes there boot
+       * @description Copies kept on hosts other than the original's, which stackboxes and computes there boot
        *     from.
        */
       copies?: components["schemas"]["SnapshotCopy"][];
       /** Format: int64 */
       created_at: number;
-      /** @description Whether OpenStack was deployed when frozen. Restored farms then start `ready`. */
+      /** @description Whether OpenStack was deployed when frozen. Restored stackboxes then start `ready`. */
       deployed: boolean;
       error?: string | null;
       /**
@@ -2016,10 +1880,10 @@ export interface components {
       release?: string | null;
       /** Format: int64 */
       size_bytes?: number | null;
-      /** @description Public ports the source farm's catalog was registered with; restores rewrite them. */
+      /** @description Public ports the source stackbox's catalog was registered with; restores rewrite them. */
       source_exposure: components["schemas"]["Exposure"];
-      /** @description Farm the snapshot was frozen from; `None` when imported from an archive. */
-      source_farm?: string | null;
+      /** @description Stackbox the snapshot was frozen from; `None` when imported from an archive. */
+      source_stackbox?: string | null;
       status: components["schemas"]["SnapshotStatus"];
       template?: null | components["schemas"]["TemplateRole"];
       transfer?: null | components["schemas"]["SnapshotTransfer"];
@@ -2030,9 +1894,9 @@ export interface components {
       /** @description Snapshot ID: 1-48 lowercase letters, digits or hyphens. */
       id: string;
       /**
-       * @description Freeze only this VM of a deployed multi-node farm as a template: a compute VM
+       * @description Freeze only this VM of a deployed multi-node stackbox as a template: a compute VM
        *     (`compute-1`, ...) that later expansions boot new computes from, or `control`, which
-       *     new farms start from without computes.
+       *     new stackboxes start from without computes.
        */
       node?: string | null;
       note?: string | null;
@@ -2061,6 +1925,142 @@ export interface components {
       port?: number;
     };
     /**
+     * @description A virtual GPU instance as the portal's load editor lists it. `gpu_count` comes
+     *     from the flavor's resource class (or 1 when it asks for none, because the guest
+     *     script defaults to one virtual GPU).
+     */
+    StackboxInstance: {
+      /** @description Whether the instance's metadata currently carries `stackbox_gpu_*`. */
+      applied: boolean;
+      flavor: string;
+      /**
+       * Format: int32
+       * @description Virtual GPUs the flavor asks for, 0 when it asks for no GPU resource.
+       */
+      gpu_count: number;
+      id: string;
+      load?: null | components["schemas"]["GpuLoad"];
+      name: string;
+      project?: string;
+      /** @description The `stackbox_gpu_*` keys currently set on the instance. */
+      properties?: string[];
+      /** @description Resource classes the flavor requires, `VGPU: 1`. */
+      resources: {
+        [key: string]: number;
+      };
+      status: string;
+    };
+    /**
+     * @description The layout of a stackbox without computes, kept readable for stackboxes and snapshots made
+     *     before every new stackbox ran a control VM with computes.
+     * @enum {string}
+     */
+    StackboxLayout: "all-in-one" | "control";
+    StackboxNode: {
+      /**
+       * Format: int32
+       * @description A multi-node compute VM's position, from 1.
+       */
+      index?: number | null;
+      /** @description Live eth0 IPv4 for new all-in-one guests; legacy nodes may retain an overlay address. */
+      ip?: string | null;
+      /** Format: int32 */
+      memory_mib: number;
+      name: string;
+      role?: null | components["schemas"]["Role"];
+      status: string;
+    };
+    /**
+     * @description The OpenStack release a stackbox installs, named as the images and documents name it: the code
+     *     name beside the number (`2022.2` is `zed`), and whether this coordinator still supports it.
+     */
+    StackboxOpenStack: {
+      /**
+       * @description The series' code name for display, `Zed` for 2022.2 and `Caracal` for 2024.1; empty
+       *     when it has no published name. Display only: `series` keeps the name the images and
+       *     the upper-constraints path use.
+       */
+      codename: string;
+      /** @description kolla-ansible keeps no branch for it any more, so it installs from the series' last tag. */
+      eol: boolean;
+      /** @description What the stackbox records, `2022.2`. */
+      release: string;
+      /**
+       * @description Its series name, `zed`; the same as `release` from 2023.1 on, where the names became
+       *     `year.release`.
+       */
+      series: string;
+      /**
+       * @description False below the oldest supported release, whatever the host's
+       *     `STACKBOX_ALLOW_UNSUPPORTED_RELEASES` says: such a stackbox keeps working but is out of support.
+       */
+      supported: boolean;
+    };
+    StackboxRecord: {
+      active_job?: string | null;
+      agent_sha256?: string | null;
+      /** Format: int64 */
+      created_at: number;
+      error?: string | null;
+      /** Format: int64 */
+      expires_at?: number | null;
+      exposure?: null | components["schemas"]["Exposure"];
+      /** @description Faults set on a multi-node stackbox's links, by VM (`control`, `compute-1`, ...). */
+      faults?: {
+        [key: string]: components["schemas"]["Impair"];
+      };
+      /**
+       * @description Virtual GPU loads the portal applied, by Nova server UUID. The guest reads the
+       *     same values from instance metadata; this copy keeps the pattern the portal shows
+       *     after a coordinator restart. A stackbox restored from a snapshot recovers the load
+       *     from the instance's metadata instead.
+       */
+      gpu_loads?: {
+        [key: string]: components["schemas"]["GpuLoad"];
+      };
+      host_id?: string | null;
+      id: string;
+      /** Format: int64 */
+      last_seen_at?: number | null;
+      nodes: components["schemas"]["StackboxNode"][];
+      observation_error?: string | null;
+      owner?: string | null;
+      phase?: null | components["schemas"]["Phase"];
+      plan?: null | components["schemas"]["Plan"];
+      remote_generation?: string | null;
+      /** @description Other hosts that run some of a multi-node stackbox's compute VMs. `host_id` runs the rest. */
+      shares?: components["schemas"]["HostShare"][];
+      /** @description Snapshot this stackbox was restored from. */
+      snapshot_id?: string | null;
+      status: components["schemas"]["StackboxStatus"];
+      /** @description Finer progress inside `phase`: our marker or the running Ansible task. */
+      step?: string | null;
+      /** Format: int64 */
+      updated_at: number;
+      /** @description SHA-256 of the token `host_id`'s switch joins the relay with, for a stackbox with shares. */
+      uplink_sha256?: string | null;
+    };
+    /** @enum {string} */
+    StackboxStatus:
+      | "creating"
+      | "created"
+      | "deploying"
+      | "settling"
+      | "ready"
+      | "failed"
+      | "broken"
+      | "deleting"
+      | "deleted"
+      | "snapshotting";
+    /**
+     * @description A stackbox as the API returns it: the stored record plus the release facts the portal labels the
+     *     stackbox with. Only the record is kept; the release comes from the release tables, so the names
+     *     live in one place and a stackbox's state stays what it was created with.
+     */
+    StackboxView: components["schemas"]["StackboxRecord"] & {
+      openstack?: null | components["schemas"]["StackboxOpenStack"];
+    };
+    /**
      * @description The VM a template snapshot was frozen from.
      * @enum {string}
      */
@@ -2075,7 +2075,7 @@ export interface components {
       connected: boolean;
       error?: string | null;
       latest?: string | null;
-      /** @description `FARM_CLOUDFLARED` names the binary; it is not updated. */
+      /** @description `STACKBOX_CLOUDFLARED` names the binary; it is not updated. */
       unmanaged: boolean;
       /** @description A quick tunnel's address, once Cloudflare gave it. */
       url?: string | null;
@@ -2477,633 +2477,6 @@ export interface operations {
       };
     };
   };
-  list: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["FarmView"][];
-        };
-      };
-    };
-  };
-  create: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody: {
-      content: {
-        "application/json": components["schemas"]["CreateRequest"];
-      };
-    };
-    responses: {
-      202: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["Job"];
-        };
-      };
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ErrorBody"];
-        };
-      };
-      409: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ErrorBody"];
-        };
-      };
-    };
-  };
-  detail: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        id: string;
-      };
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["FarmView"];
-        };
-      };
-      404: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ErrorBody"];
-        };
-      };
-    };
-  };
-  delete: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        id: string;
-        /**
-         * @description Remove only the coordinator's record, without asking the host. Whatever the host
-         *     still keeps stays there; use it when the host is gone or unreachable.
-         */
-        forget: boolean;
-      };
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      202: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["Job"];
-        };
-      };
-      409: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ErrorBody"];
-        };
-      };
-    };
-  };
-  add_compute: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        id: string;
-      };
-      cookie?: never;
-    };
-    requestBody: {
-      content: {
-        "application/json": components["schemas"]["AddComputeRequest"];
-      };
-    };
-    responses: {
-      /** @description Add the next compute VM to a deployed multi-node farm, on the given host or the farm's primary host */
-      202: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["Job"];
-        };
-      };
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ErrorBody"];
-        };
-      };
-      404: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ErrorBody"];
-        };
-      };
-      409: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ErrorBody"];
-        };
-      };
-    };
-  };
-  deploy: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        id: string;
-      };
-      cookie?: never;
-    };
-    requestBody: {
-      content: {
-        "application/json": components["schemas"]["DeployRequest"];
-      };
-    };
-    responses: {
-      202: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["Job"];
-        };
-      };
-      409: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ErrorBody"];
-        };
-      };
-    };
-  };
-  endpoints: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        id: string;
-      };
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["Endpoints"];
-        };
-      };
-      409: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ErrorBody"];
-        };
-      };
-    };
-  };
-  gpu_guest_script: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        id: string;
-      };
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description The fake nvidia-smi script, ready to install as /usr/bin/nvidia-smi */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "text/x-shellscript": string;
-        };
-      };
-      409: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ErrorBody"];
-        };
-      };
-    };
-  };
-  gpu_user_data: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        id: string;
-      };
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description A user-data installer for images that do not apply Nova vendor data (CirrOS): it writes the fake nvidia-smi and prints its XML to the console */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "text/x-shellscript": string;
-        };
-      };
-      409: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ErrorBody"];
-        };
-      };
-    };
-  };
-  instances: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        id: string;
-      };
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Nova servers in a GPU farm, with each flavor's GPU resource classes and the load farm applied */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["FarmInstance"][];
-        };
-      };
-      /** @description Not a deployed GPU farm, or Nova is not part of it */
-      409: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ErrorBody"];
-        };
-      };
-    };
-  };
-  gpu_load: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        id: string;
-        /** @description Nova server UUID, or a unique instance name */
-        server: string;
-      };
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description The load for the instance; a server without one shows the default with applied=false */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["GpuLoadView"];
-        };
-      };
-      404: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ErrorBody"];
-        };
-      };
-      409: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ErrorBody"];
-        };
-      };
-    };
-  };
-  set_gpu_load: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        id: string;
-        /** @description Nova server UUID, or a unique instance name */
-        server: string;
-      };
-      cookie?: never;
-    };
-    requestBody: {
-      content: {
-        "application/json": components["schemas"]["GpuLoad"];
-      };
-    };
-    responses: {
-      /** @description The load was written to the instance's metadata; the guest sees it within about 15 seconds */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["GpuLoadView"];
-        };
-      };
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ErrorBody"];
-        };
-      };
-      404: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ErrorBody"];
-        };
-      };
-      409: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ErrorBody"];
-        };
-      };
-    };
-  };
-  clear_gpu_load: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        id: string;
-        /** @description Nova server UUID, or a unique instance name */
-        server: string;
-      };
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description The metadata is removed; the guest returns to its default at the next metadata refresh */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["GpuLoadView"];
-        };
-      };
-      404: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ErrorBody"];
-        };
-      };
-      409: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ErrorBody"];
-        };
-      };
-    };
-  };
-  logs: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        id: string;
-        after: number;
-        limit: number;
-      };
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["LogEntry"][];
-        };
-      };
-    };
-  };
-  log_stream: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        id: string;
-        after: number;
-        limit: number;
-      };
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description SSE: log events with JSON LogEntry data, gap events on expired cursors, error events on read failures */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "text/event-stream": string;
-        };
-      };
-    };
-  };
-  set_faults: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        id: string;
-        /** @description VM of a multi-node farm: control, compute-1, ... */
-        node: string;
-      };
-      cookie?: never;
-    };
-    requestBody: {
-      content: {
-        "application/json": components["schemas"]["Impair"];
-      };
-    };
-    responses: {
-      /** @description The farm with the VM's faults applied; no delay and no loss heals it */
-      200: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["FarmView"];
-        };
-      };
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ErrorBody"];
-        };
-      };
-      404: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ErrorBody"];
-        };
-      };
-      409: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ErrorBody"];
-        };
-      };
-    };
-  };
-  settle: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        id: string;
-      };
-      cookie?: never;
-    };
-    requestBody?: never;
-    responses: {
-      /** @description Wait for the farm's services to answer again after its VM started from disk; no deployment runs */
-      202: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["Job"];
-        };
-      };
-      409: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ErrorBody"];
-        };
-      };
-    };
-  };
-  freeze: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path: {
-        id: string;
-      };
-      cookie?: never;
-    };
-    requestBody: {
-      content: {
-        "application/json": components["schemas"]["SnapshotRequest"];
-      };
-    };
-    responses: {
-      /** @description Snapshot job; the farm's VM stops for the capture and starts again. With `node: control` every VM stops, computes first, but only the control VM is captured, as a control template */
-      202: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["Job"];
-        };
-      };
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ErrorBody"];
-        };
-      };
-      409: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ErrorBody"];
-        };
-      };
-    };
-  };
   host: {
     parameters: {
       query?: never;
@@ -3383,7 +2756,7 @@ export interface operations {
       header?: never;
       path: {
         id: string;
-        /** @description Also delete this coordinator's farms and leftover VMs on the host, then unregister it. */
+        /** @description Also delete this coordinator's stackboxes and leftover VMs on the host, then unregister it. */
         purge: boolean;
         /**
          * @description With purge, also delete the snapshots frozen on the host, whose originals it keeps,
@@ -3404,7 +2777,7 @@ export interface operations {
           "application/json": components["schemas"]["RemovedHost"];
         };
       };
-      /** @description purge=true: host job that deletes the farms, their VMs, with snapshots=true the snapshots, and then the host */
+      /** @description purge=true: host job that deletes the stackboxes, their VMs, with snapshots=true the snapshots, and then the host */
       202: {
         headers: {
           [name: string]: unknown;
@@ -3645,7 +3018,7 @@ export interface operations {
     };
     requestBody?: never;
     responses: {
-      /** @description Where farms that span hosts join */
+      /** @description Where stackboxes that span hosts join */
       200: {
         headers: {
           [name: string]: unknown;
@@ -3686,7 +3059,7 @@ export interface operations {
           "application/json": components["schemas"]["ErrorBody"];
         };
       };
-      /** @description Farms that span hosts hold the current URL and CA */
+      /** @description Stackboxes that span hosts hold the current URL and CA */
       409: {
         headers: {
           [name: string]: unknown;
@@ -3706,7 +3079,7 @@ export interface operations {
     };
     requestBody?: never;
     responses: {
-      /** @description The relay is off; farms cannot span hosts */
+      /** @description The relay is off; stackboxes cannot span hosts */
       200: {
         headers: {
           [name: string]: unknown;
@@ -3786,54 +3159,6 @@ export interface operations {
       };
     };
   };
-  create_release: {
-    parameters: {
-      query?: never;
-      header?: never;
-      path?: never;
-      cookie?: never;
-    };
-    requestBody: {
-      content: {
-        "application/json": components["schemas"]["ReleaseCreateRequest"];
-      };
-    };
-    responses: {
-      /** @description Assemble job: the plan's imports, the control VM, then each compute, each step a job of its own listed in `assembly` */
-      202: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["Job"];
-        };
-      };
-      400: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ErrorBody"];
-        };
-      };
-      404: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ErrorBody"];
-        };
-      };
-      409: {
-        headers: {
-          [name: string]: unknown;
-        };
-        content: {
-          "application/json": components["schemas"]["ErrorBody"];
-        };
-      };
-    };
-  };
   release_plan: {
     parameters: {
       query?: never;
@@ -3873,6 +3198,54 @@ export interface operations {
         };
       };
       /** @description No control template of the release, and this coordinator installs another release clean */
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorBody"];
+        };
+      };
+    };
+  };
+  create_release: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["ReleaseCreateRequest"];
+      };
+    };
+    responses: {
+      /** @description Assemble job: the plan's imports, the control VM, then each compute, each step a job of its own listed in `assembly` */
+      202: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["Job"];
+        };
+      };
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorBody"];
+        };
+      };
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorBody"];
+        };
+      };
       409: {
         headers: {
           [name: string]: unknown;
@@ -4074,6 +3447,633 @@ export interface operations {
         };
         content: {
           "application/json": components["schemas"]["SnapshotRecord"];
+        };
+      };
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorBody"];
+        };
+      };
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorBody"];
+        };
+      };
+    };
+  };
+  list: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["StackboxView"][];
+        };
+      };
+    };
+  };
+  create: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["CreateRequest"];
+      };
+    };
+    responses: {
+      202: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["Job"];
+        };
+      };
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorBody"];
+        };
+      };
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorBody"];
+        };
+      };
+    };
+  };
+  detail: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["StackboxView"];
+        };
+      };
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorBody"];
+        };
+      };
+    };
+  };
+  delete: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        id: string;
+        /**
+         * @description Remove only the coordinator's record, without asking the host. Whatever the host
+         *     still keeps stays there; use it when the host is gone or unreachable.
+         */
+        forget: boolean;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      202: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["Job"];
+        };
+      };
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorBody"];
+        };
+      };
+    };
+  };
+  add_compute: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["AddComputeRequest"];
+      };
+    };
+    responses: {
+      /** @description Add the next compute VM to a deployed multi-node stackbox, on the given host or the stackbox's primary host */
+      202: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["Job"];
+        };
+      };
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorBody"];
+        };
+      };
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorBody"];
+        };
+      };
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorBody"];
+        };
+      };
+    };
+  };
+  deploy: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["DeployRequest"];
+      };
+    };
+    responses: {
+      202: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["Job"];
+        };
+      };
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorBody"];
+        };
+      };
+    };
+  };
+  endpoints: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["Endpoints"];
+        };
+      };
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorBody"];
+        };
+      };
+    };
+  };
+  gpu_guest_script: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description The fake nvidia-smi script, ready to install as /usr/bin/nvidia-smi */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "text/x-shellscript": string;
+        };
+      };
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorBody"];
+        };
+      };
+    };
+  };
+  gpu_user_data: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description A user-data installer for images that do not apply Nova vendor data (CirrOS): it writes the fake nvidia-smi and prints its XML to the console */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "text/x-shellscript": string;
+        };
+      };
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorBody"];
+        };
+      };
+    };
+  };
+  instances: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Nova servers in a GPU stackbox, with each flavor's GPU resource classes and the load stackbox applied */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["StackboxInstance"][];
+        };
+      };
+      /** @description Not a deployed GPU stackbox, or Nova is not part of it */
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorBody"];
+        };
+      };
+    };
+  };
+  gpu_load: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        id: string;
+        /** @description Nova server UUID, or a unique instance name */
+        server: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description The load for the instance; a server without one shows the default with applied=false */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["GpuLoadView"];
+        };
+      };
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorBody"];
+        };
+      };
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorBody"];
+        };
+      };
+    };
+  };
+  set_gpu_load: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        id: string;
+        /** @description Nova server UUID, or a unique instance name */
+        server: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["GpuLoad"];
+      };
+    };
+    responses: {
+      /** @description The load was written to the instance's metadata; the guest sees it within about 15 seconds */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["GpuLoadView"];
+        };
+      };
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorBody"];
+        };
+      };
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorBody"];
+        };
+      };
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorBody"];
+        };
+      };
+    };
+  };
+  clear_gpu_load: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        id: string;
+        /** @description Nova server UUID, or a unique instance name */
+        server: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description The metadata is removed; the guest returns to its default at the next metadata refresh */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["GpuLoadView"];
+        };
+      };
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorBody"];
+        };
+      };
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorBody"];
+        };
+      };
+    };
+  };
+  logs: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        id: string;
+        after: number;
+        limit: number;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["LogEntry"][];
+        };
+      };
+    };
+  };
+  log_stream: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        id: string;
+        after: number;
+        limit: number;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description SSE: log events with JSON LogEntry data, gap events on expired cursors, error events on read failures */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "text/event-stream": string;
+        };
+      };
+    };
+  };
+  set_faults: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        id: string;
+        /** @description VM of a multi-node stackbox: control, compute-1, ... */
+        node: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["Impair"];
+      };
+    };
+    responses: {
+      /** @description The stackbox with the VM's faults applied; no delay and no loss heals it */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["StackboxView"];
+        };
+      };
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorBody"];
+        };
+      };
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorBody"];
+        };
+      };
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorBody"];
+        };
+      };
+    };
+  };
+  settle: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description Wait for the stackbox's services to answer again after its VM started from disk; no deployment runs */
+      202: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["Job"];
+        };
+      };
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorBody"];
+        };
+      };
+    };
+  };
+  freeze: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["SnapshotRequest"];
+      };
+    };
+    responses: {
+      /** @description Snapshot job; the stackbox's VM stops for the capture and starts again. With `node: control` every VM stops, computes first, but only the control VM is captured, as a control template */
+      202: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["Job"];
         };
       };
       400: {

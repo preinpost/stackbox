@@ -1,6 +1,6 @@
 //! S3-compatible buckets snapshot archives move through. Secret keys are sealed in the vault.
 
-use super::{FarmManager, NotFound, bad_request, conflict, snapshots::busy};
+use super::{NotFound, StackboxManager, bad_request, conflict, snapshots::busy};
 use crate::{
     model::now,
     s3::{
@@ -15,7 +15,7 @@ use std::collections::BTreeMap;
 /// Objects listed for an import; the rest of a large bucket is left out.
 const LIST_LIMIT: usize = 5000;
 
-impl FarmManager {
+impl StackboxManager {
     pub fn buckets(&self) -> Result<Vec<Bucket>> {
         Ok(self
             .0

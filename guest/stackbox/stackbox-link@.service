@@ -1,0 +1,17 @@
+[Unit]
+Description=Stackbox L2 link %i
+After=network-online.target
+Wants=network-online.target
+Before=stackbox-identity.service stackbox-hostname.service docker.service
+ConditionPathExists=/etc/stackbox/link-%i.conf
+
+[Service]
+# Creates the persistent TAP with its MTU and address, so they exist before the services
+# that bind to it start, and survive the link process restarting.
+ExecStartPre=/usr/local/sbin/stackbox-agent agent link --setup /etc/stackbox/link-%i.conf
+ExecStart=/usr/local/sbin/stackbox-agent agent link /etc/stackbox/link-%i.conf
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=multi-user.target

@@ -1,6 +1,6 @@
-# Written by farm and mounted as the L3 agent's sitecustomize.py.
+# Written by stackbox and mounted as the L3 agent's sitecustomize.py.
 # The guest kernel has no xt_connmark, so iptables-restore rejects every router's
-# rules. Neutron only uses CONNMARK to keep address scopes apart, which farms do
+# rules. Neutron only uses CONNMARK to keep address scopes apart, which stackboxes do
 # not configure, so those rules are dropped when router_info is imported.
 import importlib.abc
 import importlib.machinery
@@ -40,7 +40,7 @@ class _Loader(importlib.machinery.SourceFileLoader):
         for old, new in EDITS:
             if source.count(old) != 1:
                 raise RuntimeError(
-                    "farm: unexpected " + self.path + "; review the connmark patch")
+                    "stackbox: unexpected " + self.path + "; review the connmark patch")
             source = source.replace(old, new)
         return compile(source, self.path, "exec", dont_inherit=True)
 

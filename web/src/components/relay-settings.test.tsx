@@ -31,7 +31,7 @@ const status = (tunnel: Partial<RelayStatus["tunnel"]>): RelayStatus =>
     listening: "127.0.0.1:10012",
     error: null,
     ca_sha256: null,
-    spanning_farms: [],
+    spanning_stackboxes: [],
   }) as RelayStatus;
 
 test("saving a quick tunnel once shows its progress until the address is ready", async () => {
@@ -47,7 +47,7 @@ test("saving a quick tunnel once shows its progress until the address is ready",
     listening: null,
     error: null,
     ca_sha256: null,
-    spanning_farms: [],
+    spanning_stackboxes: [],
   } as RelayStatus;
   let puts = 0;
   vi.stubGlobal(

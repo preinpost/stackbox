@@ -10,10 +10,10 @@ mod store;
 mod transfers;
 
 use crate::{
-    farm::Role,
     kolla::{DeployEvent, EventSink},
     model::*,
     remote::HostKind,
+    stackbox::Role,
 };
 use anyhow::{Context, Result, anyhow, bail};
 pub use backend::{Backend, MicrosandboxBackend};
@@ -38,16 +38,16 @@ pub struct ManagerOptions {
     pub agent_binary: Option<PathBuf>,
     /// Release bucket to fetch this build's agents from, for platforms no local artifact covers.
     pub agent_url: Option<String>,
-    /// Relay settings to start with when none are stored yet, from `FARM_RELAY_URL`,
-    /// `FARM_RELAY_TLS` (`private` or `proxy`) and `FARM_RELAY_BIND`. The portal changes them.
+    /// Relay settings to start with when none are stored yet, from `STACKBOX_RELAY_URL`,
+    /// `STACKBOX_RELAY_TLS` (`private` or `proxy`) and `STACKBOX_RELAY_BIND`. The portal changes them.
     pub relay: Option<crate::link::relay::RelaySettings>,
-    /// Built farm kernels (`<dir>/<arch>/manifest.txt`), installed on hosts during
+    /// Built stackbox kernels (`<dir>/<arch>/manifest.txt`), installed on hosts during
     /// preparation. `None` leaves every host on the stock microsandbox kernel, which cannot
-    /// run an `mtty` GPU farm.
+    /// run an `mtty` GPU stackbox.
     pub libkrunfw_dir: Option<PathBuf>,
-    /// Where farm-published kernels are downloaded from when `libkrunfw_dir` has none for a
+    /// Where stackbox-published kernels are downloaded from when `libkrunfw_dir` has none for a
     /// host, verified and cached under `state_dir/libkrunfw-cache`. `None` turns that off;
-    /// [`ManagerOptions::local`] takes it from `FARM_LIBKRUNFW_URL`.
+    /// [`ManagerOptions::local`] takes it from `STACKBOX_LIBKRUNFW_URL`.
     pub kernel_release_url: Option<String>,
 }
 impl ManagerOptions {
@@ -57,28 +57,28 @@ impl ManagerOptions {
             state_dir,
             public_bind: IpAddr::V4(Ipv4Addr::LOCALHOST),
             memory_budget_mib: sys.total_memory() / (1024 * 1024) * 80 / 100,
-            agent_binary: std::env::var_os("FARM_AGENT_PATH").map(PathBuf::from),
-            // An empty FARM_AGENT_URL turns published agents off.
-            agent_url: match std::env::var("FARM_AGENT_URL") {
+            agent_binary: std::env::var_os("STACKBOX_AGENT_PATH").map(PathBuf::from),
+            // An empty STACKBOX_AGENT_URL turns published agents off.
+            agent_url: match std::env::var("STACKBOX_AGENT_URL") {
                 Ok(url) => Some(url).filter(|url| !url.trim().is_empty()),
                 Err(_) => Some(crate::remote::artifact::RELEASE_URL.into()),
             },
-            relay: std::env::var("FARM_RELAY_URL")
+            relay: std::env::var("STACKBOX_RELAY_URL")
                 .ok()
                 .filter(|url| !url.trim().is_empty())
                 .map(|url| crate::link::relay::RelaySettings {
                     url,
-                    mode: match std::env::var("FARM_RELAY_TLS").as_deref() {
+                    mode: match std::env::var("STACKBOX_RELAY_TLS").as_deref() {
                         Ok("proxy") => crate::link::relay::RelayTlsMode::Proxy,
                         Ok("private") | Err(_) => crate::link::relay::RelayTlsMode::Private,
                         Ok(other) => {
                             eprintln!(
-                                "relay: FARM_RELAY_TLS={other} is not private or proxy; using private"
+                                "relay: STACKBOX_RELAY_TLS={other} is not private or proxy; using private"
                             );
                             crate::link::relay::RelayTlsMode::Private
                         }
                     },
-                    bind: std::env::var("FARM_RELAY_BIND")
+                    bind: std::env::var("STACKBOX_RELAY_BIND")
                         .ok()
                         .and_then(|bind| bind.parse().ok()),
                 }),
@@ -89,31 +89,31 @@ impl ManagerOptions {
 }
 pub fn default_state_dir() -> PathBuf {
     if let Some(path) = std::env::var_os("XDG_DATA_HOME") {
-        PathBuf::from(path).join("farm")
+        PathBuf::from(path).join("stackbox")
     } else {
         PathBuf::from(std::env::var_os("HOME").unwrap_or_else(|| ".".into()))
-            .join(".local/share/farm")
+            .join(".local/share/stackbox")
     }
 }
 
 #[derive(Clone)]
-pub struct FarmManager(Arc<Inner>);
+pub struct StackboxManager(Arc<Inner>);
 struct Inner {
     store: Mutex<Store>,
     logs: Mutex<logs::Logs>,
-    /// This machine's farm-agent, for a host registered as local.
+    /// This machine's stackbox-agent, for a host registered as local.
     local_link: Arc<dyn crate::remote::link::AgentLink>,
     /// Sockets of hosts whose agents dial in.
     hub: Arc<crate::remote::hub::Hub>,
-    /// Joins the switches of farms that span hosts.
+    /// Joins the switches of stackboxes that span hosts.
     relay: Arc<crate::link::relay::Relay>,
     /// The relay's CA and server certificate, with private TLS.
     relay_tls: std::sync::RwLock<Option<Arc<crate::link::tls::RelayTls>>>,
     /// The relay's listener once the daemon serves: its address, or why it does not listen.
     relay_listener: tokio::sync::Mutex<RelayListener>,
-    /// A quick tunnel's current address, which new farms that span hosts get.
+    /// A quick tunnel's current address, which new stackboxes that span hosts get.
     tunnel_url: Mutex<Option<String>>,
-    /// What each host of a farm that spans hosts gets at create, secrets included, until
+    /// What each host of a stackbox that spans hosts gets at create, secrets included, until
     /// its create job has handed it over. Only hashes are stored.
     spreads:
         Mutex<std::collections::HashMap<String, Vec<(String, crate::remote::protocol::Share)>>>,
@@ -127,7 +127,7 @@ struct Inner {
     host_gate: Semaphore,
     /// Hosts whose plain connection check is running, so a slow one is not doubled up.
     probing: Probing,
-    /// The Linux farm-agent the local host's multi-node guests run, where this binary is not one.
+    /// The Linux stackbox-agent the local host's multi-node guests run, where this binary is not one.
     guest_agent: std::sync::RwLock<Option<PathBuf>>,
     /// Agent binaries loaded at startup, by platform.
     artifacts: std::collections::BTreeMap<String, Arc<crate::remote::artifact::Artifact>>,
@@ -168,7 +168,7 @@ impl std::error::Error for BadRequest {}
 fn bad_request(message: impl Into<String>) -> anyhow::Error {
     BadRequest(message.into()).into()
 }
-/// Refuses an `mtty` farm whose VM runs on a host that has not verified farm's kernel.
+/// Refuses an `mtty` stackbox whose VM runs on a host that has not verified stackbox's kernel.
 ///
 /// The mediated device is the guest kernel's, so the kernel that matters is the one the
 /// target host's agent boots its VMs from — local, SSH or dial-in. Preparation installs it
@@ -200,14 +200,14 @@ fn ensure_mtty_host(state: &State, host_id: &str) -> Result<()> {
             });
             match types {
                 Some(types) if !types.is_empty() => format!(
-                    "its verification VM booted farm's kernel {kernel} but offered no mtty-1 mediated device type (it offered {})",
+                    "its verification VM booted stackbox's kernel {kernel} but offered no mtty-1 mediated device type (it offered {})",
                     types.join(", ")
                 ),
                 Some(_) => format!(
-                    "its verification VM booted farm's kernel {kernel} but offered no mtty-1 mediated device type"
+                    "its verification VM booted stackbox's kernel {kernel} but offered no mtty-1 mediated device type"
                 ),
                 None => format!(
-                    "its verification VM booted farm's kernel {kernel}, but no GPU probe was recorded for it"
+                    "its verification VM booted stackbox's kernel {kernel}, but no GPU probe was recorded for it"
                 ),
             }
         }
@@ -222,9 +222,9 @@ fn ensure_mtty_host(state: &State, host_id: &str) -> Result<()> {
 }
 /// Checks that `host_id` can pass `pci_devices` through to a compute VM: every address is a
 /// device on the host that is `vfio_ready` (bound to `vfio-pci` in an exclusive IOMMU group).
-/// farm never unbinds a host driver itself, so a device bound to anything else is refused.
-/// A device a live farm already passes through on the same host is refused too, since one
-/// physical device cannot sit in two VMs. A deleted farm releases its devices.
+/// stackbox never unbinds a host driver itself, so a device bound to anything else is refused.
+/// A device a live stackbox already passes through on the same host is refused too, since one
+/// physical device cannot sit in two VMs. A deleted stackbox releases its devices.
 fn ensure_pci_host(state: &State, host_id: &str, pci_devices: &[String]) -> Result<()> {
     if pci_devices.is_empty() {
         return Ok(());
@@ -239,7 +239,7 @@ fn ensure_pci_host(state: &State, host_id: &str, pci_devices: &[String]) -> Resu
         )));
     };
     // The upstream msb shares the fork's version string, so only the inspection's flag tells
-    // whether this host's msb can start a VM with the PCI and IOMMU flags a farm needs.
+    // whether this host's msb can start a VM with the PCI and IOMMU flags a stackbox needs.
     if !inspection.msb_pci_capable {
         return Err(bad_request(format!(
             "host '{host_id}' msb binary does not support PCI passthrough (--pci/--iommu)"
@@ -256,14 +256,14 @@ fn ensure_pci_host(state: &State, host_id: &str, pci_devices: &[String]) -> Resu
             )));
         }
     }
-    for farm in state.farms.values() {
-        if farm.status == FarmStatus::Deleted {
+    for stackbox in state.stackboxes.values() {
+        if stackbox.status == StackboxStatus::Deleted {
             continue;
         }
-        let Some(plan) = farm.plan.as_ref() else {
+        let Some(plan) = stackbox.plan.as_ref() else {
             continue;
         };
-        if plan.pci_devices.is_empty() || farm.host_of("compute-1") != Some(host_id) {
+        if plan.pci_devices.is_empty() || stackbox.host_of("compute-1") != Some(host_id) {
             continue;
         }
         if let Some(bdf) = pci_devices
@@ -271,17 +271,17 @@ fn ensure_pci_host(state: &State, host_id: &str, pci_devices: &[String]) -> Resu
             .find(|bdf| plan.pci_devices.contains(bdf))
         {
             return Err(conflict(format!(
-                "PCI device '{bdf}' on host '{host_id}' is already passed through to farm '{}'; choose another device or delete that farm first",
-                farm.id
+                "PCI device '{bdf}' on host '{host_id}' is already passed through to stackbox '{}'; choose another device or delete that stackbox first",
+                stackbox.id
             )));
         }
     }
     Ok(())
 }
-/// Why `host_id` cannot take an `mtty` farm yet, and what fixes it on that host.
+/// Why `host_id` cannot take an `mtty` stackbox yet, and what fixes it on that host.
 fn mtty_host_error(host_id: &str, why: String) -> anyhow::Error {
     bad_request(format!(
-        "host '{host_id}' cannot run an mtty GPU farm yet: {why}; prepare that host so farm installs its kernel and boots the verification VM with it (`farm host prepare {host_id}`, or prepare it under Hosts in the portal), then create the farm again (docs/gpu.md)"
+        "host '{host_id}' cannot run an mtty GPU stackbox yet: {why}; prepare that host so stackbox installs its kernel and boots the verification VM with it (`stackbox host prepare {host_id}`, or prepare it under Hosts in the portal), then create the stackbox again (docs/gpu.md)"
     ))
 }
 /// A deploy whose host-side job this coordinator lost; it may still be running there.
@@ -329,7 +329,7 @@ impl Drop for ProbeClaim<'_> {
 const REATTACH_FOR: Duration = Duration::from_secs(if cfg!(test) { 2 } else { 600 });
 const REATTACHING: &str = "Coordinator restarted; re-attaching to the running deploy";
 
-impl FarmManager {
+impl StackboxManager {
     pub async fn open(options: ManagerOptions) -> Result<Self> {
         let link = crate::remote::link::ProcessLink::current()?;
         let guest_agent = link.guest_agent.clone();
@@ -340,7 +340,7 @@ impl FarmManager {
         Ok(manager)
     }
     /// Off Linux, the local agent cannot hand its own binary to the guests of multi-node
-    /// farms; give it the loaded Linux agent for this architecture instead.
+    /// stackboxes; give it the loaded Linux agent for this architecture instead.
     fn write_guest_agent(&self) -> Result<Option<PathBuf>> {
         if cfg!(target_os = "linux") {
             return Ok(None);
@@ -351,9 +351,9 @@ impl FarmManager {
         };
         let dir = self.0.options.state_dir.join("guest");
         std::fs::create_dir_all(&dir)?;
-        let path = dir.join(format!("farm-agent-{platform}"));
+        let path = dir.join(format!("stackbox-agent-{platform}"));
         if std::fs::read(&path).ok().as_deref() != Some(&artifact.bytes[..]) {
-            let staging = dir.join(format!(".farm-agent-{}", uuid::Uuid::new_v4()));
+            let staging = dir.join(format!(".stackbox-agent-{}", uuid::Uuid::new_v4()));
             std::fs::write(&staging, &artifact.bytes[..])?;
             #[cfg(unix)]
             {
@@ -390,7 +390,7 @@ impl FarmManager {
             agent_paths.push(path.clone());
         }
         // Unit tests must not pick up developer binaries from the working tree.
-        let agent_dir = std::env::var_os("FARM_AGENT_DIR")
+        let agent_dir = std::env::var_os("STACKBOX_AGENT_DIR")
             .map(PathBuf::from)
             .or_else(|| {
                 if cfg!(test) {
@@ -484,9 +484,9 @@ impl FarmManager {
                 // A deploy runs on as its host-side job; follow it again instead of giving it up.
                 if job.kind == JobKind::Deploy && job.remote_job_id.is_some() {
                     job.status = JobStatus::Running;
-                    if let Some(farm) = state.farms.get_mut(&job.farm_id) {
-                        farm.step = Some(REATTACHING.into());
-                        farm.updated_at = now();
+                    if let Some(stackbox) = state.stackboxes.get_mut(&job.stackbox_id) {
+                        stackbox.step = Some(REATTACHING.into());
+                        stackbox.updated_at = now();
                     }
                     resumed.push(job.clone());
                     continue;
@@ -499,8 +499,9 @@ impl FarmManager {
                         .as_deref()
                         .and_then(|node| node.strip_prefix("compute-"))
                         .and_then(|index| index.parse::<u8>().ok());
-                    if let (Some(index), Some(farm)) = (index, state.farms.get_mut(&job.farm_id))
-                        && farm
+                    if let (Some(index), Some(stackbox)) =
+                        (index, state.stackboxes.get_mut(&job.stackbox_id))
+                        && stackbox
                             .plan
                             .as_ref()
                             .is_some_and(|plan| plan.computes >= index)
@@ -508,11 +509,11 @@ impl FarmManager {
                         job.status = JobStatus::Succeeded;
                         job.error = None;
                         job.finished_at = Some(now());
-                        farm.active_job = None;
-                        farm.status = FarmStatus::Ready;
-                        farm.error = None;
-                        farm.step = None;
-                        farm.updated_at = now();
+                        stackbox.active_job = None;
+                        stackbox.status = StackboxStatus::Ready;
+                        stackbox.error = None;
+                        stackbox.step = None;
+                        stackbox.updated_at = now();
                         continue;
                     }
                 }
@@ -522,22 +523,27 @@ impl FarmManager {
                 );
                 job.finished_at = Some(now());
                 job.end_step(true, now());
-                if let Some(farm) = state.farms.get_mut(&job.farm_id) {
-                    farm.active_job = None;
-                    farm.status = FarmStatus::Failed;
-                    farm.error = job.error.clone();
-                    farm.updated_at = now();
+                if let Some(stackbox) = state.stackboxes.get_mut(&job.stackbox_id) {
+                    stackbox.active_job = None;
+                    stackbox.status = StackboxStatus::Failed;
+                    stackbox.error = job.error.clone();
+                    stackbox.updated_at = now();
                 }
             }
             snapshots::recover_interrupted(state);
             Ok(())
         })?;
-        for farm in manager.list()? {
-            manager.authorize_uplinks(&farm);
+        for stackbox in manager.list()? {
+            manager.authorize_uplinks(&stackbox);
         }
         manager.reconcile().await?;
         for job in resumed {
-            manager.log(&job.farm_id, &job.id, job.phase, format!("{REATTACHING}\n"))?;
+            manager.log(
+                &job.stackbox_id,
+                &job.id,
+                job.phase,
+                format!("{REATTACHING}\n"),
+            )?;
             manager.spawn(job, None);
         }
         manager.abort_pending_uploads();
@@ -562,29 +568,29 @@ impl FarmManager {
             _ => write(),
         }
     }
-    pub fn list(&self) -> Result<Vec<FarmRecord>> {
+    pub fn list(&self) -> Result<Vec<StackboxRecord>> {
         Ok(self
             .0
             .store
             .lock()
             .map_err(|_| anyhow!("state mutex poisoned"))?
             .state
-            .farms
+            .stackboxes
             .values()
-            .filter(|f| f.status != FarmStatus::Deleted)
+            .filter(|f| f.status != StackboxStatus::Deleted)
             .cloned()
             .collect())
     }
-    pub fn get(&self, id: &str) -> Result<FarmRecord> {
+    pub fn get(&self, id: &str) -> Result<StackboxRecord> {
         self.0
             .store
             .lock()
             .map_err(|_| anyhow!("state mutex poisoned"))?
             .state
-            .farms
+            .stackboxes
             .get(id)
             .cloned()
-            .ok_or_else(|| NotFound(format!("farm '{id}'")).into())
+            .ok_or_else(|| NotFound(format!("stackbox '{id}'")).into())
     }
     pub fn job(&self, id: &str) -> Result<Job> {
         self.0
@@ -609,17 +615,17 @@ impl FarmManager {
             .cloned()
             .collect())
     }
-    pub fn logs(&self, farm: &str, after: u64, limit: usize) -> Result<Vec<LogEntry>> {
-        self.get(farm)?;
+    pub fn logs(&self, stackbox: &str, after: u64, limit: usize) -> Result<Vec<LogEntry>> {
+        self.get(stackbox)?;
         self.0
             .logs
             .lock()
             .map_err(|_| anyhow!("log mutex poisoned"))?
-            .tail(farm, after, limit)
+            .tail(stackbox, after, limit)
     }
     fn log(
         &self,
-        farm: &str,
+        stackbox: &str,
         job: &str,
         phase: Option<crate::kolla::Phase>,
         message: String,
@@ -628,115 +634,116 @@ impl FarmManager {
             .logs
             .lock()
             .map_err(|_| anyhow!("log mutex poisoned"))?
-            .append(farm, job, phase, message)
+            .append(stackbox, job, phase, message)
     }
     pub async fn endpoints(&self, id: &str) -> Result<Endpoints> {
-        let farm = self.get(id)?;
-        if farm.status != FarmStatus::Ready || farm.active_job.is_some() {
+        let stackbox = self.get(id)?;
+        if stackbox.status != StackboxStatus::Ready || stackbox.active_job.is_some() {
             return Err(conflict(
                 "endpoints are available after a successful deployment",
             ));
         }
-        let components = farm_components(&farm);
-        self.backend_for(&farm)?
-            .endpoints(id.into(), farm.exposure, components)
+        let components = stackbox_components(&stackbox);
+        self.backend_for(&stackbox)?
+            .endpoints(id.into(), stackbox.exposure, components)
             .await
     }
-    /// Set the faults of a multi-node farm VM's links (`node` is `control`, `compute-1`, ...),
+    /// Set the faults of a multi-node stackbox VM's links (`node` is `control`, `compute-1`, ...),
     /// such as loss 1.0 to cut it off; `Impair::default()` heals it. It applies at once,
-    /// whatever job the farm runs.
+    /// whatever job the stackbox runs.
     pub async fn impair(
         &self,
         id: &str,
         node: &str,
         impair: crate::link::Impair,
-    ) -> Result<FarmRecord> {
+    ) -> Result<StackboxRecord> {
         impair.validate().map_err(|e| bad_request(e.to_string()))?;
-        let farm = self.get(id)?;
+        let stackbox = self.get(id)?;
         if matches!(
-            farm.status,
-            FarmStatus::Creating | FarmStatus::Deleting | FarmStatus::Deleted
+            stackbox.status,
+            StackboxStatus::Creating | StackboxStatus::Deleting | StackboxStatus::Deleted
         ) {
-            return Err(conflict("faults apply to a created farm"));
+            return Err(conflict("faults apply to a created stackbox"));
         }
-        let plan = farm
+        let plan = stackbox
             .plan
             .as_ref()
             .filter(|plan| plan.multinode())
-            .ok_or_else(|| conflict("only multi-node farms have links to fault"))?;
+            .ok_or_else(|| conflict("only multi-node stackboxes have links to fault"))?;
         if !plan
             .nodes
             .iter()
-            .any(|spec| crate::farm::suffix(spec.role, spec.index).as_deref() == Some(node))
+            .any(|spec| crate::stackbox::suffix(spec.role, spec.index).as_deref() == Some(node))
         {
-            return Err(NotFound(format!("VM '{node}' of farm '{id}'")).into());
+            return Err(NotFound(format!("VM '{node}' of stackbox '{id}'")).into());
         }
-        self.node_backend(&farm, node)?
+        self.node_backend(&stackbox, node)?
             .impair(id.into(), node.into(), impair)
             .await?;
         self.update(|state| {
-            let farm = state
-                .farms
+            let stackbox = state
+                .stackboxes
                 .get_mut(id)
-                .ok_or_else(|| NotFound(format!("farm '{id}'")))?;
+                .ok_or_else(|| NotFound(format!("stackbox '{id}'")))?;
             if impair == crate::link::Impair::default() {
-                farm.faults.remove(node);
+                stackbox.faults.remove(node);
             } else {
-                farm.faults.insert(node.into(), impair);
+                stackbox.faults.insert(node.into(), impair);
             }
-            farm.updated_at = now();
-            Ok(farm.clone())
+            stackbox.updated_at = now();
+            Ok(stackbox.clone())
         })
     }
-    /// Fails unless the farm's VM can take a shell session. `node` picks a multi-node VM by
+    /// Fails unless the stackbox's VM can take a shell session. `node` picks a multi-node VM by
     /// suffix (`control`, `compute-1`); without it the shell opens on the all-in-one or control VM.
-    pub fn check_terminal(&self, id: &str, node: Option<&str>) -> Result<FarmRecord> {
-        let farm = self.get(id)?;
+    pub fn check_terminal(&self, id: &str, node: Option<&str>) -> Result<StackboxRecord> {
+        let stackbox = self.get(id)?;
         let vm = match node {
-            None => farm
+            None => stackbox
                 .nodes
                 .iter()
                 .find(|vm| matches!(vm.role, Some(Role::AllInOne | Role::Control))),
             Some(node) => Some(
-                farm.nodes
+                stackbox
+                    .nodes
                     .iter()
                     .find(|vm| {
                         vm.role
-                            .and_then(|role| crate::farm::suffix(role, vm.index))
+                            .and_then(|role| crate::stackbox::suffix(role, vm.index))
                             .as_deref()
                             == Some(node)
                     })
-                    .ok_or_else(|| NotFound(format!("VM '{node}' of farm '{id}'")))?,
+                    .ok_or_else(|| NotFound(format!("VM '{node}' of stackbox '{id}'")))?,
             ),
         };
         if !vm.is_some_and(|vm| vm.status == "running") {
-            return Err(conflict("the shell needs the farm's VM to be running"));
+            return Err(conflict("the shell needs the stackbox's VM to be running"));
         }
-        Ok(farm)
+        Ok(stackbox)
     }
-    /// Interactive shell in the farm's VM; it does not wait for or block the farm's jobs.
+    /// Interactive shell in the stackbox's VM; it does not wait for or block the stackbox's jobs.
     pub async fn terminal(
         &self,
         id: &str,
         node: Option<&str>,
-        size: crate::farm::TerminalSize,
-        io: crate::farm::TerminalIo,
+        size: crate::stackbox::TerminalSize,
+        io: crate::stackbox::TerminalIo,
     ) -> Result<()> {
-        let farm = self.check_terminal(id, node)?;
+        let stackbox = self.check_terminal(id, node)?;
         if let Some(node) = node
-            && farm
+            && stackbox
                 .shares
                 .iter()
                 .any(|s| s.nodes.iter().any(|n| n == node))
         {
             return self
-                .node_backend(&farm, node)?
+                .node_backend(&stackbox, node)?
                 .terminal(id.into(), Some(node.into()), size, io)
                 .await;
         }
-        // A shell needs only the host's reservation, not the agent the farm was built
-        // with, so a remote farm uses the host's current agent once that matches this coordinator.
-        let current = farm.host_id.as_ref().and_then(|host_id| {
+        // A shell needs only the host's reservation, not the agent the stackbox was built
+        // with, so a remote stackbox uses the host's current agent once that matches this coordinator.
+        let current = stackbox.host_id.as_ref().and_then(|host_id| {
             lock_unpoisoned(&self.0.store)
                 .state
                 .hosts
@@ -749,13 +756,17 @@ impl FarmManager {
         });
         let backend = match current {
             Some(digest) => self.agent_backend(
-                farm.host_id.as_deref().context("farm has no host")?,
-                Some(&digest),
-                farm.remote_generation
+                stackbox
+                    .host_id
                     .as_deref()
-                    .context("farm has no generation")?,
+                    .context("stackbox has no host")?,
+                Some(&digest),
+                stackbox
+                    .remote_generation
+                    .as_deref()
+                    .context("stackbox has no generation")?,
             )?,
-            None => self.backend_for(&farm)?,
+            None => self.backend_for(&stackbox)?,
         };
         backend
             .terminal(id.into(), node.map(Into::into), size, io)
@@ -832,24 +843,25 @@ impl FarmManager {
         }
         self.0.artifacts.get(platform).cloned().ok_or_else(|| {
             anyhow!(
-                "no {platform} farm-agent is loaded and build {} published none; build it with scripts/build-agent.sh and restart the coordinator",
+                "no {platform} stackbox-agent is loaded and build {} published none; build it with scripts/build-agent.sh and restart the coordinator",
                 crate::BUILD_ID
             )
         })
     }
-    fn backend_for(&self, farm: &FarmRecord) -> Result<Arc<dyn Backend>> {
-        Ok(Arc::new(self.agent_for(farm)?))
+    fn backend_for(&self, stackbox: &StackboxRecord) -> Result<Arc<dyn Backend>> {
+        Ok(Arc::new(self.agent_for(stackbox)?))
     }
-    fn agent_for(&self, farm: &FarmRecord) -> Result<crate::remote::backend::AgentBackend> {
-        let host_id = farm.host_id.as_deref().ok_or_else(|| {
-            conflict("this farm predates host registration; it has no host to run on")
+    fn agent_for(&self, stackbox: &StackboxRecord) -> Result<crate::remote::backend::AgentBackend> {
+        let host_id = stackbox.host_id.as_deref().ok_or_else(|| {
+            conflict("this stackbox predates host registration; it has no host to run on")
         })?;
         self.agent(
             host_id,
-            farm.agent_sha256.as_deref(),
-            farm.remote_generation
+            stackbox.agent_sha256.as_deref(),
+            stackbox
+                .remote_generation
                 .as_deref()
-                .context("farm has no generation")?,
+                .context("stackbox has no generation")?,
         )
     }
     fn agent_backend(
@@ -860,7 +872,7 @@ impl FarmManager {
     ) -> Result<Arc<dyn Backend>> {
         Ok(Arc::new(self.agent(host_id, digest, generation)?))
     }
-    /// The host's farm-agent, acting for one farm generation. A remote host runs the agent
+    /// The host's stackbox-agent, acting for one stackbox generation. A remote host runs the agent
     /// artifact `digest`; the local host runs this coordinator's own binary.
     fn agent(
         &self,
@@ -893,7 +905,9 @@ impl FarmManager {
                         .context("remote host has no credentials")?,
                     &stored.aad(),
                 )?,
-                digest: digest.context("remote farm has no pinned agent")?.into(),
+                digest: digest
+                    .context("remote stackbox has no pinned agent")?
+                    .into(),
             }),
         };
         Ok(crate::remote::backend::AgentBackend {
@@ -919,14 +933,14 @@ impl FarmManager {
             })?;
         self.agent_backend(&local, None, "")
     }
-    /// Moves a farm off a public port block its host's agent holds for another coordinator.
+    /// Moves a stackbox off a public port block its host's agent holds for another coordinator.
     /// The agent refuses a collision anyway; asking first avoids a create that is bound to fail.
-    async fn avoid_foreign_ports(&self, job: &Job, farm: &FarmRecord) -> Result<()> {
-        let taken = match self.backend_for(farm)?.public_ports().await {
+    async fn avoid_foreign_ports(&self, job: &Job, stackbox: &StackboxRecord) -> Result<()> {
+        let taken = match self.backend_for(stackbox)?.public_ports().await {
             Ok(taken) => taken,
             Err(error) => {
                 self.log(
-                    &farm.id,
+                    &stackbox.id,
                     &job.id,
                     None,
                     format!("could not read the host's reserved ports: {error}\n"),
@@ -934,7 +948,7 @@ impl FarmManager {
                 return Ok(());
             }
         };
-        let Some(current) = farm.exposure.as_ref() else {
+        let Some(current) = stackbox.exposure.as_ref() else {
             return Ok(());
         };
         if !taken
@@ -943,7 +957,7 @@ impl FarmManager {
         {
             return Ok(());
         }
-        let host_id = farm.host_id.clone().context("farm has no host")?;
+        let host_id = stackbox.host_id.clone().context("stackbox has no host")?;
         let moved = self.update(|state| {
             let probe = state
                 .hosts
@@ -958,14 +972,14 @@ impl FarmManager {
                 &taken,
             )?;
             state
-                .farms
-                .get_mut(&farm.id)
-                .context("farm missing")?
+                .stackboxes
+                .get_mut(&stackbox.id)
+                .context("stackbox missing")?
                 .exposure = Some(exposure.clone());
             Ok(exposure)
         })?;
         self.log(
-            &farm.id,
+            &stackbox.id,
             &job.id,
             None,
             format!(
@@ -976,7 +990,7 @@ impl FarmManager {
         Ok(())
     }
 
-    /// Whether a farm can be created on `host_id`: its memory budget, the agent the farm
+    /// Whether a stackbox can be created on `host_id`: its memory budget, the agent the stackbox
     /// pins there, the address its ports bind and whether it is this machine.
     fn admit_host(
         &self,
@@ -991,19 +1005,19 @@ impl FarmManager {
             .host;
         if !matches!(host.status, crate::remote::HostStatus::Ready) || host.active_job.is_some() {
             return Err(conflict(format!(
-                "host '{host_id}' must finish preparation before creating farms"
+                "host '{host_id}' must finish preparation before creating stackboxes"
             )));
         }
         let inspection = host
             .inspection
             .as_ref()
             .context("ready host has no inspection")?;
-        // A multi-node farm's guests run a Linux farm-agent for their links. Linux agents
+        // A multi-node stackbox's guests run a Linux stackbox-agent for their links. Linux agents
         // give their own; this machine gives the one loaded at startup.
         if multinode {
             let ready = if host.kind == HostKind::Local {
                 cfg!(target_os = "linux")
-                    || std::env::var_os("FARM_GUEST_AGENT").is_some()
+                    || std::env::var_os("STACKBOX_GUEST_AGENT").is_some()
                     || self.0.guest_agent.read().is_ok_and(|g| g.is_some())
             } else {
                 inspection.os == "linux"
@@ -1011,11 +1025,11 @@ impl FarmManager {
             if !ready {
                 return Err(conflict(if host.kind == HostKind::Local {
                     format!(
-                        "multi-node farms need a linux-{} farm-agent for their guests; build it with `task agent-build` and restart the coordinator",
+                        "multi-node stackboxes need a linux-{} stackbox-agent for their guests; build it with `task agent-build` and restart the coordinator",
                         crate::model::current_arch()
                     )
                 } else {
-                    "multi-node farms run on Linux hosts and this machine's local host only"
+                    "multi-node stackboxes run on Linux hosts and this machine's local host only"
                         .to_string()
                 }));
             }
@@ -1030,7 +1044,7 @@ impl FarmManager {
             HostKind::Agent => {
                 if !self.0.hub.connected(host_id) {
                     return Err(conflict(format!(
-                        "the agent of host '{host_id}' is not connected; run `farm agent connect` there"
+                        "the agent of host '{host_id}' is not connected; run `stackbox agent connect` there"
                     )));
                 }
                 (
@@ -1043,12 +1057,12 @@ impl FarmManager {
             HostKind::Ssh => {
                 let agent = host.agent.as_ref().ok_or_else(|| {
                     conflict(format!(
-                        "install the Farm execution agent on host '{host_id}' first"
+                        "install the Stackbox execution agent on host '{host_id}' first"
                     ))
                 })?;
                 if !agent.artifact.supports_single_vm {
                     return Err(conflict(
-                        "install the updated Farm execution agent to create single-VM farms",
+                        "install the updated Stackbox execution agent to create single-VM stackboxes",
                     ));
                 }
                 if agent.artifact.build_id != crate::BUILD_ID {
@@ -1067,7 +1081,7 @@ impl FarmManager {
             }
         })
     }
-    /// What each host of a farm that spans hosts runs, with a new uplink token per host and
+    /// What each host of a stackbox that spans hosts runs, with a new uplink token per host and
     /// the key Kolla reaches the computes with. `control_host` comes first.
     fn spread(
         &self,
@@ -1093,7 +1107,7 @@ impl FarmManager {
             _ => String::new(),
         };
         let (private, public) = new_ssh_key()?;
-        let segments: Vec<String> = crate::farm::NETWORKS
+        let segments: Vec<String> = crate::stackbox::NETWORKS
             .iter()
             .map(|(_, network, _)| format!("{id}/{network}"))
             .collect();
@@ -1102,7 +1116,7 @@ impl FarmManager {
             control_host.to_owned(),
             plan.nodes
                 .iter()
-                .filter_map(|spec| crate::farm::suffix(spec.role, spec.index))
+                .filter_map(|spec| crate::stackbox::suffix(spec.role, spec.index))
                 .filter(|suffix| !elsewhere.contains(&suffix))
                 .collect::<Vec<_>>(),
         )];
@@ -1137,22 +1151,24 @@ impl FarmManager {
             components: plan.components.clone(),
             computes: plan.computes + 1,
             compute: plan.compute,
-            // The computes join the farm's own release.
+            // The computes join the stackbox's own release.
             release: plan.release.clone(),
             layout: None,
             gpu: plan.gpu.clone(),
-            // compute-1 already exists on a farm with devices, so an expansion adds none.
+            // compute-1 already exists on a stackbox with devices, so an expansion adds none.
             pci_devices: plan.pci_devices.clone(),
         })?;
         if serde_json::to_value(&expanded.nodes[..plan.nodes.len()])?
             != serde_json::to_value(&plan.nodes)?
             || expanded.computes != plan.computes + 1
         {
-            bail!("this farm's existing VM layout cannot be expanded; create a new farm instead");
+            bail!(
+                "this stackbox's existing VM layout cannot be expanded; create a new stackbox instead"
+            );
         }
         Ok(expanded)
     }
-    /// A new uplink for one host of a farm that is gaining a compute on another host.
+    /// A new uplink for one host of a stackbox that is gaining a compute on another host.
     fn next_uplink(
         &self,
         state: &State,
@@ -1162,7 +1178,7 @@ impl FarmManager {
         let settings = state
             .relay
             .as_ref()
-            .context("farms that span hosts need the relay; set it up under Hosts")?;
+            .context("stackboxes that span hosts need the relay; set it up under Hosts")?;
         let tunnel = lock_unpoisoned(&self.0.tunnel_url).clone();
         let url = effective_url(settings, tunnel.as_deref())
             .context("the relay's quick tunnel has no address yet; see Hosts and try again")?;
@@ -1183,13 +1199,13 @@ impl FarmManager {
             ca,
             token: crate::link::new_token()?,
             key: crate::link::seal::new_key()?,
-            segments: crate::farm::NETWORKS
+            segments: crate::stackbox::NETWORKS
                 .iter()
                 .map(|(_, network, _)| format!("{id}/{network}"))
                 .collect(),
         })
     }
-    /// Close a deleted farm's uplinks and drop their keys.
+    /// Close a deleted stackbox's uplinks and drop their keys.
     fn forget_uplinks(&self, id: &str) -> Result<()> {
         self.0.relay.forget(id);
         self.update(|state| {
@@ -1198,22 +1214,27 @@ impl FarmManager {
             Ok(())
         })
     }
-    /// Let the switches of a farm that spans hosts join its relay.
-    fn authorize_uplinks(&self, farm: &FarmRecord) {
-        if farm.status == FarmStatus::Deleted {
-            self.0.relay.forget(&farm.id);
+    /// Let the switches of a stackbox that spans hosts join its relay.
+    fn authorize_uplinks(&self, stackbox: &StackboxRecord) {
+        if stackbox.status == StackboxStatus::Deleted {
+            self.0.relay.forget(&stackbox.id);
             return;
         }
-        let Some((host, hash)) = farm.host_id.as_ref().zip(farm.uplink_sha256.as_ref()) else {
+        let Some((host, hash)) = stackbox
+            .host_id
+            .as_ref()
+            .zip(stackbox.uplink_sha256.as_ref())
+        else {
             return;
         };
         let keys = self
-            .read(|state| state.relay_keys.get(&farm.id).cloned())
+            .read(|state| state.relay_keys.get(&stackbox.id).cloned())
             .ok()
             .flatten()
             .unwrap_or_default();
         let hosts = std::iter::once((host.as_str(), hash.as_str())).chain(
-            farm.shares
+            stackbox
+                .shares
                 .iter()
                 .map(|share| (share.host_id.as_str(), share.uplink_sha256.as_str())),
         );
@@ -1221,20 +1242,24 @@ impl FarmManager {
             match keys.get(host).context("no uplink key").and_then(|sealed| {
                 self.0
                     .vault
-                    .unseal::<String>(sealed, &uplink_key_aad(&farm.id, host))
+                    .unseal::<String>(sealed, &uplink_key_aad(&stackbox.id, host))
             }) {
-                Ok(key) => self.0.relay.authorize(&farm.id, host, hash, &key),
-                Err(error) => eprintln!("relay: farm {} on {host}: {error:#}", farm.id),
+                Ok(key) => self.0.relay.authorize(&stackbox.id, host, hash, &key),
+                Err(error) => eprintln!("relay: stackbox {} on {host}: {error:#}", stackbox.id),
             }
         }
     }
-    /// The agents of the other hosts of a farm that spans hosts, with their shares.
-    fn share_backends(&self, farm: &FarmRecord) -> Result<Vec<(HostShare, Arc<dyn Backend>)>> {
-        let generation = farm
+    /// The agents of the other hosts of a stackbox that spans hosts, with their shares.
+    fn share_backends(
+        &self,
+        stackbox: &StackboxRecord,
+    ) -> Result<Vec<(HostShare, Arc<dyn Backend>)>> {
+        let generation = stackbox
             .remote_generation
             .as_deref()
-            .context("farm has no generation")?;
-        farm.shares
+            .context("stackbox has no generation")?;
+        stackbox
+            .shares
             .iter()
             .map(|share| {
                 Ok((
@@ -1244,9 +1269,9 @@ impl FarmManager {
             })
             .collect()
     }
-    /// The agent of the host that runs the farm's VM `node`.
-    fn node_backend(&self, farm: &FarmRecord, node: &str) -> Result<Arc<dyn Backend>> {
-        match farm
+    /// The agent of the host that runs the stackbox's VM `node`.
+    fn node_backend(&self, stackbox: &StackboxRecord, node: &str) -> Result<Arc<dyn Backend>> {
+        match stackbox
             .shares
             .iter()
             .find(|s| s.nodes.iter().any(|n| n == node))
@@ -1254,67 +1279,81 @@ impl FarmManager {
             Some(share) => self.agent_backend(
                 &share.host_id,
                 share.agent_sha256.as_deref(),
-                farm.remote_generation
+                stackbox
+                    .remote_generation
                     .as_deref()
-                    .context("farm has no generation")?,
+                    .context("stackbox has no generation")?,
             ),
-            None => self.backend_for(farm),
+            None => self.backend_for(stackbox),
         }
     }
-    /// The farm's VMs as all its hosts see them.
-    async fn scan_farm(&self, farm: &FarmRecord) -> Result<Vec<crate::farm::FarmNode>> {
+    /// The stackbox's VMs as all its hosts see them.
+    async fn scan_stackbox(
+        &self,
+        stackbox: &StackboxRecord,
+    ) -> Result<Vec<crate::stackbox::StackboxNode>> {
         let mut nodes = self
-            .backend_for(farm)?
+            .backend_for(stackbox)?
             .scan()
             .await?
-            .remove(&farm.id)
+            .remove(&stackbox.id)
             .unwrap_or_default();
-        for (_, backend) in self.share_backends(farm)? {
-            nodes.extend(backend.scan().await?.remove(&farm.id).unwrap_or_default());
+        for (_, backend) in self.share_backends(stackbox)? {
+            nodes.extend(
+                backend
+                    .scan()
+                    .await?
+                    .remove(&stackbox.id)
+                    .unwrap_or_default(),
+            );
         }
-        if !farm.shares.is_empty() {
+        if !stackbox.shares.is_empty() {
             nodes.sort_by(|a, b| a.name.cmp(&b.name));
         }
         Ok(nodes)
     }
-    /// Create every host's part of a farm that spans hosts, each with its own share.
+    /// Create every host's part of a stackbox that spans hosts, each with its own share.
     async fn create_spanning(
         &self,
         job: &Job,
-        farm: &FarmRecord,
-    ) -> Result<Vec<crate::farm::FarmNode>> {
+        stackbox: &StackboxRecord,
+    ) -> Result<Vec<crate::stackbox::StackboxNode>> {
         let spread = self
             .0
             .spreads
             .lock()
             .map_err(|_| anyhow!("spread mutex poisoned"))?
-            .remove(&farm.id)
-            .context("this create lost its hosts' shares when the coordinator restarted; delete the farm and create it again")?;
-        let plan = farm.plan.clone().context("farm has no plan")?;
-        let exposure = farm.exposure.clone().context("farm has no exposure")?;
-        let generation = farm
+            .remove(&stackbox.id)
+            .context("this create lost its hosts' shares when the coordinator restarted; delete the stackbox and create it again")?;
+        let plan = stackbox.plan.clone().context("stackbox has no plan")?;
+        let exposure = stackbox
+            .exposure
+            .clone()
+            .context("stackbox has no exposure")?;
+        let generation = stackbox
             .remote_generation
             .as_deref()
-            .context("farm has no generation")?;
+            .context("stackbox has no generation")?;
         let creates = spread.into_iter().map(|(host, share)| {
             let (plan, exposure) = (plan.clone(), exposure.clone());
             async move {
-                let digest = if Some(host.as_str()) == farm.host_id.as_deref() {
-                    farm.agent_sha256.clone()
+                let digest = if Some(host.as_str()) == stackbox.host_id.as_deref() {
+                    stackbox.agent_sha256.clone()
                 } else {
-                    farm.shares
+                    stackbox
+                        .shares
                         .iter()
                         .find(|s| s.host_id == host)
                         .and_then(|s| s.agent_sha256.clone())
                 };
                 self.log(
-                    &farm.id,
+                    &stackbox.id,
                     &job.id,
                     None,
                     format!("creating {} on host {host}\n", share.nodes.join(", ")),
                 )?;
                 self.agent_backend(&host, digest.as_deref(), generation)?
-                    .create_share(farm.id.clone(), plan, exposure, share)
+                    .create_share(stackbox.id.clone(), plan, exposure, share)
                     .await
                     .with_context(|| format!("create the VMs on host {host}"))
             }
@@ -1327,9 +1366,9 @@ impl FarmManager {
         nodes.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(nodes)
     }
-    /// The relay URL new farms that span hosts get, once there is one.
+    /// The relay URL new stackboxes that span hosts get, once there is one.
     pub fn relay_url(&self) -> Option<String> {
-        // A poisoned lock is read through, not reported as no relay: a farm created then would
+        // A poisoned lock is read through, not reported as no relay: a stackbox created then would
         // skip the relay it needs. Both guarded values stay consistent when a holder panics:
         // the store publishes a change only after it is saved, and the tunnel is one assignment.
         let tunnel = lock_unpoisoned(&self.0.tunnel_url).clone();
@@ -1344,7 +1383,7 @@ impl FarmManager {
             .relay
             .clone()
     }
-    /// Listen for the switches of farms that span hosts, replacing an earlier listener. A
+    /// Listen for the switches of stackboxes that span hosts, replacing an earlier listener. A
     /// failure is reported in [`Self::relay_status`] and leaves the rest of the daemon up.
     pub async fn start_relay(&self) {
         let mut listener = self.0.relay_listener.lock().await;
@@ -1387,7 +1426,7 @@ impl FarmManager {
                         let Some(inner) = manager.upgrade() else {
                             return;
                         };
-                        let manager = FarmManager(inner);
+                        let manager = StackboxManager(inner);
                         *lock_unpoisoned(&manager.0.tunnel_url) = Some(url.clone());
                         tokio::spawn(async move { manager.relink(&url).await });
                     });
@@ -1425,20 +1464,20 @@ impl FarmManager {
             listening: listener.addr.map(|addr| addr.to_string()),
             error: listener.error.clone(),
             ca_sha256,
-            spanning_farms: self.spanning_farms()?,
+            spanning_stackboxes: self.spanning_stackboxes()?,
         })
     }
-    /// Farms that span hosts, whose switches hold the relay's URL and CA.
-    fn spanning_farms(&self) -> Result<Vec<String>> {
+    /// Stackboxes that span hosts, whose switches hold the relay's URL and CA.
+    fn spanning_stackboxes(&self) -> Result<Vec<String>> {
         Ok(self
             .list()?
             .into_iter()
-            .filter(|f| f.status != FarmStatus::Deleted && !f.shares.is_empty())
+            .filter(|f| f.status != StackboxStatus::Deleted && !f.shares.is_empty())
             .map(|f| f.id)
             .collect())
     }
-    /// Change where farms that span hosts join, or turn it off with `None`. The switches of
-    /// existing such farms keep the old URL and CA, so while any lives only the listen
+    /// Change where stackboxes that span hosts join, or turn it off with `None`. The switches of
+    /// existing such stackboxes keep the old URL and CA, so while any lives only the listen
     /// address may change.
     pub async fn set_relay(
         &self,
@@ -1454,10 +1493,10 @@ impl FarmManager {
                          b: &Option<crate::link::relay::RelaySettings>| {
             a.as_ref().map(|s| (&s.url, s.mode)) == b.as_ref().map(|s| (&s.url, s.mode))
         };
-        let spanning = self.spanning_farms()?;
+        let spanning = self.spanning_stackboxes()?;
         if !spanning.is_empty() && !same_link(&current, &settings) {
             return Err(conflict(format!(
-                "farms that span hosts use the current relay URL and CA; delete them first: {}",
+                "stackboxes that span hosts use the current relay URL and CA; delete them first: {}",
                 spanning.join(", ")
             )));
         }
@@ -1508,7 +1547,7 @@ impl FarmManager {
         }
         self.relay_status().await
     }
-    /// Point the switches of every farm that spans hosts at the relay's new address, as a
+    /// Point the switches of every stackbox that spans hosts at the relay's new address, as a
     /// quick tunnel gets one each start. Each keeps its token and CA.
     pub async fn relink(&self, url: &str) {
         self.relink_hosts(url, false).await
@@ -1522,23 +1561,24 @@ impl FarmManager {
         }
     }
     async fn relink_hosts(&self, url: &str, missing_only: bool) {
-        let Ok(farms) = self.list() else { return };
-        for farm in farms
+        let Ok(stackboxes) = self.list() else { return };
+        for stackbox in stackboxes
             .into_iter()
-            .filter(|f| f.status != FarmStatus::Deleted && !f.shares.is_empty())
+            .filter(|f| f.status != StackboxStatus::Deleted && !f.shares.is_empty())
         {
-            let connected = self.0.relay.connected(&farm.id);
-            for host in farm.hosts() {
+            let connected = self.0.relay.connected(&stackbox.id);
+            for host in stackbox.hosts() {
                 if missing_only && connected.iter().any(|c| c == host) {
                     continue;
                 }
                 let result = async {
-                    let backend = if Some(host) == farm.host_id.as_deref() {
-                        self.backend_for(&farm)?
+                    let backend = if Some(host) == stackbox.host_id.as_deref() {
+                        self.backend_for(&stackbox)?
                     } else {
                         self.node_backend(
-                            &farm,
-                            farm.shares
+                            &stackbox,
+                            stackbox
+                                .shares
                                 .iter()
                                 .find(|s| s.host_id == host)
                                 .and_then(|s| s.nodes.first())
@@ -1547,17 +1587,17 @@ impl FarmManager {
                     };
                     backend
                         .relink(
-                            farm.id.clone(),
-                            crate::link::relay::uplink_url(url, &farm.id, host)?,
+                            stackbox.id.clone(),
+                            crate::link::relay::uplink_url(url, &stackbox.id, host)?,
                         )
                         .await
                 }
                 .await;
                 match result {
-                    Ok(()) => eprintln!("relay: {} on {host} now joins {url}", farm.id),
+                    Ok(()) => eprintln!("relay: {} on {host} now joins {url}", stackbox.id),
                     Err(error) => eprintln!(
                         "relay: cannot move {} on {host} to {url}: {error:#}",
-                        farm.id
+                        stackbox.id
                     ),
                 }
             }
@@ -1566,7 +1606,7 @@ impl FarmManager {
     pub fn relay(&self) -> Arc<crate::link::relay::Relay> {
         self.0.relay.clone()
     }
-    /// Create a farm directly from a registered S3 bucket archive that carries a metadata
+    /// Create a stackbox directly from a registered S3 bucket archive that carries a metadata
     /// file. The metadata determines the plan, architecture and GPU requirements up front;
     /// the restore job has the target host download the archive via presigned URL and boot it.
     pub async fn create_from_bucket(&self, mut request: CreateRequest) -> Result<Job> {
@@ -1581,7 +1621,7 @@ impl FarmManager {
             .map_err(|e| bad_request(format!("cannot read archive metadata: {e:#}")))?
             .ok_or_else(|| {
                 bad_request(format!(
-                    "{key} has no metadata file; only archives with metadata can start a farm directly from a bucket"
+                    "{key} has no metadata file; only archives with metadata can start a stackbox directly from a bucket"
                 ))
             })?;
         let plan = snapshots::plan_from_metadata(&metadata)?;
@@ -1597,7 +1637,7 @@ impl FarmManager {
                         arch: metadata.arch.clone(),
                         platform: metadata.platform.clone(),
                         host_id: None,
-                        source_farm: metadata.source_farm.clone(),
+                        source_stackbox: metadata.source_stackbox.clone(),
                         plan: plan.clone(),
                         deployed: metadata.deployed,
                         source_exposure: Exposure {
@@ -1658,14 +1698,14 @@ impl FarmManager {
         let job = self.update(|state| {
             self.ensure_accepting()?;
             if state
-                .farms
+                .stackboxes
                 .get(&id)
-                .is_some_and(|f| f.status != FarmStatus::Deleted)
+                .is_some_and(|f| f.status != StackboxStatus::Deleted)
             {
-                return Err(conflict(format!("farm '{id}' already exists")));
+                return Err(conflict(format!("stackbox '{id}' already exists")));
             }
             let host_id = request.host_id.clone().ok_or_else(|| {
-                bad_request("choose a host for the farm; register the local host or a server under Hosts first")
+                bad_request("choose a host for the stackbox; register the local host or a server under Hosts first")
             })?;
             if let Some(snapshot_id) = &request.snapshot_id {
                 let snapshot = snapshots::restorable(state, snapshot_id, &host_id)?;
@@ -1698,7 +1738,7 @@ impl FarmManager {
             let (budget, agent_sha256, bind, local) = self.admit_host(state, &host_id, plan.multinode())?;
             let mut hosts = vec![(host_id.clone(), budget, agent_sha256.clone())];
             // The mtty device is the guest kernel's, so every host that runs a compute must
-            // have booted farm's kernel in its verification VM. Preparation installs that
+            // have booted stackbox's kernel in its verification VM. Preparation installs that
             // kernel on local, SSH and dial-in hosts alike; each host's stored inspection is
             // the evidence, and no host is judged by this coordinator's own kernel.
             if plan
@@ -1725,7 +1765,7 @@ impl FarmManager {
             let mut relay_url = None;
             if !placed.is_empty() {
                 let relay = state.relay.as_ref().ok_or_else(|| {
-                    conflict("farms that span hosts need the relay; set it up under Hosts")
+                    conflict("stackboxes that span hosts need the relay; set it up under Hosts")
                 })?;
                 let url = effective_url(relay, tunnel_url.as_deref()).ok_or_else(|| {
                     conflict("the relay's quick tunnel has no address yet; see Hosts and try again")
@@ -1760,9 +1800,9 @@ impl FarmManager {
                 .map(|spread| crate::link::token_hash(&spread[0].1.uplink.token));
             for (host, budget, _) in &hosts {
                 let reserved: u64 = state
-                    .farms
+                    .stackboxes
                     .values()
-                    .filter(|f| f.status != FarmStatus::Deleted)
+                    .filter(|f| f.status != StackboxStatus::Deleted)
                     .map(|f| f.memory_on(host))
                     .sum();
                 let requested = if shares.is_empty() {
@@ -1780,16 +1820,16 @@ impl FarmManager {
             let remote_generation = Some(uuid::Uuid::new_v4().to_string());
             let mut job = new_job(&id, if request.snapshot_id.is_some() { JobKind::Restore } else { JobKind::Create });
             job.snapshot_id = request.snapshot_id.clone();
-            state.farms.insert(
+            state.stackboxes.insert(
                 id.clone(),
-                FarmRecord {
+                StackboxRecord {
                     id: id.clone(),
                     host_id: Some(host_id),
                     agent_sha256,
                     remote_generation,
                     observation_error: None,
                     last_seen_at: None,
-                    status: FarmStatus::Creating,
+                    status: StackboxStatus::Creating,
                     plan: Some(plan),
                     exposure: Some(exposure),
                     owner: request.owner,
@@ -1822,8 +1862,8 @@ impl FarmManager {
             }
             Ok(job)
         })?;
-        if let Ok(farm) = self.get(&id) {
-            self.authorize_uplinks(&farm);
+        if let Ok(stackbox) = self.get(&id) {
+            self.authorize_uplinks(&stackbox);
         }
         self.spawn(job.clone(), None);
         Ok(job)
@@ -1831,12 +1871,12 @@ impl FarmManager {
     pub fn deploy(&self, id: &str, request: DeployRequest) -> Result<Job> {
         let job = self.update(|state| {
             self.ensure_accepting()?;
-            let farm = state
-                .farms
+            let stackbox = state
+                .stackboxes
                 .get_mut(id)
-                .ok_or_else(|| NotFound(format!("farm '{id}'")))?;
-            ensure_idle(farm)?;
-            if farm
+                .ok_or_else(|| NotFound(format!("stackbox '{id}'")))?;
+            ensure_idle(stackbox)?;
+            if stackbox
                 .host_id
                 .as_ref()
                 .and_then(|id| state.hosts.get(id))
@@ -1845,40 +1885,40 @@ impl FarmManager {
                 return Err(conflict("host preparation is running"));
             }
             if !matches!(
-                farm.status,
-                FarmStatus::Created | FarmStatus::Ready | FarmStatus::Failed
+                stackbox.status,
+                StackboxStatus::Created | StackboxStatus::Ready | StackboxStatus::Failed
             ) {
-                return Err(conflict("farm must be created before deploying"));
+                return Err(conflict("stackbox must be created before deploying"));
             }
-            let layout = farm.plan.as_ref().map(|plan| crate::farm::layout(&plan.nodes));
+            let layout = stackbox.plan.as_ref().map(|plan| crate::stackbox::layout(&plan.nodes));
             if !matches!(layout, Some(Ok(_))) {
-                return Err(conflict("legacy multi-node farms cannot be deployed; keep or delete this farm and create a new farm"));
+                return Err(conflict("legacy multi-node stackboxes cannot be deployed; keep or delete this stackbox and create a new stackbox"));
             }
-            // A farm restored from a control template has its Kolla configuration already;
-            // a full deploy would verify Nova on computes it does not have. A farm created
+            // A stackbox restored from a control template has its Kolla configuration already;
+            // a full deploy would verify Nova on computes it does not have. A stackbox created
             // clean as a control VM alone still has to install OpenStack on it.
-            if farm.snapshot_id.is_some()
-                && farm
+            if stackbox.snapshot_id.is_some()
+                && stackbox
                     .plan
                     .as_ref()
                     .is_some_and(|plan| plan.multinode() && plan.computes == 0)
             {
-                return Err(conflict("this farm has no compute VM yet; add one instead of deploying it again"));
+                return Err(conflict("this stackbox has no compute VM yet; add one instead of deploying it again"));
             }
-            let expected = farm.plan.as_ref().map_or(1, |plan| plan.nodes.len());
-            if farm.nodes.len() != expected || farm.nodes.iter().any(|n| n.status != "running") {
+            let expected = stackbox.plan.as_ref().map_or(1, |plan| plan.nodes.len());
+            if stackbox.nodes.len() != expected || stackbox.nodes.iter().any(|n| n.status != "running") {
                 return Err(conflict(format!(
-                    "all {expected} farm nodes must be running before deploying"
+                    "all {expected} stackbox nodes must be running before deploying"
                 )));
             }
-            // A remote farm keeps the agent it was created with. Move it to the host's current
+            // A remote stackbox keeps the agent it was created with. Move it to the host's current
             // agent once that agent matches this coordinator, so reinstalling the agent also
-            // repairs existing farms.
+            // repairs existing stackboxes.
             let mut repinned = None;
-            if let Some(host_id) = farm.host_id.clone()
+            if let Some(host_id) = stackbox.host_id.clone()
                 && let Some(stored) = state.hosts.get(&host_id)
                 && let Some(agent) = &stored.host.agent
-                && farm.agent_sha256.as_deref() != Some(agent.artifact.sha256.as_str())
+                && stackbox.agent_sha256.as_deref() != Some(agent.artifact.sha256.as_str())
             {
                 if agent.artifact.build_id != crate::BUILD_ID {
                     return Err(conflict(format!(
@@ -1887,22 +1927,22 @@ impl FarmManager {
                     )));
                 }
                 repinned = Some(agent.artifact.sha256.clone());
-                farm.agent_sha256 = repinned.clone();
+                stackbox.agent_sha256 = repinned.clone();
             }
             let mut job = new_job(id, JobKind::Deploy);
             job.phase = Some(request.from);
-            farm.status = FarmStatus::Deploying;
-            farm.active_job = Some(job.id.clone());
-            farm.error = None;
-            farm.phase = Some(request.from);
-            farm.updated_at = now();
+            stackbox.status = StackboxStatus::Deploying;
+            stackbox.active_job = Some(job.id.clone());
+            stackbox.error = None;
+            stackbox.phase = Some(request.from);
+            stackbox.updated_at = now();
             state.jobs.insert(job.id.clone(), job.clone());
             Ok((job, repinned))
         })?;
         let (job, repinned) = job;
         if let Some(digest) = repinned {
             self.log(
-                &job.farm_id,
+                &job.stackbox_id,
                 &job.id,
                 None,
                 format!(
@@ -1915,53 +1955,53 @@ impl FarmManager {
         self.spawn(job.clone(), Some(request));
         Ok(job)
     }
-    /// Add the next compute VM to a deployed multi-node farm. The VM runs on `host_id`, or
-    /// on the farm's primary host when it is omitted. A remote host joins the farm's link
+    /// Add the next compute VM to a deployed multi-node stackbox. The VM runs on `host_id`, or
+    /// on the stackbox's primary host when it is omitted. A remote host joins the stackbox's link
     /// segments through the coordinator's relay.
     pub fn add_compute(&self, id: &str, request: AddComputeRequest) -> Result<Job> {
         let tunnel_url = lock_unpoisoned(&self.0.tunnel_url).clone();
         let job = self.update(|state| {
             self.ensure_accepting()?;
-            let farm = state
-                .farms
+            let stackbox = state
+                .stackboxes
                 .get(id)
-                .ok_or_else(|| NotFound(format!("farm '{id}'")))?;
-            ensure_idle(farm)?;
-            let plan = farm
+                .ok_or_else(|| NotFound(format!("stackbox '{id}'")))?;
+            ensure_idle(stackbox)?;
+            let plan = stackbox
                 .plan
                 .as_ref()
-                .ok_or_else(|| conflict("farm has no plan to expand"))?
+                .ok_or_else(|| conflict("stackbox has no plan to expand"))?
                 .clone();
             if !plan.multinode() {
                 return Err(conflict(
-                    "an all-in-one farm has no control VM to add a compute to; create a multi-node farm instead",
+                    "an all-in-one stackbox has no control VM to add a compute to; create a multi-node stackbox instead",
                 ));
             }
-            if plan.computes >= crate::farm::MAX_COMPUTES {
+            if plan.computes >= crate::stackbox::MAX_COMPUTES {
                 return Err(conflict(format!(
-                    "a farm has at most {} compute VMs",
-                    crate::farm::MAX_COMPUTES
+                    "a stackbox has at most {} compute VMs",
+                    crate::stackbox::MAX_COMPUTES
                 )));
             }
             let previous = state
                 .jobs
                 .values()
                 .filter(|job| {
-                    job.farm_id == id
+                    job.stackbox_id == id
                         && job.kind == JobKind::Expand
                         && matches!(job.status, JobStatus::Failed | JobStatus::Interrupted)
                 })
                 .max_by_key(|job| job.created_at)
                 .cloned();
             // A failed expansion leaves its new VM running on the host, and the inventory then
-            // differs from the plan, which marks the farm broken. Both mean the same attempt can
+            // differs from the plan, which marks the stackbox broken. Both mean the same attempt can
             // go on from where it stopped.
-            let resuming = matches!(farm.status, FarmStatus::Failed | FarmStatus::Broken)
+            let resuming = matches!(stackbox.status, StackboxStatus::Failed | StackboxStatus::Broken)
                 && previous.is_some();
             let (target_host, target_node) = if resuming {
                 let previous = previous.as_ref().ok_or_else(|| {
                     conflict(
-                        "this farm failed before a compute was added; deploy it or delete it first",
+                        "this stackbox failed before a compute was added; deploy it or delete it first",
                     )
                 })?;
                 // The VM may already exist, booted the way the failed attempt chose.
@@ -1984,22 +2024,22 @@ impl FarmManager {
                         .context("the failed expansion has no VM")?,
                 )
             } else {
-                if farm.status != FarmStatus::Ready {
+                if stackbox.status != StackboxStatus::Ready {
                     return Err(conflict(
-                        "deploy the farm before adding a compute VM to it",
+                        "deploy the stackbox before adding a compute VM to it",
                     ));
                 }
-                if farm.nodes.len() != plan.nodes.len()
-                    || farm.nodes.iter().any(|node| node.status != "running")
+                if stackbox.nodes.len() != plan.nodes.len()
+                    || stackbox.nodes.iter().any(|node| node.status != "running")
                 {
                     return Err(conflict(
-                        "all of the farm's VMs must be running before adding a compute",
+                        "all of the stackbox's VMs must be running before adding a compute",
                     ));
                 }
                 let host = request
                     .host_id
                     .clone()
-                    .or_else(|| farm.host_id.clone())
+                    .or_else(|| stackbox.host_id.clone())
                     .context("choose a host for the new compute")?;
                 validate_id(&host).map_err(|error| bad_request(error.to_string()))?;
                 (host, format!("compute-{}", plan.computes + 1))
@@ -2007,11 +2047,11 @@ impl FarmManager {
             let expected = format!("compute-{}", plan.computes + 1);
             if target_node != expected {
                 return Err(conflict(format!(
-                    "the next compute is {expected}, not {target_node}; delete the farm or finish its deployment first"
+                    "the next compute is {expected}, not {target_node}; delete the stackbox or finish its deployment first"
                 )));
             }
             // The new compute boots its own host's kernel, so that host's inspection decides
-            // whether it can bind the farm plan's mtty device.
+            // whether it can bind the stackbox plan's mtty device.
             if plan
                 .gpu
                 .as_ref()
@@ -2026,14 +2066,14 @@ impl FarmManager {
                 .nodes
                 .last()
                 .context("the expanded plan has no new compute")?;
-            let primary = farm
+            let primary = stackbox
                 .host_id
                 .clone()
-                .ok_or_else(|| conflict("farm has no primary host"))?;
+                .ok_or_else(|| conflict("stackbox has no primary host"))?;
             let (budget, _, _, _) = self.admit_host(state, &target_host, true)?;
             if let Some(snapshot) = &request.from_snapshot {
                 // A host other than the local one gets a copy when the expansion starts.
-                transfers::copyable(snapshots::compute_template(state, snapshot, farm, &target_host)?)?;
+                transfers::copyable(snapshots::compute_template(state, snapshot, stackbox, &target_host)?)?;
             }
             if target_host != primary {
                 let arch = |host: &str| {
@@ -2047,14 +2087,14 @@ impl FarmManager {
                     && control != target
                 {
                     return Err(conflict(format!(
-                        "host '{target_host}' is {target} but the farm's control VM runs {control}; Kolla images cannot mix CPU architectures"
+                        "host '{target_host}' is {target} but the stackbox's control VM runs {control}; Kolla images cannot mix CPU architectures"
                     )));
                 }
             }
             let reserved: u64 = state
-                .farms
+                .stackboxes
                 .values()
-                .filter(|other| other.status != FarmStatus::Deleted)
+                .filter(|other| other.status != StackboxStatus::Deleted)
                 .map(|other| other.memory_on(&target_host))
                 .sum();
             let added = u64::from(new_spec.memory_mib);
@@ -2072,10 +2112,10 @@ impl FarmManager {
                     "the relay's quick tunnel has no address yet; see Hosts and try again",
                 )?;
             }
-            // Move the farm to the hosts' current agents when they match this build, as
+            // Move the stackbox to the hosts' current agents when they match this build, as
             // deploy does, so an upgraded host can run the expansion protocol.
             let mut repin_primary = None;
-            if let Some(agent) = farm
+            if let Some(agent) = stackbox
                 .host_id
                 .as_ref()
                 .and_then(|host| state.hosts.get(host))
@@ -2084,17 +2124,17 @@ impl FarmManager {
                 if agent.artifact.build_id != crate::BUILD_ID {
                     return Err(conflict(format!(
                         "the agent installed on {} was built from {} but this coordinator is {}; reinstall it from Hosts first",
-                        farm.host_id.as_deref().unwrap_or_default(),
+                        stackbox.host_id.as_deref().unwrap_or_default(),
                         agent.artifact.build_id,
                         crate::BUILD_ID
                     )));
                 }
-                if farm.agent_sha256.as_deref() != Some(agent.artifact.sha256.as_str()) {
+                if stackbox.agent_sha256.as_deref() != Some(agent.artifact.sha256.as_str()) {
                     repin_primary = Some(agent.artifact.sha256.clone());
                 }
             }
             let mut repin_shares = Vec::new();
-            for share in &farm.shares {
+            for share in &stackbox.shares {
                 if let Some(agent) = state
                     .hosts
                     .get(&share.host_id)
@@ -2116,21 +2156,21 @@ impl FarmManager {
             job.target_host = Some(target_host);
             job.target_node = Some(target_node);
             job.phase = Some(crate::kolla::Phase::Prepare);
-            let farm = state.farms.get_mut(id).context("farm disappeared")?;
+            let stackbox = state.stackboxes.get_mut(id).context("stackbox disappeared")?;
             if let Some(sha256) = repin_primary {
-                farm.agent_sha256 = Some(sha256);
+                stackbox.agent_sha256 = Some(sha256);
             }
             for (host, sha256) in repin_shares {
-                if let Some(share) = farm.shares.iter_mut().find(|share| share.host_id == host) {
+                if let Some(share) = stackbox.shares.iter_mut().find(|share| share.host_id == host) {
                     share.agent_sha256 = Some(sha256);
                 }
             }
-            farm.status = FarmStatus::Deploying;
-            farm.active_job = Some(job.id.clone());
-            farm.phase = Some(crate::kolla::Phase::Prepare);
-            farm.step = Some(format!("{} 추가", job.target_node.as_deref().unwrap_or("compute")));
-            farm.error = None;
-            farm.updated_at = now();
+            stackbox.status = StackboxStatus::Deploying;
+            stackbox.active_job = Some(job.id.clone());
+            stackbox.phase = Some(crate::kolla::Phase::Prepare);
+            stackbox.step = Some(format!("{} 추가", job.target_node.as_deref().unwrap_or("compute")));
+            stackbox.error = None;
+            stackbox.updated_at = now();
             state.jobs.insert(job.id.clone(), job.clone());
             Ok(job)
         })?;
@@ -2138,16 +2178,16 @@ impl FarmManager {
         Ok(job)
     }
 
-    /// Re-check a farm whose VM started from disk (or was restarted) without deploying again.
+    /// Re-check a stackbox whose VM started from disk (or was restarted) without deploying again.
     pub fn settle(&self, id: &str) -> Result<Job> {
         let job = self.update(|state| {
             self.ensure_accepting()?;
-            let farm = state
-                .farms
+            let stackbox = state
+                .stackboxes
                 .get_mut(id)
-                .ok_or_else(|| NotFound(format!("farm '{id}'")))?;
-            ensure_idle(farm)?;
-            if farm
+                .ok_or_else(|| NotFound(format!("stackbox '{id}'")))?;
+            ensure_idle(stackbox)?;
+            if stackbox
                 .host_id
                 .as_ref()
                 .and_then(|id| state.hosts.get(id))
@@ -2155,46 +2195,46 @@ impl FarmManager {
             {
                 return Err(conflict("host preparation is running"));
             }
-            // Only a farm that was deployed has services to wait for.
+            // Only a stackbox that was deployed has services to wait for.
             if !matches!(
-                farm.status,
-                FarmStatus::Ready | FarmStatus::Created | FarmStatus::Broken | FarmStatus::Settling
+                stackbox.status,
+                StackboxStatus::Ready | StackboxStatus::Created | StackboxStatus::Broken | StackboxStatus::Settling
             ) {
                 return Err(conflict(
-                    "farm must be deployed (or restored from a deployed snapshot) to check its services",
+                    "stackbox must be deployed (or restored from a deployed snapshot) to check its services",
                 ));
             }
             let deployed = state.jobs.values().any(|j| {
-                j.farm_id == id
+                j.stackbox_id == id
                     && j.kind == JobKind::Deploy
                     && j.status == JobStatus::Succeeded
-            }) || farm
+            }) || stackbox
                 .snapshot_id
                 .as_ref()
                 .and_then(|snapshot| state.snapshots.get(snapshot))
                 .is_some_and(|snapshot| snapshot.deployed);
             if !deployed {
                 return Err(conflict(
-                    "farm has no successful deployment; deploy it before checking its services",
+                    "stackbox has no successful deployment; deploy it before checking its services",
                 ));
             }
-            if farm
+            if stackbox
                 .plan
                 .as_ref()
                 .is_none_or(|plan| plan.nodes.len() != 1)
             {
-                return Err(conflict("farms imported from older versions cannot be checked"));
+                return Err(conflict("stackboxes imported from older versions cannot be checked"));
             }
-            if farm.nodes.len() != 1 || farm.nodes[0].status != "running" {
-                return Err(conflict("the farm's VM must be running to check its services"));
+            if stackbox.nodes.len() != 1 || stackbox.nodes[0].status != "running" {
+                return Err(conflict("the stackbox's VM must be running to check its services"));
             }
             let mut job = new_job(id, JobKind::Settle);
             job.phase = Some(crate::kolla::Phase::Verify);
-            farm.status = FarmStatus::Settling;
-            farm.active_job = Some(job.id.clone());
-            farm.error = None;
-            farm.phase = Some(crate::kolla::Phase::Verify);
-            farm.updated_at = now();
+            stackbox.status = StackboxStatus::Settling;
+            stackbox.active_job = Some(job.id.clone());
+            stackbox.error = None;
+            stackbox.phase = Some(crate::kolla::Phase::Verify);
+            stackbox.updated_at = now();
             state.jobs.insert(job.id.clone(), job.clone());
             Ok(job)
         })?;
@@ -2202,25 +2242,30 @@ impl FarmManager {
         Ok(job)
     }
     pub fn delete(&self, id: &str) -> Result<Job> {
-        self.delete_farm(id, false, false)
+        self.delete_stackbox(id, false, false)
     }
-    /// Removes the farm's record without asking its host, for a host that is gone or
+    /// Removes the stackbox's record without asking its host, for a host that is gone or
     /// unreachable. A VM it left on the host stays until the host is purged.
     pub fn forget(&self, id: &str) -> Result<Job> {
-        self.delete_farm(id, false, true)
+        self.delete_stackbox(id, false, true)
     }
 
-    /// `own_host_job` lets a purge delete the farms of the host whose job it already holds.
-    pub(crate) fn delete_farm(&self, id: &str, own_host_job: bool, forget: bool) -> Result<Job> {
+    /// `own_host_job` lets a purge delete the stackboxes of the host whose job it already holds.
+    pub(crate) fn delete_stackbox(
+        &self,
+        id: &str,
+        own_host_job: bool,
+        forget: bool,
+    ) -> Result<Job> {
         let job = self.update(|state| {
             self.ensure_accepting()?;
-            let farm = state
-                .farms
+            let stackbox = state
+                .stackboxes
                 .get_mut(id)
-                .ok_or_else(|| NotFound(format!("farm '{id}'")))?;
-            ensure_idle(farm)?;
+                .ok_or_else(|| NotFound(format!("stackbox '{id}'")))?;
+            ensure_idle(stackbox)?;
             if !own_host_job
-                && farm
+                && stackbox
                     .host_id
                     .as_ref()
                     .and_then(|id| state.hosts.get(id))
@@ -2228,15 +2273,15 @@ impl FarmManager {
             {
                 return Err(conflict("host preparation is running"));
             }
-            if farm.status == FarmStatus::Deleted {
-                return Err(conflict("farm is already deleted"));
+            if stackbox.status == StackboxStatus::Deleted {
+                return Err(conflict("stackbox is already deleted"));
             }
             let mut job = new_job(id, JobKind::Delete);
             job.forget = forget;
-            farm.status = FarmStatus::Deleting;
-            farm.active_job = Some(job.id.clone());
-            farm.error = None;
-            farm.updated_at = now();
+            stackbox.status = StackboxStatus::Deleting;
+            stackbox.active_job = Some(job.id.clone());
+            stackbox.error = None;
+            stackbox.updated_at = now();
             state.jobs.insert(job.id.clone(), job.clone());
             Ok(job)
         })?;
@@ -2259,15 +2304,15 @@ impl FarmManager {
                 .await
                 .unwrap_or_else(|_| Err(anyhow!("job panicked")));
             // Refresh partial VM results even if creation or deletion failed. A forgotten
-            // farm's host is not asked; it may be the reason the farm is being forgotten.
+            // stackbox's host is not asked; it may be the reason the stackbox is being forgotten.
             if !job.forget
-                && let Ok(farm) = manager.get(&job.farm_id)
-                && let Ok(nodes) = manager.scan_farm(&farm).await
+                && let Ok(stackbox) = manager.get(&job.stackbox_id)
+                && let Ok(nodes) = manager.scan_stackbox(&stackbox).await
                 && let Err(error) = manager.update(|state| {
                     state
-                        .farms
-                        .get_mut(&job.farm_id)
-                        .context("farm missing")?
+                        .stackboxes
+                        .get_mut(&job.stackbox_id)
+                        .context("stackbox missing")?
                         .nodes = nodes;
                     Ok(())
                 })
@@ -2295,39 +2340,39 @@ impl FarmManager {
         })?;
         if job.remote_job_id.is_none() {
             self.log(
-                &job.farm_id,
+                &job.stackbox_id,
                 &job.id,
                 None,
                 format!("{:?} started", job.kind),
             )?;
         }
-        let farm = self.get(&job.farm_id)?;
+        let stackbox = self.get(&job.stackbox_id)?;
         match job.kind {
             JobKind::Create => {
                 // An SSH host's inspection may be old by now; look at the host again first.
-                if let Some(host_id) = &farm.host_id
+                if let Some(host_id) = &stackbox.host_id
                     && self.refresh_ssh_inspection(host_id, 300).await?
                 {
-                    self.log(&farm.id, &job.id, None, format!("re-inspected host {host_id} over SSH\n"))?;
+                    self.log(&stackbox.id, &job.id, None, format!("re-inspected host {host_id} over SSH\n"))?;
                 }
-                self.avoid_foreign_ports(job, &farm).await?;
-                let farm = self.get(&job.farm_id)?;
-                let nodes = if farm.shares.is_empty() {
-                    self.backend_for(&farm)?
+                self.avoid_foreign_ports(job, &stackbox).await?;
+                let stackbox = self.get(&job.stackbox_id)?;
+                let nodes = if stackbox.shares.is_empty() {
+                    self.backend_for(&stackbox)?
                         .create(
-                            farm.id.clone(),
-                            farm.plan.context("farm has no plan")?,
-                            farm.exposure.context("farm has no exposure")?,
+                            stackbox.id.clone(),
+                            stackbox.plan.context("stackbox has no plan")?,
+                            stackbox.exposure.context("stackbox has no exposure")?,
                         )
                         .await?
                 } else {
-                    self.create_spanning(job, &farm).await?
+                    self.create_spanning(job, &stackbox).await?
                 };
                 self.update(|state| {
                     state
-                        .farms
-                        .get_mut(&job.farm_id)
-                        .context("farm missing")?
+                        .stackboxes
+                        .get_mut(&job.stackbox_id)
+                        .context("stackbox missing")?
                         .nodes = nodes;
                     Ok(())
                 })?;
@@ -2336,95 +2381,95 @@ impl FarmManager {
                 let from = request.unwrap_or_default().from;
                 // A followed host-side job got past preparing the other hosts already.
                 if from <= crate::kolla::Phase::Prepare && job.remote_job_id.is_none() {
-                    for (share, backend) in self.share_backends(&farm)? {
-                        self.log(&farm.id, &job.id, None, format!("preparing {} on host {}\n", share.nodes.join(", "), share.host_id))?;
+                    for (share, backend) in self.share_backends(&stackbox)? {
+                        self.log(&stackbox.id, &job.id, None, format!("preparing {} on host {}\n", share.nodes.join(", "), share.host_id))?;
                         backend
                             .prepare(
-                                farm.id.clone(),
-                                farm_components(&farm),
-                                farm_release(&farm),
+                                stackbox.id.clone(),
+                                stackbox_components(&stackbox),
+                                stackbox_release(&stackbox),
                                 String::new(),
                             )
                             .await
                             .with_context(|| format!("prepare the VMs on host {}", share.host_id))?;
                     }
                 }
-                self.deploy_job(job, &farm, from).await?
+                self.deploy_job(job, &stackbox, from).await?
             }
             JobKind::Delete if job.forget => {
-                self.forget_uplinks(&farm.id)?;
+                self.forget_uplinks(&stackbox.id)?;
                 self.log(
-                &farm.id,
+                &stackbox.id,
                 &job.id,
                 None,
                 format!(
-                    "removing this farm's record only; a VM it left on host {} stays until the host is purged\n",
-                    farm.hosts().join(", ")
+                    "removing this stackbox's record only; a VM it left on host {} stays until the host is purged\n",
+                    stackbox.hosts().join(", ")
                 ),
             )?
             }
-            // A farm from before host registration has no agent to remove its VM; drop the record.
-            JobKind::Delete if farm.host_id.is_none() => self.log(
-                &farm.id,
+            // A stackbox from before host registration has no agent to remove its VM; drop the record.
+            JobKind::Delete if stackbox.host_id.is_none() => self.log(
+                &stackbox.id,
                 &job.id,
                 None,
-                "this farm has no host; removing its record only (delete any leftover VM with msb)\n"
+                "this stackbox has no host; removing its record only (delete any leftover VM with msb)\n"
                     .into(),
             )?,
             JobKind::Delete => {
-                // Each host removes its part; the farm is gone once every host has.
+                // Each host removes its part; the stackbox is gone once every host has.
                 let mut failed = Vec::new();
-                if let Err(error) = self.backend_for(&farm)?.delete(farm.id.clone()).await {
-                    failed.push(format!("{}: {error:#}", farm.host_id.as_deref().unwrap_or_default()));
+                if let Err(error) = self.backend_for(&stackbox)?.delete(stackbox.id.clone()).await {
+                    failed.push(format!("{}: {error:#}", stackbox.host_id.as_deref().unwrap_or_default()));
                 }
-                for (share, backend) in self.share_backends(&farm)? {
-                    if let Err(error) = backend.delete(farm.id.clone()).await {
+                for (share, backend) in self.share_backends(&stackbox)? {
+                    if let Err(error) = backend.delete(stackbox.id.clone()).await {
                         failed.push(format!("{}: {error:#}", share.host_id));
                     }
                 }
                 if !failed.is_empty() {
                     bail!("{}", failed.join("; "));
                 }
-                self.forget_uplinks(&farm.id)?;
+                self.forget_uplinks(&stackbox.id)?;
             }
-            JobKind::Expand => self.expand_job(job, &farm).await?,
+            JobKind::Expand => self.expand_job(job, &stackbox).await?,
             JobKind::Settle => {
-                let components = farm_components(&farm);
-                let backend = self.backend_for(&farm)?;
+                let components = stackbox_components(&stackbox);
+                let backend = self.backend_for(&stackbox)?;
                 // A restore from a control template may have stopped before its copy forgot
-                // the source farm's computes; doing it again changes nothing once it has.
-                let template = farm
+                // the source stackbox's computes; doing it again changes nothing once it has.
+                let template = stackbox
                     .snapshot_id
                     .as_ref()
                     .and_then(|id| self.snapshot(id).ok())
                     .and_then(|snapshot| snapshot.template);
                 if template == Some(crate::model::TemplateRole::Control)
-                    && farm.plan.as_ref().is_some_and(|plan| plan.computes == 0)
+                    && stackbox.plan.as_ref().is_some_and(|plan| plan.computes == 0)
                 {
                     backend
                         .forget_computes(
-                            farm.id.clone(),
+                            stackbox.id.clone(),
                             components.clone(),
                             self.event_sink(job, None),
                         )
                         .await?;
                 }
                 backend
-                    .settle(farm.id, None, components, self.event_sink(job, None))
+                    .settle(stackbox.id, None, components, self.event_sink(job, None))
                     .await?;
             }
-            JobKind::Snapshot => self.freeze_job(job, farm).await?,
-            JobKind::Restore => self.restore_job(job, farm).await?,
+            JobKind::Snapshot => self.freeze_job(job, stackbox).await?,
+            JobKind::Restore => self.restore_job(job, stackbox).await?,
             JobKind::Assemble => bail!("an assemble job runs its steps as jobs of their own"),
         }
         Ok(())
     }
-    /// Add one compute VM to a deployed farm, then deploy it with Kolla. The farm's plan is
+    /// Add one compute VM to a deployed stackbox, then deploy it with Kolla. The stackbox's plan is
     /// committed only after Kolla accepts the new compute, so a failure leaves the previous
     /// plan and the same expansion can be retried.
-    async fn expand_job(&self, job: &Job, farm: &FarmRecord) -> Result<()> {
-        let id = farm.id.clone();
-        let old_plan = farm.plan.clone().context("farm has no plan")?;
+    async fn expand_job(&self, job: &Job, stackbox: &StackboxRecord) -> Result<()> {
+        let id = stackbox.id.clone();
+        let old_plan = stackbox.plan.clone().context("stackbox has no plan")?;
         let plan = self.expand_plan(&old_plan)?;
         let target_host = job.target_host.clone().context("expansion has no host")?;
         let target_node = job.target_node.clone().context("expansion has no VM")?;
@@ -2432,13 +2477,19 @@ impl FarmManager {
             .strip_prefix("compute-")
             .and_then(|index| index.parse().ok())
             .context("expansion VM is not a compute")?;
-        let primary = farm.host_id.clone().context("farm has no primary host")?;
-        let generation = farm
+        let primary = stackbox
+            .host_id
+            .clone()
+            .context("stackbox has no primary host")?;
+        let generation = stackbox
             .remote_generation
             .clone()
-            .context("farm has no generation")?;
-        let exposure = farm.exposure.clone().context("farm has no exposure")?;
-        let components = farm_components(farm);
+            .context("stackbox has no generation")?;
+        let exposure = stackbox
+            .exposure
+            .clone()
+            .context("stackbox has no exposure")?;
+        let components = stackbox_components(stackbox);
         // The host checked when the expansion was accepted may have been prepared again
         // since; the new compute still boots that host's own kernel, not this coordinator's.
         if old_plan
@@ -2452,7 +2503,7 @@ impl FarmManager {
         let source = match &job.snapshot_id {
             Some(snapshot) => {
                 self.read(|state| {
-                    snapshots::compute_template(state, snapshot, farm, &target_host).map(|_| ())
+                    snapshots::compute_template(state, snapshot, stackbox, &target_host).map(|_| ())
                 })??;
                 // The template boots on the new compute's host, which may need a copy first.
                 Some(
@@ -2475,8 +2526,8 @@ impl FarmManager {
                 format!("booting {target_node} from compute template {snapshot}\n"),
             )?;
         }
-        let primary_backend = self.backend_for(farm)?;
-        let mut shares = farm.shares.clone();
+        let primary_backend = self.backend_for(stackbox)?;
+        let mut shares = stackbox.shares.clone();
         let target_share = shares
             .iter()
             .find(|share| share.host_id == target_host)
@@ -2587,9 +2638,9 @@ impl FarmManager {
                 if let Some(hosts) = state.pending_shares.get_mut(&id) {
                     hosts.remove(&target_host);
                 }
-                let farm = state.farms.get_mut(&id).context("farm missing")?;
-                farm.shares.push(record);
-                farm.updated_at = now();
+                let stackbox = state.stackboxes.get_mut(&id).context("stackbox missing")?;
+                stackbox.shares.push(record);
+                stackbox.updated_at = now();
                 Ok(())
             })?;
             shares.push(
@@ -2603,12 +2654,12 @@ impl FarmManager {
                 .prepare(
                     id.clone(),
                     components.clone(),
-                    farm_release(farm),
+                    stackbox_release(stackbox),
                     keys.as_ref().context("no control key")?.0.clone(),
                 )
                 .await?;
         } else if target_host != primary {
-            // A compute on a host the farm already uses: its uplink and key stay as they are.
+            // A compute on a host the stackbox already uses: its uplink and key stay as they are.
             let share = target_share.context("the target host's share disappeared")?;
             let mut nodes = share.nodes.clone();
             if !nodes.iter().any(|node| node == &target_node) {
@@ -2633,14 +2684,14 @@ impl FarmManager {
                 )
                 .await?;
             self.update(|state| {
-                let farm = state.farms.get_mut(&id).context("farm missing")?;
-                let share = farm
+                let stackbox = state.stackboxes.get_mut(&id).context("stackbox missing")?;
+                let share = stackbox
                     .shares
                     .iter_mut()
                     .find(|share| share.host_id == target_host)
                     .context("the target host's share disappeared")?;
                 share.nodes = nodes.clone();
-                farm.updated_at = now();
+                stackbox.updated_at = now();
                 Ok(())
             })?;
             if let Some(share) = shares.iter_mut().find(|share| share.host_id == target_host) {
@@ -2650,14 +2701,14 @@ impl FarmManager {
                 .prepare(
                     id.clone(),
                     components.clone(),
-                    farm_release(farm),
+                    stackbox_release(stackbox),
                     keys.as_ref().context("no control key")?.0.clone(),
                 )
                 .await?;
         }
-        // The control VM's host joins the relay when the farm gains its first remote compute,
+        // The control VM's host joins the relay when the stackbox gains its first remote compute,
         // or repairs an earlier attempt that did not record its uplink.
-        let primary_uplink = if target_host != primary && farm.uplink_sha256.is_none() {
+        let primary_uplink = if target_host != primary && stackbox.uplink_sha256.is_none() {
             Some(self.read(|state| self.next_uplink(state, &id, &primary))??)
         } else {
             None
@@ -2669,7 +2720,7 @@ impl FarmManager {
         let primary_nodes: Vec<String> = plan
             .nodes
             .iter()
-            .filter_map(|spec| crate::farm::suffix(spec.role, spec.index))
+            .filter_map(|spec| crate::stackbox::suffix(spec.role, spec.index))
             .filter(|suffix| !remote.contains(suffix))
             .collect();
         let add = if target_host == primary {
@@ -2682,7 +2733,7 @@ impl FarmManager {
             &job.id,
             Some(crate::kolla::Phase::Prepare),
             format!(
-                "updating the farm plan on host {primary}{}\n",
+                "updating the stackbox plan on host {primary}{}\n",
                 if primary_uplink.is_some() {
                     " and joining the relay"
                 } else {
@@ -2708,18 +2759,18 @@ impl FarmManager {
                 .vault
                 .seal(&uplink.key, &uplink_key_aad(&id, &primary))?;
             self.update(|state| {
-                let farm = state.farms.get_mut(&id).context("farm missing")?;
-                farm.uplink_sha256 = Some(token);
+                let stackbox = state.stackboxes.get_mut(&id).context("stackbox missing")?;
+                stackbox.uplink_sha256 = Some(token);
                 state
                     .relay_keys
                     .entry(id.clone())
                     .or_default()
                     .insert(primary.clone(), sealed);
-                farm.updated_at = now();
+                stackbox.updated_at = now();
                 Ok(())
             })?;
         }
-        // Other hosts keep their reservation's plan in step with the farm's layout.
+        // Other hosts keep their reservation's plan in step with the stackbox's layout.
         for share in &shares {
             if share.host_id == target_host {
                 continue;
@@ -2761,10 +2812,10 @@ impl FarmManager {
             .await?;
         self.update(|state| {
             state.pending_shares.remove(&id);
-            let farm = state.farms.get_mut(&id).context("farm missing")?;
-            farm.plan = Some(plan);
-            farm.shares = shares;
-            farm.updated_at = now();
+            let stackbox = state.stackboxes.get_mut(&id).context("stackbox missing")?;
+            stackbox.plan = Some(plan);
+            stackbox.shares = shares;
+            stackbox.updated_at = now();
             Ok(())
         })?;
         Ok(())
@@ -2776,11 +2827,11 @@ impl FarmManager {
     async fn deploy_job(
         &self,
         job: &Job,
-        farm: &FarmRecord,
+        stackbox: &StackboxRecord,
         from: crate::kolla::Phase,
     ) -> Result<()> {
         use crate::remote::protocol::AgentError;
-        let backend = self.agent_for(farm)?;
+        let backend = self.agent_for(stackbox)?;
         let mut attach = job.remote_job_id.is_some();
         // The host's agent never reads the release catalog, so the coordinator resolves the
         // kolla-ansible ref here and sends it with the deploy (2025.1 lives on
@@ -2789,7 +2840,7 @@ impl FarmManager {
         let reference = if attach {
             None
         } else {
-            Some(crate::kolla::releases::reference(&farm_release(farm)).await?)
+            Some(crate::kolla::releases::reference(&stackbox_release(stackbox)).await?)
         };
         let remote = match &job.remote_job_id {
             Some(remote) => remote.clone(),
@@ -2819,7 +2870,7 @@ impl FarmManager {
             } else {
                 backend
                     .deploy_job(
-                        farm.id.clone(),
+                        stackbox.id.clone(),
                         from,
                         remote.clone(),
                         reference.clone(),
@@ -2846,7 +2897,7 @@ impl FarmManager {
             attach = true;
             if lost.is_none() || frames.load(Ordering::SeqCst) != before {
                 self.log(
-                    &job.farm_id,
+                    &job.stackbox_id,
                     &job.id,
                     self.job(&job.id)?.phase,
                     format!("lost the connection to the host's deploy ({error:#}); re-attaching\n"),
@@ -2856,7 +2907,7 @@ impl FarmManager {
             }
             if lost.is_some_and(|since| since.elapsed() >= REATTACH_FOR) {
                 break Err(Detached(format!(
-                    "cannot reach the host's deploy job {remote} ({error:#}); it may still be running on the host, so check the farm there before retrying"
+                    "cannot reach the host's deploy job {remote} ({error:#}); it may still be running on the host, so check the stackbox there before retrying"
                 ))
                 .into());
             }
@@ -2874,7 +2925,7 @@ impl FarmManager {
         });
         outcome.and(saved)
     }
-    /// Records deployment phases on the farm and job, and output in the farm log. With
+    /// Records deployment phases on the stackbox and job, and output in the stackbox log. With
     /// `frames`, it also counts the host-side job's frames applied, saved with the job.
     fn event_sink(&self, job: &Job, frames: Option<Arc<AtomicU64>>) -> EventSink {
         let manager = self.clone();
@@ -2897,20 +2948,26 @@ impl FarmManager {
             let phase = match event {
                 DeployEvent::Step(step) => {
                     manager.update(|state| {
-                        let farm = state.farms.get_mut(&job.farm_id).context("farm missing")?;
-                        farm.step = Some(step.clone());
-                        farm.updated_at = now();
+                        let stackbox = state
+                            .stackboxes
+                            .get_mut(&job.stackbox_id)
+                            .context("stackbox missing")?;
+                        stackbox.step = Some(step.clone());
+                        stackbox.updated_at = now();
                         save(state)
                     })?;
-                    manager.log(&job.farm_id, &job.id, None, format!("step: {step}"))?;
+                    manager.log(&job.stackbox_id, &job.id, None, format!("step: {step}"))?;
                     return Ok(());
                 }
                 DeployEvent::Progress(progress) => {
                     let text = format!("{}/{} {}", progress.index, progress.total, progress.step);
                     manager.update(|state| {
-                        let farm = state.farms.get_mut(&job.farm_id).context("farm missing")?;
-                        farm.step = Some(text.clone());
-                        farm.updated_at = now();
+                        let stackbox = state
+                            .stackboxes
+                            .get_mut(&job.stackbox_id)
+                            .context("stackbox missing")?;
+                        stackbox.step = Some(text.clone());
+                        stackbox.updated_at = now();
                         state
                             .jobs
                             .get_mut(&job.id)
@@ -2918,19 +2975,27 @@ impl FarmManager {
                             .start_step(progress.step, progress.index, progress.total, now());
                         save(state)
                     })?;
-                    manager.log(&job.farm_id, &job.id, None, format!("step {text}"))?;
+                    manager.log(&job.stackbox_id, &job.id, None, format!("step {text}"))?;
                     return Ok(());
                 }
                 DeployEvent::Phase(phase) => {
                     manager.update(|state| {
-                        let farm = state.farms.get_mut(&job.farm_id).context("farm missing")?;
-                        farm.phase = Some(phase);
-                        farm.step = None;
-                        farm.updated_at = now();
+                        let stackbox = state
+                            .stackboxes
+                            .get_mut(&job.stackbox_id)
+                            .context("stackbox missing")?;
+                        stackbox.phase = Some(phase);
+                        stackbox.step = None;
+                        stackbox.updated_at = now();
                         state.jobs.get_mut(&job.id).context("job missing")?.phase = Some(phase);
                         save(state)
                     })?;
-                    manager.log(&job.farm_id, &job.id, Some(phase), format!("phase {phase}"))?;
+                    manager.log(
+                        &job.stackbox_id,
+                        &job.id,
+                        Some(phase),
+                        format!("phase {phase}"),
+                    )?;
                     return Ok(());
                 }
                 DeployEvent::Output(message) => {
@@ -2938,7 +3003,7 @@ impl FarmManager {
                     (phase, message)
                 }
             };
-            manager.log(&job.farm_id, &job.id, phase.0, phase.1)?;
+            manager.log(&job.stackbox_id, &job.id, phase.0, phase.1)?;
             // Output is too frequent to save each count; a restart within this window
             // records those lines again.
             let mut saved = saved.lock().map_err(|_| anyhow!("sink mutex poisoned"))?;
@@ -2954,7 +3019,7 @@ impl FarmManager {
         let error = result.err().map(|e| format!("{e:#}"));
         // A terminal state must still be persisted if writing the final log fails.
         let log_result = self.log(
-            &job.farm_id,
+            &job.stackbox_id,
             &job.id,
             self.job(&job.id)?.phase,
             error.clone().unwrap_or_else(|| "job succeeded".into()),
@@ -2971,39 +3036,42 @@ impl FarmManager {
             current.error = error.clone();
             current.finished_at = Some(now());
             current.end_step(error.is_some(), now());
-            // A farm restored from a deployed snapshot is ready as soon as its services answer.
+            // A stackbox restored from a deployed snapshot is ready as soon as its services answer.
             let deployed = job
                 .snapshot_id
                 .as_ref()
                 .and_then(|id| state.snapshots.get(id))
                 .is_some_and(|s| s.deployed);
-            let farm = state.farms.get_mut(&job.farm_id).context("farm missing")?;
-            farm.status = match (job.kind, error.is_some()) {
-                // Freezing leaves the farm as it was, ready, created or failed; the job and the
+            let stackbox = state
+                .stackboxes
+                .get_mut(&job.stackbox_id)
+                .context("stackbox missing")?;
+            stackbox.status = match (job.kind, error.is_some()) {
+                // Freezing leaves the stackbox as it was, ready, created or failed; the job and the
                 // snapshot report a failure of the capture itself.
-                (JobKind::Snapshot, _) => farm.resume.take().unwrap_or(if deployed {
-                    FarmStatus::Ready
+                (JobKind::Snapshot, _) => stackbox.resume.take().unwrap_or(if deployed {
+                    StackboxStatus::Ready
                 } else {
-                    FarmStatus::Created
+                    StackboxStatus::Created
                 }),
-                (JobKind::Assemble, _) => farm.status,
+                (JobKind::Assemble, _) => stackbox.status,
                 // A check that fails leaves the VM as it was; the user can run it again.
-                (JobKind::Settle, true) => FarmStatus::Created,
-                (JobKind::Settle, false) => FarmStatus::Ready,
-                (_, true) => FarmStatus::Failed,
-                (JobKind::Create, false) => FarmStatus::Created,
-                (JobKind::Deploy | JobKind::Expand, false) => FarmStatus::Ready,
-                (JobKind::Delete, false) => FarmStatus::Deleted,
-                (JobKind::Restore, false) if deployed => FarmStatus::Ready,
-                (JobKind::Restore, false) => FarmStatus::Created,
+                (JobKind::Settle, true) => StackboxStatus::Created,
+                (JobKind::Settle, false) => StackboxStatus::Ready,
+                (_, true) => StackboxStatus::Failed,
+                (JobKind::Create, false) => StackboxStatus::Created,
+                (JobKind::Deploy | JobKind::Expand, false) => StackboxStatus::Ready,
+                (JobKind::Delete, false) => StackboxStatus::Deleted,
+                (JobKind::Restore, false) if deployed => StackboxStatus::Ready,
+                (JobKind::Restore, false) => StackboxStatus::Created,
             };
-            farm.error = error;
-            farm.active_job = None;
+            stackbox.error = error;
+            stackbox.active_job = None;
             // The step describes work in flight; once the job ends it is stale.
-            farm.step = None;
-            farm.updated_at = now();
-            if farm.status == FarmStatus::Deleted {
-                farm.nodes.clear();
+            stackbox.step = None;
+            stackbox.updated_at = now();
+            if stackbox.status == StackboxStatus::Deleted {
+                stackbox.nodes.clear();
             }
             Ok(())
         })?;
@@ -3052,7 +3120,7 @@ impl FarmManager {
         use futures::StreamExt;
         /// One attempt to reach a host: its inventory scan, or a plain connection check.
         enum Attempt {
-            Scan(Result<std::collections::BTreeMap<String, Vec<crate::farm::FarmNode>>>),
+            Scan(Result<std::collections::BTreeMap<String, Vec<crate::stackbox::StackboxNode>>>),
             /// `None` when another check of the host is still running.
             Connect(Option<Result<()>>),
         }
@@ -3066,12 +3134,12 @@ impl FarmManager {
                 .store
                 .lock()
                 .map_err(|_| anyhow!("state mutex poisoned"))?;
-            // Each host is scanned through its own agent, with a farm's pinned agent on remote hosts.
+            // Each host is scanned through its own agent, with a stackbox's pinned agent on remote hosts.
             let scans: std::collections::BTreeMap<String, Option<String>> = store
                 .state
-                .farms
+                .stackboxes
                 .values()
-                .filter(|f| f.status != FarmStatus::Deleted)
+                .filter(|f| f.status != StackboxStatus::Deleted)
                 .flat_map(|f| {
                     f.host_id
                         .clone()
@@ -3084,7 +3152,7 @@ impl FarmManager {
                         )
                 })
                 .collect();
-            // An SSH host that runs no farm gets a plain connection check, unless a job is on it.
+            // An SSH host that runs no stackbox gets a plain connection check, unless a job is on it.
             let connects = store.state.hosts.values().filter(|h| {
                 h.host.kind == HostKind::Ssh
                     && h.host.active_job.is_none()
@@ -3139,10 +3207,11 @@ impl FarmManager {
                 match scan {
                     Some(Ok(observed)) => apply_inventory(state, observed, &host_id),
                     Some(Err(error)) => {
-                        for farm in state.farms.values_mut().filter(|f| {
-                            f.hosts().contains(&host_id.as_str()) && f.status != FarmStatus::Deleted
+                        for stackbox in state.stackboxes.values_mut().filter(|f| {
+                            f.hosts().contains(&host_id.as_str())
+                                && f.status != StackboxStatus::Deleted
                         }) {
-                            farm.observation_error =
+                            stackbox.observation_error =
                                 Some(format!("host inventory unavailable: {error}"));
                         }
                     }
@@ -3207,41 +3276,41 @@ fn record_reachability(state: &mut State, host_id: &str, outcome: std::result::R
         }
     }
 }
-/// A host's agent reports only the farms this coordinator reserved there.
+/// A host's agent reports only the stackboxes this coordinator reserved there.
 fn apply_inventory(
     state: &mut State,
-    mut observed: std::collections::BTreeMap<String, Vec<crate::farm::FarmNode>>,
+    mut observed: std::collections::BTreeMap<String, Vec<crate::stackbox::StackboxNode>>,
     host_id: &str,
 ) {
-    for farm in state
-        .farms
+    for stackbox in state
+        .stackboxes
         .values_mut()
         .filter(|f| f.hosts().contains(&host_id))
     {
-        if farm.active_job.is_some() {
-            // A job owns the farm's status, phase and VMs. The host's answer still says whether
-            // the farm's host is reachable, so it is recorded.
-            observed.remove(&farm.id);
-            farm.observation_error = None;
-            farm.last_seen_at = Some(now());
+        if stackbox.active_job.is_some() {
+            // A job owns the stackbox's status, phase and VMs. The host's answer still says whether
+            // the stackbox's host is reachable, so it is recorded.
+            observed.remove(&stackbox.id);
+            stackbox.observation_error = None;
+            stackbox.last_seen_at = Some(now());
             continue;
         }
-        let mut nodes = observed.remove(&farm.id).unwrap_or_default();
-        if !farm.shares.is_empty() {
+        let mut nodes = observed.remove(&stackbox.id).unwrap_or_default();
+        if !stackbox.shares.is_empty() {
             // This host reports only its own VMs; the others keep what their hosts reported.
-            let elsewhere = farm.nodes.iter().filter(|node| {
+            let elsewhere = stackbox.nodes.iter().filter(|node| {
                 node.role
-                    .and_then(|role| crate::farm::suffix(role, node.index))
-                    .and_then(|suffix| farm.host_of(&suffix))
+                    .and_then(|role| crate::stackbox::suffix(role, node.index))
+                    .and_then(|suffix| stackbox.host_of(&suffix))
                     != Some(host_id)
             });
             nodes.extend(elsewhere.cloned().collect::<Vec<_>>());
             nodes.sort_by(|a, b| a.name.cmp(&b.name));
         }
-        if farm.status == FarmStatus::Deleted && nodes.is_empty() {
+        if stackbox.status == StackboxStatus::Deleted && nodes.is_empty() {
             continue;
         }
-        let expected: Vec<(Role, Option<u8>)> = farm
+        let expected: Vec<(Role, Option<u8>)> = stackbox
             .plan
             .as_ref()
             .map(|p| p.nodes.iter().map(|n| (n.role, n.index)).collect())
@@ -3249,7 +3318,7 @@ fn apply_inventory(
                 if nodes.iter().any(|node| node.role == Some(Role::AllInOne)) {
                     return vec![(Role::AllInOne, None)];
                 }
-                // Imported legacy farms have no recorded plan. Preserve their
+                // Imported legacy stackboxes have no recorded plan. Preserve their
                 // known role layout, including optional control/compute nodes.
                 let mut roles = vec![
                     Role::Deployer,
@@ -3268,35 +3337,35 @@ fn apply_inventory(
         let intact = nodes.len() == expected.len()
             && expected.iter().all(|(role, index)| {
                 nodes.iter().any(|n| {
-                    crate::farm::is_node_name(&farm.id, *role, *index, &n.name)
+                    crate::stackbox::is_node_name(&stackbox.id, *role, *index, &n.name)
                         && n.status == "running"
                 })
             });
-        if !intact || farm.status == FarmStatus::Deleted {
-            farm.status = FarmStatus::Broken;
-            farm.error = Some("VM inventory differs from the expected running nodes".into());
-        } else if farm.status == FarmStatus::Broken {
-            farm.status = FarmStatus::Created;
-            farm.error = None;
+        if !intact || stackbox.status == StackboxStatus::Deleted {
+            stackbox.status = StackboxStatus::Broken;
+            stackbox.error = Some("VM inventory differs from the expected running nodes".into());
+        } else if stackbox.status == StackboxStatus::Broken {
+            stackbox.status = StackboxStatus::Created;
+            stackbox.error = None;
         }
-        farm.observation_error = None;
-        farm.last_seen_at = Some(now());
-        farm.nodes = nodes;
-        farm.updated_at = now();
+        stackbox.observation_error = None;
+        stackbox.last_seen_at = Some(now());
+        stackbox.nodes = nodes;
+        stackbox.updated_at = now();
     }
 }
 
-fn ensure_idle(farm: &FarmRecord) -> Result<()> {
-    if farm.active_job.is_some() {
-        Err(conflict("farm already has an active job"))
+fn ensure_idle(stackbox: &StackboxRecord) -> Result<()> {
+    if stackbox.active_job.is_some() {
+        Err(conflict("stackbox already has an active job"))
     } else {
         Ok(())
     }
 }
-fn new_job(farm: &str, kind: JobKind) -> Job {
+fn new_job(stackbox: &str, kind: JobKind) -> Job {
     Job {
         id: uuid::Uuid::new_v4().to_string(),
-        farm_id: farm.into(),
+        stackbox_id: stackbox.into(),
         kind,
         status: JobStatus::Queued,
         phase: None,
@@ -3314,16 +3383,17 @@ fn new_job(farm: &str, kind: JobKind) -> Job {
         assembly: Vec::new(),
     }
 }
-/// The release the farm installs; plans recorded before it was kept read as this build's own.
-fn farm_release(farm: &FarmRecord) -> String {
-    farm.plan
+/// The release the stackbox installs; plans recorded before it was kept read as this build's own.
+fn stackbox_release(stackbox: &StackboxRecord) -> String {
+    stackbox
+        .plan
         .as_ref()
         .and_then(|plan| plan.release.clone())
         .unwrap_or_else(|| crate::kolla::OPENSTACK_RELEASE.to_owned())
 }
 
-fn farm_components(farm: &FarmRecord) -> Vec<String> {
-    farm.plan.as_ref().map_or_else(
+fn stackbox_components(stackbox: &StackboxRecord) -> Vec<String> {
+    stackbox.plan.as_ref().map_or_else(
         || {
             crate::model::BASE_COMPONENTS
                 .iter()
@@ -3338,7 +3408,7 @@ fn blocks_overlap(a: u16, b: u16, block: u16) -> bool {
     a.abs_diff(b) < block
 }
 
-/// `probe` checks the block against this machine's sockets too, for farms published here.
+/// `probe` checks the block against this machine's sockets too, for stackboxes published here.
 fn allocate_ports(
     state: &State,
     host: String,
@@ -3349,12 +3419,12 @@ fn allocate_ports(
 ) -> Result<Exposure> {
     let block = PUBLIC_PORT_BLOCK;
     for base in (15000u16..24000).step_by(usize::from(block)) {
-        // Compare blocks, not just bases, so a widened block cannot overlap an older farm's ports.
+        // Compare blocks, not just bases, so a widened block cannot overlap an older stackbox's ports.
         if taken.iter().any(|&t| blocks_overlap(t, base, block)) {
             continue;
         }
-        if state.farms.values().any(|f| {
-            f.status != FarmStatus::Deleted
+        if state.stackboxes.values().any(|f| {
+            f.status != StackboxStatus::Deleted
                 && f.host_id.as_deref() == Some(host_id)
                 && f.exposure
                     .as_ref()
@@ -3385,15 +3455,15 @@ struct RelayListener {
     error: Option<String>,
 }
 
-fn uplink_key_aad(farm: &str, host: &str) -> String {
-    format!("farm-uplink-key:{farm}:{host}")
+fn uplink_key_aad(stackbox: &str, host: &str) -> String {
+    format!("stackbox-uplink-key:{stackbox}:{host}")
 }
-fn expansion_share_aad(farm: &str, host: &str) -> String {
-    format!("farm-expansion-share:{farm}:{host}")
+fn expansion_share_aad(stackbox: &str, host: &str) -> String {
+    format!("stackbox-expansion-share:{stackbox}:{host}")
 }
 
 /// Locks a value that a panicking holder may have poisoned. Both guarded values stay
-/// consistent when a holder panics (see [`FarmManager::relay_url`]), so reads and writes
+/// consistent when a holder panics (see [`StackboxManager::relay_url`]), so reads and writes
 /// go through here instead of dropping the write or the read on poison.
 fn lock_unpoisoned<T>(lock: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -3414,7 +3484,7 @@ fn effective_url(
 #[derive(Clone, Debug, serde::Serialize, utoipa::ToSchema)]
 pub struct RelayStatus {
     pub settings: Option<crate::link::relay::RelaySettings>,
-    /// The URL new farms that span hosts get: the settings', or a quick tunnel's address.
+    /// The URL new stackboxes that span hosts get: the settings', or a quick tunnel's address.
     pub url: Option<String>,
     /// cloudflared, when the coordinator runs the tunnel.
     pub tunnel: Option<crate::link::cloudflared::TunnelStatus>,
@@ -3426,8 +3496,8 @@ pub struct RelayStatus {
     pub error: Option<String>,
     /// SHA-256 of the private CA's PEM, with private TLS.
     pub ca_sha256: Option<String>,
-    /// Farms that span hosts; while any lives, the URL and mode stay.
-    pub spanning_farms: Vec<String>,
+    /// Stackboxes that span hosts; while any lives, the URL and mode stay.
+    pub spanning_stackboxes: Vec<String>,
 }
 
 /// The relay's CA and server certificate for `settings`, with private TLS.
@@ -3454,7 +3524,7 @@ fn new_ssh_key() -> Result<(String, String)> {
     let key = PrivateKey::from(Ed25519Keypair::from_seed(&seed));
     let private = key.to_openssh(LineEnding::LF)?.to_string();
     let mut public = key.public_key().to_openssh()?;
-    public.push_str(" farm-kolla");
+    public.push_str(" stackbox-kolla");
     Ok((private, public))
 }
 
@@ -3475,8 +3545,8 @@ mod poison_tests {
         assert!(lock.is_poisoned());
     }
 
-    async fn manager(dir: &std::path::Path) -> FarmManager {
-        FarmManager::with_backend(
+    async fn manager(dir: &std::path::Path) -> StackboxManager {
+        StackboxManager::with_backend(
             ManagerOptions {
                 state_dir: dir.into(),
                 memory_budget_mib: 50_000,

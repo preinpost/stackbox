@@ -1,14 +1,14 @@
-//! Snapshots: freeze a farm's VM, restore farms from it, and move it between hosts as an archive.
+//! Snapshots: freeze a stackbox's VM, restore stackboxes from it, and move it between hosts as an archive.
 
 use super::{
-    FarmManager, NotFound, bad_request, conflict, ensure_idle,
+    NotFound, StackboxManager, bad_request, conflict, ensure_idle,
     store::State,
     transfers::{host_arch, origin_host, origin_missing},
 };
 use crate::{
-    farm::Role,
     kolla::{DeployEvent, StepProgress},
     model::{snapshot_labels as label, *},
+    stackbox::Role,
 };
 use anyhow::{Context, Result, anyhow};
 use std::{
@@ -28,7 +28,7 @@ pub(super) fn busy(status: SnapshotStatus) -> bool {
     )
 }
 
-/// A snapshot a new farm on `host_id` can start from. Exporting only reads it.
+/// A snapshot a new stackbox on `host_id` can start from. Exporting only reads it.
 /// A snapshot backed by a bucket archive (`archive.bucket` set) may have no local `reference`
 /// yet; the target host fetches and loads it when the restore starts.
 pub(super) fn restorable<'a>(
@@ -54,10 +54,10 @@ pub(super) fn restorable<'a>(
     {
         return Err(conflict(format!("snapshot '{id}' is not ready")));
     }
-    // A control template is restored too, as a farm with its control VM alone.
+    // A control template is restored too, as a stackbox with its control VM alone.
     if snapshot.template == Some(TemplateRole::Compute) {
         return Err(conflict(format!(
-            "snapshot '{id}' is a compute template; add a compute from it to a deployed farm instead"
+            "snapshot '{id}' is a compute template; add a compute from it to a deployed stackbox instead"
         )));
     }
     ensure_compatible(state, snapshot, host_id)?;
@@ -73,7 +73,7 @@ pub(super) fn plan_from_metadata(metadata: &crate::s3::catalog::ArchiveMetadata)
             metadata.release.as_deref(),
         ),
         Some(TemplateRole::Compute) => Err(conflict(format!(
-            "{} is a compute template and cannot start a farm",
+            "{} is a compute template and cannot start a stackbox",
             metadata.key
         ))),
         None => layout(&PlanRequest {
@@ -147,13 +147,13 @@ pub(super) fn bucket_snapshot_id(
     format!("snap-{}", &uuid::Uuid::new_v4().simple().to_string()[..12])
 }
 
-/// A compute template a new compute of `farm` on `host_id` can boot from: Kolla only
-/// reconfigures that VM, so its containers must be the farm's release and services, on the
+/// A compute template a new compute of `stackbox` on `host_id` can boot from: Kolla only
+/// reconfigures that VM, so its containers must be the stackbox's release and services, on the
 /// host's architecture.
 pub(super) fn compute_template<'a>(
     state: &'a State,
     id: &str,
-    farm: &FarmRecord,
+    stackbox: &StackboxRecord,
     host_id: &str,
 ) -> Result<&'a SnapshotRecord> {
     let snapshot = state
@@ -162,7 +162,7 @@ pub(super) fn compute_template<'a>(
         .ok_or_else(|| NotFound(format!("snapshot '{id}'")))?;
     if snapshot.template != Some(TemplateRole::Compute) {
         return Err(conflict(format!(
-            "snapshot '{id}' is not a compute template; freeze one of a farm's compute VMs as one"
+            "snapshot '{id}' is not a compute template; freeze one of a stackbox's compute VMs as one"
         )));
     }
     if !matches!(
@@ -173,20 +173,20 @@ pub(super) fn compute_template<'a>(
         return Err(conflict(format!("snapshot '{id}' is not ready")));
     }
     ensure_compatible(state, snapshot, host_id)?;
-    let release = farm_release(state, farm);
+    let release = stackbox_release(state, stackbox);
     if snapshot.release.as_deref() != Some(release.as_str()) {
         return Err(conflict(format!(
-            "compute template '{id}' is OpenStack {} but the farm runs {release}",
+            "compute template '{id}' is OpenStack {} but the stackbox runs {release}",
             snapshot
                 .release
                 .as_deref()
                 .unwrap_or("of an unknown release")
         )));
     }
-    let components = farm.plan.as_ref().map(|plan| &plan.components);
+    let components = stackbox.plan.as_ref().map(|plan| &plan.components);
     if components != Some(&snapshot.plan.components) {
         return Err(conflict(format!(
-            "compute template '{id}' was frozen from a farm with {} but this farm has {}",
+            "compute template '{id}' was frozen from a stackbox with {} but this stackbox has {}",
             snapshot.plan.components.join(","),
             components.map(|c| c.join(",")).unwrap_or_default()
         )));
@@ -194,10 +194,11 @@ pub(super) fn compute_template<'a>(
     Ok(snapshot)
 }
 
-/// The OpenStack release a farm runs: its snapshot's when it was restored from one, or the
+/// The OpenStack release a stackbox runs: its snapshot's when it was restored from one, or the
 /// one this coordinator deploys.
-fn farm_release(state: &State, farm: &FarmRecord) -> String {
-    farm.snapshot_id
+fn stackbox_release(state: &State, stackbox: &StackboxRecord) -> String {
+    stackbox
+        .snapshot_id
         .as_ref()
         .and_then(|id| state.snapshots.get(id))
         .and_then(|snapshot| snapshot.release.clone())
@@ -210,7 +211,7 @@ pub(super) fn recover_interrupted(state: &mut State) {
         let (status, error) = match snapshot.status {
             SnapshotStatus::Creating => (
                 SnapshotStatus::Failed,
-                "daemon stopped while capturing; check that the source farm's VM is running, then delete this snapshot",
+                "daemon stopped while capturing; check that the source stackbox's VM is running, then delete this snapshot",
             ),
             SnapshotStatus::Importing => (
                 SnapshotStatus::Failed,
@@ -277,7 +278,7 @@ fn labels(snapshot: &SnapshotRecord) -> BTreeMap<String, String> {
     if let Some(platform) = &snapshot.platform {
         labels.insert(label::PLATFORM.into(), platform.clone());
     }
-    if let Some(source) = &snapshot.source_farm {
+    if let Some(source) = &snapshot.source_stackbox {
         labels.insert(label::SOURCE.into(), source.clone());
     }
     if let Some(note) = &snapshot.note {
@@ -319,7 +320,7 @@ fn archive_metadata(
         arch: labels[label::ARCH].clone(),
         platform: labels.get(label::PLATFORM).cloned(),
         deployed: snapshot.deployed,
-        source_farm: snapshot.source_farm.clone(),
+        source_stackbox: snapshot.source_stackbox.clone(),
         note: snapshot.note.clone(),
         created_at: snapshot.created_at,
         exported_at,
@@ -349,7 +350,7 @@ struct Imported {
     plan: Plan,
     deployed: bool,
     source_exposure: Exposure,
-    source_farm: Option<String>,
+    source_stackbox: Option<String>,
     note: Option<String>,
     template: Option<TemplateRole>,
     node: Option<String>,
@@ -360,7 +361,7 @@ struct Imported {
 struct LoadedArchive {
     meta: Imported,
     reference: String,
-    nodes: Vec<crate::farm::NodeSnapshot>,
+    nodes: Vec<crate::stackbox::NodeSnapshot>,
     size_bytes: Option<u64>,
 }
 
@@ -369,7 +370,7 @@ struct LoadedArchive {
 async fn remove_loaded(
     backend: &Arc<dyn super::Backend>,
     reference: &str,
-    nodes: &[crate::farm::NodeSnapshot],
+    nodes: &[crate::stackbox::NodeSnapshot],
     id: &str,
 ) {
     let refs: Vec<String> = if nodes.is_empty() {
@@ -393,7 +394,7 @@ fn parse_labels(
     let get = |key: &str| {
         labels
             .get(key)
-            .with_context(|| format!("archive has no {key} label; it was not frozen by farm"))
+            .with_context(|| format!("archive has no {key} label; it was not frozen by stackbox"))
     };
     let arch = get(label::ARCH)?;
     anyhow::ensure!(
@@ -409,9 +410,9 @@ fn parse_labels(
         None => None,
         Some("control") => Some(TemplateRole::Control),
         Some("compute") => Some(TemplateRole::Compute),
-        Some(role) => anyhow::bail!("archive holds a {role} VM, which farm cannot use"),
+        Some(role) => anyhow::bail!("archive holds a {role} VM, which stackbox cannot use"),
     };
-    // Single-VM archives are all-in-one farms or templates; a multi-node bundle supplies the
+    // Single-VM archives are all-in-one stackboxes or templates; a multi-node bundle supplies the
     // compute count, compute size and GPU config from its manifest.
     let release = labels.get(label::RELEASE).cloned();
     let plan = match (template, bundle) {
@@ -452,7 +453,7 @@ fn parse_labels(
                 .parse()
                 .context("invalid exposure port label")?,
         },
-        source_farm: labels.get(label::SOURCE).cloned(),
+        source_stackbox: labels.get(label::SOURCE).cloned(),
         note: labels.get(label::NOTE).cloned(),
         template,
         node: template.and(labels.get(label::NODE).cloned()),
@@ -460,7 +461,7 @@ fn parse_labels(
     })
 }
 
-impl FarmManager {
+impl StackboxManager {
     pub fn snapshots(&self) -> Result<Vec<SnapshotRecord>> {
         Ok(self
             .0
@@ -503,8 +504,8 @@ impl FarmManager {
         }
     }
 
-    /// Freeze the farm's VM into a new snapshot. The VM stops for the capture and starts again.
-    pub fn freeze(&self, farm_id: &str, request: SnapshotRequest) -> Result<Job> {
+    /// Freeze the stackbox's VM into a new snapshot. The VM stops for the capture and starts again.
+    pub fn freeze(&self, stackbox_id: &str, request: SnapshotRequest) -> Result<Job> {
         request.validate().map_err(|e| bad_request(e.to_string()))?;
         let (job, repinned) = self.update(|state| {
             self.ensure_accepting()?;
@@ -514,24 +515,24 @@ impl FarmManager {
                     request.id
                 )));
             }
-            // The farm's host keeps the snapshot; another host's VMs are not captured.
+            // The stackbox's host keeps the snapshot; another host's VMs are not captured.
             let host_id = state
-                .farms
-                .get(farm_id)
-                .ok_or_else(|| NotFound(format!("farm '{farm_id}'")))?
+                .stackboxes
+                .get(stackbox_id)
+                .ok_or_else(|| NotFound(format!("stackbox '{stackbox_id}'")))?
                 .host_id
                 .clone()
-                .ok_or_else(|| conflict("farms imported from older versions cannot be frozen"))?;
+                .ok_or_else(|| conflict("stackboxes imported from older versions cannot be frozen"))?;
             let arch = host_arch(state, &host_id);
-            let farm = state
-                .farms
-                .get_mut(farm_id)
-                .ok_or_else(|| NotFound(format!("farm '{farm_id}'")))?;
-            ensure_idle(farm)?;
+            let stackbox = state
+                .stackboxes
+                .get_mut(stackbox_id)
+                .ok_or_else(|| NotFound(format!("stackbox '{stackbox_id}'")))?;
+            ensure_idle(stackbox)?;
             let stored = state
                 .hosts
                 .get(&host_id)
-                .ok_or_else(|| conflict(format!("the farm's host '{host_id}' is not registered")))?;
+                .ok_or_else(|| conflict(format!("the stackbox's host '{host_id}' is not registered")))?;
             let local = stored.host.kind == crate::remote::HostKind::Local;
             let arch = arch.ok_or_else(|| {
                 conflict(format!(
@@ -543,87 +544,87 @@ impl FarmManager {
                 _ => current_platform(),
             };
             if !matches!(
-                farm.status,
-                FarmStatus::Created | FarmStatus::Ready | FarmStatus::Failed
+                stackbox.status,
+                StackboxStatus::Created | StackboxStatus::Ready | StackboxStatus::Failed
             ) {
-                return Err(conflict("farm must be created before freezing"));
+                return Err(conflict("stackbox must be created before freezing"));
             }
-            let (Some(plan), Some(exposure)) = (&farm.plan, &farm.exposure) else {
+            let (Some(plan), Some(exposure)) = (&stackbox.plan, &stackbox.exposure) else {
                 return Err(conflict(
-                    "farms imported from older versions cannot be frozen",
+                    "stackboxes imported from older versions cannot be frozen",
                 ));
             };
             // A passed-through device is bound to the compute VM that boots with it; a template
             // or snapshot would not carry the binding, so restoring it would lose the device.
             if !plan.pci_devices.is_empty() {
                 return Err(conflict(
-                    "this farm passes PCI devices through to compute-1, and a template or snapshot does not carry that binding; create a PCI farm clean instead",
+                    "this stackbox passes PCI devices through to compute-1, and a template or snapshot does not carry that binding; create a PCI stackbox clean instead",
                 ));
             }
             if request.node.as_deref() == Some("control") {
                 if !plan.multinode() {
                     return Err(conflict(
-                        "an all-in-one farm has no control VM to freeze as a template; freeze the whole farm instead",
+                        "an all-in-one stackbox has no control VM to freeze as a template; freeze the whole stackbox instead",
                     ));
                 }
-                // A control template records the farm without its computes, and the GPU is
+                // A control template records the stackbox without its computes, and the GPU is
                 // part of the computes: restoring the template would silently drop it.
                 if let Some(gpu) = &plan.gpu {
                     return Err(conflict(format!(
-                        "this farm's computes offer a '{}' GPU, and a control template keeps neither computes nor GPU, so a farm restored from it would lose the GPU; create GPU farms clean instead",
+                        "this stackbox's computes offer a '{}' GPU, and a control template keeps neither computes nor GPU, so a stackbox restored from it would lose the GPU; create GPU stackboxes clean instead",
                         gpu.mode_name()
                     )));
                 }
-                if farm.status != FarmStatus::Ready {
+                if stackbox.status != StackboxStatus::Ready {
                     return Err(conflict(
-                        "deploy the farm before freezing a control template from it",
+                        "deploy the stackbox before freezing a control template from it",
                     ));
                 }
                 // Its computes stop while the control VM is captured; the snapshot stays on
                 // the control VM's host.
-                if !farm.shares.is_empty() {
+                if !stackbox.shares.is_empty() {
                     return Err(conflict(format!(
-                        "this farm has computes on other hosts; only a farm whose VMs all run on host '{host_id}' can be frozen as a control template"
+                        "this stackbox has computes on other hosts; only a stackbox whose VMs all run on host '{host_id}' can be frozen as a control template"
                     )));
                 }
             } else if let Some(node) = &request.node {
                 if plan.computes == 0
                     || !plan.nodes.iter().any(|spec| {
-                        crate::farm::suffix(spec.role, spec.index).as_deref() == Some(node.as_str())
+                        crate::stackbox::suffix(spec.role, spec.index).as_deref() == Some(node.as_str())
                     })
                 {
-                    return Err(conflict(format!("the farm has no compute VM '{node}'")));
+                    return Err(conflict(format!("the stackbox has no compute VM '{node}'")));
                 }
-                if farm.status != FarmStatus::Ready {
+                if stackbox.status != StackboxStatus::Ready {
                     return Err(conflict(
-                        "deploy the farm before freezing a compute template from it",
+                        "deploy the stackbox before freezing a compute template from it",
                     ));
                 }
-                if farm.host_of(node) != Some(host_id.as_str()) {
+                if stackbox.host_of(node) != Some(host_id.as_str()) {
                     return Err(conflict(format!(
-                        "{node} runs on another host than the farm's; only VMs on host '{host_id}' can be frozen"
+                        "{node} runs on another host than the stackbox's; only VMs on host '{host_id}' can be frozen"
                     )));
                 }
             }
             if request.node.is_none() && plan.multinode() && plan.computes == 0 {
                 return Err(conflict(
-                    "this farm has no compute VM yet; freeze its control VM as a control template instead",
+                    "this stackbox has no compute VM yet; freeze its control VM as a control template instead",
                 ));
             }
             let layout_matches = if plan.multinode() {
-                crate::farm::observed_layout(&farm.nodes) == Some(plan.computes)
+                crate::stackbox::observed_layout(&stackbox.nodes) == Some(plan.computes)
             } else {
-                farm.nodes.len() == 1 && farm.nodes[0].role == Some(Role::AllInOne)
+                stackbox.nodes.len() == 1 && stackbox.nodes[0].role == Some(Role::AllInOne)
             };
-            if !layout_matches || farm.nodes.iter().any(|node| node.status != "running") {
-                return Err(conflict("the farm's VMs must be running to freeze it"));
+            if !layout_matches || stackbox.nodes.iter().any(|node| node.status != "running") {
+                return Err(conflict("the stackbox's VMs must be running to freeze it"));
             }
-            // A remote farm keeps the agent it was created with. Move it to the host's current
+            // A remote stackbox keeps the agent it was created with. Move it to the host's current
             // agent once that agent matches this coordinator, as a deploy does, so the freeze
             // and later transfers of the snapshot speak this coordinator's protocol.
             let mut repinned = None;
             if let Some(agent) = &stored.host.agent
-                && farm.agent_sha256.as_deref() != Some(agent.artifact.sha256.as_str())
+                && stackbox.agent_sha256.as_deref() != Some(agent.artifact.sha256.as_str())
             {
                 if agent.artifact.build_id != crate::BUILD_ID {
                     return Err(conflict(format!(
@@ -633,7 +634,7 @@ impl FarmManager {
                     )));
                 }
                 repinned = Some(agent.artifact.sha256.clone());
-                farm.agent_sha256 = repinned.clone();
+                stackbox.agent_sha256 = repinned.clone();
             }
             let template = request.node.as_deref().map(|node| match node {
                 "control" => TemplateRole::Control,
@@ -645,9 +646,9 @@ impl FarmManager {
                 arch,
                 platform: Some(platform),
                 host_id: (!local).then_some(host_id),
-                source_farm: Some(farm_id.into()),
+                source_stackbox: Some(stackbox_id.into()),
                 plan: match template {
-                    // What a farm restored from it runs until it gains computes.
+                    // What a stackbox restored from it runs until it gains computes.
                     Some(TemplateRole::Control) => control_layout(
                         &plan.components,
                         plan.compute,
@@ -656,7 +657,7 @@ impl FarmManager {
                     .map_err(|e| conflict(e.to_string()))?,
                     _ => plan.clone(),
                 },
-                deployed: farm.status == FarmStatus::Ready,
+                deployed: stackbox.status == StackboxStatus::Ready,
                 source_exposure: exposure.clone(),
                 note: request.note.clone().filter(|n| !n.trim().is_empty()),
                 reference: None,
@@ -664,7 +665,7 @@ impl FarmManager {
                 template,
                 node: request.node.clone(),
                 legacy_compute_template: false,
-                // The farm's own release; a farm recorded before releases were kept reads as
+                // The stackbox's own release; a stackbox recorded before releases were kept reads as
                 // the one this build installs.
                 release: plan
                     .release
@@ -678,22 +679,22 @@ impl FarmManager {
                 created_at: now(),
                 updated_at: now(),
             };
-            let mut job = super::new_job(farm_id, JobKind::Snapshot);
+            let mut job = super::new_job(stackbox_id, JobKind::Snapshot);
             job.snapshot_id = Some(request.id.clone());
             job.target_node = request.node.clone();
-            // The farm says its VM is stopping, and remembers what to be once it restarts.
-            farm.resume = Some(farm.status);
-            farm.status = FarmStatus::Snapshotting;
-            farm.active_job = Some(job.id.clone());
-            farm.error = None;
-            farm.updated_at = now();
+            // The stackbox says its VM is stopping, and remembers what to be once it restarts.
+            stackbox.resume = Some(stackbox.status);
+            stackbox.status = StackboxStatus::Snapshotting;
+            stackbox.active_job = Some(job.id.clone());
+            stackbox.error = None;
+            stackbox.updated_at = now();
             state.snapshots.insert(snapshot.id.clone(), snapshot);
             state.jobs.insert(job.id.clone(), job.clone());
             Ok((job, repinned))
         })?;
         if let Some(digest) = repinned {
             self.log(
-                &job.farm_id,
+                &job.stackbox_id,
                 &job.id,
                 None,
                 format!("agent: using the host's current agent {}\n", &digest[..12]),
@@ -703,11 +704,11 @@ impl FarmManager {
         Ok(job)
     }
 
-    pub(super) async fn freeze_job(&self, job: &Job, farm: FarmRecord) -> Result<()> {
+    pub(super) async fn freeze_job(&self, job: &Job, stackbox: StackboxRecord) -> Result<()> {
         let id = job.snapshot_id.clone().context("snapshot job has no id")?;
         let snapshot = self.snapshot(&id)?;
         self.log(
-            &farm.id,
+            &stackbox.id,
             &job.id,
             None,
             match job.target_node.as_deref() {
@@ -716,14 +717,14 @@ impl FarmManager {
                 None => "stopping the VM to capture its disks\n".into(),
             },
         )?;
-        let backend = self.backend_for(&farm)?;
+        let backend = self.backend_for(&stackbox)?;
         // A compute template stopped one compute only; the control plane kept answering.
         let settle = snapshot.deployed && snapshot.template != Some(TemplateRole::Compute);
         let sink = self.event_sink(job, None);
         let steps = sink.clone();
         let frozen = match backend
             .freeze(
-                farm.id.clone(),
+                stackbox.id.clone(),
                 id.clone(),
                 job.target_node.clone(),
                 labels(&snapshot),
@@ -757,14 +758,14 @@ impl FarmManager {
             s.nodes = frozen.nodes;
         })?;
         self.log(
-            &farm.id,
+            &stackbox.id,
             &job.id,
             None,
             format!("snapshot {id} captured; the VM started again\n"),
         )?;
         if let Some(error) = frozen.restart_error {
             return Err(anyhow!(
-                "snapshot {id} is ready, but the farm's VM did not start again: {error}"
+                "snapshot {id} is ready, but the stackbox's VM did not start again: {error}"
             ));
         }
         if settle {
@@ -778,28 +779,37 @@ impl FarmManager {
             }
             backend
                 .settle(
-                    farm.id.clone(),
+                    stackbox.id.clone(),
                     None,
                     snapshot.plan.components.clone(),
                     self.event_sink(job, None),
                 )
                 .await
                 .with_context(|| {
-                    format!("snapshot {id} is ready, but the farm's services did not answer again")
+                    format!(
+                        "snapshot {id} is ready, but the stackbox's services did not answer again"
+                    )
                 })?;
         }
         Ok(())
     }
 
-    pub(super) async fn restore_job(&self, job: &Job, farm: FarmRecord) -> Result<()> {
-        let host_id = farm.host_id.clone().context("restored farm has no host")?;
-        self.avoid_foreign_ports(job, &farm).await?;
-        let farm = self.get(&farm.id)?;
-        let (reference, snapshot_nodes, source_exposure, template, deployed, plan) =
-            self.prepare_restore_source(job, &farm, &host_id).await?;
-        let exposure = farm.exposure.clone().context("farm has no exposure")?;
+    pub(super) async fn restore_job(&self, job: &Job, stackbox: StackboxRecord) -> Result<()> {
+        let host_id = stackbox
+            .host_id
+            .clone()
+            .context("restored stackbox has no host")?;
+        self.avoid_foreign_ports(job, &stackbox).await?;
+        let stackbox = self.get(&stackbox.id)?;
+        let (reference, snapshot_nodes, source_exposure, template, deployed, plan) = self
+            .prepare_restore_source(job, &stackbox, &host_id)
+            .await?;
+        let exposure = stackbox
+            .exposure
+            .clone()
+            .context("stackbox has no exposure")?;
         self.log(
-            &farm.id,
+            &stackbox.id,
             &job.id,
             None,
             format!(
@@ -807,10 +817,10 @@ impl FarmManager {
                 job.snapshot_id.as_deref().unwrap_or("bucket archive")
             ),
         )?;
-        let backend = self.backend_for(&farm)?;
+        let backend = self.backend_for(&stackbox)?;
         let nodes = backend
             .restore(
-                farm.id.clone(),
+                stackbox.id.clone(),
                 reference,
                 snapshot_nodes,
                 plan.clone(),
@@ -818,38 +828,42 @@ impl FarmManager {
             )
             .await?;
         self.update(|state| {
-            state.farms.get_mut(&farm.id).context("farm missing")?.nodes = nodes;
+            state
+                .stackboxes
+                .get_mut(&stackbox.id)
+                .context("stackbox missing")?
+                .nodes = nodes;
             Ok(())
         })?;
         if template == Some(TemplateRole::Control) {
             self.log(
-                &farm.id,
+                &stackbox.id,
                 &job.id,
                 None,
-                "control VM started; forgetting the computes of the farm it was frozen from\n"
+                "control VM started; forgetting the computes of the stackbox it was frozen from\n"
                     .into(),
             )?;
             backend
                 .forget_computes(
-                    farm.id.clone(),
+                    stackbox.id.clone(),
                     plan.components.clone(),
                     self.event_sink(job, None),
                 )
                 .await
                 .context(
-                    "the control VM started, but its source farm's computes are still registered",
+                    "the control VM started, but its source stackbox's computes are still registered",
                 )?;
         }
         if deployed {
             self.log(
-                &farm.id,
+                &stackbox.id,
                 &job.id,
                 None,
                 "VM started; moving public endpoints and waiting for OpenStack\n".into(),
             )?;
             backend
                 .settle(
-                    farm.id.clone(),
+                    stackbox.id.clone(),
                     Some((source_exposure, exposure)),
                     plan.components.clone(),
                     self.event_sink(job, None),
@@ -862,20 +876,20 @@ impl FarmManager {
     async fn prepare_restore_source(
         &self,
         job: &Job,
-        farm: &FarmRecord,
+        stackbox: &StackboxRecord,
         host_id: &str,
     ) -> Result<(
         String,
-        Vec<crate::farm::NodeSnapshot>,
+        Vec<crate::stackbox::NodeSnapshot>,
         Exposure,
         Option<TemplateRole>,
         bool,
         Plan,
     )> {
-        let id = farm
+        let id = stackbox
             .snapshot_id
             .clone()
-            .context("restored farm has no snapshot")?;
+            .context("restored stackbox has no snapshot")?;
         let snapshot = self.snapshot(&id)?;
         self.read(|state| ensure_compatible(state, &snapshot, host_id))??;
         let (reference, snapshot_nodes) = self
@@ -886,7 +900,7 @@ impl FarmManager {
         let snapshot = self.snapshot(&id)?;
         let plan = snapshot.plan.clone();
         self.update(|state| {
-            if let Some(record) = state.farms.get_mut(&farm.id) {
+            if let Some(record) = state.stackboxes.get_mut(&stackbox.id) {
                 record.plan = Some(plan.clone());
             }
             Ok(())
@@ -1231,7 +1245,7 @@ impl FarmManager {
                 arch: current_arch(),
                 platform: None,
                 host_id: None,
-                source_farm: None,
+                source_stackbox: None,
                 plan: plan(&PlanRequest::default())?,
                 deployed: false,
                 source_exposure: Exposure {
@@ -1275,7 +1289,7 @@ impl FarmManager {
                         s.plan = imported.meta.plan;
                         s.deployed = imported.meta.deployed;
                         s.source_exposure = imported.meta.source_exposure;
-                        s.source_farm = imported.meta.source_farm;
+                        s.source_stackbox = imported.meta.source_stackbox;
                         s.note = imported.meta.note;
                         s.template = imported.meta.template;
                         s.node = imported.meta.node;
@@ -1376,7 +1390,7 @@ impl FarmManager {
                 size_bytes: imported.size_bytes,
             }),
             Err(error) => {
-                // Do not keep an msb snapshot no farm can be restored from.
+                // Do not keep an msb snapshot no stackbox can be restored from.
                 if let Err(cleanup) = backend.remove_snapshot(imported.reference).await {
                     eprintln!("cannot remove rejected import {id}: {cleanup:#}");
                 }
@@ -1397,7 +1411,7 @@ impl FarmManager {
                 let dest = stage_dir.clone();
                 tokio::task::spawn_blocking(move || super::bundle::unpack(&archive, &dest)).await??
             };
-            let mut loaded_nodes: Vec<crate::farm::NodeSnapshot> =
+            let mut loaded_nodes: Vec<crate::stackbox::NodeSnapshot> =
                 Vec::with_capacity(extracted.nodes.len());
             let mut control_labels: Option<BTreeMap<String, String>> = None;
             let mut compute_count: u8 = 0;
@@ -1416,7 +1430,7 @@ impl FarmManager {
                 if let Some(labeled_node) = imported.labels.get(label::NODE)
                     && labeled_node != node
                 {
-                    loaded_nodes.push(crate::farm::NodeSnapshot {
+                    loaded_nodes.push(crate::stackbox::NodeSnapshot {
                         node: node.clone(),
                         reference: imported.reference,
                         size_bytes: imported.size_bytes,
@@ -1431,7 +1445,7 @@ impl FarmManager {
                 } else {
                     compute_count = compute_count.saturating_add(1);
                 }
-                loaded_nodes.push(crate::farm::NodeSnapshot {
+                loaded_nodes.push(crate::stackbox::NodeSnapshot {
                     node: node.clone(),
                     reference: imported.reference,
                     size_bytes: imported.size_bytes,

@@ -40,11 +40,11 @@ export function JobRow({ job }: { job: Job }) {
       <div className="job-row-main">
         <div className="flex flex-wrap items-center gap-2.5">
           <Link
-            to="/farms/$farmId"
-            params={{ farmId: job.farm_id }}
+            to="/stackboxes/$stackboxId"
+            params={{ stackboxId: job.stackbox_id }}
             className="font-medium hover:underline"
           >
-            {job.farm_id}
+            {job.stackbox_id}
           </Link>
           <span className="muted text-xs">
             {jobLabel(job.kind)}
@@ -69,10 +69,10 @@ export function JobRow({ job }: { job: Job }) {
         {job.error && <p className="job-error">{job.error}</p>}
       </div>
       <Link
-        to="/farms/$farmId"
-        params={{ farmId: job.farm_id }}
+        to="/stackboxes/$stackboxId"
+        params={{ stackboxId: job.stackbox_id }}
         className="icon-button shrink-0"
-        aria-label={`${job.farm_id} 작업 상세`}
+        aria-label={`${job.stackbox_id} 작업 상세`}
       >
         <ArrowRight size={16} />
       </Link>

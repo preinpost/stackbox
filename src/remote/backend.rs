@@ -4,16 +4,16 @@ use super::{
 };
 use crate::link::Impair;
 use crate::{
-    farm::{FarmNode, FrozenSnapshot, ImportedSnapshot, TerminalIo, TerminalSize},
     kolla::{EventSink, Phase},
     manager::Backend,
     model::{Endpoints, Exposure, Plan},
+    stackbox::{FrozenSnapshot, ImportedSnapshot, StackboxNode, TerminalIo, TerminalSize},
 };
 use anyhow::{Result, bail};
 use futures::future::BoxFuture;
 use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
 
-/// Drives one farm generation on a host through that host's farm-agent.
+/// Drives one stackbox generation on a host through that host's stackbox-agent.
 pub struct AgentBackend {
     pub link: Arc<dyn AgentLink>,
     pub coordinator_id: String,
@@ -33,11 +33,11 @@ impl AgentBackend {
     async fn done(&self, operation: Operation, sink: Option<EventSink>) -> Result<()> {
         match self.call(operation, sink).await? {
             Reply::Done => Ok(()),
-            _ => bail!("unexpected farm-agent response"),
+            _ => bail!("unexpected stackbox-agent response"),
         }
     }
     /// Deploy as the host-side job `job_id`, which keeps running if this request ends.
-    /// `reference` is the kolla-ansible ref the coordinator resolved for the farm's release;
+    /// `reference` is the kolla-ansible ref the coordinator resolved for the stackbox's release;
     /// the agent has no catalog cache to resolve it itself.
     pub async fn deploy_job(
         &self,
@@ -49,7 +49,7 @@ impl AgentBackend {
     ) -> Result<()> {
         self.done(
             Operation::Deploy {
-                farm_id: id,
+                stackbox_id: id,
                 generation: self.generation.clone(),
                 from,
                 job_id,
@@ -71,14 +71,14 @@ impl AgentBackend {
                 supports_template_transfer,
                 ..
             } => Ok(supports_template_transfer),
-            _ => bail!("unexpected farm-agent hello response"),
+            _ => bail!("unexpected stackbox-agent hello response"),
         }
     }
     /// The reference of the copy of `snapshot_id` this coordinator left on the host.
     pub async fn find_snapshot(
         &self,
         snapshot_id: String,
-    ) -> Result<Option<(String, Vec<crate::farm::NodeSnapshot>)>> {
+    ) -> Result<Option<(String, Vec<crate::stackbox::NodeSnapshot>)>> {
         match self
             .call(Operation::FindSnapshot { snapshot_id }, None)
             .await?
@@ -90,7 +90,7 @@ impl AgentBackend {
             Reply::Found {
                 reference: None, ..
             } => Ok(None),
-            _ => bail!("unexpected farm-agent response"),
+            _ => bail!("unexpected stackbox-agent response"),
         }
     }
     /// Have the host download an archive from a presigned URL into transfer `transfer_id`.
@@ -136,7 +136,7 @@ impl AgentBackend {
                 sha256,
                 size_bytes,
             }),
-            crate::farm::TerminalIo {
+            crate::stackbox::TerminalIo {
                 input: input_rx,
                 output,
             },
@@ -152,7 +152,7 @@ impl AgentBackend {
                 }
                 chunk.truncate(read);
                 if input
-                    .send(crate::farm::TerminalInput::Data(chunk))
+                    .send(crate::stackbox::TerminalInput::Data(chunk))
                     .await
                     .is_err()
                 {
@@ -188,7 +188,7 @@ impl AgentBackend {
             .await?
         {
             Reply::Archived { sha256, size_bytes } => Ok((sha256, size_bytes)),
-            _ => bail!("unexpected farm-agent export response"),
+            _ => bail!("unexpected stackbox-agent export response"),
         }
     }
     /// Stream transfer `transfer_id`'s exported archive from the host into `path`, which
@@ -208,7 +208,7 @@ impl AgentBackend {
         let (output, mut output_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(8);
         let session = self.link.terminal(
             self.request(Operation::SendArchive { transfer_id }),
-            crate::farm::TerminalIo {
+            crate::stackbox::TerminalIo {
                 input: input_rx,
                 output,
             },
@@ -263,22 +263,22 @@ impl AgentBackend {
             .await?
         {
             Reply::Imported { snapshot } => Ok(snapshot),
-            _ => bail!("unexpected farm-agent import response"),
+            _ => bail!("unexpected stackbox-agent import response"),
         }
     }
-    async fn nodes(&self, operation: Operation) -> Result<Vec<FarmNode>> {
+    async fn nodes(&self, operation: Operation) -> Result<Vec<StackboxNode>> {
         match self.call(operation, None).await? {
             Reply::Nodes { nodes } => Ok(nodes),
-            _ => bail!("unexpected farm-agent response"),
+            _ => bail!("unexpected stackbox-agent response"),
         }
     }
 }
 impl Backend for AgentBackend {
-    fn scan(&self) -> BoxFuture<'_, Result<BTreeMap<String, Vec<FarmNode>>>> {
+    fn scan(&self) -> BoxFuture<'_, Result<BTreeMap<String, Vec<StackboxNode>>>> {
         Box::pin(async {
             match self.call(Operation::Scan, None).await? {
-                Reply::Inventory { farms } => Ok(farms),
-                _ => bail!("unexpected farm-agent inventory response"),
+                Reply::Inventory { stackboxes } => Ok(stackboxes),
+                _ => bail!("unexpected stackbox-agent inventory response"),
             }
         })
     }
@@ -286,7 +286,7 @@ impl Backend for AgentBackend {
         Box::pin(async {
             match self.call(Operation::PublicPorts, None).await? {
                 Reply::PublicPorts { bases } => Ok(bases),
-                _ => bail!("unexpected farm-agent public ports response"),
+                _ => bail!("unexpected stackbox-agent public ports response"),
             }
         })
     }
@@ -295,9 +295,9 @@ impl Backend for AgentBackend {
         id: String,
         plan: Plan,
         exposure: Exposure,
-    ) -> BoxFuture<'_, Result<Vec<FarmNode>>> {
+    ) -> BoxFuture<'_, Result<Vec<StackboxNode>>> {
         Box::pin(self.nodes(Operation::Create {
-            farm_id: id,
+            stackbox_id: id,
             generation: self.generation.clone(),
             plan,
             exposure,
@@ -311,9 +311,9 @@ impl Backend for AgentBackend {
         plan: Plan,
         exposure: Exposure,
         share: super::protocol::Share,
-    ) -> BoxFuture<'_, Result<Vec<FarmNode>>> {
+    ) -> BoxFuture<'_, Result<Vec<StackboxNode>>> {
         Box::pin(self.nodes(Operation::Create {
-            farm_id: id,
+            stackbox_id: id,
             generation: self.generation.clone(),
             plan,
             exposure,
@@ -328,9 +328,9 @@ impl Backend for AgentBackend {
         exposure: Exposure,
         share: super::protocol::Share,
         source: String,
-    ) -> BoxFuture<'_, Result<Vec<FarmNode>>> {
+    ) -> BoxFuture<'_, Result<Vec<StackboxNode>>> {
         Box::pin(self.nodes(Operation::Create {
-            farm_id: id,
+            stackbox_id: id,
             generation: self.generation.clone(),
             plan,
             exposure,
@@ -346,9 +346,9 @@ impl Backend for AgentBackend {
         add: Vec<String>,
         uplink: Option<crate::link::UplinkConfig>,
         source: Option<String>,
-    ) -> BoxFuture<'_, Result<Vec<FarmNode>>> {
+    ) -> BoxFuture<'_, Result<Vec<StackboxNode>>> {
         Box::pin(self.nodes(Operation::Expand {
-            farm_id: id,
+            stackbox_id: id,
             generation: self.generation.clone(),
             plan,
             nodes,
@@ -362,7 +362,7 @@ impl Backend for AgentBackend {
             match self
                 .call(
                     Operation::SshKeys {
-                        farm_id: id,
+                        stackbox_id: id,
                         generation: self.generation.clone(),
                     },
                     None,
@@ -373,7 +373,7 @@ impl Backend for AgentBackend {
                     public_key,
                     private_key,
                 } => Ok((public_key, private_key)),
-                _ => bail!("unexpected farm-agent response"),
+                _ => bail!("unexpected stackbox-agent response"),
             }
         })
     }
@@ -389,7 +389,7 @@ impl Backend for AgentBackend {
     ) -> BoxFuture<'_, Result<()>> {
         Box::pin(self.done(
             Operation::DeployCompute {
-                farm_id: id,
+                stackbox_id: id,
                 generation: self.generation.clone(),
                 index,
                 from_template,
@@ -400,7 +400,7 @@ impl Backend for AgentBackend {
     fn relink(&self, id: String, url: String) -> BoxFuture<'_, Result<()>> {
         Box::pin(self.done(
             Operation::Relink {
-                farm_id: id,
+                stackbox_id: id,
                 generation: self.generation.clone(),
                 url,
             },
@@ -417,7 +417,7 @@ impl Backend for AgentBackend {
     ) -> BoxFuture<'_, Result<()>> {
         Box::pin(self.done(
             Operation::Prepare {
-                farm_id: id,
+                stackbox_id: id,
                 generation: self.generation.clone(),
             },
             None,
@@ -443,7 +443,7 @@ impl Backend for AgentBackend {
     fn delete(&self, id: String) -> BoxFuture<'_, Result<()>> {
         Box::pin(self.done(
             Operation::Delete {
-                farm_id: id,
+                stackbox_id: id,
                 generation: self.generation.clone(),
             },
             None,
@@ -459,7 +459,7 @@ impl Backend for AgentBackend {
             match self
                 .call(
                     Operation::Endpoints {
-                        farm_id: id,
+                        stackbox_id: id,
                         generation: self.generation.clone(),
                     },
                     None,
@@ -467,25 +467,25 @@ impl Backend for AgentBackend {
                 .await?
             {
                 Reply::Endpoints { endpoints } => Ok(endpoints),
-                _ => bail!("unexpected farm-agent endpoints response"),
+                _ => bail!("unexpected stackbox-agent endpoints response"),
             }
         })
     }
     fn control_script(&self, id: String, script: String) -> BoxFuture<'_, Result<String>> {
         Box::pin(async move {
-            // The Shell operation already opens a login shell in the farm's VM; farm drives
+            // The Shell operation already opens a login shell in the stackbox's VM; stackbox drives
             // it as a non-interactive `bash -s` session, so no protocol version changes.
             let request = self.request(Operation::Shell {
-                farm_id: id,
+                stackbox_id: id,
                 generation: self.generation.clone(),
                 node: None,
-                size: crate::farm::TerminalSize {
+                size: crate::stackbox::TerminalSize {
                     rows: 40,
                     cols: 240,
                 },
             });
             let link = self.link.clone();
-            crate::farm::ScriptSession::new(move |io| {
+            crate::stackbox::ScriptSession::new(move |io| {
                 Box::pin(async move { link.terminal(request, io).await })
             })
             .run(&script)
@@ -504,7 +504,7 @@ impl Backend for AgentBackend {
             match self
                 .call(
                     Operation::Freeze {
-                        farm_id: id,
+                        stackbox_id: id,
                         generation: self.generation.clone(),
                         snapshot_id,
                         node,
@@ -515,7 +515,7 @@ impl Backend for AgentBackend {
                 .await?
             {
                 Reply::Frozen { snapshot } => Ok(snapshot),
-                _ => bail!("unexpected farm-agent freeze response"),
+                _ => bail!("unexpected stackbox-agent freeze response"),
             }
         })
     }
@@ -523,12 +523,12 @@ impl Backend for AgentBackend {
         &self,
         id: String,
         reference: String,
-        nodes: Vec<crate::farm::NodeSnapshot>,
+        nodes: Vec<crate::stackbox::NodeSnapshot>,
         plan: Plan,
         exposure: Exposure,
-    ) -> BoxFuture<'_, Result<Vec<FarmNode>>> {
+    ) -> BoxFuture<'_, Result<Vec<StackboxNode>>> {
         Box::pin(self.nodes(Operation::Restore {
-            farm_id: id,
+            stackbox_id: id,
             generation: self.generation.clone(),
             reference,
             nodes,
@@ -546,7 +546,7 @@ impl Backend for AgentBackend {
     ) -> BoxFuture<'_, Result<()>> {
         Box::pin(self.done(
             Operation::Settle {
-                farm_id: id,
+                stackbox_id: id,
                 generation: self.generation.clone(),
                 rebind,
             },
@@ -562,7 +562,7 @@ impl Backend for AgentBackend {
     ) -> BoxFuture<'_, Result<()>> {
         Box::pin(self.done(
             Operation::ForgetComputes {
-                farm_id: id,
+                stackbox_id: id,
                 generation: self.generation.clone(),
             },
             Some(sink),
@@ -594,14 +594,14 @@ impl Backend for AgentBackend {
                 .await?
             {
                 Reply::Imported { snapshot } => Ok(snapshot),
-                _ => bail!("unexpected farm-agent import response"),
+                _ => bail!("unexpected stackbox-agent import response"),
             }
         })
     }
     fn impair(&self, id: String, node: String, impair: Impair) -> BoxFuture<'_, Result<()>> {
         Box::pin(self.done(
             Operation::Impair {
-                farm_id: id,
+                stackbox_id: id,
                 generation: self.generation.clone(),
                 node,
                 impair,
@@ -621,7 +621,7 @@ impl Backend for AgentBackend {
     ) -> BoxFuture<'_, Result<()>> {
         Box::pin(self.link.terminal(
             self.request(Operation::Shell {
-                farm_id: id,
+                stackbox_id: id,
                 generation: self.generation.clone(),
                 node,
                 size,

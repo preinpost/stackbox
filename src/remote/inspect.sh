@@ -1,7 +1,7 @@
 set -eu
 export PATH="$HOME/.microsandbox/bin:$HOME/.local/bin:$PATH"
 export MSB_BACKEND=local
-field() { printf 'FARM\t%s\t%s\n' "$1" "$2"; }
+field() { printf 'STACKBOX\t%s\t%s\n' "$1" "$2"; }
 field os "$(uname -s)"
 field arch "$(uname -m)"
 if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then field kvm 1; else field kvm 0; fi
@@ -20,14 +20,14 @@ esac
 field msb_pci "$msb_pci"
 if timeout 10 docker info >/dev/null 2>&1; then field docker 1; else field docker 0; fi
 field golden "$(if timeout 15 msb snapshot inspect '@GOLDEN@' >/dev/null 2>&1; then echo 1; else echo 0; fi)"
-# A kernel host preparation installed under ~/.local/share/farm/libkrunfw and this host can
+# A kernel host preparation installed under ~/.local/share/stackbox/libkrunfw and this host can
 # boot: its manifest names this architecture and the msb the host runs. An installation that
 # cannot be used is reported as the reason instead, so the coordinator can show it.
 kernel=
 kernel_note=
-if [ -d "$HOME/.local/share/farm/libkrunfw" ]; then
+if [ -d "$HOME/.local/share/stackbox/libkrunfw" ]; then
     host_arch=$(uname -m)
-    for dir in "$HOME/.local/share/farm/libkrunfw"/*; do
+    for dir in "$HOME/.local/share/stackbox/libkrunfw"/*; do
         [ -f "$dir/manifest.txt" ] || continue
         karch=$(sed -n 's/^arch //p' "$dir/manifest.txt")
         kmsb=$(sed -n 's/^msb //p' "$dir/manifest.txt")
@@ -47,7 +47,7 @@ if [ -d "$HOME/.local/share/farm/libkrunfw" ]; then
 fi
 field libkrunfw "$kernel"
 field libkrunfw_note "$kernel_note"
-# PCI passthrough: list only the devices bound to vfio-pci, the only ones a farm may pass through.
+# PCI passthrough: list only the devices bound to vfio-pci, the only ones a stackbox may pass through.
 # A device is ready when its IOMMU group has no member bound to another driver and the group's
 # /dev/vfio file is readable and writable by this user. The groups are read here, not by the
 # coordinator, so the answer is the host's own.
@@ -76,5 +76,5 @@ for dev in /sys/bus/pci/devices/*; do
         done
         if [ "$exclusive" = 1 ] && [ -r "/dev/vfio/$group" ] && [ -w "/dev/vfio/$group" ]; then ready=1; fi
     fi
-    printf 'FARM\tpci_device\t%s,%s,%s,%s,%s,%s,%s,%s\n' "$bdf" "$vendor" "$product" "$class" "$group" "$driver" "$exclusive" "$ready"
+    printf 'STACKBOX\tpci_device\t%s,%s,%s,%s,%s,%s,%s,%s\n' "$bdf" "$vendor" "$product" "$class" "$group" "$driver" "$exclusive" "$ready"
 done

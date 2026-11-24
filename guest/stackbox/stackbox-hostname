@@ -1,0 +1,38 @@
+#!/bin/bash
+# msb recreates /etc/hosts at boot. RabbitMQ must resolve our hostname to the
+# fixed service address (see stackbox-identity), or to eth0 on stackboxes created without one.
+set -euo pipefail
+STACKBOX_ADDRESS=""
+STACKBOX_PEERS=""
+if [ -f /etc/stackbox/identity.conf ]; then . /etc/stackbox/identity.conf; fi
+address="$STACKBOX_ADDRESS"
+for _ in $(seq 60); do
+  [ -n "$address" ] && break
+  address=$(ip -4 -o addr show dev eth0 scope global | awk 'NR==1 { split($4, a, "/"); print a[1] }')
+  [ -n "$address" ] && break
+  sleep 1
+done
+[ -n "$address" ] || { echo 'eth0 has no IPv4 address' >&2; exit 1; }
+name=$(hostname)
+work=$(mktemp)
+trap 'rm -f "$work"' EXIT
+awk -v name="$name" '
+  $0 == "# BEGIN STACKBOX HOSTNAME" { managed=1; next }
+  $0 == "# END STACKBOX HOSTNAME" { managed=0; next }
+  managed { next }
+  /^[[:space:]]*#/ || NF == 0 { print; next }
+  {
+    line=$1
+    for (i=2; i<=NF; i++) if ($i != name) line=line "\t" $i
+    print line
+  }
+' /etc/hosts > "$work"
+{
+  printf '\n# BEGIN STACKBOX HOSTNAME\n%s %s\n' "$address" "$name"
+  # The stackbox's other VMs, as `address=hostname` words: Kolla's own entries do not survive
+  # msb rewriting /etc/hosts.
+  for peer in ${STACKBOX_PEERS:-}; do printf '%s %s\n' "${peer%%=*}" "${peer#*=}"; done
+  printf '# END STACKBOX HOSTNAME\n'
+} >> "$work"
+# /etc/hosts can be a bind mount; retain its inode rather than renaming over it.
+cat "$work" > /etc/hosts

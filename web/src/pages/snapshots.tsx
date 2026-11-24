@@ -4,7 +4,7 @@ import { Cloud, HardDrive, LoaderCircle, Snowflake } from "lucide-react";
 import { useEffect, useState } from "react";
 import {
   activeJob,
-  farmsQuery,
+  stackboxesQuery,
   hostQuery,
   hostsQuery,
   jobsQuery,
@@ -55,7 +55,7 @@ export function SnapshotsPage() {
       <PageHeading
         eyebrow="FROZEN ENVIRONMENTS"
         title="Snapshots"
-        description="설치가 끝난 farm을 얼려두고, 같은 환경을 다시 설치하지 않고 새 farm으로 불러오세요. S3 버킷으로 올려 다른 호스트로 옮길 수도 있습니다."
+        description="설치가 끝난 stackbox를 얼려두고, 같은 환경을 다시 설치하지 않고 새 stackbox로 불러오세요. S3 버킷으로 올려 다른 호스트로 옮길 수도 있습니다."
         actions={
           <div className="flex items-center gap-2">
             <CreateFromBucketDialog triggerVariant="primary" />
@@ -90,7 +90,7 @@ export function SnapshotsPage() {
           <EmptyState
             icon={<Snowflake size={24} />}
             title="얼려둔 환경이 없습니다"
-            description="Farm 상세 화면의 얼리기로 배포가 끝난 VM을 저장하거나, 내보낸 .msb 파일을 파일 경로나 S3 버킷에서 가져오세요."
+            description="Stackbox 상세 화면의 얼리기로 배포가 끝난 VM을 저장하거나, 내보낸 .msb 파일을 파일 경로나 S3 버킷에서 가져오세요."
           />
         ) : (
           <>
@@ -104,7 +104,7 @@ export function SnapshotsPage() {
             <div className="panel-foot">
               <span>
                 스냅샷은 같은 아키텍처의 호스트에서만 부팅됩니다. 복원할 때 새
-                farm이 만들어집니다.
+                stackbox가 만들어집니다.
               </span>
               <span className="chip">아카이브 {archived}개</span>
             </div>
@@ -240,7 +240,7 @@ function SnapshotRow({
   snapshot: Snapshot;
   localArch?: string;
 }) {
-  const farms = useQuery(farmsQuery());
+  const stackboxes = useQuery(stackboxesQuery());
   const hosts = useQuery(hostsQuery());
   // The host that froze a snapshot keeps it and boots it; one imported here must match this
   // machine's architecture. The label says where it came from.
@@ -249,7 +249,7 @@ function SnapshotRow({
   const foreignArch = Boolean(
     !snapshot.host_id && localArch && snapshot.arch !== localArch,
   );
-  const sourceExists = farms.data?.some((f) => f.id === snapshot.source_farm);
+  const sourceExists = stackboxes.data?.some((f) => f.id === snapshot.source_stackbox);
   // An import learns its services from the archive only when it completes.
   const known = snapshot.status !== "importing" && snapshot.status !== "failed";
   const creating = snapshot.status === "creating";
@@ -287,16 +287,16 @@ function SnapshotRow({
         <div className="snap-meta">
           <span>
             원본{" "}
-            {snapshot.source_farm ? (
+            {snapshot.source_stackbox ? (
               sourceExists ? (
                 <Link
-                  to="/farms/$farmId"
-                  params={{ farmId: snapshot.source_farm }}
+                  to="/stackboxes/$stackboxId"
+                  params={{ stackboxId: snapshot.source_stackbox }}
                 >
-                  {snapshot.source_farm}
+                  {snapshot.source_stackbox}
                 </Link>
               ) : (
-                snapshot.source_farm
+                snapshot.source_stackbox
               )
             ) : (
               "가져온 파일"

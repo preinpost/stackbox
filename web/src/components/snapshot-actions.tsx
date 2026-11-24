@@ -21,12 +21,12 @@ import {
   bucketObjectsQuery,
   bucketsQuery,
   busySnapshot,
-  farmsQuery,
+  stackboxesQuery,
   hostQuery,
   hostsQuery,
   keys,
   snapshotsQuery,
-  type Farm,
+  type Stackbox,
   type Snapshot,
 } from "../api/client";
 import {
@@ -38,9 +38,9 @@ import {
   hostNotice,
   hostReady,
   awaitsCompute,
-  farmNodesRunning,
-  isDeployableFarm,
-  isMultiNodeFarm,
+  stackboxNodesRunning,
+  isDeployableStackbox,
+  isMultiNodeStackbox,
   memory,
   remoteAgentNeedsUpdate,
   snapshotHost,
@@ -62,7 +62,7 @@ const idPattern = "[a-z0-9]([a-z0-9\\-]{0,46}[a-z0-9])?";
 async function refresh(client: ReturnType<typeof useQueryClient>) {
   await Promise.all([
     client.invalidateQueries({ queryKey: keys.snapshots }),
-    client.invalidateQueries({ queryKey: keys.farms }),
+    client.invalidateQueries({ queryKey: keys.stackboxes }),
     client.invalidateQueries({ queryKey: keys.jobs }),
     client.invalidateQueries({ queryKey: keys.host }),
   ]);
@@ -81,63 +81,63 @@ function useDialog(pending: boolean, onOpen?: () => void) {
   };
 }
 
-/** VMs of a deployed multi-node farm that can be frozen as templates: the control VM,
- * while every VM runs on the farm's own host, which keeps its snapshots, and the computes
+/** VMs of a deployed multi-node stackbox that can be frozen as templates: the control VM,
+ * while every VM runs on the stackbox's own host, which keeps its snapshots, and the computes
  * there. */
-export const templateNodes = (farm: Farm) =>
-  farm.status === "ready" && isMultiNodeFarm(farm)
+export const templateNodes = (stackbox: Stackbox) =>
+  stackbox.status === "ready" && isMultiNodeStackbox(stackbox)
     ? [
-        ...(farm.shares?.length ? [] : ["control"]),
-        ...(farm.plan?.nodes ?? [])
+        ...(stackbox.shares?.length ? [] : ["control"]),
+        ...(stackbox.plan?.nodes ?? [])
           .filter((spec) => spec.role === "compute" && spec.index)
           .map((spec) => `compute-${spec.index}`)
           .filter(
             (suffix) =>
-              !farm.shares?.some((share) => share.nodes.includes(suffix)),
+              !stackbox.shares?.some((share) => share.nodes.includes(suffix)),
           ),
       ]
     : [];
 const templateLabel = (node: string) =>
   node === "control" ? "control (control 템플릿)" : `${node} (compute 템플릿)`;
 
-/** A PCI farm's compute-1 holds a device the snapshot does not carry, so it is never frozen. */
-export const hasPciPassthrough = (farm: Farm) =>
-  (farm.plan?.pci_devices?.length ?? 0) > 0;
+/** A PCI stackbox's compute-1 holds a device the snapshot does not carry, so it is never frozen. */
+export const hasPciPassthrough = (stackbox: Stackbox) =>
+  (stackbox.plan?.pci_devices?.length ?? 0) > 0;
 
-/** The farm's host keeps the snapshot, so the farm must be on a registered host. */
-export const canFreeze = (farm: Farm, hostIds: string[] = []) =>
-  !hasPciPassthrough(farm) &&
-  Boolean(farm.host_id && hostIds.includes(farm.host_id)) &&
-  !farm.active_job &&
-  Boolean(farm.plan && farm.exposure) &&
-  isDeployableFarm(farm) &&
-  ["created", "ready", "failed"].includes(farm.status) &&
-  farmNodesRunning(farm);
+/** The stackbox's host keeps the snapshot, so the stackbox must be on a registered host. */
+export const canFreeze = (stackbox: Stackbox, hostIds: string[] = []) =>
+  !hasPciPassthrough(stackbox) &&
+  Boolean(stackbox.host_id && hostIds.includes(stackbox.host_id)) &&
+  !stackbox.active_job &&
+  Boolean(stackbox.plan && stackbox.exposure) &&
+  isDeployableStackbox(stackbox) &&
+  ["created", "ready", "failed"].includes(stackbox.status) &&
+  stackboxNodesRunning(stackbox);
 
-export function FreezeFarmDialog({ farm }: { farm: Farm }) {
+export function FreezeStackboxDialog({ stackbox }: { stackbox: Stackbox }) {
   const client = useQueryClient();
   const hosts = useQuery(hostsQuery()).data;
   const coordinator = useQuery(hostQuery());
-  // The farm's host keeps the snapshot, and its architecture decides where it boots.
-  const farmHost = hosts?.find((h) => h.id === farm.host_id);
-  const local = farmHost?.kind === "local";
+  // The stackbox's host keeps the snapshot, and its architecture decides where it boots.
+  const stackboxHost = hosts?.find((h) => h.id === stackbox.host_id);
+  const local = stackboxHost?.kind === "local";
   const snapshots = useQuery(snapshotsQuery());
-  // A farm without computes yet is frozen as a control template only.
-  const whole = !awaitsCompute(farm);
+  // A stackbox without computes yet is frozen as a control template only.
+  const whole = !awaitsCompute(stackbox);
   const initialNode = whole ? "" : "control";
   const [node, setNode] = useState(initialNode);
   const suggest = (node: string) =>
     node
-      ? `${farm.id.slice(0, 36)}-${node}-tpl`
-      : `${farm.id.slice(0, 42)}-${farm.status === "ready" ? "clean" : "base"}`;
+      ? `${stackbox.id.slice(0, 36)}-${node}-tpl`
+      : `${stackbox.id.slice(0, 42)}-${stackbox.status === "ready" ? "clean" : "base"}`;
   const suggested = suggest(initialNode);
   const [id, setId] = useState(suggested);
   const [note, setNote] = useState("");
-  const templates = templateNodes(farm);
-  const pci = hasPciPassthrough(farm);
+  const templates = templateNodes(stackbox);
+  const pci = hasPciPassthrough(stackbox);
   const mutation = useMutation({
     mutationFn: () =>
-      api.freeze(farm.id, {
+      api.freeze(stackbox.id, {
         id,
         ...(note.trim() ? { note: note.trim() } : {}),
         ...(node ? { node } : {}),
@@ -161,7 +161,7 @@ export function FreezeFarmDialog({ farm }: { farm: Farm }) {
           <Button
             disabled={
               !canFreeze(
-                farm,
+                stackbox,
                 hosts?.map((h) => h.id),
               )
             }
@@ -169,23 +169,23 @@ export function FreezeFarmDialog({ farm }: { farm: Farm }) {
         }
         title={
           pci
-            ? "PCI 패스스루 farm은 스냅샷을 지원하지 않습니다."
-            : !farmHost
-              ? "farm의 호스트가 등록되어 있지 않아 얼릴 수 없습니다."
+            ? "PCI 패스스루 stackbox는 스냅샷을 지원하지 않습니다."
+            : !stackboxHost
+              ? "stackbox의 호스트가 등록되어 있지 않아 얼릴 수 없습니다."
               : local
                 ? "VM을 스냅샷으로 얼려둡니다."
-                : `VM을 스냅샷으로 얼려 ${farmHost.id}에 둡니다.`
+                : `VM을 스냅샷으로 얼려 ${stackboxHost.id}에 둡니다.`
         }
       >
         <Snowflake size={16} />
         얼리기
       </Dialog.Trigger>
       {pci && (
-        <p className="field-hint">PCI 패스스루 farm은 스냅샷을 지원하지 않습니다.</p>
+        <p className="field-hint">PCI 패스스루 stackbox는 스냅샷을 지원하지 않습니다.</p>
       )}
       <Modal
-        title="Farm 얼리기"
-        description="VM의 디스크를 스냅샷으로 저장합니다. 이 스냅샷으로 같은 환경의 farm을 빠르게 만들 수 있습니다."
+        title="Stackbox 얼리기"
+        description="VM의 디스크를 스냅샷으로 저장합니다. 이 스냅샷으로 같은 환경의 stackbox를 빠르게 만들 수 있습니다."
         closeDisabled={mutation.isPending}
       >
         <form
@@ -199,16 +199,16 @@ export function FreezeFarmDialog({ farm }: { farm: Farm }) {
               <Snowflake size={20} />
               <div>
                 <strong className="font-mono">
-                  {node ? `${farm.id}-${node}` : farm.id}
+                  {node ? `${stackbox.id}-${node}` : stackbox.id}
                 </strong>
                 <p>
                   {node === "control"
-                    ? "control VM 하나를 control 템플릿으로 저장합니다. 이 템플릿으로 compute 없는 farm을 만든 뒤 compute를 추가해 클러스터를 조립합니다."
+                    ? "control VM 하나를 control 템플릿으로 저장합니다. 이 템플릿으로 compute 없는 stackbox를 만든 뒤 compute를 추가해 클러스터를 조립합니다."
                     : node
-                      ? "이 compute VM 하나를 compute 템플릿으로 저장합니다. 같은 서비스와 릴리스의 farm에 compute를 빠르게 추가할 때 씁니다."
-                      : farm.status === "ready"
-                        ? "배포된 OpenStack을 그대로 저장합니다. 복원한 farm은 바로 Ready가 됩니다."
-                        : "OpenStack 배포 전 상태입니다. 복원한 farm은 VM 준비됨 상태로 시작합니다."}
+                      ? "이 compute VM 하나를 compute 템플릿으로 저장합니다. 같은 서비스와 릴리스의 stackbox에 compute를 빠르게 추가할 때 씁니다."
+                      : stackbox.status === "ready"
+                        ? "배포된 OpenStack을 그대로 저장합니다. 복원한 stackbox는 바로 Ready가 됩니다."
+                        : "OpenStack 배포 전 상태입니다. 복원한 stackbox는 VM 준비됨 상태로 시작합니다."}
                 </p>
               </div>
             </div>
@@ -223,7 +223,7 @@ export function FreezeFarmDialog({ farm }: { farm: Farm }) {
                     setId(suggest(value));
                   }}
                   items={[
-                    ...(whole ? [{ value: "", label: "farm 전체" }] : []),
+                    ...(whole ? [{ value: "", label: "stackbox 전체" }] : []),
                     ...templates.map((suffix) => ({
                       value: suffix,
                       label: templateLabel(suffix),
@@ -267,10 +267,10 @@ export function FreezeFarmDialog({ farm }: { farm: Farm }) {
             </label>
             {node === "control" ? (
               <div className="warning-notice">
-                farm 전체처럼 compute를 먼저 멈추고 control을 먼저 켜지만,
-                control VM만 저장합니다. 원본 farm의 OpenStack은 바꾸지
-                않습니다. 인스턴스가 있는 farm은 얼릴 수 없습니다. 이 템플릿으로
-                만든 farm은 원본의 compute 등록(nova-compute, placement, Neutron
+                stackbox 전체처럼 compute를 먼저 멈추고 control을 먼저 켜지만,
+                control VM만 저장합니다. 원본 stackbox의 OpenStack은 바꾸지
+                않습니다. 인스턴스가 있는 stackbox는 얼릴 수 없습니다. 이 템플릿으로
+                만든 stackbox는 원본의 compute 등록(nova-compute, placement, Neutron
                 agent)을 지우고 compute 없이 시작합니다.
               </div>
             ) : node ? (
@@ -283,24 +283,24 @@ export function FreezeFarmDialog({ farm }: { farm: Farm }) {
             ) : (
               <div className="warning-notice">
                 데이터베이스를 깨끗하게 저장하기 위해 VM을 잠시 정지했다가 다시
-                시작합니다. 여러 VM farm은 compute를 먼저 멈추고 control을 먼저
+                시작합니다. 여러 VM stackbox는 compute를 먼저 멈추고 control을 먼저
                 켭니다. 서비스가 다시 응답할 때까지 몇 분 정도 걸립니다. 이
                 스냅샷은{" "}
                 {snapshotHost(
-                  local || !farmHost?.inspection
+                  local || !stackboxHost?.inspection
                     ? {
                         arch: coordinator.data?.arch ?? undefined,
                         platform: coordinator.data?.os,
                       }
                     : {
-                        arch: farmHost.inspection.arch,
-                        platform: farmHost.inspection.os,
+                        arch: stackboxHost.inspection.arch,
+                        platform: stackboxHost.inspection.os,
                       },
                 )}
                 에서만 복원할 수 있습니다.
                 {!local &&
-                  farmHost &&
-                  ` 원본은 ${farmHost.id}에 두고, 다른 호스트에서 쓸 때 사본을 복사합니다.`}
+                  stackboxHost &&
+                  ` 원본은 ${stackboxHost.id}에 두고, 다른 호스트에서 쓸 때 사본을 복사합니다.`}
               </div>
             )}
             {mutation.error && <ErrorNotice error={mutation.error} />}
@@ -337,7 +337,7 @@ export function RestoreSnapshotDialog({
 }) {
   const client = useQueryClient();
   const navigate = useNavigate();
-  const farms = useQuery(farmsQuery());
+  const stackboxes = useQuery(stackboxesQuery());
   const coordinator = useQuery(hostQuery());
   const buildId = coordinator.data?.build_id;
   const hosts = useQuery(hostsQuery()).data;
@@ -384,7 +384,7 @@ export function RestoreSnapshotDialog({
     onSuccess: async (job) => {
       await refresh(client);
       dialog.setOpen(false);
-      await navigate({ to: "/farms/$farmId", params: { farmId: job.farm_id } });
+      await navigate({ to: "/stackboxes/$stackboxId", params: { stackboxId: job.stackbox_id } });
     },
   });
   const dialog = useDialog(mutation.isPending, () => {
@@ -394,7 +394,7 @@ export function RestoreSnapshotDialog({
     setEditedHostName(undefined);
     mutation.reset();
   });
-  const duplicate = farms.data?.some((f) => f.id === id);
+  const duplicate = stackboxes.data?.some((f) => f.id === id);
   const capacity = target?.capacity;
   const remaining = capacity
     ? capacity.memory_budget_mib - capacity.memory_reserved_mib
@@ -430,16 +430,16 @@ export function RestoreSnapshotDialog({
     <Dialog.Root open={dialog.open} onOpenChange={dialog.onOpenChange}>
       <Dialog.Trigger render={<Button variant="primary" disabled={!ready} />}>
         <CopyPlus size={16} />
-        Farm 만들기
+        Stackbox 만들기
       </Dialog.Trigger>
       <Modal
         title={
-          control ? "Control 템플릿에서 farm 만들기" : "스냅샷에서 farm 만들기"
+          control ? "Control 템플릿에서 stackbox 만들기" : "스냅샷에서 stackbox 만들기"
         }
         description={
           control
-            ? "얼려둔 control VM만 복사해 compute 없는 farm으로 시작합니다. 원본의 compute 등록은 지워지고, Compute 추가로 compute-1부터 clean 설치하거나 compute 템플릿에서 붙입니다."
-            : "얼려둔 VM을 복사해 새 farm으로 시작합니다. OpenStack을 다시 설치하지 않습니다."
+            ? "얼려둔 control VM만 복사해 compute 없는 stackbox로 시작합니다. 원본의 compute 등록은 지워지고, Compute 추가로 compute-1부터 clean 설치하거나 compute 템플릿에서 붙입니다."
+            : "얼려둔 VM을 복사해 새 stackbox로 시작합니다. OpenStack을 다시 설치하지 않습니다."
         }
         closeDisabled={mutation.isPending}
       >
@@ -527,7 +527,7 @@ export function RestoreSnapshotDialog({
             <div className="grid gap-4 sm:grid-cols-2">
               <label className="field">
                 <span>
-                  Farm ID <span className="field-required">*</span>
+                  Stackbox ID <span className="field-required">*</span>
                 </span>
                 <Input
                   autoFocus
@@ -542,7 +542,7 @@ export function RestoreSnapshotDialog({
                 />
                 {duplicate && (
                   <small className="field-error">
-                    이미 사용 중인 Farm ID입니다.
+                    이미 사용 중인 Stackbox ID입니다.
                   </small>
                 )}
               </label>
@@ -571,7 +571,7 @@ export function RestoreSnapshotDialog({
                 disabled={mutation.isPending}
               />
               <small>
-                새 farm의 public 포트로 OpenStack 서비스 카탈로그를 다시
+                새 stackbox의 public 포트로 OpenStack 서비스 카탈로그를 다시
                 등록합니다.
               </small>
             </label>
@@ -625,7 +625,7 @@ export function RestoreSnapshotDialog({
               ) : (
                 <CopyPlus size={16} />
               )}
-              Farm 만들기
+              Stackbox 만들기
             </Button>
           </div>
         </form>
@@ -785,7 +785,7 @@ export function ExportSnapshotDialog({ snapshot }: { snapshot: Snapshot }) {
                   </small>
                 </label>
                 <div className="info-notice">
-                  farmd 호스트에 아카이브를 잠시 만든 뒤 올리고, 다 올리면
+                  stackboxd 호스트에 아카이브를 잠시 만든 뒤 올리고, 다 올리면
                   지웁니다. 그동안 스냅샷 크기만큼의 디스크 공간이 필요합니다.
                 </div>
               </>
@@ -803,7 +803,7 @@ export function ExportSnapshotDialog({ snapshot }: { snapshot: Snapshot }) {
                   disabled={mutation.isPending}
                 />
                 <small>
-                  farmd 호스트의 절대 경로입니다. 폴더를 지정하면 그 안에{" "}
+                  stackboxd 호스트의 절대 경로입니다. 폴더를 지정하면 그 안에{" "}
                   {snapshot.id}.msb로 저장합니다.
                 </small>
               </label>
@@ -838,7 +838,7 @@ export function ExportSnapshotDialog({ snapshot }: { snapshot: Snapshot }) {
 export function CreateFromBucketDialog({
   initialBucket,
   triggerVariant = "default",
-  triggerLabel = "버킷에서 Farm 만들기",
+  triggerLabel = "버킷에서 Stackbox 만들기",
 }: {
   initialBucket?: string;
   triggerVariant?: "default" | "primary" | "ghost";
@@ -848,7 +848,7 @@ export function CreateFromBucketDialog({
   const navigate = useNavigate();
   const buckets = useQuery(bucketsQuery()).data ?? [];
   const hosts = useQuery(hostsQuery()).data ?? [];
-  const farms = useQuery(farmsQuery());
+  const stackboxes = useQuery(stackboxesQuery());
   const coordinator = useQuery(hostQuery());
   const buildId = coordinator.data?.build_id;
   const hostArchOf = (h: (typeof hosts)[number]) =>
@@ -874,7 +874,7 @@ export function CreateFromBucketDialog({
     ...bucketObjectsQuery(activeBucketId),
     enabled: dialog.open && Boolean(activeBucketId),
   });
-  // Only archives with metadata that can boot a farm (not compute templates) and match at
+  // Only archives with metadata that can boot a stackbox (not compute templates) and match at
   // least one registered host's architecture are shown.
   const registeredArches = new Set(
     hosts.map(hostArchOf).filter((a): a is string => Boolean(a)),
@@ -917,11 +917,11 @@ export function CreateFromBucketDialog({
     onSuccess: async (job) => {
       await refresh(client);
       dialog.setOpen(false);
-      await navigate({ to: "/farms/$farmId", params: { farmId: job.farm_id } });
+      await navigate({ to: "/stackboxes/$stackboxId", params: { stackboxId: job.stackbox_id } });
     },
   });
 
-  const duplicate = farms.data?.some((f) => f.id === id);
+  const duplicate = stackboxes.data?.some((f) => f.id === id);
   const targetArch = target ? hostArchOf(target) : undefined;
   const targetWrongArch = Boolean(
     selectedMeta && targetArch && targetArch !== selectedMeta.arch,
@@ -965,8 +965,8 @@ export function CreateFromBucketDialog({
         {triggerLabel}
       </Dialog.Trigger>
       <Modal
-        title="S3 버킷에서 farm 만들기"
-        description="메타데이터가 있는 버킷 이미지를 골라 대상 호스트로 바로 내려받고 새 farm으로 시작합니다."
+        title="S3 버킷에서 stackbox 만들기"
+        description="메타데이터가 있는 버킷 이미지를 골라 대상 호스트로 바로 내려받고 새 stackbox로 시작합니다."
         closeDisabled={mutation.isPending}
       >
         <form
@@ -1017,7 +1017,7 @@ export function CreateFromBucketDialog({
                 <p className="field-hint">
                   {bucket && bucketLocation(bucket)}에 현재 호스트에서 바로
                   실행할 수 있는 이미지가 없습니다. (메타데이터가 있고 등록된
-                  호스트와 아키텍처가 같은 farm 스냅샷 또는 Control 템플릿만
+                  호스트와 아키텍처가 같은 stackbox 스냅샷 또는 Control 템플릿만
                   표시됩니다.)
                 </p>
               ) : (
@@ -1106,7 +1106,7 @@ export function CreateFromBucketDialog({
             <div className="grid gap-4 sm:grid-cols-2">
               <label className="field">
                 <span>
-                  Farm ID <span className="field-required">*</span>
+                  Stackbox ID <span className="field-required">*</span>
                 </span>
                 <Input
                   autoFocus
@@ -1121,7 +1121,7 @@ export function CreateFromBucketDialog({
                 />
                 {duplicate && (
                   <small className="field-error">
-                    이미 사용 중인 Farm ID입니다.
+                    이미 사용 중인 Stackbox ID입니다.
                   </small>
                 )}
               </label>
@@ -1150,7 +1150,7 @@ export function CreateFromBucketDialog({
                 disabled={mutation.isPending}
               />
               <small>
-                새 farm의 public 포트로 OpenStack 서비스 카탈로그를 다시
+                새 stackbox의 public 포트로 OpenStack 서비스 카탈로그를 다시
                 등록합니다.
               </small>
             </label>
@@ -1189,7 +1189,7 @@ export function CreateFromBucketDialog({
               ) : (
                 <CopyPlus size={16} />
               )}
-              Farm 만들기
+              Stackbox 만들기
             </Button>
           </div>
         </form>
@@ -1355,11 +1355,11 @@ export function ImportSnapshotDialog() {
                   value={path}
                   onValueChange={setPath}
                   className="input font-mono"
-                  placeholder="/Users/me/farm-snapshots/dev-clean.msb"
+                  placeholder="/Users/me/stackbox-snapshots/dev-clean.msb"
                   required
                   disabled={mutation.isPending}
                 />
-                <small>farmd 호스트의 절대 경로</small>
+                <small>stackboxd 호스트의 절대 경로</small>
               </label>
             )}
             <label className="field">
@@ -1379,7 +1379,7 @@ export function ImportSnapshotDialog() {
             </label>
             {mode === "bucket" && (
               <div className="info-notice">
-                farmd 호스트로 내려받아 등록한 뒤, 내려받은 파일은 지웁니다.
+                stackboxd 호스트로 내려받아 등록한 뒤, 내려받은 파일은 지웁니다.
               </div>
             )}
             {mutation.error && <ErrorNotice error={mutation.error} />}
@@ -1445,8 +1445,8 @@ export function DeleteSnapshotDialog({ snapshot }: { snapshot: Snapshot }) {
         title="스냅샷을 삭제할까요?"
         description={
           forget
-            ? "이 스냅샷의 coordinator 기록만 삭제합니다. 이 스냅샷으로 만든 farm에는 영향이 없습니다."
-            : "이 호스트에 저장된 스냅샷 디스크를 삭제합니다. 이 스냅샷으로 만든 farm에는 영향이 없습니다."
+            ? "이 스냅샷의 coordinator 기록만 삭제합니다. 이 스냅샷으로 만든 stackbox에는 영향이 없습니다."
+            : "이 호스트에 저장된 스냅샷 디스크를 삭제합니다. 이 스냅샷으로 만든 stackbox에는 영향이 없습니다."
         }
         closeDisabled={mutation.isPending}
       >

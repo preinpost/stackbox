@@ -79,7 +79,7 @@ export function RelaySettingsDialog() {
   );
 }
 
-/** Where farms that span hosts join: the coordinator's relay, with its own CA or behind a proxy. */
+/** Where stackboxes that span hosts join: the coordinator's relay, with its own CA or behind a proxy. */
 function RelaySettingsForm() {
   const client = useQueryClient();
   const relay = useQuery(relayQuery());
@@ -108,7 +108,7 @@ function RelaySettingsForm() {
     mutationFn: api.updateCloudflared,
     onSuccess: () => client.invalidateQueries({ queryKey: keys.relay }),
   });
-  const locked = !!relay.data?.spanning_farms?.length;
+  const locked = !!relay.data?.spanning_stackboxes?.length;
   const quick = current.mode === "quick_tunnel";
   const tunnel = relay.data?.tunnel;
   const stage = tunnelStage(relay.data);
@@ -225,7 +225,7 @@ function RelaySettingsForm() {
           </details>
           {locked && (
             <div className="warning-notice">
-              여러 호스트에 걸친 farm({relay.data?.spanning_farms?.join(", ")}
+              여러 호스트에 걸친 stackbox({relay.data?.spanning_stackboxes?.join(", ")}
               )이 있어 연결 방식과 URL은 바꿀 수 없습니다.
             </div>
           )}
@@ -239,7 +239,7 @@ function RelaySettingsForm() {
                 {tunnel.latest &&
                   tunnel.latest !== tunnel.version &&
                   ` (최신 ${tunnel.latest})`}
-                {tunnel.unmanaged && " · FARM_CLOUDFLARED"}
+                {tunnel.unmanaged && " · STACKBOX_CLOUDFLARED"}
               </span>
               <span>{tunnel.connected ? "터널 연결됨" : "터널 연결 중"}</span>
               {checked && <span>확인 {checked}</span>}

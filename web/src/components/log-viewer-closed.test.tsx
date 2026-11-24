@@ -35,10 +35,10 @@ describe("LogViewer closed stream", () => {
 
   it("shows DISCONNECTED with a reconnect button, and reopens the stream on click", async () => {
     const client = new QueryClient();
-    client.setQueryData(keys.logs("farm-render"), []);
+    client.setQueryData(keys.logs("stackbox-render"), []);
     render(
       <QueryClientProvider client={client}>
-        <LogViewer id="farm-render" />
+        <LogViewer id="stackbox-render" />
       </QueryClientProvider>,
     );
     expect(FakeEventSource.instances).toHaveLength(1);

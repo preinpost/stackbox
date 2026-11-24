@@ -12,8 +12,8 @@ import {
   api,
   gpuInstancesQuery,
   keys,
-  type Farm,
-  type FarmInstance,
+  type Stackbox,
+  type StackboxInstance,
   type GpuLoad,
   type GpuPattern,
   type GpuProfile,
@@ -27,7 +27,7 @@ import {
   StatusBadge,
 } from "./ui";
 
-/** What a GPU farm shows before anyone sets a load; the guest's own default. */
+/** What a GPU stackbox shows before anyone sets a load; the guest's own default. */
 export const defaultGpuLoad: GpuLoad = {
   profile: "sim-8g",
   pattern: "sine",
@@ -54,7 +54,7 @@ const patterns: { value: GpuPattern; label: string }[] = [
   { value: "spike", label: "스파이크" },
 ];
 
-/** One period of utilization, exactly as farm samples it for the guest. */
+/** One period of utilization, exactly as stackbox samples it for the guest. */
 export function gpuSamples(load: GpuLoad): number[] {
   const count = Math.max(1, Math.min(24, Math.floor(load.period_s)));
   const low = Math.min(load.min, load.max);
@@ -127,18 +127,18 @@ function Sparkline({ values }: { values: number[] }) {
   );
 }
 
-function gpuLabel(instance: FarmInstance) {
+function gpuLabel(instance: StackboxInstance) {
   const classes = Object.entries(instance.resources);
   if (!classes.length) return "GPU 리소스 없음 · 기본 1장";
   return classes.map(([name, count]) => `${name}×${count}`).join(" · ");
 }
 
 function GpuLoadRow({
-  farmId,
+  stackboxId,
   instance,
 }: {
-  farmId: string;
-  instance: FarmInstance;
+  stackboxId: string;
+  instance: StackboxInstance;
 }) {
   const queryClient = useQueryClient();
   const [load, setLoad] = useState<GpuLoad>(instance.load ?? defaultGpuLoad);
@@ -152,11 +152,11 @@ function GpuLoadRow({
   const samples = gpuSamples(load);
   const refresh = () => {
     void queryClient.invalidateQueries({
-      queryKey: keys.gpuInstances(farmId),
+      queryKey: keys.gpuInstances(stackboxId),
     });
   };
   const apply = useMutation({
-    mutationFn: () => api.setGpuLoad(farmId, instance.id, load),
+    mutationFn: () => api.setGpuLoad(stackboxId, instance.id, load),
     onSuccess: (view) => {
       setLoad(view.load);
       setMessage("적용했습니다. 게스트 반영까지 최대 약 15초 걸립니다.");
@@ -165,7 +165,7 @@ function GpuLoadRow({
     onError: (error: Error) => setMessage(error.message),
   });
   const reset = useMutation({
-    mutationFn: () => api.clearGpuLoad(farmId, instance.id),
+    mutationFn: () => api.clearGpuLoad(stackboxId, instance.id),
     onSuccess: (view) => {
       setLoad(view.load);
       setMessage(
@@ -308,19 +308,19 @@ function GpuLoadRow({
   );
 }
 
-/** The GPU tab of a farm: instances, their load, a preview, and install help. */
-export function GpuLoadPanel({ farm }: { farm: Farm }) {
-  const ready = farm.status === "ready" && !farm.active_job;
-  const query = useQuery({ ...gpuInstancesQuery(farm.id), enabled: ready });
+/** The GPU tab of a stackbox: instances, their load, a preview, and install help. */
+export function GpuLoadPanel({ stackbox }: { stackbox: Stackbox }) {
+  const ready = stackbox.status === "ready" && !stackbox.active_job;
+  const query = useQuery({ ...gpuInstancesQuery(stackbox.id), enabled: ready });
   const downloads = [
     {
-      href: `/api/v1/farms/${encodeURIComponent(farm.id)}/gpu/guest-script`,
+      href: `/api/v1/stackboxes/${encodeURIComponent(stackbox.id)}/gpu/guest-script`,
       name: "nvidia-smi.sh",
       label: "가짜 nvidia-smi",
     },
     {
-      href: `/api/v1/farms/${encodeURIComponent(farm.id)}/gpu/user-data`,
-      name: "farm-gpu-user-data.sh",
+      href: `/api/v1/stackboxes/${encodeURIComponent(stackbox.id)}/gpu/user-data`,
+      name: "stackbox-gpu-user-data.sh",
       label: "user-data 설치 스크립트",
     },
   ];
@@ -332,13 +332,13 @@ export function GpuLoadPanel({ farm }: { farm: Farm }) {
           가짜 nvidia-smi 부하
         </h2>
         <span className="chip mono">
-          {farm.plan?.gpu?.mode === "mtty" ? "mtty" : "simulated"} ·{" "}
-          {farm.plan?.gpu?.count ?? 0} GPU
+          {stackbox.plan?.gpu?.mode === "mtty" ? "mtty" : "simulated"} ·{" "}
+          {stackbox.plan?.gpu?.count ?? 0} GPU
         </span>
       </div>
       <div className="panel-body gpu-panel-body">
         <p className="field-hint">
-          farm이 부하 표를 인스턴스 메타데이터에 넣고, 게스트의 가짜{" "}
+          stackbox가 부하 표를 인스턴스 메타데이터에 넣고, 게스트의 가짜{" "}
           <code>nvidia-smi</code>가 그 값을 읽습니다. 실제 GPU 연산은 하지
           않으며, Nova 메타데이터 캐시 때문에 반영까지 최대 약 15초 걸립니다.
         </p>
@@ -348,7 +348,7 @@ export function GpuLoadPanel({ farm }: { farm: Farm }) {
               <Download size={15} /> 게스트 설치
             </strong>
             <p className="field-hint">
-              cloud-init 이미지는 이 farm의 vendordata로 자동 설치됩니다.
+              cloud-init 이미지는 이 stackbox의 vendordata로 자동 설치됩니다.
               CirrOS처럼 vendordata를 적용하지 않는 이미지는 user-data 설치
               스크립트를 인스턴스에 넘기세요. 실제 GPU(PCI vendor 10de)가 보이면
               설치는 스스로 건너뜁니다.
@@ -397,7 +397,7 @@ export function GpuLoadPanel({ farm }: { farm: Farm }) {
           <div className="gpu-list">
             {query.data.map((instance) => (
               <GpuLoadRow
-                farmId={farm.id}
+                stackboxId={stackbox.id}
                 instance={instance}
                 key={`${instance.id}:${JSON.stringify(instance.load ?? null)}`}
               />

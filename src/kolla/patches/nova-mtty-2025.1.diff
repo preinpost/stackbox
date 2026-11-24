@@ -1,4 +1,4 @@
-# farm: OpenStack Nova's "Add mtty support for testing fake mdevs", backported to
+# stackbox: OpenStack Nova's "Add mtty support for testing fake mdevs", backported to
 # 2025.1. Differences from the upstream commit:
 #
 #   * 2025.1 supports Python 3.9, so _get_device_address() returns `ty.Optional[str]`
@@ -8,7 +8,7 @@
 #   * _create_new_mediated_device() still carries the privsep branch that upstream
 #     dropped, and it refuses a virtual mdev parent instead of handing privsep a
 #     non-PCI address. The branch is unreachable on a libvirt that can persist mdevs
-#     (>= 7.3.0), which every image farm supports ships.
+#     (>= 7.3.0), which every image stackbox supports ships.
 #
 # Upstream: OpenStack Nova commit f412fac1ae1e78e91b8b7c2c4b0cf2be4f63ceb2, "Add mtty
 # support for testing fake mdevs", which upstream merged only on stable/2026.2. Nova is
@@ -17,7 +17,7 @@
 #
 # Only the two files the running service needs are here; the upstream unit tests are
 # not. src/kolla/patches/apply.py applies this file inside the nova_compute container,
-# matching hunks by their text, and farm's verify phase checks that it is in place. A
+# matching hunks by their text, and stackbox's verify phase checks that it is in place. A
 # hunk that no longer matches fails the container start rather than letting
 # nova-compute run with half the backport.
 #

@@ -2,7 +2,7 @@ import { queryOptions } from "@tanstack/react-query";
 import type { components } from "./schema";
 
 type Schema = components["schemas"];
-export type Farm = Schema["FarmView"];
+export type Stackbox = Schema["StackboxView"];
 export type Host = Schema["HostInfo"];
 export type RelayStatus = Schema["RelayStatus"];
 export type RelaySettings = Schema["RelaySettings"];
@@ -15,8 +15,8 @@ export type GpuLoad = Schema["GpuLoad"];
 export type GpuLoadView = Schema["GpuLoadView"];
 export type GpuPattern = Schema["GpuPattern"];
 export type GpuProfile = Schema["GpuProfile"];
-export type FarmInstance = Schema["FarmInstance"];
-export type FarmLayout = Schema["FarmLayout"];
+export type StackboxInstance = Schema["StackboxInstance"];
+export type StackboxLayout = Schema["StackboxLayout"];
 export type Phase = Schema["Phase"];
 export type Job = Schema["Job"];
 export type LogEntry = Schema["LogEntry"];
@@ -91,11 +91,11 @@ export async function request<T>(
 const encode = encodeURIComponent;
 export const activeJob = (job: Pick<Job, "status">) =>
   job.status === "queued" || job.status === "running";
-export const busyFarm = (farm: Farm) => Boolean(farm.active_job);
+export const busyStackbox = (stackbox: Stackbox) => Boolean(stackbox.active_job);
 export const busySnapshot = (snapshot: Pick<Snapshot, "status">) =>
   ["creating", "exporting", "importing", "deleting"].includes(snapshot.status);
 export const keys = {
-  farms: ["farms"] as const,
+  stackboxes: ["stackboxes"] as const,
   jobs: ["jobs"] as const,
   host: ["host"] as const,
   hosts: ["remote-hosts"] as const,
@@ -105,16 +105,16 @@ export const keys = {
   buckets: ["buckets"] as const,
   bucketObjects: (id: string) => ["buckets", id, "objects"] as const,
   releases: ["releases"] as const,
-  farm: (id: string) => ["farms", id] as const,
+  stackbox: (id: string) => ["stackboxes", id] as const,
   logs: (id: string) => ["logs", id] as const,
   endpoints: (id: string) => ["endpoints", id] as const,
   gpuInstances: (id: string) => ["gpu-instances", id] as const,
 };
-export const farmsQuery = () =>
+export const stackboxesQuery = () =>
   queryOptions({
-    queryKey: keys.farms,
-    queryFn: ({ signal }) => request<Farm[]>("/farms", { signal }),
-    refetchInterval: (q) => (q.state.data?.some(busyFarm) ? 2000 : 10_000),
+    queryKey: keys.stackboxes,
+    queryFn: ({ signal }) => request<Stackbox[]>("/stackboxes", { signal }),
+    refetchInterval: (q) => (q.state.data?.some(busyStackbox) ? 2000 : 10_000),
   });
 export const jobsQuery = () =>
   queryOptions({
@@ -184,12 +184,12 @@ export const releasesQuery = (arch?: string) =>
       ),
     staleTime: 30_000,
   });
-/** The farm's Nova servers and their GPU loads; refreshed while a deploy changes them. */
+/** The stackbox's Nova servers and their GPU loads; refreshed while a deploy changes them. */
 export const gpuInstancesQuery = (id: string) =>
   queryOptions({
     queryKey: keys.gpuInstances(id),
     queryFn: ({ signal }) =>
-      request<FarmInstance[]>(`/farms/${encode(id)}/instances`, { signal }),
+      request<StackboxInstance[]>(`/stackboxes/${encode(id)}/instances`, { signal }),
     refetchInterval: 15_000,
   });
 /** With a release, each service says whether that release can run it. */
@@ -203,17 +203,17 @@ export const catalogQuery = (release?: string) =>
       ),
     staleTime: Infinity,
   });
-export const farmQuery = (id: string) =>
+export const stackboxQuery = (id: string) =>
   queryOptions({
-    queryKey: keys.farm(id),
-    queryFn: ({ signal }) => request<Farm>(`/farms/${encode(id)}`, { signal }),
+    queryKey: keys.stackbox(id),
+    queryFn: ({ signal }) => request<Stackbox>(`/stackboxes/${encode(id)}`, { signal }),
     refetchInterval: (q) => (q.state.data?.active_job ? 1500 : 10_000),
   });
 export const logsQuery = (id: string) =>
   queryOptions({
     queryKey: keys.logs(id),
     queryFn: ({ signal }) =>
-      request<LogEntry[]>(`/farms/${encode(id)}/logs`, { signal }),
+      request<LogEntry[]>(`/stackboxes/${encode(id)}/logs`, { signal }),
     staleTime: Infinity,
   });
 export const api = {
@@ -264,14 +264,14 @@ export const api = {
     request<HostJob>(`/hosts/${encode(id)}/prepare`, { method: "POST" }),
   unregisterHost: (id: string) =>
     request<{ id: string }>(`/hosts/${encode(id)}`, { method: "DELETE" }),
-  /** Delete this coordinator's farms and leftover VMs on the host, then unregister it.
+  /** Delete this coordinator's stackboxes and leftover VMs on the host, then unregister it.
    * `snapshots` also deletes the snapshots whose original the host keeps. */
   purgeHost: (id: string, snapshots = false) =>
     request<HostJob>(
       `/hosts/${encode(id)}?purge=true${snapshots ? "&snapshots=true" : ""}`,
       { method: "DELETE" },
     ),
-  /** Where farms that span hosts join; `null` turns it off. */
+  /** Where stackboxes that span hosts join; `null` turns it off. */
   setRelay: (body: RelaySettings | null) =>
     request<RelayStatus>("/relay", {
       method: body ? "PUT" : "DELETE",
@@ -280,7 +280,7 @@ export const api = {
   updateCloudflared: () =>
     request<RelayStatus>("/relay/cloudflared/update", { method: "POST" }),
   create: (body: CreateRequest) =>
-    request<Job>("/farms", { method: "POST", body: JSON.stringify(body) }),
+    request<Job>("/stackboxes", { method: "POST", body: JSON.stringify(body) }),
   /** Dry run: which template or clean install makes each VM, and why. */
   releasePlan: (body: ReleaseCreateRequest, signal?: AbortSignal) =>
     request<ReleasePlan>("/releases/plan", {
@@ -290,28 +290,28 @@ export const api = {
     }),
   /** Starts an assemble job; its steps are jobs of their own. */
   createRelease: (body: ReleaseCreateRequest) =>
-    request<Job>("/releases/farms", {
+    request<Job>("/releases/stackboxes", {
       method: "POST",
       body: JSON.stringify(body),
     }),
   deploy: (id: string, from: Phase) =>
-    request<Job>(`/farms/${encode(id)}/deploy`, {
+    request<Job>(`/stackboxes/${encode(id)}/deploy`, {
       method: "POST",
       body: JSON.stringify({ from }),
     }),
-  /** Add the next compute VM; a host other than the farm's primary joins through the relay.
+  /** Add the next compute VM; a host other than the stackbox's primary joins through the relay.
    * `fromSnapshot` boots it from a compute template instead of installing it clean. */
   addCompute: (id: string, hostId?: string, fromSnapshot?: string) =>
-    request<Job>(`/farms/${encode(id)}/computes`, {
+    request<Job>(`/stackboxes/${encode(id)}/computes`, {
       method: "POST",
       body: JSON.stringify({
         host_id: hostId ?? null,
         ...(fromSnapshot ? { from_snapshot: fromSnapshot } : {}),
       }),
     }),
-  /** `forget` removes only the record, without asking the farm's host. */
+  /** `forget` removes only the record, without asking the stackbox's host. */
   delete: (id: string, forget = false) =>
-    request<Job>(`/farms/${encode(id)}${forget ? "?forget=true" : ""}`, {
+    request<Job>(`/stackboxes/${encode(id)}${forget ? "?forget=true" : ""}`, {
       method: "DELETE",
     }),
   plan: (
@@ -334,34 +334,34 @@ export const api = {
       signal,
     }),
   /** No delay and no loss heals the VM. */
-  setFaults: (farmId: string, node: string, impair: Impair) =>
-    request<Farm>(`/farms/${encode(farmId)}/nodes/${encode(node)}/faults`, {
+  setFaults: (stackboxId: string, node: string, impair: Impair) =>
+    request<Stackbox>(`/stackboxes/${encode(stackboxId)}/nodes/${encode(node)}/faults`, {
       method: "PUT",
       body: JSON.stringify(impair),
     }),
   endpoints: (id: string) =>
-    request<ServiceEndpoints>(`/farms/${encode(id)}/endpoints`),
+    request<ServiceEndpoints>(`/stackboxes/${encode(id)}/endpoints`),
   instances: (id: string) =>
-    request<FarmInstance[]>(`/farms/${encode(id)}/instances`),
+    request<StackboxInstance[]>(`/stackboxes/${encode(id)}/instances`),
   gpuLoad: (id: string, server: string) =>
     request<GpuLoadView>(
-      `/farms/${encode(id)}/instances/${encode(server)}/gpu-load`,
+      `/stackboxes/${encode(id)}/instances/${encode(server)}/gpu-load`,
     ),
   /** Writes the sample table to the instance's Nova metadata. */
   setGpuLoad: (id: string, server: string, load: GpuLoad) =>
     request<GpuLoadView>(
-      `/farms/${encode(id)}/instances/${encode(server)}/gpu-load`,
+      `/stackboxes/${encode(id)}/instances/${encode(server)}/gpu-load`,
       { method: "PUT", body: JSON.stringify(load) },
     ),
   clearGpuLoad: (id: string, server: string) =>
     request<GpuLoadView>(
-      `/farms/${encode(id)}/instances/${encode(server)}/gpu-load`,
+      `/stackboxes/${encode(id)}/instances/${encode(server)}/gpu-load`,
       { method: "DELETE" },
     ),
   settle: (id: string) =>
-    request<Job>(`/farms/${encode(id)}/settle`, { method: "POST" }),
-  freeze: (farmId: string, body: SnapshotRequest) =>
-    request<Job>(`/farms/${encode(farmId)}/snapshots`, {
+    request<Job>(`/stackboxes/${encode(id)}/settle`, { method: "POST" }),
+  freeze: (stackboxId: string, body: SnapshotRequest) =>
+    request<Job>(`/stackboxes/${encode(stackboxId)}/snapshots`, {
       method: "POST",
       body: JSON.stringify(body),
     }),

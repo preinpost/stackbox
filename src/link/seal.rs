@@ -2,8 +2,8 @@
 //! whatever carries it: the relay's own TLS, or a proxy or Cloudflare tunnel that ends TLS
 //! before it and so sees the WebSocket messages.
 //!
-//! Each (farm, host) has a 32-byte key, made by the coordinator and handed to the host's
-//! agent with the farm. On connecting, each side first sends a random 16-byte hello in the
+//! Each (stackbox, host) has a 32-byte key, made by the coordinator and handed to the host's
+//! agent with the stackbox. On connecting, each side first sends a random 16-byte hello in the
 //! clear. Every later message is `counter (8, big-endian) | nonce (24) | XChaCha20-Poly1305
 //! ciphertext and tag`, authenticated with the direction, the receiver's hello and the
 //! counter. The receiver takes counters 0, 1, 2, ... only, so a message from another connection,

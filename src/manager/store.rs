@@ -1,4 +1,4 @@
-use crate::model::{FarmRecord, Job, SnapshotRecord};
+use crate::model::{Job, SnapshotRecord, StackboxRecord};
 use anyhow::{Context, Result, ensure};
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
@@ -15,7 +15,7 @@ pub struct State {
     pub version: u32,
     #[serde(default = "coordinator_id")]
     pub coordinator_id: String,
-    pub farms: BTreeMap<String, FarmRecord>,
+    pub stackboxes: BTreeMap<String, StackboxRecord>,
     pub jobs: BTreeMap<String, Job>,
     #[serde(default)]
     pub hosts: BTreeMap<String, crate::remote::StoredHost>,
@@ -28,10 +28,10 @@ pub struct State {
     /// Multipart uploads to abort, by upload ID.
     #[serde(default)]
     pub uploads: BTreeMap<String, crate::s3::PendingUpload>,
-    /// Where farms that span hosts join; none disables them.
+    /// Where stackboxes that span hosts join; none disables them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relay: Option<crate::link::relay::RelaySettings>,
-    /// Each farm that spans hosts' uplink keys, by host, sealed by the vault.
+    /// Each stackbox that spans hosts' uplink keys, by host, sealed by the vault.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub relay_keys: BTreeMap<String, BTreeMap<String, crate::remote::SealedCredentials>>,
     /// A compute expansion's share while its new host is being created, sealed by the
@@ -44,7 +44,7 @@ impl Default for State {
         Self {
             version: 1,
             coordinator_id: coordinator_id(),
-            farms: BTreeMap::new(),
+            stackboxes: BTreeMap::new(),
             jobs: BTreeMap::new(),
             hosts: BTreeMap::new(),
             host_jobs: BTreeMap::new(),
@@ -81,11 +81,11 @@ impl Store {
             .read(true)
             .write(true)
             .open(dir.join("state.lock"))?;
-        lock.try_lock_exclusive().context("farm state is locked by another process; use the running daemon's API or stop it before using the CLI")?;
+        lock.try_lock_exclusive().context("stackbox state is locked by another process; use the running daemon's API or stop it before using the CLI")?;
         let path = dir.join("state.json");
         let mut state: State = match fs::read(&path) {
             Ok(bytes) => serde_json::from_slice(&bytes)
-                .context("invalid farm state.json; refusing to overwrite it")?,
+                .context("invalid stackbox state.json; refusing to overwrite it")?,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => State::default(),
             Err(e) => return Err(e.into()),
         };

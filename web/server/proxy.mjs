@@ -10,10 +10,10 @@ const json = (res, status, error) => {
   res.end(JSON.stringify({ error }));
 };
 
-/** farmd URL for the request's path and query, or null when FARM_API_URL is unusable. */
+/** stackboxd URL for the request's path and query, or null when STACKBOX_API_URL is unusable. */
 function upstreamUrl(req, env) {
   try {
-    const url = new URL(env.FARM_API_URL || "http://127.0.0.1:10010");
+    const url = new URL(env.STACKBOX_API_URL || "http://127.0.0.1:10010");
     if (
       !["http:", "https:"].includes(url.protocol) ||
       url.username ||
@@ -30,13 +30,13 @@ function upstreamUrl(req, env) {
 }
 
 /**
- * The portal's API surface, including canonical farm IDs: every route the browser may reach
+ * The portal's API surface, including canonical stackbox IDs: every route the browser may reach
  * through this boundary. Encoded or alternate spellings cannot bypass the credential
  * response filter. A route the portal calls but this does not list fails as a 404, so
  * `proxy.test.mjs` checks every path of `docs/openapi.json` against this expression.
  */
 export const portalApiPath =
-  /^\/api\/v1\/(?:host|local-host|agent-hosts|hosts(?:\/[a-z0-9-]+(?:\/(?:check|prepare|agent))?)?|host-jobs(?:\/[a-f0-9-]+)?|catalog|plans|releases(?:\/(?:plan|farms))?|openapi\.json|jobs(?:\/[a-f0-9-]+)?|farms(?:\/[a-z0-9-]+(?:\/(?:deploy|computes|settle|endpoints|instances(?:\/[a-z0-9-]+\/gpu-load)?|nodes\/[a-z0-9-]+\/faults|gpu\/(?:guest-script|user-data)|snapshots|logs(?:\/stream)?))?)?|snapshots(?:\/[a-z0-9-]+(?:\/(?:export|copies\/[a-z0-9-]+))?)?|buckets(?:\/[a-z0-9-]+(?:\/(?:check|objects))?)?|relay(?:\/cloudflared\/update)?)$/;
+  /^\/api\/v1\/(?:host|local-host|agent-hosts|hosts(?:\/[a-z0-9-]+(?:\/(?:check|prepare|agent))?)?|host-jobs(?:\/[a-f0-9-]+)?|catalog|plans|releases(?:\/(?:plan|stackboxes))?|openapi\.json|jobs(?:\/[a-f0-9-]+)?|stackboxes(?:\/[a-z0-9-]+(?:\/(?:deploy|computes|settle|endpoints|instances(?:\/[a-z0-9-]+\/gpu-load)?|nodes\/[a-z0-9-]+\/faults|gpu\/(?:guest-script|user-data)|snapshots|logs(?:\/stream)?))?)?|snapshots(?:\/[a-z0-9-]+(?:\/(?:export|copies\/[a-z0-9-]+))?)?|buckets(?:\/[a-z0-9-]+(?:\/(?:check|objects))?)?|relay(?:\/cloudflared\/update)?)$/;
 
 /** Hostname of a Host header or config value (no port, no IPv6 brackets), or null. */
 function hostName(value) {
@@ -88,9 +88,9 @@ export function proxyApi(req, res, env = process.env) {
     }
   }
   const url = upstreamUrl(req, env);
-  if (!url) return json(res, 502, "서버의 FARM_API_URL 설정을 확인하세요.");
+  if (!url) return json(res, 502, "서버의 STACKBOX_API_URL 설정을 확인하세요.");
 
-  // Only expose the portal's known API surface, including canonical farm IDs.
+  // Only expose the portal's known API surface, including canonical stackbox IDs.
   // Encoded/alternate spellings cannot bypass the credential response filter.
   if (!portalApiPath.test(url.pathname)) {
     return json(res, 404, "API 경로를 찾을 수 없습니다.");
@@ -99,8 +99,8 @@ export function proxyApi(req, res, env = process.env) {
   for (const name of ["content-type", "content-length", "last-event-id"]) {
     if (req.headers[name]) headers[name] = req.headers[name];
   }
-  if (env.FARM_API_TOKEN)
-    headers.authorization = `Bearer ${env.FARM_API_TOKEN}`;
+  if (env.STACKBOX_API_TOKEN)
+    headers.authorization = `Bearer ${env.STACKBOX_API_TOKEN}`;
   const upstream = (url.protocol === "https:" ? https : http).request(
     url,
     {
@@ -117,7 +117,7 @@ export function proxyApi(req, res, env = process.env) {
       if (response.headers.location)
         responseHeaders.location = response.headers.location;
       // Horizon shows the admin login. Forward only those fields, not any extra payload.
-      if (/\/farms\/[^/]+\/endpoints$/.test(url.pathname)) {
+      if (/\/stackboxes\/[^/]+\/endpoints$/.test(url.pathname)) {
         let size = 0;
         const chunks = [];
         response.on("data", (chunk) => {
@@ -192,7 +192,7 @@ export function proxyApi(req, res, env = process.env) {
     json(
       res,
       502,
-      "farmd에 연결할 수 없습니다. 데몬 주소와 서버 token 설정을 확인하세요.",
+      "stackboxd에 연결할 수 없습니다. 데몬 주소와 서버 token 설정을 확인하세요.",
     ),
   );
   req.on("aborted", () => upstream.destroy());
@@ -212,7 +212,7 @@ const refuse = (socket, status, error) => {
 };
 
 /**
- * WebSocket counterpart of proxyApi, for the farm shell only. A browser opens a WebSocket
+ * WebSocket counterpart of proxyApi, for the stackbox shell only. A browser opens a WebSocket
  * without CORS, so the page's Origin must be this portal, and it must name one.
  */
 export function proxyUpgrade(req, socket, head, env = process.env) {
@@ -229,12 +229,12 @@ export function proxyUpgrade(req, socket, head, env = process.env) {
     return refuse(socket, 400, "WebSocket 연결만 지원합니다.");
   const url = upstreamUrl(req, env);
   if (!url)
-    return refuse(socket, 502, "서버의 FARM_API_URL 설정을 확인하세요.");
+    return refuse(socket, 502, "서버의 STACKBOX_API_URL 설정을 확인하세요.");
   const rows = url.searchParams.get("rows");
   const cols = url.searchParams.get("cols");
   const node = url.searchParams.get("node");
   if (
-    !/^\/api\/v1\/farms\/[a-z0-9-]+\/shell$/.test(url.pathname) ||
+    !/^\/api\/v1\/stackboxes\/[a-z0-9-]+\/shell$/.test(url.pathname) ||
     !/^\d{1,4}$/.test(rows ?? "") ||
     !/^\d{1,4}$/.test(cols ?? "") ||
     (node !== null && !/^(control|compute-\d{1,2})$/.test(node))
@@ -249,8 +249,8 @@ export function proxyUpgrade(req, socket, head, env = process.env) {
   ]) {
     if (req.headers[name]) headers[name] = req.headers[name];
   }
-  if (env.FARM_API_TOKEN)
-    headers.authorization = `Bearer ${env.FARM_API_TOKEN}`;
+  if (env.STACKBOX_API_TOKEN)
+    headers.authorization = `Bearer ${env.STACKBOX_API_TOKEN}`;
   const upstream = (url.protocol === "https:" ? https : http).request(url, {
     headers,
     timeout: 30_000,
@@ -278,7 +278,7 @@ export function proxyUpgrade(req, socket, head, env = process.env) {
     tunnel.pipe(socket);
     socket.pipe(tunnel);
   });
-  // farmd refused the upgrade: relay its status and error message.
+  // stackboxd refused the upgrade: relay its status and error message.
   upstream.on("response", (response) => {
     let body = "";
     response.setEncoding("utf8");
@@ -299,7 +299,7 @@ export function proxyUpgrade(req, socket, head, env = process.env) {
       refuse(
         socket,
         502,
-        "farmd에 연결할 수 없습니다. 데몬 주소와 서버 token 설정을 확인하세요.",
+        "stackboxd에 연결할 수 없습니다. 데몬 주소와 서버 token 설정을 확인하세요.",
       );
   });
   socket.on("close", () => upstream.destroy());

@@ -14,7 +14,7 @@ const root = createRootRoute({
     <div className="empty-state">
       <h1>페이지를 찾을 수 없습니다</h1>
       <Link to="/" className="btn btn-primary">
-        Farms로 돌아가기
+        Stackboxes로 돌아가기
       </Link>
     </div>
   ),
@@ -22,17 +22,17 @@ const root = createRootRoute({
     <ErrorNotice error={error} retry={reset} />
   ),
 });
-const farms = createRoute({
+const stackboxes = createRoute({
   getParentRoute: () => root,
   path: "/",
-  component: lazyRouteComponent(() => import("./pages/farms"), "FarmsPage"),
+  component: lazyRouteComponent(() => import("./pages/stackboxes"), "StackboxesPage"),
 });
 const detail = createRoute({
   getParentRoute: () => root,
-  path: "/farms/$farmId",
+  path: "/stackboxes/$stackboxId",
   component: lazyRouteComponent(
-    () => import("./pages/farm-detail"),
-    "FarmDetailRoute",
+    () => import("./pages/stackbox-detail"),
+    "StackboxDetailRoute",
   ),
 });
 const snapshots = createRoute({
@@ -57,7 +57,7 @@ const remoteHosts = createRoute({
   ),
 });
 export const router = createRouter({
-  routeTree: root.addChildren([farms, detail, snapshots, jobs, remoteHosts]),
+  routeTree: root.addChildren([stackboxes, detail, snapshots, jobs, remoteHosts]),
   defaultPreload: "intent",
   scrollRestoration: true,
 });

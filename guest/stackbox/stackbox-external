@@ -1,0 +1,21 @@
+#!/bin/bash
+# Route Neutron's userspace br-ex to this VM's eth0. No inter-VM overlay needed.
+set -euo pipefail
+[ -f /etc/stackbox/external.conf ] || exit 0
+. /etc/stackbox/external.conf
+ip link show stackbox-ext >/dev/null 2>&1 || ip link add stackbox-ext type veth peer name stackbox-extgw
+ip link set stackbox-ext up
+ip link set stackbox-extgw up
+ip addr replace "$EXTERNAL_GATEWAY" dev stackbox-extgw
+sysctl -qw net.ipv4.ip_forward=1
+# Kernel iptables extensions are deliberately unavailable in msb. Preserve the
+# proven nftables masquerading used by the previous Neutron compute node.
+nft delete table ip stackbox_external 2>/dev/null || true
+nft -f - <<NFT
+table ip stackbox_external {
+  chain postrouting {
+    type nat hook postrouting priority srcnat;
+    ip saddr $EXTERNAL_NETWORK oifname "eth0" masquerade
+  }
+}
+NFT

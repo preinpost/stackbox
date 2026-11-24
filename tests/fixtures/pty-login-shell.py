@@ -2,7 +2,7 @@
 """A login shell on a real PTY, the way the microsandbox agent opens one.
 
 `bash -s` with a terminal stdin and a terminal stderr is an interactive shell: it prints
-its prompt and echoes what it reads, and both land in the stream farm captures. This
+its prompt and echoes what it reads, and both land in the stream stackbox captures. This
 stand-in lets a test drive that shell, so the script session must keep its output clean.
 
 Its stdin is the session's input and its stdout the session's output. Closing stdin is not

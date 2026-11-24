@@ -20,7 +20,7 @@ use std::{
 };
 
 /// First tar entry of a multi-node snapshot bundle.
-pub const MANIFEST_ENTRY: &str = "farm-multinode-bundle.json";
+pub const MANIFEST_ENTRY: &str = "stackbox-multinode-bundle.json";
 /// Current bundle manifest schema version.
 pub const BUNDLE_SCHEMA: u32 = 1;
 /// Upper bound on manifest size so a crafted archive cannot exhaust memory.
@@ -103,7 +103,7 @@ pub fn pack(
     Ok(())
 }
 
-/// Returns `true` when `path` is a farm multi-node bundle tar (first tar entry is
+/// Returns `true` when `path` is a stackbox multi-node bundle tar (first tar entry is
 /// [`MANIFEST_ENTRY`]). Plain or zstd-compressed single-VM `.msb` archives return `false`.
 pub fn is_bundle(path: &Path) -> Result<bool> {
     let mut file = File::open(path).with_context(|| format!("open archive {}", path.display()))?;
@@ -238,7 +238,7 @@ fn validate_node_name(node: &str) -> Result<()> {
     let valid_compute = node
         .strip_prefix("compute-")
         .and_then(|n| n.parse::<u8>().ok())
-        .is_some_and(|index| (1..=crate::farm::MAX_COMPUTES).contains(&index));
+        .is_some_and(|index| (1..=crate::stackbox::MAX_COMPUTES).contains(&index));
     ensure!(valid_compute, "invalid multi-node VM name '{node}'");
     Ok(())
 }
@@ -255,7 +255,7 @@ mod tests {
         let cmp = dir.path().join("cmp.msb");
         std::fs::write(&ctl, b"control-bytes").unwrap();
         std::fs::write(&cmp, b"compute-bytes").unwrap();
-        let bundle = dir.path().join("farm.msb");
+        let bundle = dir.path().join("stackbox.msb");
         let gpu = Some(GpuConfig {
             mode: GpuMode::Mtty,
             count: 2,
@@ -304,7 +304,7 @@ mod tests {
         assert!(!is_bundle(&zstd).unwrap());
 
         let plain = dir.path().join("plain.msb");
-        std::fs::write(&plain, b"{\"farm.snapshot.id\":\"x\"}").unwrap();
+        std::fs::write(&plain, b"{\"stackbox.snapshot.id\":\"x\"}").unwrap();
         assert!(!is_bundle(&plain).unwrap());
 
         // A plain tar whose first entry is not the bundle manifest is not a bundle either.

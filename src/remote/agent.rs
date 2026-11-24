@@ -4,9 +4,9 @@ use super::{
     protocol::{Frame, MAX_FRAME, Operation, Reply, Request, TerminalFrame, VERSION},
 };
 use crate::{
-    farm::{TerminalInput, TerminalIo, TerminalSize},
     manager::{Backend, MicrosandboxBackend},
     model::{Exposure, Plan, PlanRequest, layout, validate_id},
+    stackbox::{TerminalInput, TerminalIo, TerminalSize},
 };
 use anyhow::{Context, Result, bail, ensure};
 use base64::{Engine, engine::general_purpose::STANDARD};
@@ -32,7 +32,7 @@ struct Reservation {
     plan: Plan,
     exposure: Exposure,
     deleted: bool,
-    /// The part of a farm that spans hosts this host runs.
+    /// The part of a stackbox that spans hosts this host runs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     share: Option<super::protocol::Share>,
 }
@@ -41,7 +41,7 @@ impl Reservation {
     fn memory_mib(&self) -> u64 {
         share_memory(&self.plan, self.share.as_ref())
     }
-    /// Whether this host publishes the farm's ports: it runs its all-in-one or control VM.
+    /// Whether this host publishes the stackbox's ports: it runs its all-in-one or control VM.
     fn publishes(&self) -> bool {
         self.share.as_ref().is_none_or(|share| share.has_control())
     }
@@ -57,7 +57,8 @@ fn share_memory(plan: &Plan, share: Option<&super::protocol::Share>) -> u64 {
         .iter()
         .filter(|spec| {
             share.is_none_or(|share| {
-                crate::farm::suffix(spec.role, spec.index).is_some_and(|s| share.nodes.contains(&s))
+                crate::stackbox::suffix(spec.role, spec.index)
+                    .is_some_and(|s| share.nodes.contains(&s))
             })
         })
         .map(|spec| u64::from(spec.memory_mib))
@@ -66,7 +67,7 @@ fn share_memory(plan: &Plan, share: Option<&super::protocol::Share>) -> u64 {
 #[derive(Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Registry {
-    farms: BTreeMap<String, Reservation>,
+    stackboxes: BTreeMap<String, Reservation>,
 }
 struct LockedRegistry {
     dir: PathBuf,
@@ -115,12 +116,12 @@ impl LockedRegistry {
     fn owned(&self, coordinator: &str, id: &str, generation: &str) -> Result<&Reservation> {
         let entry = self
             .state
-            .farms
+            .stackboxes
             .get(id)
-            .context("remote farm reservation not found")?;
+            .context("remote stackbox reservation not found")?;
         ensure!(
             entry.coordinator == coordinator && entry.generation == generation,
-            "remote farm belongs to another coordinator or generation"
+            "remote stackbox belongs to another coordinator or generation"
         );
         Ok(entry)
     }
@@ -150,7 +151,7 @@ pub struct Limits {
     pub memory_budget_mib: u64,
     pub available_mib: u64,
     pub virtualization: bool,
-    /// Bind a new farm's public port block before reserving it.
+    /// Bind a new stackbox's public port block before reserving it.
     pub probe_ports: bool,
 }
 impl Limits {
@@ -214,12 +215,12 @@ impl Agent {
             runner: Runner::Detached,
         }
     }
-    /// Destroys every farm VM this host's agent created, whatever coordinator reserved it,
+    /// Destroys every stackbox VM this host's agent created, whatever coordinator reserved it,
     /// and forgets them. Used when the coordinator removes the host.
     async fn purge(&self, request: &Request) -> Result<Reply> {
         let reserved: Vec<String> = {
             let registry = LockedRegistry::open(&self.dir)?;
-            registry.state.farms.keys().cloned().collect()
+            registry.state.stackboxes.keys().cloned().collect()
         };
         let mut purged = 0;
         let mut failed = Vec::new();
@@ -236,22 +237,22 @@ impl Agent {
                 .iter()
                 .any(|message| message.starts_with(&format!("{id}:")))
             {
-                registry.state.farms.remove(id);
+                registry.state.stackboxes.remove(id);
             }
         }
         registry.save()?;
         let _ = request;
         ensure!(
             failed.is_empty(),
-            "failed to remove {} reserved farm(s): {}",
+            "failed to remove {} reserved stackbox(s): {}",
             failed.len(),
             failed.join("; ")
         );
-        Ok(Reply::Purged { farms: purged })
+        Ok(Reply::Purged { stackboxes: purged })
     }
 
-    /// Reserve capacity and public ports for a new farm on this host. A replay of the same
-    /// request returns the farm's existing nodes instead.
+    /// Reserve capacity and public ports for a new stackbox on this host. A replay of the same
+    /// request returns the stackbox's existing nodes instead.
     async fn reserve(
         &self,
         request: &Request,
@@ -260,13 +261,13 @@ impl Agent {
         requested: &Plan,
         exposure: &Exposure,
         share: Option<&super::protocol::Share>,
-    ) -> Result<Option<Vec<crate::farm::FarmNode>>> {
+    ) -> Result<Option<Vec<crate::stackbox::StackboxNode>>> {
         ensure!(
             self.limits.virtualization,
             "this host has no usable hypervisor (/dev/kvm on Linux)"
         );
         // The coordinator applies plan()'s policy; restored snapshots keep an older layout,
-        // and a control template's farm starts with its control VM alone.
+        // and a control template's stackbox starts with its control VM alone.
         let canonical = if requested.multinode() && requested.computes == 0 {
             crate::model::control_layout(
                 &requested.components,
@@ -286,7 +287,7 @@ impl Agent {
         };
         ensure!(
             serde_json::to_value(requested)? == serde_json::to_value(&canonical)?,
-            "farm plan differs from the supported layout"
+            "stackbox plan differs from the supported layout"
         );
         // The coordinator picks the bind address (0.0.0.0 for remote hosts, its public bind
         // locally); binding the whole block below proves the ports are free.
@@ -303,7 +304,7 @@ impl Agent {
             host_id: None,
             components: requested.components.clone(),
             computes: requested.computes,
-            // A control template's farm keeps its computes' size for later expansions.
+            // A control template's stackbox keeps its computes' size for later expansions.
             compute: requested.compute.filter(|_| requested.computes > 0),
             layout: None,
             release: None,
@@ -325,15 +326,15 @@ impl Agent {
         let _create_lock = lock(&self.dir, "create.lock")?;
         let mut registry = LockedRegistry::open(&self.dir)?;
         let observed = self.backend.scan().await?;
-        if let Some(entry) = registry.state.farms.get(id) {
+        if let Some(entry) = registry.state.stackboxes.get(id) {
             ensure!(
                 entry.coordinator == request.coordinator_id,
-                "farm id is owned by another coordinator"
+                "stackbox id is owned by another coordinator"
             );
             if !entry.deleted {
                 ensure!(
                     entry.generation == generation,
-                    "farm id is reserved by an earlier generation"
+                    "stackbox id is reserved by an earlier generation"
                 );
                 ensure!(
                     serde_json::to_value(&entry.plan)? == serde_json::to_value(requested)?
@@ -352,23 +353,29 @@ impl Agent {
             }
             ensure!(
                 entry.generation != generation,
-                "this farm generation was already deleted"
+                "this stackbox generation was already deleted"
             );
         }
         ensure!(
             observed.get(id).is_none_or(Vec::is_empty),
-            "existing VM labels conflict with this farm; refusing to adopt or remove them"
+            "existing VM labels conflict with this stackbox; refusing to adopt or remove them"
         );
         let reserved: u64 = registry
             .state
-            .farms
+            .stackboxes
             .values()
             .filter(|r| !r.deleted)
             .map(Reservation::memory_mib)
             .sum();
         let foreign: u64 = observed
             .iter()
-            .filter(|(id, _)| !registry.state.farms.get(*id).is_some_and(|r| !r.deleted))
+            .filter(|(id, _)| {
+                !registry
+                    .state
+                    .stackboxes
+                    .get(*id)
+                    .is_some_and(|r| !r.deleted)
+            })
             .flat_map(|(_, nodes)| nodes)
             .map(|n| u64::from(n.memory_mib))
             .sum();
@@ -381,20 +388,20 @@ impl Agent {
             memory_mib <= self.limits.available_mib,
             "remote host available memory is insufficient"
         );
-        // Only the host of the control VM publishes the farm's ports.
+        // Only the host of the control VM publishes the stackbox's ports.
         ensure!(
             !publishes
-                || !registry.state.farms.values().any(|r| {
+                || !registry.state.stackboxes.values().any(|r| {
                     !r.deleted && r.publishes() && r.exposure.port_base == exposure.port_base
                 }),
-            "remote public ports are reserved by another farm"
+            "remote public ports are reserved by another stackbox"
         );
         let sockets = (exposure.port_base..exposure.port_base + 10)
             .filter(|_| self.limits.probe_ports && publishes)
             .map(|p| TcpListener::bind((exposure.bind, p)))
             .collect::<std::io::Result<Vec<_>>>()
-            .context("the farm's public port block is occupied on this host")?;
-        registry.state.farms.insert(
+            .context("the stackbox's public port block is occupied on this host")?;
+        registry.state.stackboxes.insert(
             id.into(),
             Reservation {
                 coordinator: request.coordinator_id.clone(),
@@ -414,12 +421,12 @@ impl Agent {
     fn admit(request: &Request) -> Result<()> {
         ensure!(
             request.version == VERSION,
-            "incompatible farm-agent protocol"
+            "incompatible stackbox-agent protocol"
         );
         uuid::Uuid::parse_str(&request.coordinator_id).context("invalid coordinator identity")?;
         if let Some((id, generation)) = request.operation.scope() {
             validate_id(id)?;
-            uuid::Uuid::parse_str(generation).context("invalid farm generation")?;
+            uuid::Uuid::parse_str(generation).context("invalid stackbox generation")?;
         }
         if let Operation::Deploy { job_id, .. } | Operation::Attach { job_id, .. } =
             &request.operation
@@ -429,8 +436,8 @@ impl Agent {
         Ok(())
     }
 
-    /// Relay a shell in the farm's VM: `TerminalFrame` lines in, `Frame::Terminal` out.
-    /// It takes no farm lock, so a shell can watch a running deployment. An archive the
+    /// Relay a shell in the stackbox's VM: `TerminalFrame` lines in, `Frame::Terminal` out.
+    /// It takes no stackbox lock, so a shell can watch a running deployment. An archive the
     /// coordinator streams arrives the same way.
     pub async fn terminal<R>(&self, request: &Request, input: R, emit: Emitter) -> Result<Reply>
     where
@@ -455,7 +462,7 @@ impl Agent {
             return Ok(Reply::Done);
         }
         let Operation::Shell {
-            farm_id: id,
+            stackbox_id: id,
             generation,
             node,
             size,
@@ -467,11 +474,11 @@ impl Agent {
         {
             let registry = LockedRegistry::open(&self.dir)?;
             let entry = registry.owned(&request.coordinator_id, id, generation)?;
-            ensure!(!entry.deleted, "remote farm was deleted");
+            ensure!(!entry.deleted, "remote stackbox was deleted");
             let wanted = node.clone().unwrap_or_else(|| "control".into());
             ensure!(
                 entry.share.is_none() || entry.runs(&wanted),
-                "VM '{wanted}' of farm '{id}' runs on another host"
+                "VM '{wanted}' of stackbox '{id}' runs on another host"
             );
         }
         emit(Frame::Attached)?;
@@ -539,26 +546,26 @@ impl Agent {
         Ok(Reply::Done)
     }
 
-    /// The live reservation `request`'s coordinator holds for this farm generation.
+    /// The live reservation `request`'s coordinator holds for this stackbox generation.
     fn owned(&self, request: &Request, id: &str, generation: &str) -> Result<Reservation> {
         let registry = LockedRegistry::open(&self.dir)?;
         let entry = registry
             .owned(&request.coordinator_id, id, generation)?
             .clone();
-        ensure!(!entry.deleted, "farm was deleted");
+        ensure!(!entry.deleted, "stackbox was deleted");
         Ok(entry)
     }
 
-    /// The reservation a deploy of this farm generation runs on.
+    /// The reservation a deploy of this stackbox generation runs on.
     fn deployable(&self, request: &Request, id: &str, generation: &str) -> Result<Reservation> {
         let entry = self.owned(request, id, generation)?;
         ensure!(
-            crate::farm::layout(&entry.plan.nodes).is_ok(),
-            "legacy multi-node farm cannot be deployed; create a new farm"
+            crate::stackbox::layout(&entry.plan.nodes).is_ok(),
+            "legacy multi-node stackbox cannot be deployed; create a new stackbox"
         );
         ensure!(
             entry.publishes(),
-            "this host runs only compute VMs of farm '{id}'; deploy it from the control VM's host"
+            "this host runs only compute VMs of stackbox '{id}'; deploy it from the control VM's host"
         );
         Ok(entry)
     }
@@ -569,7 +576,7 @@ impl Agent {
         let (id, generation) = request
             .operation
             .scope()
-            .context("deploy without a farm id")?;
+            .context("deploy without a stackbox id")?;
         // Refuse a foreign or impossible deploy before it leaves a job behind.
         self.deployable(request, id, generation)?;
         let (job, created) = Job::create(&self.dir, job_id, request)?;
@@ -597,7 +604,7 @@ impl Agent {
                 tokio::spawn(async move {
                     let _claim = claim;
                     if let Err(error) = agent.run_job(&job).await {
-                        eprintln!("farm agent: cannot record the deploy job: {error:#}");
+                        eprintln!("stackbox agent: cannot record the deploy job: {error:#}");
                     }
                 });
                 return Ok(());
@@ -625,7 +632,7 @@ impl Agent {
         .await
         .unwrap_or_else(|_| {
             Err(anyhow::anyhow!(
-                "deploy timed out after {seconds} s; inspect the farm's VM before retrying"
+                "deploy timed out after {seconds} s; inspect the stackbox's VM before retrying"
             ))
         });
         job.finish(outcome)
@@ -634,7 +641,7 @@ impl Agent {
     async fn run_deploy(&self, request: &Request, emit: Emitter) -> Result<Reply> {
         Self::admit(request)?;
         let Operation::Deploy {
-            farm_id: id,
+            stackbox_id: id,
             generation,
             from,
             reference,
@@ -648,7 +655,7 @@ impl Agent {
         let reference = reference
             .clone()
             .filter(|reference| crate::kolla::releases::reference_ok(reference));
-        let _farm_lock = lock(&self.dir, &format!("{id}.lock"))?;
+        let _stackbox_lock = lock(&self.dir, &format!("{id}.lock"))?;
         let entry = self.deployable(request, id, generation)?;
         let _deploy_lock = lock(&self.dir, "deploy.lock")?;
         if let Some(share) = &entry.share {
@@ -658,7 +665,7 @@ impl Agent {
                 .nodes
                 .iter()
                 .filter(|spec| {
-                    crate::farm::suffix(spec.role, spec.index)
+                    crate::stackbox::suffix(spec.role, spec.index)
                         .is_some_and(|s| !share.nodes.contains(&s))
                 })
                 .filter_map(|spec| spec.index)
@@ -683,7 +690,7 @@ impl Agent {
                     share
                         .ssh_private_key
                         .clone()
-                        .context("deploy the farm from the host of its control VM")?,
+                        .context("deploy the stackbox from the host of its control VM")?,
                     progress(emit),
                 )
                 .await?;
@@ -767,34 +774,34 @@ impl Agent {
             let registry = LockedRegistry::open(&self.dir)?;
             let owned: Vec<_> = registry
                 .state
-                .farms
+                .stackboxes
                 .iter()
                 .filter(|(_, r)| r.coordinator == request.coordinator_id && !r.deleted)
                 .map(|(id, _)| id.clone())
                 .collect();
             drop(registry);
             let mut inventory = self.backend.scan().await?;
-            let farms = owned
+            let stackboxes = owned
                 .into_iter()
                 .map(|id| {
                     let nodes = inventory.remove(&id).unwrap_or_default();
                     (id, nodes)
                 })
                 .collect();
-            return Ok(Reply::Inventory { farms });
+            return Ok(Reply::Inventory { stackboxes });
         }
         if matches!(request.operation, Operation::PublicPorts) {
             let registry = LockedRegistry::open(&self.dir)?;
             let bases = registry
                 .state
-                .farms
+                .stackboxes
                 .values()
                 .filter(|r| !r.deleted && r.publishes())
                 .map(|r| r.exposure.port_base)
                 .collect();
             return Ok(Reply::PublicPorts { bases });
         }
-        // Host-wide checks have no farm id either.
+        // Host-wide checks have no stackbox id either.
         if matches!(request.operation, Operation::Inspect) {
             return Ok(Reply::Inspection {
                 inspection: Box::new(crate::remote::host::inspect().await),
@@ -818,7 +825,7 @@ impl Agent {
             crate::remote::host::install_msb().await?;
             return Ok(Reply::Done);
         }
-        // A host-wide cleanup has no farm id, so it runs before the per-farm scope below.
+        // A host-wide cleanup has no stackbox id, so it runs before the per-stackbox scope below.
         if matches!(request.operation, Operation::Purge) {
             // Serialize with creates so a reservation cannot appear mid-purge.
             let _create_lock = lock(&self.dir, "create.lock")?;
@@ -893,7 +900,7 @@ impl Agent {
             Operation::SendArchive { .. } => bail!("an archive goes out as a stream"),
             _ => {}
         }
-        // A deploy outlives this request; its worker takes the farm's locks instead.
+        // A deploy outlives this request; its worker takes the stackbox's locks instead.
         if let Operation::Deploy { job_id, .. } = &request.operation {
             return self.deploy(&request, job_id, emit).await;
         }
@@ -909,8 +916,8 @@ impl Agent {
         let (id, generation) = request
             .operation
             .scope()
-            .context("farm operation without a farm id")?;
-        let _farm_lock = lock(&self.dir, &format!("{id}.lock"))?;
+            .context("stackbox operation without a stackbox id")?;
+        let _stackbox_lock = lock(&self.dir, &format!("{id}.lock"))?;
         match &request.operation {
             Operation::Create {
                 plan: requested,
@@ -921,7 +928,7 @@ impl Agent {
             } => {
                 ensure!(
                     source.is_none() || share.is_some(),
-                    "only a share of a farm that spans hosts boots from a template on create"
+                    "only a share of a stackbox that spans hosts boots from a template on create"
                 );
                 if let Some(nodes) = self
                     .reserve(
@@ -937,7 +944,7 @@ impl Agent {
                     return Ok(Reply::Nodes { nodes });
                 }
                 emit(Frame::Output {
-                    message: "Host capacity and public ports reserved; creating the farm VM\n"
+                    message: "Host capacity and public ports reserved; creating the stackbox VM\n"
                         .into(),
                 })?;
                 let nodes = match (share, source) {
@@ -972,20 +979,22 @@ impl Agent {
             }
             Operation::Relink { url, .. } => {
                 let entry = self.owned(&request, id, generation)?;
-                ensure!(entry.share.is_some(), "farm '{id}' runs on this host alone");
                 ensure!(
-                    url.starts_with("wss://") && url.contains(&format!("?farm={id}&host=")),
-                    "invalid relay URL for farm '{id}'"
+                    entry.share.is_some(),
+                    "stackbox '{id}' runs on this host alone"
+                );
+                ensure!(
+                    url.starts_with("wss://") && url.contains(&format!("?stackbox={id}&host=")),
+                    "invalid relay URL for stackbox '{id}'"
                 );
                 self.backend.relink(id.into(), url.clone()).await?;
                 Ok(Reply::Done)
             }
             Operation::Prepare { .. } => {
                 let entry = self.owned(&request, id, generation)?;
-                let share = entry
-                    .share
-                    .as_ref()
-                    .context("only a farm that spans hosts is prepared apart from its deploy")?;
+                let share = entry.share.as_ref().context(
+                    "only a stackbox that spans hosts is prepared apart from its deploy",
+                )?;
                 ensure!(
                     !share.has_control(),
                     "the control VM's host prepares its VMs as it deploys"
@@ -1032,7 +1041,7 @@ impl Agent {
                 })?;
                 ensure!(
                     serde_json::to_value(requested)? == serde_json::to_value(&canonical)?,
-                    "farm plan differs from the supported layout"
+                    "stackbox plan differs from the supported layout"
                 );
                 ensure!(
                     requested.computes >= entry.plan.computes,
@@ -1042,12 +1051,12 @@ impl Agent {
                     requested.nodes.len() >= entry.plan.nodes.len()
                         && serde_json::to_value(&requested.nodes[..entry.plan.nodes.len()])?
                             == serde_json::to_value(&entry.plan.nodes)?,
-                    "an expansion cannot change the farm's existing VMs"
+                    "an expansion cannot change the stackbox's existing VMs"
                 );
                 let suffixes: Vec<String> = requested
                     .nodes
                     .iter()
-                    .filter_map(|spec| crate::farm::suffix(spec.role, spec.index))
+                    .filter_map(|spec| crate::stackbox::suffix(spec.role, spec.index))
                     .collect();
                 let ordered: Vec<String> = suffixes
                     .iter()
@@ -1058,12 +1067,12 @@ impl Agent {
                     ordered.len() == nodes.len()
                         && nodes.iter().all(|node| suffixes.contains(node))
                         && add.iter().all(|node| ordered.contains(node)),
-                    "the expansion names VMs the farm does not have"
+                    "the expansion names VMs the stackbox does not have"
                 );
                 let mut share = entry.share.clone();
                 if let Some(uplink) = uplink {
                     // The control VM's host joins the relay for the first time. Keep the
-                    // farm's existing Kolla key so computes prepared earlier still trust it.
+                    // stackbox's existing Kolla key so computes prepared earlier still trust it.
                     share = Some(match share {
                         Some(mut share) => {
                             share.uplink = uplink.clone();
@@ -1092,7 +1101,7 @@ impl Agent {
                     let registry = LockedRegistry::open(&self.dir)?;
                     let reserved: u64 = registry
                         .state
-                        .farms
+                        .stackboxes
                         .values()
                         .filter(|r| !r.deleted && r.generation != generation)
                         .map(Reservation::memory_mib)
@@ -1102,8 +1111,12 @@ impl Agent {
                         .scan()
                         .await?
                         .iter()
-                        .filter(|(farm, _)| {
-                            !registry.state.farms.get(*farm).is_some_and(|r| !r.deleted)
+                        .filter(|(stackbox, _)| {
+                            !registry
+                                .state
+                                .stackboxes
+                                .get(*stackbox)
+                                .is_some_and(|r| !r.deleted)
                         })
                         .flat_map(|(_, nodes)| nodes)
                         .map(|n| u64::from(n.memory_mib))
@@ -1133,14 +1146,14 @@ impl Agent {
                 let mut registry = LockedRegistry::open(&self.dir)?;
                 let entry = registry
                     .state
-                    .farms
+                    .stackboxes
                     .get_mut(id)
-                    .context("remote farm reservation disappeared")?;
+                    .context("remote stackbox reservation disappeared")?;
                 ensure!(
                     entry.coordinator == request.coordinator_id
                         && entry.generation == generation
                         && !entry.deleted,
-                    "farm reservation changed while expanding"
+                    "stackbox reservation changed while expanding"
                 );
                 entry.plan = requested.clone();
                 entry.share = share;
@@ -1149,7 +1162,10 @@ impl Agent {
             }
             Operation::SshKeys { .. } => {
                 let entry = self.owned(&request, id, generation)?;
-                ensure!(entry.publishes(), "farm '{id}' is served from another host");
+                ensure!(
+                    entry.publishes(),
+                    "stackbox '{id}' is served from another host"
+                );
                 let (public_key, private_key) = match &entry.share {
                     Some(share) => (
                         share.ssh_public_key.clone(),
@@ -1171,12 +1187,15 @@ impl Agent {
                 ..
             } => {
                 let entry = self.owned(&request, id, generation)?;
-                ensure!(entry.publishes(), "farm '{id}' is served from another host");
+                ensure!(
+                    entry.publishes(),
+                    "stackbox '{id}' is served from another host"
+                );
                 ensure!(
                     entry.plan.nodes.iter().any(|spec| {
-                        spec.role == crate::farm::Role::Compute && spec.index == Some(*index)
+                        spec.role == crate::stackbox::Role::Compute && spec.index == Some(*index)
                     }),
-                    "farm '{id}' has no compute-{index}"
+                    "stackbox '{id}' has no compute-{index}"
                 );
                 let nodes = entry.share.as_ref().map_or_else(
                     || {
@@ -1184,7 +1203,7 @@ impl Agent {
                             .plan
                             .nodes
                             .iter()
-                            .filter_map(|spec| crate::farm::suffix(spec.role, spec.index))
+                            .filter_map(|spec| crate::stackbox::suffix(spec.role, spec.index))
                             .collect()
                     },
                     |share| share.nodes.clone(),
@@ -1231,7 +1250,7 @@ impl Agent {
             Operation::Delete { .. } => {
                 let _create_lock = lock(&self.dir, "create.lock")?;
                 let mut registry = LockedRegistry::open(&self.dir)?;
-                if !registry.state.farms.contains_key(id) {
+                if !registry.state.stackboxes.contains_key(id) {
                     // A failed preflight may not have created a reservation. Never delete foreign labels.
                     ensure!(
                         self.backend.scan().await?.get(id).is_none_or(Vec::is_empty),
@@ -1248,13 +1267,16 @@ impl Agent {
                 );
                 registry = LockedRegistry::open(&self.dir)?;
                 registry.owned(&request.coordinator_id, id, generation)?;
-                registry.state.farms.get_mut(id).unwrap().deleted = true;
+                registry.state.stackboxes.get_mut(id).unwrap().deleted = true;
                 registry.save()?;
                 Ok(Reply::Done)
             }
             Operation::Endpoints { .. } => {
                 let entry = self.owned(&request, id, generation)?;
-                ensure!(entry.publishes(), "farm '{id}' is served from another host");
+                ensure!(
+                    entry.publishes(),
+                    "stackbox '{id}' is served from another host"
+                );
                 Ok(Reply::Endpoints {
                     endpoints: self
                         .backend
@@ -1264,7 +1286,10 @@ impl Agent {
             }
             Operation::Settle { rebind, .. } => {
                 let entry = self.owned(&request, id, generation)?;
-                ensure!(entry.publishes(), "farm '{id}' is served from another host");
+                ensure!(
+                    entry.publishes(),
+                    "stackbox '{id}' is served from another host"
+                );
                 self.backend
                     .settle(
                         id.into(),
@@ -1277,10 +1302,13 @@ impl Agent {
             }
             Operation::ForgetComputes { .. } => {
                 let entry = self.owned(&request, id, generation)?;
-                ensure!(entry.publishes(), "farm '{id}' is served from another host");
+                ensure!(
+                    entry.publishes(),
+                    "stackbox '{id}' is served from another host"
+                );
                 ensure!(
                     entry.plan.multinode(),
-                    "farm '{id}' has no control VM to forget computes on"
+                    "stackbox '{id}' has no control VM to forget computes on"
                 );
                 self.backend
                     .forget_computes(id.into(), entry.plan.components, progress(emit))
@@ -1300,15 +1328,15 @@ impl Agent {
                         entry.plan.nodes.iter().any(|spec| {
                             matches!(
                                 spec.role,
-                                crate::farm::Role::Control | crate::farm::Role::Compute
-                            ) && crate::farm::suffix(spec.role, spec.index).as_deref()
+                                crate::stackbox::Role::Control | crate::stackbox::Role::Compute
+                            ) && crate::stackbox::suffix(spec.role, spec.index).as_deref()
                                 == Some(node.as_str())
                         }),
-                        "farm '{id}' has no control or compute VM '{node}'"
+                        "stackbox '{id}' has no control or compute VM '{node}'"
                     );
                     ensure!(
                         entry.runs(node),
-                        "VM '{node}' of farm '{id}' runs on another host"
+                        "VM '{node}' of stackbox '{id}' runs on another host"
                     );
                 }
                 Ok(Reply::Frozen {
@@ -1328,15 +1356,15 @@ impl Agent {
                 let entry = self.owned(&request, id, generation)?;
                 ensure!(
                     entry.plan.nodes.iter().any(|spec| {
-                        spec.role != crate::farm::Role::AllInOne
-                            && crate::farm::suffix(spec.role, spec.index).as_deref()
+                        spec.role != crate::stackbox::Role::AllInOne
+                            && crate::stackbox::suffix(spec.role, spec.index).as_deref()
                                 == Some(node.as_str())
                     }),
-                    "farm '{id}' has no linked VM '{node}'"
+                    "stackbox '{id}' has no linked VM '{node}'"
                 );
                 ensure!(
                     entry.runs(node),
-                    "VM '{node}' of farm '{id}' runs on another host"
+                    "VM '{node}' of stackbox '{id}' runs on another host"
                 );
                 impair.validate()?;
                 self.backend
@@ -1351,7 +1379,7 @@ impl Agent {
 
 fn local_dir() -> PathBuf {
     let home = std::env::var_os("HOME").unwrap_or_else(|| ".".into());
-    PathBuf::from(home).join(".local/share/farm/worker-v1")
+    PathBuf::from(home).join(".local/share/stackbox/worker-v1")
 }
 
 /// `agent worker <job dir>`: run a job recorded under this agent's directory to its result.
@@ -1422,9 +1450,9 @@ pub fn stdout_emitter() -> Emitter {
 /// build id has to be greppable bytes rather than a runtime report.
 #[used]
 #[unsafe(no_mangle)]
-pub static FARM_AGENT_BUILD_STAMP: [u8; BUILD_STAMP_LEN] = build_stamp();
+pub static STACKBOX_AGENT_BUILD_STAMP: [u8; BUILD_STAMP_LEN] = build_stamp();
 
-pub const BUILD_STAMP_PREFIX: &str = "farm-agent-build:";
+pub const BUILD_STAMP_PREFIX: &str = "stackbox-agent-build:";
 const BUILD_STAMP_LEN: usize = 64;
 
 const fn build_stamp() -> [u8; BUILD_STAMP_LEN] {
@@ -1485,7 +1513,7 @@ pub async fn serve_stdio() -> Result<()> {
             agent.terminal(&request, stdin, emit.clone()).await
         }
         Ok(request) => agent.execute(request, emit.clone()).await,
-        Err(_) => Err(anyhow::anyhow!("invalid farm-agent request")),
+        Err(_) => Err(anyhow::anyhow!("invalid stackbox-agent request")),
     };
     match result {
         Ok(result) => emit(Frame::Result { result }),
@@ -1505,7 +1533,7 @@ mod tests {
     use std::sync::atomic::Ordering;
     fn create(id: &str, generation: &str, base: u16) -> Operation {
         Operation::Create {
-            farm_id: id.into(),
+            stackbox_id: id.into(),
             generation: generation.into(),
             plan: layout(&PlanRequest::default()).unwrap(),
             exposure: Exposure {
@@ -1565,7 +1593,7 @@ mod tests {
                 .await
                 .unwrap_err()
                 .to_string()
-                .contains("reserved by another farm")
+                .contains("reserved by another stackbox")
         );
     }
     #[tokio::test]
@@ -1609,7 +1637,7 @@ mod tests {
                         request(
                             who,
                             Operation::Delete {
-                                farm_id: "one".into(),
+                                stackbox_id: "one".into(),
                                 generation: token.into()
                             }
                         ),
@@ -1620,14 +1648,14 @@ mod tests {
             );
         }
         assert!(
-            matches!(agent.execute(request(&other, Operation::Scan), emit.clone()).await.unwrap(), Reply::Inventory { farms } if farms.is_empty())
+            matches!(agent.execute(request(&other, Operation::Scan), emit.clone()).await.unwrap(), Reply::Inventory { stackboxes } if stackboxes.is_empty())
         );
         agent
             .execute(
                 request(
                     &owner,
                     Operation::Delete {
-                        farm_id: "one".into(),
+                        stackbox_id: "one".into(),
                         generation: generation.clone(),
                     },
                 ),
@@ -1647,13 +1675,13 @@ mod tests {
                 .await
                 .is_err()
         );
-        assert!(!LockedRegistry::open(dir.path()).unwrap().state.farms["one"].deleted);
+        assert!(!LockedRegistry::open(dir.path()).unwrap().state.stackboxes["one"].deleted);
         agent
             .execute(
                 request(
                     &owner,
                     Operation::Delete {
-                        farm_id: "one".into(),
+                        stackbox_id: "one".into(),
                         generation: next.clone(),
                     },
                 ),
@@ -1680,7 +1708,7 @@ mod tests {
                     request(
                         &owner,
                         Operation::Delete {
-                            farm_id: "foreign".into(),
+                            stackbox_id: "foreign".into(),
                             generation: next
                         }
                     ),
@@ -1753,7 +1781,7 @@ mod tests {
                 request(
                     &owner,
                     Operation::Create {
-                        farm_id: "pci-farm".into(),
+                        stackbox_id: "pci-stackbox".into(),
                         generation: generation.clone(),
                         plan,
                         exposure: Exposure {
@@ -1771,7 +1799,7 @@ mod tests {
             .expect("a PCI plan the layout accepts must reserve");
         let stored = LockedRegistry::open(dir.path()).unwrap();
         assert_eq!(
-            stored.state.farms["pci-farm"].plan.pci_devices,
+            stored.state.stackboxes["pci-stackbox"].plan.pci_devices,
             vec!["0000:04:00.3".to_owned()]
         );
         drop(stored);
@@ -1781,13 +1809,13 @@ mod tests {
         let suffixes: Vec<String> = grown
             .nodes
             .iter()
-            .filter_map(|spec| crate::farm::suffix(spec.role, spec.index))
+            .filter_map(|spec| crate::stackbox::suffix(spec.role, spec.index))
             .collect();
         let added: Vec<String> = grown
             .nodes
             .iter()
             .filter(|spec| spec.index == Some(2))
-            .filter_map(|spec| crate::farm::suffix(spec.role, spec.index))
+            .filter_map(|spec| crate::stackbox::suffix(spec.role, spec.index))
             .collect();
         assert!(!added.is_empty());
         agent
@@ -1795,7 +1823,7 @@ mod tests {
                 request(
                     &owner,
                     Operation::Expand {
-                        farm_id: "pci-farm".into(),
+                        stackbox_id: "pci-stackbox".into(),
                         generation: generation.clone(),
                         plan: grown,
                         nodes: suffixes,
@@ -1810,10 +1838,10 @@ mod tests {
             .expect("an expansion keeps the PCI plan it was reserved with");
         let stored = LockedRegistry::open(dir.path()).unwrap();
         assert_eq!(
-            stored.state.farms["pci-farm"].plan.pci_devices,
+            stored.state.stackboxes["pci-stackbox"].plan.pci_devices,
             vec!["0000:04:00.3".to_owned()]
         );
-        assert_eq!(stored.state.farms["pci-farm"].plan.computes, 2);
+        assert_eq!(stored.state.stackboxes["pci-stackbox"].plan.computes, 2);
         drop(stored);
 
         // A malformed address is refused at the agent too, not only by the coordinator.
@@ -1824,7 +1852,7 @@ mod tests {
                 request(
                     &owner,
                     Operation::Create {
-                        farm_id: "bad-pci-2".into(),
+                        stackbox_id: "bad-pci-2".into(),
                         generation: generation.clone(),
                         plan: forged,
                         exposure: Exposure {
@@ -1861,7 +1889,7 @@ mod tests {
         request(
             owner,
             Operation::Deploy {
-                farm_id: "one".into(),
+                stackbox_id: "one".into(),
                 generation: generation.into(),
                 from: crate::kolla::Phase::Prepare,
                 job_id: job_id.into(),
@@ -1987,8 +2015,10 @@ mod tests {
     impl Backend for Held {
         fn scan(
             &self,
-        ) -> futures::future::BoxFuture<'_, Result<BTreeMap<String, Vec<crate::farm::FarmNode>>>>
-        {
+        ) -> futures::future::BoxFuture<
+            '_,
+            Result<BTreeMap<String, Vec<crate::stackbox::StackboxNode>>>,
+        > {
             Box::pin(async { bail!("not in this test") })
         }
         fn create(
@@ -1996,7 +2026,7 @@ mod tests {
             _: String,
             _: Plan,
             _: Exposure,
-        ) -> futures::future::BoxFuture<'_, Result<Vec<crate::farm::FarmNode>>> {
+        ) -> futures::future::BoxFuture<'_, Result<Vec<crate::stackbox::StackboxNode>>> {
             Box::pin(async { bail!("not in this test") })
         }
         #[allow(clippy::too_many_arguments)]
@@ -2121,7 +2151,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn purge_removes_every_reserved_farm_and_forgets_them() {
+    async fn purge_removes_every_reserved_stackbox_and_forgets_them() {
         let dir = tempfile::tempdir().unwrap();
         let backend = Arc::new(Fake::default());
         let agent = Agent {
@@ -2148,19 +2178,22 @@ mod tests {
                 .await
                 .unwrap();
         }
-        // Both coordinators' VMs are this host's farms, so a purge removes all of them.
+        // Both coordinators' VMs are this host's stackboxes, so a purge removes all of them.
         let reply = agent
             .execute(request(&owner, Operation::Purge), emit.clone())
             .await
             .unwrap();
-        assert!(matches!(reply, Reply::Purged { farms: 2 }), "{reply:?}");
-        assert!(backend.farms.lock().unwrap().is_empty());
+        assert!(
+            matches!(reply, Reply::Purged { stackboxes: 2 }),
+            "{reply:?}"
+        );
+        assert!(backend.stackboxes.lock().unwrap().is_empty());
         assert!(matches!(
             agent
                 .execute(request(&owner, Operation::Scan), emit.clone())
                 .await
                 .unwrap(),
-            Reply::Inventory { farms } if farms.is_empty()
+            Reply::Inventory { stackboxes } if stackboxes.is_empty()
         ));
         // A second purge has nothing left and still succeeds.
         assert!(matches!(
@@ -2168,7 +2201,7 @@ mod tests {
                 .execute(request(&owner, Operation::Purge), emit)
                 .await
                 .unwrap(),
-            Reply::Purged { farms: 0 }
+            Reply::Purged { stackboxes: 0 }
         ));
     }
 
@@ -2200,7 +2233,7 @@ mod tests {
             request(
                 who,
                 Operation::Shell {
-                    farm_id: "one".into(),
+                    stackbox_id: "one".into(),
                     generation: generation.clone(),
                     node: None,
                     size: TerminalSize { rows: 24, cols: 80 },
@@ -2293,7 +2326,7 @@ mod tests {
         let request = request(
             &owner,
             Operation::Shell {
-                farm_id: "one".into(),
+                stackbox_id: "one".into(),
                 generation,
                 node: None,
                 size: TerminalSize {
@@ -2305,7 +2338,7 @@ mod tests {
         let link = std::sync::Arc::new(crate::remote::link::InProcessLink { agent });
         use crate::remote::link::AgentLink;
         let script = "printf 'a\\n'; sleep 0.3\nprintf 'b\\n'";
-        let session = crate::farm::ScriptSession::new({
+        let session = crate::stackbox::ScriptSession::new({
             let link = link.clone();
             move |io| Box::pin(async move { link.terminal(request, io).await })
         });

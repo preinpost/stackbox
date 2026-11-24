@@ -1,0 +1,13 @@
+[Unit]
+Description=Restore the Stackbox guest hostname on eth0
+After=network-online.target disable-ipv6.service
+Wants=network-online.target
+Before=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/stackbox-hostname
+
+[Install]
+WantedBy=multi-user.target

@@ -1,5 +1,5 @@
 //! Bakes an identity of the agent's own sources into every binary, so a stale
-//! farm-agent artifact can be told apart from the coordinator that would use it.
+//! stackbox-agent artifact can be told apart from the coordinator that would use it.
 //!
 //! The identity covers what the protocol depends on: the Rust sources, every file
 //! under `src/` and `guest/` that `include_str!`/`include_bytes!` embeds (kernel
@@ -21,15 +21,15 @@ const ROOT_INPUTS: [&str; 6] = [
 const EMBEDDED_EXTENSIONS: [&str; 4] = ["rs", "py", "diff", "sh"];
 
 fn main() {
-    println!("cargo:rerun-if-env-changed=FARM_BUILD_ID");
+    println!("cargo:rerun-if-env-changed=STACKBOX_BUILD_ID");
     for path in ROOT_INPUTS.iter().chain(["guest"].iter()) {
         println!("cargo:rerun-if-changed={path}");
     }
-    let id = std::env::var("FARM_BUILD_ID")
+    let id = std::env::var("STACKBOX_BUILD_ID")
         .ok()
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(source_identity);
-    println!("cargo:rustc-env=FARM_BUILD_ID={id}");
+    println!("cargo:rustc-env=STACKBOX_BUILD_ID={id}");
 }
 
 /// FNV-1a over every input file, so the id changes only when they do.

@@ -2,11 +2,11 @@
 
 use anyhow::{Result, bail};
 use clap::{Args, Parser, Subcommand};
-use farm::remote::{HostJobKind, RegisterLocalHost};
-use farm::{
+use stackbox::remote::{HostJobKind, RegisterLocalHost};
+use stackbox::{
     api,
     kolla::Phase,
-    manager::{self, FarmManager, ManagerOptions, default_state_dir},
+    manager::{self, ManagerOptions, StackboxManager, default_state_dir},
     model::{
         self, AddComputeRequest, ComputeSize, CreateRequest, DeployRequest, ExportRequest,
         GpuConfig, ImportRequest, Job, JobStatus, PlanRequest, SnapshotRecord, SnapshotRequest,
@@ -19,7 +19,7 @@ use std::{
 };
 
 #[derive(Parser)]
-#[command(about = "Manage OpenStack farms on microsandbox VMs")]
+#[command(about = "Manage OpenStack stackboxes on microsandbox VMs")]
 struct Cli {
     #[arg(long, global = true)]
     state_dir: Option<PathBuf>,
@@ -65,7 +65,7 @@ enum GpuModeArg {
     /// Advertise the standard VGPU inventory on a child provider per fake GPU (OpenStack
     /// 2025.1 and newer); the guest gets no device
     Simulated,
-    /// Nova binds farm kernel's mtty mediated device (2025.1 and newer; farm patches
+    /// Nova binds stackbox kernel's mtty mediated device (2025.1 and newer; stackbox patches
     /// Nova's driver itself before 2026.2)
     Mtty,
 }
@@ -73,7 +73,7 @@ enum GpuModeArg {
 #[derive(Args)]
 struct GpuArgs {
     /// Virtual GPU on every compute VM: 'simulated' (OpenStack 2025.1 and newer) or 'mtty'
-    /// (2025.1 and newer, on hosts prepared with farm's kernel); not real hardware
+    /// (2025.1 and newer, on hosts prepared with stackbox's kernel); not real hardware
     #[arg(long, value_enum)]
     gpu: Option<GpuModeArg>,
     /// Virtual GPUs per compute VM (1-24)
@@ -84,7 +84,7 @@ struct GpuArgs {
     #[arg(long = "gpu-devices", requires = "gpu")]
     gpu_devices: Option<u32>,
     /// Trait the flavor requires besides the resource class (simulated only, repeatable;
-    /// 'CUSTOM_*'; default CUSTOM_FARM_VGPU)
+    /// 'CUSTOM_*'; default CUSTOM_STACKBOX_VGPU)
     #[arg(long = "gpu-trait", requires = "gpu")]
     gpu_traits: Vec<String>,
     /// Resource class the flavor asks for (simulated only): VGPU, PGPU or CUSTOM_*
@@ -110,7 +110,7 @@ impl GpuArgs {
 #[derive(Args)]
 struct PciArgs {
     /// Host PCI device to pass through to compute-1, as DDDD:BB:DD.F (repeatable). It must
-    /// already be bound to vfio-pci on that host, in an IOMMU group with no other driver; farm
+    /// already be bound to vfio-pci on that host, in an IOMMU group with no other driver; stackbox
     /// never unbinds a host driver. Needs a compute VM and a clean install.
     #[arg(long = "pci", value_name = "BDF")]
     pci: Vec<String>,
@@ -121,7 +121,7 @@ struct PciArgs {
 struct ReleaseArgs {
     /// Start from this OpenStack release's templates: the control VM from the newest
     /// control template, each compute from a compute template of the release when one
-    /// boots on its host, otherwise clean. Without a control template the farm is
+    /// boots on its host, otherwise clean. Without a control template the stackbox is
     /// installed clean, which only this coordinator's release can be.
     #[arg(long, conflicts_with_all = ["snapshot", "placement"])]
     release: Option<String>,
@@ -142,7 +142,7 @@ struct ReleaseArgs {
     #[arg(long, requires = "release")]
     dry_run: bool,
     /// These GPU flags are shared, not release-only: `plan` takes them, and so does a plain
-    /// `create`, which passes them to the farm it makes. A GPU farm ignores templates and
+    /// `create`, which passes them to the stackbox it makes. A GPU stackbox ignores templates and
     /// installs clean, so with --release they mean a clean install of every VM.
     #[command(flatten)]
     gpu: GpuArgs,
@@ -152,11 +152,11 @@ struct ReleaseArgs {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Run the REST API daemon (FARM_API_TOKEN enables bearer authentication)
+    /// Run the REST API daemon (STACKBOX_API_TOKEN enables bearer authentication)
     Serve {
         #[arg(long, default_value = "127.0.0.1:10010")]
         bind: SocketAddr,
-        /// Address on which newly created farms publish OpenStack services
+        /// Address on which newly created stackboxes publish OpenStack services
         #[arg(long, default_value = "127.0.0.1")]
         public_bind: IpAddr,
     },
@@ -170,7 +170,7 @@ enum Command {
     Plan {
         #[arg(long, value_delimiter = ',')]
         components: Vec<String>,
-        /// Compute VMs beside a control VM (1-3); a new farm always has one
+        /// Compute VMs beside a control VM (1-3); a new stackbox always has one
         #[arg(long, default_value_t = 1)]
         computes: u8,
         #[command(flatten)]
@@ -184,12 +184,12 @@ enum Command {
     },
     Create {
         id: String,
-        /// Registered host to run the farm on (see the Hosts page or `GET /api/v1/hosts`)
+        /// Registered host to run the stackbox on (see the Hosts page or `GET /api/v1/hosts`)
         #[arg(long)]
         host_id: String,
         #[arg(long, value_delimiter = ',')]
         components: Vec<String>,
-        /// Compute VMs beside a control VM (1-3); a new farm always has one. Adds Nova.
+        /// Compute VMs beside a control VM (1-3); a new stackbox always has one. Adds Nova.
         #[arg(long, default_value_t = 1, conflicts_with = "snapshot")]
         computes: u8,
         #[command(flatten)]
@@ -202,17 +202,17 @@ enum Command {
         #[arg(long)]
         expires_at: Option<u64>,
         /// Start from a snapshot instead of an empty VM (this machine's host only; replaces --components).
-        /// A control template starts a legacy multi-node farm without computes; add them with add-compute.
+        /// A control template starts a legacy multi-node stackbox without computes; add them with add-compute.
         #[arg(long, conflicts_with = "components")]
         snapshot: Option<String>,
         /// Run a compute VM on another host, as `compute-2=<host id>`; repeatable.
-        /// Needs FARM_RELAY_URL on the coordinator.
+        /// Needs STACKBOX_RELAY_URL on the coordinator.
         #[arg(long = "place", value_parser = parse_placement, conflicts_with = "snapshot")]
         placement: Vec<(String, String)>,
         #[command(flatten)]
         by_release: Box<ReleaseArgs>,
     },
-    /// OpenStack releases with the templates farms can start from
+    /// OpenStack releases with the templates stackboxes can start from
     Releases {
         /// CPU architecture; defaults to this host's
         #[arg(long)]
@@ -228,20 +228,20 @@ enum Command {
         #[arg(long, value_enum, default_value_t=Phase::Prepare)]
         from: Phase,
     },
-    /// Add the next compute VM to a deployed multi-node farm
+    /// Add the next compute VM to a deployed multi-node stackbox
     AddCompute {
         id: String,
-        /// Host for the new VM; omit to use the farm's primary host. Another host joins
-        /// the farm through the coordinator's link relay.
+        /// Host for the new VM; omit to use the stackbox's primary host. Another host joins
+        /// the stackbox through the coordinator's link relay.
         #[arg(long)]
         host_id: Option<String>,
         /// Boot the new VM from this compute template snapshot instead of installing it clean
         #[arg(long)]
         from_snapshot: Option<String>,
     },
-    /// Check that a deployed farm's services answer again after its VM started from disk
+    /// Check that a deployed stackbox's services answer again after its VM started from disk
     Settle { id: String },
-    /// Build this machine's golden image now instead of with the first farm
+    /// Build this machine's golden image now instead of with the first stackbox
     Golden {
         /// Only report whether it is built
         #[arg(long)]
@@ -267,7 +267,7 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Delay or drop the traffic of a multi-node farm's VM; with neither, heal it
+    /// Delay or drop the traffic of a multi-node stackbox's VM; with neither, heal it
     Fault {
         id: String,
         /// control, compute-1, ...
@@ -284,15 +284,15 @@ enum Command {
         #[arg(long, default_value_t = 0)]
         after: u64,
     },
-    /// Register, check and prepare the hosts farms run on
+    /// Register, check and prepare the hosts stackboxes run on
     #[command(subcommand)]
     Host(HostCommand),
-    /// Freeze farms into snapshots, and move snapshots between hosts as archives
+    /// Freeze stackboxes into snapshots, and move snapshots between hosts as archives
     #[command(subcommand)]
     Snapshot(SnapshotCommand),
     /// Print the OpenAPI document without opening the state store
     Openapi,
-    /// Run this machine's farm agent. Without a subcommand it serves one request on
+    /// Run this machine's stackbox agent. Without a subcommand it serves one request on
     /// stdin/stdout, which is how a coordinator runs its local host's agent.
     Agent {
         #[command(subcommand)]
@@ -301,12 +301,12 @@ enum Command {
 }
 #[derive(Subcommand)]
 enum AgentMode {
-    /// Keep this host connected to a coordinator, which then runs farms here.
+    /// Keep this host connected to a coordinator, which then runs stackboxes here.
     /// Register the host first (Hosts → 에이전트 연결 등록) to get its token.
     Connect {
-        /// Coordinator base URL, such as https://farm.example
+        /// Coordinator base URL, such as https://stackbox.example
         coordinator: String,
-        /// Host token; defaults to the FARM_AGENT_TOKEN environment variable
+        /// Host token; defaults to the STACKBOX_AGENT_TOKEN environment variable
         #[arg(long)]
         token: Option<String>,
     },
@@ -316,7 +316,7 @@ enum AgentMode {
     /// Run the host's link switch; the agent starts it
     #[command(hide = true)]
     Switch { dir: PathBuf },
-    /// Carry a guest's link to its host's switch (in farm VMs, under farm-link@.service)
+    /// Carry a guest's link to its host's switch (in stackbox VMs, under stackbox-link@.service)
     #[command(hide = true)]
     Link {
         /// Only create the TAP device and give it its MTU and address
@@ -343,14 +343,14 @@ enum HostCommand {
 }
 #[derive(Subcommand)]
 enum SnapshotCommand {
-    /// Freeze a farm's VM; it stops for the capture and starts again
+    /// Freeze a stackbox's VM; it stops for the capture and starts again
     Create {
-        farm: String,
+        stackbox: String,
         id: String,
         #[arg(long)]
         note: Option<String>,
-        /// Freeze only this VM of a deployed multi-node farm as a template: `control`, which
-        /// `create --snapshot` starts a farm without computes from, or a compute VM
+        /// Freeze only this VM of a deployed multi-node stackbox as a template: `control`, which
+        /// `create --snapshot` starts a stackbox without computes from, or a compute VM
         /// (compute-1, ...) for add-compute --from-snapshot
         #[arg(long)]
         node: Option<String>,
@@ -401,7 +401,7 @@ enum SnapshotCommand {
         forget: bool,
     },
     /// Remove the copy of a snapshot another host keeps; templates are copied to hosts
-    /// automatically when a farm or compute there starts from them
+    /// automatically when a stackbox or compute there starts from them
     Uncache {
         id: String,
         #[arg(long)]
@@ -412,8 +412,8 @@ fn print_json(value: &impl serde::Serialize) -> Result<()> {
     println!("{}", serde_json::to_string_pretty(value)?);
     Ok(())
 }
-/// The kernel and GPU facts a host's last verification VM reported, for `farm host list`.
-fn kernel_note(inspection: &farm::remote::HostInspection) -> String {
+/// The kernel and GPU facts a host's last verification VM reported, for `stackbox host list`.
+fn kernel_note(inspection: &stackbox::remote::HostInspection) -> String {
     let mut parts = Vec::new();
     if let Some(path) = &inspection.custom_kernel {
         parts.push(format!("custom kernel {path}"));
@@ -446,7 +446,7 @@ fn kernel_note(inspection: &farm::remote::HostInspection) -> String {
         format!(" · {}", parts.join(" · "))
     }
 }
-async fn wait_snapshot(manager: &FarmManager, id: &str) -> Result<SnapshotRecord> {
+async fn wait_snapshot(manager: &StackboxManager, id: &str) -> Result<SnapshotRecord> {
     let snapshot = manager.wait_snapshot(id).await?;
     if snapshot.status == SnapshotStatus::Failed {
         bail!(
@@ -463,18 +463,18 @@ fn absolute(path: PathBuf) -> Result<String> {
     Ok(std::path::absolute(path)?.display().to_string())
 }
 /// A coordinator without Docker still installs agents when its build was released.
-async fn load_published_agents(manager: &FarmManager) {
+async fn load_published_agents(manager: &StackboxManager) {
     match manager.load_published_agents().await {
         Ok(0) => {}
         Ok(count) => eprintln!(
-            "{count} published farm-agent(s) of build {} available",
-            farm::BUILD_ID
+            "{count} published stackbox-agent(s) of build {} available",
+            stackbox::BUILD_ID
         ),
-        Err(error) => eprintln!("cannot read the published farm-agents: {error:#}"),
+        Err(error) => eprintln!("cannot read the published stackbox-agents: {error:#}"),
     }
 }
 
-async fn wait_host(manager: &FarmManager, id: &str, kind: HostJobKind) -> Result<()> {
+async fn wait_host(manager: &StackboxManager, id: &str, kind: HostJobKind) -> Result<()> {
     let job = manager.start_host_job(id, kind)?;
     loop {
         let job = manager.host_job(&job.id)?;
@@ -493,7 +493,7 @@ async fn wait_host(manager: &FarmManager, id: &str, kind: HostJobKind) -> Result
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     }
 }
-async fn wait(manager: &FarmManager, job: Job) -> Result<()> {
+async fn wait(manager: &StackboxManager, job: Job) -> Result<()> {
     println!("job {}: {:?}", job.id, job.kind);
     let job = manager.wait(&job.id).await?;
     if job.status != JobStatus::Succeeded {
@@ -508,8 +508,8 @@ async fn wait(manager: &FarmManager, job: Job) -> Result<()> {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     // Planning and schema commands need neither msb nor the daemon's writer lock, nor a
-    // usable farm kernel: computing a plan never boots a VM, and whether a host can bind the
-    // `mtty` device is decided by that host's inspection when the farm is created.
+    // usable stackbox kernel: computing a plan never boots a VM, and whether a host can bind the
+    // `mtty` device is decided by that host's inspection when the stackbox is created.
     match &cli.command {
         Command::Catalog { release, json } => {
             let c = model::catalog(release.as_deref());
@@ -585,56 +585,59 @@ async fn main() -> Result<()> {
         Command::Golden { check } => {
             // Building a golden image boots a VM, so this is where the custom kernel of this
             // process has to reach the SDK first.
-            farm::kernel::configure_sdk()?;
-            let golden = farm::farm::golden::current();
+            stackbox::kernel::configure_sdk()?;
+            let golden = stackbox::stackbox::golden::current();
             if *check {
-                let built = farm::farm::golden::available(&golden).await?;
+                let built = stackbox::stackbox::golden::available(&golden).await?;
                 println!("{golden}: {}", if built { "built" } else { "not built" });
                 return Ok(());
             }
-            farm::farm::golden::ensure(farm::farm::golden::DEFAULT_OS, &farm::farm::ALL_IN_ONE)
-                .await?;
+            stackbox::stackbox::golden::ensure(
+                stackbox::stackbox::golden::DEFAULT_OS,
+                &stackbox::stackbox::ALL_IN_ONE,
+            )
+            .await?;
             println!("{golden}: built");
             return Ok(());
         }
         Command::Agent {
             mode: Some(AgentMode::Connect { coordinator, token }),
         } => {
-            farm::kernel::configure_sdk()?;
+            stackbox::kernel::configure_sdk()?;
             let token = token
                 .clone()
-                .or_else(|| std::env::var("FARM_AGENT_TOKEN").ok())
+                .or_else(|| std::env::var("STACKBOX_AGENT_TOKEN").ok())
                 .filter(|t| !t.trim().is_empty())
-                .ok_or_else(|| anyhow::anyhow!("pass --token or set FARM_AGENT_TOKEN"))?;
-            let agent = std::sync::Arc::new(farm::remote::agent::Agent::local());
-            return farm::remote::dial::run(coordinator, &token, agent).await;
+                .ok_or_else(|| anyhow::anyhow!("pass --token or set STACKBOX_AGENT_TOKEN"))?;
+            let agent = std::sync::Arc::new(stackbox::remote::agent::Agent::local());
+            return stackbox::remote::dial::run(coordinator, &token, agent).await;
         }
         Command::Agent {
             mode: Some(AgentMode::Worker { job }),
         } => {
-            farm::kernel::configure_sdk()?;
-            if let Err(error) = farm::remote::agent::serve_worker(job).await {
-                eprintln!("farm agent worker: {error:#}");
+            stackbox::kernel::configure_sdk()?;
+            if let Err(error) = stackbox::remote::agent::serve_worker(job).await {
+                eprintln!("stackbox agent worker: {error:#}");
                 std::process::exit(1);
             }
             std::process::exit(0);
         }
         Command::Agent {
             mode: Some(AgentMode::Switch { dir }),
-        } => return farm::link::host::serve_dir(dir).await,
+        } => return stackbox::link::host::serve_dir(dir).await,
         Command::Agent {
             mode: Some(AgentMode::Link { setup, conf }),
         } => {
             return if *setup {
-                farm::link::guest::setup(conf).await
+                stackbox::link::guest::setup(conf).await
             } else {
-                farm::link::guest::run(conf).await
+                stackbox::link::guest::run(conf).await
             };
         }
         Command::Agent { mode: None } => {
-            farm::kernel::configure_sdk()?;
-            if let Err(error) = farm::remote::agent::serve_stdio().await {
-                eprintln!("farm agent: {error}");
+            stackbox::kernel::configure_sdk()?;
+            if let Err(error) = stackbox::remote::agent::serve_stdio().await {
+                eprintln!("stackbox agent: {error}");
                 std::process::exit(1);
             }
             // A finished shell can leave tokio's blocking stdin read waiting for input that never comes.
@@ -645,30 +648,30 @@ async fn main() -> Result<()> {
     // Every command below reaches microsandbox: it creates, boots or deletes VMs on this
     // machine or on a host whose agent it starts. Point the SDK at the custom kernel of
     // this process once, before the runtime is resolved.
-    farm::kernel::configure_sdk()?;
+    stackbox::kernel::configure_sdk()?;
     let mut options = ManagerOptions::local(cli.state_dir.unwrap_or_else(default_state_dir));
     if let Some(limit) = cli.memory_budget_mib {
         options.memory_budget_mib = limit;
     }
-    let token = std::env::var("FARM_API_TOKEN").ok();
+    let token = std::env::var("STACKBOX_API_TOKEN").ok();
     if let Command::Serve { bind, public_bind } = &cli.command {
         anyhow::ensure!(
             bind.ip().is_loopback() || token.is_some(),
-            "non-loopback API binding requires FARM_API_TOKEN"
+            "non-loopback API binding requires STACKBOX_API_TOKEN"
         );
         anyhow::ensure!(
             token.as_ref().is_none_or(|t| !t.trim().is_empty()),
-            "FARM_API_TOKEN cannot be empty"
+            "STACKBOX_API_TOKEN cannot be empty"
         );
         options.public_bind = *public_bind;
     }
-    let manager = FarmManager::open(options).await?;
+    let manager = StackboxManager::open(options).await?;
     match cli.command {
         Command::Serve { bind, .. } => {
             load_published_agents(&manager).await;
             for job in manager.upgrade_stale_agents()? {
                 eprintln!(
-                    "reinstalling the farm-agent on {} (host job {})",
+                    "reinstalling the stackbox-agent on {} (host job {})",
                     job.host_id, job.id
                 );
             }
@@ -716,7 +719,7 @@ async fn main() -> Result<()> {
                 pci_devices: pci.pci,
             };
             if compute.size().is_some() {
-                bail!("a farm made by release takes its compute size from its templates");
+                bail!("a stackbox made by release takes its compute size from its templates");
             }
             let _ = (snapshot, placement);
             model::require_multi_node(request.computes, request.layout)?;
@@ -745,7 +748,7 @@ async fn main() -> Result<()> {
             by_release,
             ..
         } => {
-            // A snapshot brings its own services and layout; a new farm has its computes.
+            // A snapshot brings its own services and layout; a new stackbox has its computes.
             let computes = if snapshot.is_some() { 0 } else { computes };
             if snapshot.is_none() {
                 model::require_multi_node(computes, None)?;
@@ -821,19 +824,19 @@ async fn main() -> Result<()> {
                 manager.delete(&id)?
             };
             wait(&manager, job).await?;
-            println!("deleted farm '{id}'");
+            println!("deleted stackbox '{id}'");
         }
         Command::Status { id, json } => {
-            let farm = manager.get(&id)?;
+            let stackbox = manager.get(&id)?;
             if json {
-                print_json(&farm)?;
+                print_json(&stackbox)?;
             } else {
-                println!("{}: {:?}", farm.id, farm.status);
-                if let Some(error) = farm.error {
+                println!("{}: {:?}", stackbox.id, stackbox.status);
+                if let Some(error) = stackbox.error {
                     println!("{error}");
                 }
                 println!("{:<24} {:<10} IP", "NAME", "STATUS");
-                for node in farm.nodes {
+                for node in stackbox.nodes {
                     println!(
                         "{:<24} {:<10} {}",
                         node.name,
@@ -844,16 +847,16 @@ async fn main() -> Result<()> {
             }
         }
         Command::List { json } => {
-            let farms = manager.list()?;
+            let stackboxes = manager.list()?;
             if json {
-                print_json(&farms)?;
+                print_json(&stackboxes)?;
             } else {
-                for farm in farms {
+                for stackbox in stackboxes {
                     println!(
                         "{:<24} {:?} ({} nodes)",
-                        farm.id,
-                        farm.status,
-                        farm.nodes.len()
+                        stackbox.id,
+                        stackbox.status,
+                        stackbox.nodes.len()
                     );
                 }
             }
@@ -865,10 +868,10 @@ async fn main() -> Result<()> {
             delay_ms,
             loss,
         } => {
-            let farm = manager
-                .impair(&id, &node, farm::link::Impair { delay_ms, loss })
+            let stackbox = manager
+                .impair(&id, &node, stackbox::link::Impair { delay_ms, loss })
                 .await?;
-            match farm.faults.get(&node) {
+            match stackbox.faults.get(&node) {
                 Some(f) => println!("{id}/{node}: delay {} ms, loss {}", f.delay_ms, f.loss),
                 None => println!("{id}/{node}: healed"),
             }
@@ -884,7 +887,7 @@ async fn main() -> Result<()> {
                     manager.register_local_host(RegisterLocalHost { id: id.clone() })?;
                 }
                 wait_host(&manager, &id, HostJobKind::Prepare).await?;
-                println!("host '{id}' is ready; create farms with --host-id {id}");
+                println!("host '{id}' is ready; create stackboxes with --host-id {id}");
             }
             HostCommand::List { json } => {
                 let hosts = manager.hosts()?;
@@ -909,7 +912,7 @@ async fn main() -> Result<()> {
         },
         Command::Snapshot(command) => match command {
             SnapshotCommand::Create {
-                farm,
+                stackbox,
                 id,
                 note,
                 node,
@@ -917,7 +920,7 @@ async fn main() -> Result<()> {
                 wait(
                     &manager,
                     manager.freeze(
-                        &farm,
+                        &stackbox,
                         SnapshotRequest {
                             id: id.clone(),
                             note,
@@ -939,7 +942,7 @@ async fn main() -> Result<()> {
                             s.id,
                             s.status,
                             s.arch,
-                            s.source_farm.as_deref().unwrap_or("archive"),
+                            s.source_stackbox.as_deref().unwrap_or("archive"),
                             s.plan.components.join(","),
                             if s.deployed { ", deployed" } else { "" },
                             match s.template {
@@ -1017,7 +1020,7 @@ async fn main() -> Result<()> {
                                 match m.role {
                                     Some(model::TemplateRole::Control) => "control template",
                                     Some(model::TemplateRole::Compute) => "compute template",
-                                    None => "farm snapshot",
+                                    None => "stackbox snapshot",
                                 },
                                 m.arch,
                                 m.components.join(",")

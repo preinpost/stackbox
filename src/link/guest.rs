@@ -1,13 +1,13 @@
 //! The guest end of a link: a persistent TAP device bridged to one switch port.
 //!
-//! `farm-link@<dev>.service` first runs `agent link --setup <conf>`, which creates the TAP and
+//! `stackbox-link@<dev>.service` first runs `agent link --setup <conf>`, which creates the TAP and
 //! gives it its MTU and address, then `agent link <conf>`, which attaches to it and carries its
 //! frames. The device outlives the second process, so services bound to its address keep
 //! running while the link restarts or reconnects.
 
 use anyhow::{Context, Result, ensure};
 
-/// `/etc/farm/link-<dev>.conf`.
+/// `/etc/stackbox/link-<dev>.conf`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct LinkConf {
     pub dev: String,
@@ -22,7 +22,7 @@ pub struct LinkConf {
 
 impl LinkConf {
     pub fn path(dev: &str) -> String {
-        format!("/etc/farm/link-{dev}.conf")
+        format!("/etc/stackbox/link-{dev}.conf")
     }
     pub fn render(&self) -> String {
         format!(
@@ -338,7 +338,7 @@ mod tests {
     #[test]
     fn configuration_round_trips_and_is_checked() {
         let conf = LinkConf {
-            dev: "farm0".into(),
+            dev: "stackbox0".into(),
             switch: "ws://host.microsandbox.internal:41234/link".into(),
             port: "dev/ctl/mgmt".into(),
             token: "a".repeat(64),
@@ -347,14 +347,14 @@ mod tests {
         };
         assert_eq!(LinkConf::parse(&conf.render()).unwrap(), conf);
         let bridge = LinkConf {
-            dev: "farm1".into(),
+            dev: "stackbox1".into(),
             address: None,
             ..conf.clone()
         };
         assert_eq!(LinkConf::parse(&bridge.render()).unwrap(), bridge);
         for bad in [
             LinkConf {
-                dev: "farm0; rm".into(),
+                dev: "stackbox0; rm".into(),
                 ..conf.clone()
             },
             LinkConf {

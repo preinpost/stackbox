@@ -1,8 +1,8 @@
 use crate::link::{Impair, host::Switch};
 use crate::{
-    farm::{self, FarmNode, FrozenSnapshot, ImportedSnapshot, TerminalIo, TerminalSize},
     kolla::{self, EventSink, Phase},
     model::{Datastore, Endpoints, Exposure, Plan},
+    stackbox::{self, FrozenSnapshot, ImportedSnapshot, StackboxNode, TerminalIo, TerminalSize},
 };
 use anyhow::{Context, Result, anyhow};
 use futures::future::BoxFuture;
@@ -12,13 +12,13 @@ use std::{
 };
 
 fn unsupported<T: Send + 'static>() -> BoxFuture<'static, Result<T>> {
-    Box::pin(async { Err(anyhow!("snapshots are available for local farms only")) })
+    Box::pin(async { Err(anyhow!("snapshots are available for local stackboxes only")) })
 }
 
 /// VM boundary; tests can exercise the real manager without launching guests.
 pub trait Backend: Send + Sync + 'static {
-    fn scan(&self) -> BoxFuture<'_, Result<BTreeMap<String, Vec<FarmNode>>>>;
-    /// Public port bases the host reserves for farms of every coordinator.
+    fn scan(&self) -> BoxFuture<'_, Result<BTreeMap<String, Vec<StackboxNode>>>>;
+    /// Public port bases the host reserves for stackboxes of every coordinator.
     fn public_ports(&self) -> BoxFuture<'_, Result<Vec<u16>>> {
         Box::pin(async { Ok(Vec::new()) })
     }
@@ -27,8 +27,8 @@ pub trait Backend: Send + Sync + 'static {
         id: String,
         plan: Plan,
         exposure: Exposure,
-    ) -> BoxFuture<'_, Result<Vec<FarmNode>>>;
-    /// `components` and `release` are the farm plan's resolved services and OpenStack release;
+    ) -> BoxFuture<'_, Result<Vec<StackboxNode>>>;
+    /// `components` and `release` are the stackbox plan's resolved services and OpenStack release;
     /// `reference` is the kolla-ansible ref the coordinator resolved for it.
     #[allow(clippy::too_many_arguments)]
     fn deploy(
@@ -44,17 +44,17 @@ pub trait Backend: Send + Sync + 'static {
         sink: EventSink,
     ) -> BoxFuture<'_, Result<()>>;
     fn delete(&self, id: String) -> BoxFuture<'_, Result<()>>;
-    /// Create this host's part of a farm that spans hosts.
+    /// Create this host's part of a stackbox that spans hosts.
     fn create_share(
         &self,
         _id: String,
         _plan: Plan,
         _exposure: Exposure,
         _share: crate::remote::protocol::Share,
-    ) -> BoxFuture<'_, Result<Vec<FarmNode>>> {
-        Box::pin(async { Err(anyhow!("this backend runs farms on one host only")) })
+    ) -> BoxFuture<'_, Result<Vec<StackboxNode>>> {
+        Box::pin(async { Err(anyhow!("this backend runs stackboxes on one host only")) })
     }
-    /// Create this host's part of a farm that spans hosts, booting its one compute from
+    /// Create this host's part of a stackbox that spans hosts, booting its one compute from
     /// the compute template snapshot `source` on this host.
     fn create_share_from(
         &self,
@@ -63,10 +63,10 @@ pub trait Backend: Send + Sync + 'static {
         _exposure: Exposure,
         _share: crate::remote::protocol::Share,
         _source: String,
-    ) -> BoxFuture<'_, Result<Vec<FarmNode>>> {
+    ) -> BoxFuture<'_, Result<Vec<StackboxNode>>> {
         Box::pin(async { Err(anyhow!("this backend cannot boot a share from a template")) })
     }
-    /// Add compute VMs to an existing farm on this host. `nodes` are the farm's VMs this
+    /// Add compute VMs to an existing stackbox on this host. `nodes` are the stackbox's VMs this
     /// host runs after the change; `add` are the suffixes to create, from the compute
     /// template snapshot `source` if given. `uplink` joins this host's switch to the relay
     /// for the first time when a remote compute is added.
@@ -78,10 +78,10 @@ pub trait Backend: Send + Sync + 'static {
         _add: Vec<String>,
         _uplink: Option<crate::link::UplinkConfig>,
         _source: Option<String>,
-    ) -> BoxFuture<'_, Result<Vec<FarmNode>>> {
+    ) -> BoxFuture<'_, Result<Vec<StackboxNode>>> {
         Box::pin(async { Err(anyhow!("this backend cannot add a compute VM")) })
     }
-    /// The SSH key pair the control VM uses to reach the farm's computes.
+    /// The SSH key pair the control VM uses to reach the stackbox's computes.
     fn ssh_keys(&self, _id: String) -> BoxFuture<'_, Result<(String, String)>> {
         Box::pin(async { Err(anyhow!("this backend has no control VM SSH key")) })
     }
@@ -100,11 +100,11 @@ pub trait Backend: Send + Sync + 'static {
     ) -> BoxFuture<'_, Result<()>> {
         Box::pin(async { Err(anyhow!("this backend cannot deploy a compute VM")) })
     }
-    /// Point this host's switch at the relay's new `url` for a farm that spans hosts.
+    /// Point this host's switch at the relay's new `url` for a stackbox that spans hosts.
     fn relink(&self, _id: String, _url: String) -> BoxFuture<'_, Result<()>> {
-        Box::pin(async { Err(anyhow!("this backend runs farms on one host only")) })
+        Box::pin(async { Err(anyhow!("this backend runs stackboxes on one host only")) })
     }
-    /// Ready this host's compute VMs of a farm that spans hosts for Kolla: what the
+    /// Ready this host's compute VMs of a stackbox that spans hosts for Kolla: what the
     /// prepare phase does to computes, and Kolla's SSH key.
     fn prepare(
         &self,
@@ -113,9 +113,9 @@ pub trait Backend: Send + Sync + 'static {
         _release: String,
         _ssh_public_key: String,
     ) -> BoxFuture<'_, Result<()>> {
-        Box::pin(async { Err(anyhow!("this backend runs farms on one host only")) })
+        Box::pin(async { Err(anyhow!("this backend runs stackboxes on one host only")) })
     }
-    /// Deploy a farm that spans hosts from its control VM's host. `remote` are the
+    /// Deploy a stackbox that spans hosts from its control VM's host. `remote` are the
     /// compute VMs on other hosts, which [`Backend::prepare`] readied there.
     #[allow(clippy::too_many_arguments)]
     fn deploy_spanning(
@@ -132,7 +132,7 @@ pub trait Backend: Send + Sync + 'static {
         _ssh_private_key: String,
         _sink: EventSink,
     ) -> BoxFuture<'_, Result<()>> {
-        Box::pin(async { Err(anyhow!("this backend runs farms on one host only")) })
+        Box::pin(async { Err(anyhow!("this backend runs stackboxes on one host only")) })
     }
     fn endpoints(
         &self,
@@ -140,14 +140,14 @@ pub trait Backend: Send + Sync + 'static {
         exposure: Option<Exposure>,
         components: Vec<String>,
     ) -> BoxFuture<'_, Result<Endpoints>>;
-    /// Run `script` in the farm's all-in-one or control VM and return its stdout. A
+    /// Run `script` in the stackbox's all-in-one or control VM and return its stdout. A
     /// non-zero exit status is an error carrying the script's stderr. Unlike `endpoints`,
     /// whose script is fixed, this lets the coordinator read and write instance metadata
     /// through the OpenStack CLI the VM already has.
     fn control_script(&self, _id: String, _script: String) -> BoxFuture<'_, Result<String>> {
-        Box::pin(async { Err(anyhow!("this backend cannot run commands in a farm VM")) })
+        Box::pin(async { Err(anyhow!("this backend cannot run commands in a stackbox VM")) })
     }
-    /// Stop the farm's VM, capture its disks under `labels`, and start it again. With
+    /// Stop the stackbox's VM, capture its disks under `labels`, and start it again. With
     /// `node`, only that VM is captured, as a control or compute template.
     fn freeze(
         &self,
@@ -159,19 +159,19 @@ pub trait Backend: Send + Sync + 'static {
     ) -> BoxFuture<'_, Result<FrozenSnapshot>> {
         unsupported()
     }
-    /// Boot the farm from a snapshot: `reference` for an all-in-one VM or a control
-    /// template's control VM, `nodes` for a multi-node farm's VMs.
+    /// Boot the stackbox from a snapshot: `reference` for an all-in-one VM or a control
+    /// template's control VM, `nodes` for a multi-node stackbox's VMs.
     fn restore(
         &self,
         _id: String,
         _reference: String,
-        _nodes: Vec<farm::NodeSnapshot>,
+        _nodes: Vec<stackbox::NodeSnapshot>,
         _plan: Plan,
         _exposure: Exposure,
-    ) -> BoxFuture<'_, Result<Vec<FarmNode>>> {
+    ) -> BoxFuture<'_, Result<Vec<StackboxNode>>> {
         unsupported()
     }
-    /// Wait for a deployed farm's services after a cold start, optionally moving its
+    /// Wait for a deployed stackbox's services after a cold start, optionally moving its
     /// public catalog entries from the first exposure to the second.
     fn settle(
         &self,
@@ -182,7 +182,7 @@ pub trait Backend: Send + Sync + 'static {
     ) -> BoxFuture<'_, Result<()>> {
         unsupported()
     }
-    /// Drop the registrations of the source farm's computes from a farm restored from a
+    /// Drop the registrations of the source stackbox's computes from a stackbox restored from a
     /// control template, and list no compute in its Kolla inventory.
     fn forget_computes(
         &self,
@@ -212,12 +212,12 @@ pub trait Backend: Send + Sync + 'static {
     ) -> BoxFuture<'_, Result<Option<BTreeMap<String, String>>>> {
         unsupported()
     }
-    /// Add faults to the links of a multi-node farm's VM (`control`, `compute-1`, ...);
+    /// Add faults to the links of a multi-node stackbox's VM (`control`, `compute-1`, ...);
     /// `Impair::default()` heals them.
     fn impair(&self, _id: String, _node: String, _impair: Impair) -> BoxFuture<'_, Result<()>> {
         Box::pin(async { Err(anyhow!("this backend has no links")) })
     }
-    /// Run an interactive login shell in the farm's VM until it exits or `io.input` closes.
+    /// Run an interactive login shell in the stackbox's VM until it exits or `io.input` closes.
     /// `node` picks a multi-node VM by suffix; `None` is the all-in-one or control VM.
     fn terminal(
         &self,
@@ -229,7 +229,7 @@ pub trait Backend: Send + Sync + 'static {
         Box::pin(async { Err(anyhow!("this backend has no terminal")) })
     }
 }
-/// The farms of the host its agent directory belongs to, whose link switch it runs.
+/// The stackboxes of the host its agent directory belongs to, whose link switch it runs.
 pub struct MicrosandboxBackend {
     switch: Switch,
 }
@@ -241,17 +241,17 @@ impl MicrosandboxBackend {
     }
 }
 impl Backend for MicrosandboxBackend {
-    fn scan(&self) -> BoxFuture<'_, Result<BTreeMap<String, Vec<FarmNode>>>> {
-        Box::pin(farm::scan_farms())
+    fn scan(&self) -> BoxFuture<'_, Result<BTreeMap<String, Vec<StackboxNode>>>> {
+        Box::pin(stackbox::scan_stackboxes())
     }
     fn create(
         &self,
         id: String,
         plan: Plan,
         exposure: Exposure,
-    ) -> BoxFuture<'_, Result<Vec<FarmNode>>> {
+    ) -> BoxFuture<'_, Result<Vec<StackboxNode>>> {
         Box::pin(async move {
-            farm::create_farm_with(
+            stackbox::create_stackbox_with(
                 &id,
                 &plan.nodes,
                 Some(&exposure),
@@ -270,9 +270,9 @@ impl Backend for MicrosandboxBackend {
         plan: Plan,
         exposure: Exposure,
         share: crate::remote::protocol::Share,
-    ) -> BoxFuture<'_, Result<Vec<FarmNode>>> {
+    ) -> BoxFuture<'_, Result<Vec<StackboxNode>>> {
         Box::pin(async move {
-            farm::create_farm_with(
+            stackbox::create_stackbox_with(
                 &id,
                 &plan.nodes,
                 Some(&exposure),
@@ -292,7 +292,7 @@ impl Backend for MicrosandboxBackend {
         exposure: Exposure,
         share: crate::remote::protocol::Share,
         source: String,
-    ) -> BoxFuture<'_, Result<Vec<FarmNode>>> {
+    ) -> BoxFuture<'_, Result<Vec<StackboxNode>>> {
         Box::pin(async move {
             anyhow::ensure!(
                 share.nodes.len() == 1 && share.nodes[0].starts_with("compute-"),
@@ -300,7 +300,7 @@ impl Backend for MicrosandboxBackend {
             );
             // Only the share's VM is created here, so every entry may name the template.
             let sources = vec![source; plan.nodes.len()];
-            farm::create_farm_with(
+            stackbox::create_stackbox_with(
                 &id,
                 &plan.nodes,
                 Some(&exposure),
@@ -321,12 +321,12 @@ impl Backend for MicrosandboxBackend {
         add: Vec<String>,
         uplink: Option<crate::link::UplinkConfig>,
         source: Option<String>,
-    ) -> BoxFuture<'_, Result<Vec<FarmNode>>> {
+    ) -> BoxFuture<'_, Result<Vec<StackboxNode>>> {
         Box::pin(async move {
             if let Some(uplink) = uplink {
                 self.switch.set_uplink(&id, uplink)?;
             }
-            farm::add_nodes(
+            stackbox::add_nodes(
                 &id,
                 &plan.nodes,
                 &add,
@@ -339,19 +339,19 @@ impl Backend for MicrosandboxBackend {
     }
     fn ssh_keys(&self, id: String) -> BoxFuture<'_, Result<(String, String)>> {
         Box::pin(async move {
-            let node = farm::get_farm(&id)
+            let node = stackbox::get_stackbox(&id)
                 .await?
                 .into_iter()
-                .find(|node| node.role == Some(farm::Role::Control))
-                .context("the farm has no control VM")?;
-            let sandbox = farm::connect(&node.name).await?;
+                .find(|node| node.role == Some(stackbox::Role::Control))
+                .context("the stackbox has no control VM")?;
+            let sandbox = stackbox::connect(&node.name).await?;
             let result = async {
                 let private = crate::shell::run(
                     &sandbox,
                     "test -f /root/.ssh/id_ed25519 && cat /root/.ssh/id_ed25519",
                 )
                 .await
-                .context("the control VM has no SSH key; deploy the farm first")?;
+                .context("the control VM has no SSH key; deploy the stackbox first")?;
                 let public = crate::shell::run(
                     &sandbox,
                     "test -f /root/.ssh/id_ed25519.pub && cat /root/.ssh/id_ed25519.pub",
@@ -371,7 +371,7 @@ impl Backend for MicrosandboxBackend {
                 Ok((public, private))
             }
             .await;
-            farm::detach(&sandbox).await;
+            stackbox::detach(&sandbox).await;
             result
         })
     }
@@ -465,14 +465,14 @@ impl Backend for MicrosandboxBackend {
     }
     fn delete(&self, id: String) -> BoxFuture<'_, Result<()>> {
         Box::pin(async move {
-            farm::delete_farm(&id).await?;
+            stackbox::delete_stackbox(&id).await?;
             self.switch.remove_ports(&id)?;
             Ok(())
         })
     }
     fn impair(&self, id: String, node: String, impair: Impair) -> BoxFuture<'_, Result<()>> {
         Box::pin(async move {
-            for (_, network, _) in farm::NETWORKS {
+            for (_, network, _) in stackbox::NETWORKS {
                 self.switch
                     .impair(&format!("{id}/{node}/{network}"), impair)?;
             }
@@ -486,18 +486,18 @@ impl Backend for MicrosandboxBackend {
         components: Vec<String>,
     ) -> BoxFuture<'_, Result<Endpoints>> {
         Box::pin(async move {
-            // New farms keep Kolla's configuration on the all-in-one or control VM. Legacy
-            // farms remain readable/deletable; their credentials live on the old deployer.
-            let name = match farm::all_in_one_name(&id).await {
+            // New stackboxes keep Kolla's configuration on the all-in-one or control VM. Legacy
+            // stackboxes remain readable/deletable; their credentials live on the old deployer.
+            let name = match stackbox::all_in_one_name(&id).await {
                 Ok(name) => name,
-                Err(error) => farm::get_farm(&id)
+                Err(error) => stackbox::get_stackbox(&id)
                     .await?
                     .into_iter()
-                    .find(|node| node.role == Some(farm::Role::Deployer))
+                    .find(|node| node.role == Some(stackbox::Role::Deployer))
                     .map(|node| node.name)
                     .ok_or(error)?,
             };
-            let sandbox = farm::connect(&name).await?;
+            let sandbox = stackbox::connect(&name).await?;
             let result = crate::shell::run(&sandbox, r#"set -euo pipefail
 . /etc/kolla/admin-openrc.sh
 python3 - <<'PY'
@@ -507,7 +507,7 @@ print(json.dumps({k: os.environ[k] for k in keys if k in os.environ}))
 PY"#).await;
             // The data stores report their own credentials and live schemas.
             let stores = crate::shell::run(&sandbox, DATASTORES_SCRIPT).await;
-            farm::detach(&sandbox).await;
+            stackbox::detach(&sandbox).await;
             let mut credentials: BTreeMap<String, String> = serde_json::from_str(&result?)?;
             let datastores = exposure
                 .as_ref()
@@ -543,9 +543,11 @@ PY"#).await;
     ) -> BoxFuture<'_, Result<FrozenSnapshot>> {
         Box::pin(async move {
             match node.as_deref() {
-                Some("control") => farm::freeze_control(&id, &snapshot_id, &labels, sink).await,
-                Some(node) => farm::freeze_compute(&id, &snapshot_id, node, &labels, sink).await,
-                None => farm::freeze_farm(&id, &snapshot_id, &labels, sink).await,
+                Some("control") => stackbox::freeze_control(&id, &snapshot_id, &labels, sink).await,
+                Some(node) => {
+                    stackbox::freeze_compute(&id, &snapshot_id, node, &labels, sink).await
+                }
+                None => stackbox::freeze_stackbox(&id, &snapshot_id, &labels, sink).await,
             }
         })
     }
@@ -553,10 +555,10 @@ PY"#).await;
         &self,
         id: String,
         reference: String,
-        nodes: Vec<farm::NodeSnapshot>,
+        nodes: Vec<stackbox::NodeSnapshot>,
         plan: Plan,
         exposure: Exposure,
-    ) -> BoxFuture<'_, Result<Vec<FarmNode>>> {
+    ) -> BoxFuture<'_, Result<Vec<StackboxNode>>> {
         Box::pin(async move {
             if plan.multinode() && nodes.is_empty() {
                 // A control template holds the control VM alone.
@@ -564,7 +566,7 @@ PY"#).await;
                     plan.nodes.len() == 1,
                     "a control template restores the control VM alone"
                 );
-                return farm::create_farm_with(
+                return stackbox::create_stackbox_with(
                     &id,
                     &plan.nodes,
                     Some(&exposure),
@@ -582,7 +584,7 @@ PY"#).await;
                     .nodes
                     .iter()
                     .map(|spec| {
-                        let suffix = farm::suffix(spec.role, spec.index);
+                        let suffix = stackbox::suffix(spec.role, spec.index);
                         nodes
                             .iter()
                             .find(|n| Some(&n.node) == suffix.as_ref())
@@ -590,7 +592,7 @@ PY"#).await;
                             .with_context(|| format!("snapshot has no disks for {suffix:?}"))
                     })
                     .collect::<Result<Vec<_>>>()?;
-                return farm::create_farm_with(
+                return stackbox::create_stackbox_with(
                     &id,
                     &plan.nodes,
                     Some(&exposure),
@@ -605,7 +607,7 @@ PY"#).await;
             let [spec] = plan.nodes[..] else {
                 anyhow::bail!("snapshots hold exactly one all-in-one VM");
             };
-            farm::restore_farm(&id, &reference, spec, &exposure, &plan.components).await
+            stackbox::restore_stackbox(&id, &reference, spec, &exposure, &plan.components).await
         })
     }
     fn settle(
@@ -629,26 +631,26 @@ PY"#).await;
         Box::pin(async move { kolla::forget_computes(&id, &components, sink).await })
     }
     fn export_snapshot(&self, reference: String, output: PathBuf) -> BoxFuture<'_, Result<()>> {
-        Box::pin(async move { farm::export_snapshot(&reference, &output).await })
+        Box::pin(async move { stackbox::export_snapshot(&reference, &output).await })
     }
     fn import_snapshot(
         &self,
         archive: PathBuf,
         snapshot_id: String,
     ) -> BoxFuture<'_, Result<ImportedSnapshot>> {
-        Box::pin(async move { farm::import_snapshot(&archive, &snapshot_id).await })
+        Box::pin(async move { stackbox::import_snapshot(&archive, &snapshot_id).await })
     }
     fn remove_snapshot(&self, reference: String) -> BoxFuture<'_, Result<()>> {
-        Box::pin(async move { farm::remove_snapshot(&reference).await })
+        Box::pin(async move { stackbox::remove_snapshot(&reference).await })
     }
     fn snapshot_labels(
         &self,
         reference: String,
     ) -> BoxFuture<'_, Result<Option<BTreeMap<String, String>>>> {
-        Box::pin(async move { farm::snapshot_labels(&reference).await })
+        Box::pin(async move { stackbox::snapshot_labels(&reference).await })
     }
     fn control_script(&self, id: String, script: String) -> BoxFuture<'_, Result<String>> {
-        Box::pin(async move { farm::run_script(&id, None, &script).await })
+        Box::pin(async move { stackbox::run_script(&id, None, &script).await })
     }
     fn terminal(
         &self,
@@ -658,7 +660,7 @@ PY"#).await;
         io: TerminalIo,
     ) -> BoxFuture<'_, Result<()>> {
         Box::pin(async move {
-            farm::attach_terminal(&id, node.as_deref(), size, io)
+            stackbox::attach_terminal(&id, node.as_deref(), size, io)
                 .await
                 .map(|_| ())
         })

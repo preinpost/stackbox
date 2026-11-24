@@ -20,7 +20,7 @@ pub async fn run(sandbox: &Sandbox, script: &str) -> Result<String> {
 }
 
 /// Marker a generated script prints to report a finer step than the phase.
-const STEP_PREFIX: &str = "__FARM_STEP__ ";
+const STEP_PREFIX: &str = "__STACKBOX_STEP__ ";
 /// Longest Ansible task name kept for display; the full text stays in the log.
 const STEP_LIMIT: usize = 160;
 
@@ -253,7 +253,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let log = dir.path().join("run dir").join("it's $HOME.log");
         let log = log.to_str().unwrap();
-        let script = "echo hello; echo '__FARM_STEP__ copy'; echo last";
+        let script = "echo hello; echo '__STACKBOX_STEP__ copy'; echo last";
         let run = std::process::Command::new("bash")
             .arg("-c")
             .arg(wrapped_script(script, log))
@@ -278,7 +278,7 @@ mod tests {
     #[test]
     fn recognises_our_markers_and_ansible_tasks_only() {
         assert_eq!(
-            step_of("__FARM_STEP__ globals.yml 작성").as_deref(),
+            step_of("__STACKBOX_STEP__ globals.yml 작성").as_deref(),
             Some("globals.yml 작성")
         );
         assert_eq!(
@@ -292,7 +292,7 @@ mod tests {
         // Ordinary output, task results and empty markers stay out of the step line.
         assert!(step_of("changed: all-in-one").is_none());
         assert!(step_of("Downloading crates ...").is_none());
-        assert!(step_of("__FARM_STEP__   ").is_none());
+        assert!(step_of("__STACKBOX_STEP__   ").is_none());
         assert!(step_of("TASKNOTHING").is_none());
     }
 

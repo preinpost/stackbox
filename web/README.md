@@ -1,16 +1,16 @@
-# farm portal
+# stackbox portal
 
-기존 Rust farmd에 연결되는 웹포탈입니다.
+기존 Rust stackboxd에 연결되는 웹포탈입니다.
 
 - React + TypeScript + Vite
 - Tailwind CSS 4와 Base UI: Dialog, RadioGroup, Checkbox, Select, Tabs, Button, Input
 - TanStack Router: URL 기반 화면과 상세 페이지
 - TanStack Query: API 캐시, polling, 작업 후 갱신, SSE 로그 캐시
-- TanStack Table 8: farm 검색·상태 필터·정렬·페이지 이동
+- TanStack Table 8: stackbox 검색·상태 필터·정렬·페이지 이동
 
 ## 개발 실행
 
-Node.js 22.12 이상이 필요합니다. 프로젝트 루트에서 farmd를 먼저 실행합니다.
+Node.js 22.12 이상이 필요합니다. 프로젝트 루트에서 stackboxd를 먼저 실행합니다.
 
 ```bash
 cargo run -- serve
@@ -25,34 +25,34 @@ npm run dev
 # http://127.0.0.1:10020
 ```
 
-기본 farmd 주소는 `http://127.0.0.1:10010`입니다. 다른 호스트나 token을 쓰는 경우
+기본 stackboxd 주소는 `http://127.0.0.1:10010`입니다. 다른 호스트나 token을 쓰는 경우
 `web/.env`를 만드세요 (`.env.example` 참고).
 
 ```dotenv
-FARM_API_URL=http://127.0.0.1:10010
-FARM_API_TOKEN=server-token
+STACKBOX_API_URL=http://127.0.0.1:10010
+STACKBOX_API_TOKEN=server-token
 ```
 
-`FARM_API_TOKEN`은 farmd의 token과 같아야 합니다. Vite 개발 서버와 운영 Node 서버만 읽으며
+`STACKBOX_API_TOKEN`은 stackboxd의 token과 같아야 합니다. Vite 개발 서버와 운영 Node 서버만 읽으며
 브라우저 번들에는 포함되지 않습니다. `VITE_` 접두사를 붙이지 마세요.
 설정을 변경하면 포탈 서버를 재시작하세요.
 
 ## 화면
 
-- `/`: 실제 farm 목록, 검색·상태 필터·정렬·pagination, 호스트 메모리 예약, farm 생성
-- `/farms/:id`: VM 토폴로지, 메모리·디스크, 배포·재개·삭제, public endpoint 주소, 작업 내역, SSE 로그
+- `/`: 실제 stackbox 목록, 검색·상태 필터·정렬·pagination, 호스트 메모리 예약, stackbox 생성
+- `/stackboxes/:id`: VM 토폴로지, 메모리·디스크, 배포·재개·삭제, public endpoint 주소, 작업 내역, SSE 로그
 - `/jobs`: 진행 중·완료·실패/중단된 작업과 마지막 phase
 - `/host`: runtime·golden image·가상화 준비 상태, 메모리·디스크·상태 디렉터리
 
-첫 실행 시 실제 farm이 없으면 빈 화면을 표시합니다. 예제 farm을 자동으로 생성하지 않습니다.
-Farm마다 VM 한 대를 만들며, Kolla Ansible과 DB·메시지 큐·선택한 OpenStack 서비스를
+첫 실행 시 실제 stackbox가 없으면 빈 화면을 표시합니다. 예제 stackbox를 자동으로 생성하지 않습니다.
+Stackbox마다 VM 한 대를 만들며, Kolla Ansible과 DB·메시지 큐·선택한 OpenStack 서비스를
 모두 그 VM에 설치합니다. 기본 3 GiB에 선택 서비스의 메모리를 합산하며,
 배포 가능한 서비스를 모두 선택하면 8 GiB입니다.
 Keystone·Glance는 필수이며 Placement·Horizon·Neutron을 선택할 수 있습니다.
 Nova는 준비 중으로 표시하고 선택할 수 없습니다. 서비스 간 통신은 같은 VM 안에서
 이루어지며 단일 VM의 eth0을 사용합니다.
-기존 다중 VM Farm은 기존 역할과 VM을 그대로 표시하고 삭제할 수 있습니다.
-기존 Farm의 배포는 비활성화하며, 단일 VM Farm을 새로 만들도록 안내합니다.
+기존 다중 VM Stackbox는 기존 역할과 VM을 그대로 표시하고 삭제할 수 있습니다.
+기존 Stackbox의 배포는 비활성화하며, 단일 VM Stackbox를 새로 만들도록 안내합니다.
 배포는 VM 생성과 분리되며, 실패 시 마지막 배포 phase를 재개 폼의 기본값으로 제안합니다.
 
 상태는 TanStack Query로 주기적으로 갱신하며, 로그는 `EventSource`로 수신합니다.
@@ -81,13 +81,13 @@ API는 Host 헤더가 `localhost`, `127.0.0.1`, `[::1]`, `PORTAL_HOST` 또는 `P
 ## 서버 경계
 
 ```text
-Browser → /api/v1/* → web/server/proxy.mjs → farmd → microsandbox VMs
+Browser → /api/v1/* → web/server/proxy.mjs → stackboxd → microsandbox VMs
 ```
 
 개발·운영 모두 같은 API 프록시를 사용합니다. 서버가 bearer token을 주입하고,
 교차 출처 요청과 지원하지 않는 API 경로를 차단합니다.
 `/endpoints` 응답에서는 `services`만 전달하며 관리자 인증정보를 제거합니다.
-화면은 비밀값이 없는 farm record의 exposure로 public URL을 표시하므로
+화면은 비밀값이 없는 stackbox record의 exposure로 public URL을 표시하므로
 관리자 인증정보 API를 자동으로 호출하지 않습니다. 브라우저 저장소에도 token이나 password를 쓰지 않습니다.
 
 OpenStack 인스턴스 관리 화면과 Nova·Cinder 배포는 아직 지원하지 않습니다.
@@ -107,15 +107,15 @@ Hosts와 Jobs 화면에서 단계·실패 이유·재시작으로 중단된 작�
 등록 요청 완료/실패 후 입력을 비웁니다. 조회 API에는 인증 정보를 반환하지 않습니다.
 등록 해제는 중앙 기록과 암호화된 인증 정보만 지우며 원격 설치나 VM을 삭제하지 않습니다.
 
-Farm 생성의 `실행 호스트`에서 준비된 호스트(Hosts에서 등록한 로컬 호스트, 에이전트 호스트 또는 원격 서버)를 선택합니다.
-원격 호스트는 환경 준비와 단일 VM을 지원하는 Farm 실행기 설치를 마치고 5분 이내에 SSH 점검한 상태여야 합니다.
-기존 실행기가 단일 VM을 지원하지 않으면 업데이트 안내를 표시하고 신규 Farm 생성을 막습니다.
-기존 실행기에 연결된 Farm의 상태 조회와 삭제는 계속 사용할 수 있습니다.
+Stackbox 생성의 `실행 호스트`에서 준비된 호스트(Hosts에서 등록한 로컬 호스트, 에이전트 호스트 또는 원격 서버)를 선택합니다.
+원격 호스트는 환경 준비와 단일 VM을 지원하는 Stackbox 실행기 설치를 마치고 5분 이내에 SSH 점검한 상태여야 합니다.
+기존 실행기가 단일 VM을 지원하지 않으면 업데이트 안내를 표시하고 신규 Stackbox 생성을 막습니다.
+기존 실행기에 연결된 Stackbox의 상태 조회와 삭제는 계속 사용할 수 있습니다.
 선택한 호스트의 예약 한도로 메모리를 검사하며, 공개 URL은 타겟의 IPv4/DNS로 설정하세요.
 원격 서비스 포트는 타겟의 모든 IPv4 인터페이스에 바인딩합니다.
-Farm 목록·상세에 실행 호스트를 표시하고, 원격 조회 실패 시 마지막 VM 상태와 연결 오류를 함께 표시합니다.
-호스트에 Farm이 남아 있으면 등록 해제를 거절합니다. 인증 변경은 지문 확인 후 같은 주소·port·사용자의 인증 정보만 교체합니다.
-한 Farm을 여러 호스트로 나누는 구성은 지원하지 않습니다.
+Stackbox 목록·상세에 실행 호스트를 표시하고, 원격 조회 실패 시 마지막 VM 상태와 연결 오류를 함께 표시합니다.
+호스트에 Stackbox가 남아 있으면 등록 해제를 거절합니다. 인증 변경은 지문 확인 후 같은 주소·port·사용자의 인증 정보만 교체합니다.
+한 Stackbox를 여러 호스트로 나누는 구성은 지원하지 않습니다.
 조건과 보관·복구 방법은 [원격 호스트 운영](../docs/remote-hosts.md)을 참고하세요.
 
 ## 검증과 API 타입

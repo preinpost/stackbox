@@ -7,7 +7,7 @@ requests with the same shapes, so a test can run the generated Python block itse
 
 * microversions 1.0 - 1.19 answer `POST /resource_providers` with 201 and an empty body,
   and 1.20 on answers 200 with the new provider; both carry `Location` (which is why a
-  script that reads `created["uuid"]` fails here, as it did on the farm);
+  script that reads `created["uuid"]` fails here, as it did on the stackbox);
 * a resource provider takes a trait only when the trait table holds it, and
   `PUT /traits/<name>` creates a missing one (201) and accepts an existing one (204);
 * a provider's trait list is a list of strings on every microversion.
@@ -204,7 +204,7 @@ class Handler(BaseHTTPRequestHandler):
                 wanted = body.get("traits") or []
                 unknown = sorted(set(wanted) - TRAITS)
                 if unknown:
-                    # The refusal that a farm which never created its own traits hits.
+                    # The refusal that a stackbox which never created its own traits hits.
                     return self.answer(
                         400,
                         {
@@ -232,10 +232,10 @@ class Handler(BaseHTTPRequestHandler):
 def main():
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 0
     server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
-    # The compute Nova itself reported, which a simulated farm's child providers hang off.
+    # The compute Nova itself reported, which a simulated stackbox's child providers hang off.
     root = {
         "uuid": "11111111-1111-1111-1111-111111111111",
-        "name": "farm-compute-1",
+        "name": "stackbox-compute-1",
         "parent_provider_uuid": None,
         "generation": 5,
         "inventories": {"VCPU": {"total": 8}, "MEMORY_MB": {"total": 4096}},

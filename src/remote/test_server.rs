@@ -18,15 +18,16 @@ pub struct Observed {
     pub golden: AtomicBool,
     pub fail_smoke: AtomicBool,
     pub calls: Mutex<Vec<String>>,
-    pub rpc_farms: Mutex<std::collections::BTreeMap<String, Vec<crate::farm::FarmNode>>>,
+    pub rpc_stackboxes:
+        Mutex<std::collections::BTreeMap<String, Vec<crate::stackbox::StackboxNode>>>,
     pub fail_scan: AtomicBool,
     /// Answer `Hello` like an agent from before template transfers.
     pub legacy_agent: AtomicBool,
     /// Snapshot IDs this host keeps a copy of, with their references.
     pub cached: Mutex<std::collections::BTreeMap<String, String>>,
-    /// Public port bases that farms of other coordinators hold on this host.
+    /// Public port bases that stackboxes of other coordinators hold on this host.
     pub reserved_ports: Mutex<Vec<u16>>,
-    /// The farm kernel path this host's shell inspection would report.
+    /// The stackbox kernel path this host's shell inspection would report.
     pub kernel: Mutex<Option<String>>,
     /// Why an installed kernel is not used, as the shell inspection would report it.
     pub kernel_reason: Mutex<Option<String>>,
@@ -100,7 +101,7 @@ struct Handler {
     input: Vec<u8>,
     /// A shell request arrived: stdin stays open and carries terminal frames.
     shell: bool,
-    /// A farm kernel upload arrived: stdin carries the library, not a script.
+    /// A stackbox kernel upload arrived: stdin carries the library, not a script.
     kernel_upload: bool,
 }
 impl Handler {
@@ -205,7 +206,7 @@ impl server::Handler for Handler {
         session: &mut server::Session,
     ) -> Result<(), Self::Error> {
         let text = String::from_utf8_lossy(command);
-        assert!(text.starts_with("timeout ") || text.contains("/farm-agent"));
+        assert!(text.starts_with("timeout ") || text.contains("/stackbox-agent"));
         // The kernel upload carries its script in the command and the library on stdin.
         self.kernel_upload = text.contains("libkrunfw") && text.contains("sha256sum -c");
         self.input.clear();
@@ -235,7 +236,7 @@ impl server::Handler for Handler {
                 .unwrap()
                 .push("kernel-upload".into());
             *self.observed.kernel.lock().unwrap() = Some(
-                "/home/operator/.local/share/farm/libkrunfw/0123456789abcdef/libkrunfw.so.5.6.1"
+                "/home/operator/.local/share/stackbox/libkrunfw/0123456789abcdef/libkrunfw.so.5.6.1"
                     .into(),
             );
             session.exit_status_request(channel, 0)?;
@@ -292,7 +293,7 @@ impl server::Handler for Handler {
                         .unwrap()
                         .insert(snapshot_id, reference.clone());
                     Reply::Imported {
-                        snapshot: crate::farm::ImportedSnapshot {
+                        snapshot: crate::stackbox::ImportedSnapshot {
                             reference,
                             labels: Default::default(),
                             size_bytes: Some(4096),
@@ -322,11 +323,11 @@ impl server::Handler for Handler {
                         return Ok(());
                     }
                     Reply::Inventory {
-                        farms: self.observed.rpc_farms.lock().unwrap().clone(),
+                        stackboxes: self.observed.rpc_stackboxes.lock().unwrap().clone(),
                     }
                 }
                 Operation::Create {
-                    farm_id,
+                    stackbox_id,
                     plan,
                     share,
                     source,
@@ -339,7 +340,7 @@ impl server::Handler for Handler {
                             format!(
                                 "{}\n",
                                 serde_json::to_string(&Frame::Error {
-                                    message: "remote public ports are reserved by another farm".into()
+                                    message: "remote public ports are reserved by another stackbox".into()
                                 })
                                 .unwrap()
                             )
@@ -369,13 +370,13 @@ impl server::Handler for Handler {
                         .into_iter()
                         .filter(|node| {
                             share.as_ref().is_none_or(|share| {
-                                crate::farm::suffix(node.role, node.index)
+                                crate::stackbox::suffix(node.role, node.index)
                                     .is_some_and(|s| share.nodes.contains(&s))
                             })
                         })
-                        .map(|node| crate::farm::FarmNode {
+                        .map(|node| crate::stackbox::StackboxNode {
                             index: node.index,
-                            name: crate::farm::node_name(&farm_id, node.role, node.index),
+                            name: crate::stackbox::node_name(&stackbox_id, node.role, node.index),
                             role: Some(node.role),
                             status: "running".into(),
                             memory_mib: node.memory_mib,
@@ -383,10 +384,10 @@ impl server::Handler for Handler {
                         })
                         .collect();
                     self.observed
-                        .rpc_farms
+                        .rpc_stackboxes
                         .lock()
                         .unwrap()
-                        .insert(farm_id, nodes.clone());
+                        .insert(stackbox_id, nodes.clone());
                     Reply::Nodes { nodes }
                 }
                 Operation::Deploy { from, .. } => {
@@ -407,28 +408,28 @@ impl server::Handler for Handler {
                     });
                     Reply::Done
                 }
-                Operation::Delete { farm_id, .. } => {
-                    self.observed.rpc_farms.lock().unwrap().remove(&farm_id);
+                Operation::Delete { stackbox_id, .. } => {
+                    self.observed.rpc_stackboxes.lock().unwrap().remove(&stackbox_id);
                     Reply::Done
                 }
-                Operation::Relink { farm_id, url, .. } => {
+                Operation::Relink { stackbox_id, url, .. } => {
                     self.observed
                         .calls
                         .lock()
                         .unwrap()
-                        .push(format!("relink:{farm_id}:{url}"));
+                        .push(format!("relink:{stackbox_id}:{url}"));
                     Reply::Done
                 }
-                Operation::Prepare { farm_id, .. } => {
+                Operation::Prepare { stackbox_id, .. } => {
                     self.observed
                         .calls
                         .lock()
                         .unwrap()
-                        .push(format!("prepare:{farm_id}"));
+                        .push(format!("prepare:{stackbox_id}"));
                     Reply::Done
                 }
                 Operation::Expand {
-                    farm_id,
+                    stackbox_id,
                     plan,
                     add,
                     source,
@@ -445,17 +446,17 @@ impl server::Handler for Handler {
                         .calls
                         .lock()
                         .unwrap()
-                        .push(format!("expand:{farm_id}:{}", add.join(",")));
+                        .push(format!("expand:{stackbox_id}:{}", add.join(",")));
                     let nodes: Vec<_> = plan
                         .nodes
                         .iter()
                         .filter(|node| {
-                            crate::farm::suffix(node.role, node.index)
+                            crate::stackbox::suffix(node.role, node.index)
                                 .is_some_and(|suffix| add.iter().any(|add| add == &suffix))
                         })
-                        .map(|node| crate::farm::FarmNode {
+                        .map(|node| crate::stackbox::StackboxNode {
                             index: node.index,
-                            name: crate::farm::node_name(&farm_id, node.role, node.index),
+                            name: crate::stackbox::node_name(&stackbox_id, node.role, node.index),
                             role: Some(node.role),
                             status: "running".into(),
                             memory_mib: node.memory_mib,
@@ -463,10 +464,10 @@ impl server::Handler for Handler {
                         })
                         .collect();
                     self.observed
-                        .rpc_farms
+                        .rpc_stackboxes
                         .lock()
                         .unwrap()
-                        .entry(farm_id)
+                        .entry(stackbox_id)
                         .or_default()
                         .extend(nodes.clone());
                     Reply::Nodes { nodes }
@@ -475,18 +476,18 @@ impl server::Handler for Handler {
                     public_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFixture".into(),
                     private_key: "-----BEGIN OPENSSH PRIVATE KEY-----\nfixture\n-----END OPENSSH PRIVATE KEY-----\n".into(),
                 },
-                Operation::DeployCompute { farm_id, index, .. } => {
+                Operation::DeployCompute { stackbox_id, index, .. } => {
                     self.observed
                         .calls
                         .lock()
                         .unwrap()
-                        .push(format!("deploy-compute:{farm_id}:{index}"));
+                        .push(format!("deploy-compute:{stackbox_id}:{index}"));
                     Reply::Done
                 }
                 Operation::Purge => {
-                    let removed = self.observed.rpc_farms.lock().unwrap().len();
-                    self.observed.rpc_farms.lock().unwrap().clear();
-                    Reply::Purged { farms: removed }
+                    let removed = self.observed.rpc_stackboxes.lock().unwrap().len();
+                    self.observed.rpc_stackboxes.lock().unwrap().clear();
+                    Reply::Purged { stackboxes: removed }
                 }
                 Operation::Shell { .. }
                 | Operation::VerifyVm
@@ -513,7 +514,7 @@ impl server::Handler for Handler {
                     unimplemented!("the SSH fixture does not take streamed archives")
                 }
                 Operation::Restore {
-                    farm_id,
+                    stackbox_id,
                     plan,
                     exposure,
                     ..
@@ -524,7 +525,7 @@ impl server::Handler for Handler {
                             format!(
                                 "{}\n",
                                 serde_json::to_string(&Frame::Error {
-                                    message: "remote public ports are reserved by another farm".into()
+                                    message: "remote public ports are reserved by another stackbox".into()
                                 })
                                 .unwrap()
                             )
@@ -538,9 +539,9 @@ impl server::Handler for Handler {
                     let nodes: Vec<_> = plan
                         .nodes
                         .into_iter()
-                        .map(|node| crate::farm::FarmNode {
+                        .map(|node| crate::stackbox::StackboxNode {
                             index: node.index,
-                            name: crate::farm::node_name(&farm_id, node.role, node.index),
+                            name: crate::stackbox::node_name(&stackbox_id, node.role, node.index),
                             role: Some(node.role),
                             status: "running".into(),
                             memory_mib: node.memory_mib,
@@ -548,10 +549,10 @@ impl server::Handler for Handler {
                         })
                         .collect();
                     self.observed
-                        .rpc_farms
+                        .rpc_stackboxes
                         .lock()
                         .unwrap()
-                        .insert(farm_id, nodes.clone());
+                        .insert(stackbox_id, nodes.clone());
                     Reply::Nodes { nodes }
                 }
                 Operation::Freeze { .. }
@@ -588,7 +589,7 @@ impl server::Handler for Handler {
         let output = if script.contains("field()") {
             self.observed.calls.lock().unwrap().push("inspect".into());
             format!(
-                "FARM\tos\tLinux\nFARM\tarch\t{}\nFARM\tkvm\t1\nFARM\tsudo\t0\nFARM\tmemory_total\t32768\nFARM\tmemory_available\t24000\nFARM\tdisk_available\t200000\nFARM\tmsb\t{}\nFARM\tdocker\t1\nFARM\tgolden\t{}\nFARM\tlibkrunfw\t{}\nFARM\tlibkrunfw_note\t{}\n",
+                "STACKBOX\tos\tLinux\nSTACKBOX\tarch\t{}\nSTACKBOX\tkvm\t1\nSTACKBOX\tsudo\t0\nSTACKBOX\tmemory_total\t32768\nSTACKBOX\tmemory_available\t24000\nSTACKBOX\tdisk_available\t200000\nSTACKBOX\tmsb\t{}\nSTACKBOX\tdocker\t1\nSTACKBOX\tgolden\t{}\nSTACKBOX\tlibkrunfw\t{}\nSTACKBOX\tlibkrunfw_note\t{}\n",
                 std::env::consts::ARCH,
                 self.observed
                     .msb
@@ -625,12 +626,12 @@ impl server::Handler for Handler {
                 .push("kernel-manifest".into());
             String::new()
         } else if script
-            .contains("FARM_MSB_RELEASE_BASE:-https://github.com/preinpost/microsandbox")
+            .contains("STACKBOX_MSB_RELEASE_BASE:-https://github.com/preinpost/microsandbox")
         {
             self.observed.calls.lock().unwrap().push("install".into());
             *self.observed.msb.lock().unwrap() = Some(MSB_VERSION.into());
             String::new()
-        } else if script.contains("name=farm-check-") {
+        } else if script.contains("name=stackbox-check-") {
             self.observed.calls.lock().unwrap().push("smoke".into());
             if self.observed.fail_smoke.load(Ordering::SeqCst) {
                 code = 1;
@@ -640,12 +641,12 @@ impl server::Handler for Handler {
             // VFIO and the mdev bus built in, and registers the sample mtty device.
             let mtty = u8::from(self.observed.kernel.lock().unwrap().is_some());
             let types = if mtty == 1 {
-                "FARM-GPU type mtty-1 24\n"
+                "STACKBOX-GPU type mtty-1 24\n"
             } else {
                 ""
             };
             format!(
-                "fixture-password-only PRIVATE-KEY-DO-NOT-PERSIST\nFARM-GPU vfio {mtty}\nFARM-GPU mdev {mtty}\nFARM-GPU mtty {mtty}\nFARM-GPU release 6.12.113\n{types}FARM-MDEV {mtty}\n"
+                "fixture-password-only PRIVATE-KEY-DO-NOT-PERSIST\nSTACKBOX-GPU vfio {mtty}\nSTACKBOX-GPU mdev {mtty}\nSTACKBOX-GPU mtty {mtty}\nSTACKBOX-GPU release 6.12.113\n{types}STACKBOX-MDEV {mtty}\n"
             )
         } else {
             code = 1;

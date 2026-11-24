@@ -1,11 +1,11 @@
 # Cuts a release for every push to main: bumps the version (patch unless a commit
 # since the last release says #minor/[minor] or #major/[major]), commits it to main,
-# tags it, builds the farm-agent for every platform a host can run, uploads them to
+# tags it, builds the stackbox-agent for every platform a host can run, uploads them to
 # the public R2 bucket, publishes a release that links them, and merges the result
 # back into dev.
 #
 # The guest kernels are not part of this release: .forgejo/workflows/libkrunfw.yml builds and
-# publishes them to the farm-libkrunfw bucket for linux-x86_64 and linux-aarch64 on its own
+# publishes them to the stackbox-libkrunfw bucket for linux-x86_64 and linux-aarch64 on its own
 # schedule (push to main when the kernel scripts change, or workflow_dispatch). A release
 # therefore neither waits for a kernel build nor changes the kernel a host installs.
 name: release
@@ -101,8 +101,8 @@ jobs:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       R2_BUCKET: public-bucket
-      R2_PREFIX: farm-agent
-      AGENT_BASE_URL: https://public-bucket.preinpost.in/farm-agent
+      R2_PREFIX: stackbox-agent
+      AGENT_BASE_URL: https://public-bucket.preinpost.in/stackbox-agent
     steps:
       - uses: actions/checkout@v4
         with:
@@ -175,7 +175,7 @@ jobs:
           tar -xJf "$sdk.tar.xz" -C "$sdk"
           echo "MACOS_SDK=$sdk/MacOSX.sdk" >>"$GITHUB_ENV"
 
-      # Built from the release commit, since the version bump changes FARM_BUILD_ID: a
+      # Built from the release commit, since the version bump changes STACKBOX_BUILD_ID: a
       # coordinator built from the tag then accepts these agents. Nothing is pushed
       # until all of them build, so a failed build leaves no tag behind.
       - name: Build the agents
@@ -185,14 +185,14 @@ jobs:
             sh scripts/build-agent.sh "$target"
           done
           ids=$(for target in $TARGETS; do
-            grep -haoE 'farm-agent-build:[0-9a-f]+' dist/agent/"$target"/farm-agent*
+            grep -haoE 'stackbox-agent-build:[0-9a-f]+' dist/agent/"$target"/stackbox-agent*
           done | sort -u)
           # An empty $ids still counts as one line to wc, so check it separately.
           if [ -z "$ids" ] || [ "$(printf '%s\n' "$ids" | wc -l)" -ne 1 ]; then
             echo "no build id found, or the agents disagree on it: $ids" >&2
             exit 1
           fi
-          echo "BUILD_ID=${ids#farm-agent-build:}" >>"$GITHUB_ENV"
+          echo "BUILD_ID=${ids#stackbox-agent-build:}" >>"$GITHUB_ENV"
 
       # Under the build id, which is all a coordinator knows, so the paths never change
       # and can be cached for good. Uploading before the push is harmless: the same
@@ -205,8 +205,8 @@ jobs:
             '{build_id: $id, version: $version, agents: {}}' >"$manifest"
           for target in $TARGETS; do
             case $target in
-              windows-*) file=farm-agent.exe ;;
-              *) file=farm-agent ;;
+              windows-*) file=stackbox-agent.exe ;;
+              *) file=stackbox-agent ;;
             esac
             case $target in
               x86_64 | aarch64) platform=linux-$target ;;
@@ -246,7 +246,7 @@ jobs:
           {
             git log --no-merges --format='- %s (%h)' "${PREV:+$PREV..}v$VERSION" \
               | grep -v '^- Release v' || true
-            printf '\n### farm-agent\n\nBuild id `%s`. A coordinator built from this tag accepts these agents ([manifest](%s/%s/manifest.json)).\n\n' \
+            printf '\n### stackbox-agent\n\nBuild id `%s`. A coordinator built from this tag accepts these agents ([manifest](%s/%s/manifest.json)).\n\n' \
               "$BUILD_ID" "$AGENT_BASE_URL" "$BUILD_ID"
             printf '| platform | sha256 |\n|---|---|\n'
             jq -r --arg base "$AGENT_BASE_URL" \

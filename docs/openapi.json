@@ -1,12 +1,12 @@
 {
   "openapi": "3.1.0",
   "info": {
-    "title": "farm",
+    "title": "stackbox",
     "description": "",
     "license": {
       "name": ""
     },
-    "version": "0.1.8"
+    "version": "0.1.9"
   },
   "paths": {
     "/api/v1/agent-hosts": {
@@ -488,884 +488,6 @@
         }
       }
     },
-    "/api/v1/farms": {
-      "get": {
-        "tags": [],
-        "operationId": "list",
-        "responses": {
-          "200": {
-            "description": "",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/FarmView"
-                  }
-                }
-              }
-            }
-          }
-        }
-      },
-      "post": {
-        "tags": [],
-        "operationId": "create",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/CreateRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "202": {
-            "description": "",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Job"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/farms/{id}": {
-      "get": {
-        "tags": [],
-        "operationId": "detail",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/FarmView"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          }
-        }
-      },
-      "delete": {
-        "tags": [],
-        "operationId": "delete",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "forget",
-            "in": "path",
-            "description": "Remove only the coordinator's record, without asking the host. Whatever the host\nstill keeps stays there; use it when the host is gone or unreachable.",
-            "required": true,
-            "schema": {
-              "type": "boolean"
-            }
-          }
-        ],
-        "responses": {
-          "202": {
-            "description": "",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Job"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/farms/{id}/computes": {
-      "post": {
-        "tags": [],
-        "operationId": "add_compute",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/AddComputeRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "202": {
-            "description": "Add the next compute VM to a deployed multi-node farm, on the given host or the farm's primary host",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Job"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/farms/{id}/deploy": {
-      "post": {
-        "tags": [],
-        "operationId": "deploy",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/DeployRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "202": {
-            "description": "",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Job"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/farms/{id}/endpoints": {
-      "get": {
-        "tags": [],
-        "operationId": "endpoints",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Endpoints"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/farms/{id}/gpu/guest-script": {
-      "get": {
-        "tags": [],
-        "operationId": "gpu_guest_script",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "The fake nvidia-smi script, ready to install as /usr/bin/nvidia-smi",
-            "content": {
-              "text/x-shellscript": {
-                "schema": {
-                  "type": "string"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/farms/{id}/gpu/user-data": {
-      "get": {
-        "tags": [],
-        "operationId": "gpu_user_data",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "A user-data installer for images that do not apply Nova vendor data (CirrOS): it writes the fake nvidia-smi and prints its XML to the console",
-            "content": {
-              "text/x-shellscript": {
-                "schema": {
-                  "type": "string"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/farms/{id}/instances": {
-      "get": {
-        "tags": [],
-        "operationId": "instances",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "Nova servers in a GPU farm, with each flavor's GPU resource classes and the load farm applied",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/FarmInstance"
-                  }
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "Not a deployed GPU farm, or Nova is not part of it",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/farms/{id}/instances/{server}/gpu-load": {
-      "get": {
-        "tags": [],
-        "operationId": "gpu_load",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "server",
-            "in": "path",
-            "description": "Nova server UUID, or a unique instance name",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "The load for the instance; a server without one shows the default with applied=false",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/GpuLoadView"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          }
-        }
-      },
-      "put": {
-        "tags": [],
-        "operationId": "set_gpu_load",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "server",
-            "in": "path",
-            "description": "Nova server UUID, or a unique instance name",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/GpuLoad"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "The load was written to the instance's metadata; the guest sees it within about 15 seconds",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/GpuLoadView"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          }
-        }
-      },
-      "delete": {
-        "tags": [],
-        "operationId": "clear_gpu_load",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "server",
-            "in": "path",
-            "description": "Nova server UUID, or a unique instance name",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "The metadata is removed; the guest returns to its default at the next metadata refresh",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/GpuLoadView"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/farms/{id}/logs": {
-      "get": {
-        "tags": [],
-        "operationId": "logs",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "after",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "integer",
-              "format": "int64",
-              "minimum": 0
-            }
-          },
-          {
-            "name": "limit",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "integer",
-              "minimum": 0
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/LogEntry"
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/farms/{id}/logs/stream": {
-      "get": {
-        "tags": [],
-        "operationId": "log_stream",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "after",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "integer",
-              "format": "int64",
-              "minimum": 0
-            }
-          },
-          {
-            "name": "limit",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "integer",
-              "minimum": 0
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "SSE: log events with JSON LogEntry data, gap events on expired cursors, error events on read failures",
-            "content": {
-              "text/event-stream": {
-                "schema": {
-                  "type": "string"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/farms/{id}/nodes/{node}/faults": {
-      "put": {
-        "tags": [],
-        "operationId": "set_faults",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "node",
-            "in": "path",
-            "description": "VM of a multi-node farm: control, compute-1, ...",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/Impair"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "description": "The farm with the VM's faults applied; no delay and no loss heals it",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/FarmView"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/farms/{id}/settle": {
-      "post": {
-        "tags": [],
-        "operationId": "settle",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "responses": {
-          "202": {
-            "description": "Wait for the farm's services to answer again after its VM started from disk; no deployment runs",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Job"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
-    "/api/v1/farms/{id}/snapshots": {
-      "post": {
-        "tags": [],
-        "operationId": "freeze",
-        "parameters": [
-          {
-            "name": "id",
-            "in": "path",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/SnapshotRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "202": {
-            "description": "Snapshot job; the farm's VM stops for the capture and starts again. With `node: control` every VM stops, computes first, but only the control VM is captured, as a control template",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Job"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
     "/api/v1/host": {
       "get": {
         "tags": [],
@@ -1714,7 +836,7 @@
           {
             "name": "purge",
             "in": "path",
-            "description": "Also delete this coordinator's farms and leftover VMs on the host, then unregister it.",
+            "description": "Also delete this coordinator's stackboxes and leftover VMs on the host, then unregister it.",
             "required": true,
             "schema": {
               "type": "boolean"
@@ -1742,7 +864,7 @@
             }
           },
           "202": {
-            "description": "purge=true: host job that deletes the farms, their VMs, with snapshots=true the snapshots, and then the host",
+            "description": "purge=true: host job that deletes the stackboxes, their VMs, with snapshots=true the snapshots, and then the host",
             "content": {
               "application/json": {
                 "schema": {
@@ -1777,7 +899,7 @@
     "/api/v1/hosts/{id}/agent": {
       "post": {
         "tags": [],
-        "summary": "Install only the agent, without msb, the farm kernel or a verification boot.",
+        "summary": "Install only the agent, without msb, the stackbox kernel or a verification boot.",
         "description": "Deprecated: `POST /hosts/{id}/prepare` installs the agent too, after the kernel and the\nverification VM, so the portal offers one button. This endpoint stays for older callers.",
         "operationId": "install_agent",
         "parameters": [
@@ -2042,7 +1164,7 @@
         "operationId": "relay_status",
         "responses": {
           "200": {
-            "description": "Where farms that span hosts join",
+            "description": "Where stackboxes that span hosts join",
             "content": {
               "application/json": {
                 "schema": {
@@ -2088,7 +1210,7 @@
             }
           },
           "409": {
-            "description": "Farms that span hosts hold the current URL and CA",
+            "description": "Stackboxes that span hosts hold the current URL and CA",
             "content": {
               "application/json": {
                 "schema": {
@@ -2104,7 +1226,7 @@
         "operationId": "remove_relay",
         "responses": {
           "200": {
-            "description": "The relay is off; farms cannot span hosts",
+            "description": "The relay is off; stackboxes cannot span hosts",
             "content": {
               "application/json": {
                 "schema": {
@@ -2208,64 +1330,6 @@
         }
       }
     },
-    "/api/v1/releases/farms": {
-      "post": {
-        "tags": [],
-        "operationId": "create_release",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/ReleaseCreateRequest"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "202": {
-            "description": "Assemble job: the plan's imports, the control VM, then each compute, each step a job of its own listed in `assembly`",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/Job"
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorBody"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
     "/api/v1/releases/plan": {
       "post": {
         "tags": [],
@@ -2313,6 +1377,64 @@
           },
           "409": {
             "description": "No control template of the release, and this coordinator installs another release clean",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/releases/stackboxes": {
+      "post": {
+        "tags": [],
+        "operationId": "create_release",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReleaseCreateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Assemble job: the plan's imports, the control VM, then each compute, each step a job of its own listed in `assembly`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Job"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "",
             "content": {
               "application/json": {
                 "schema": {
@@ -2599,6 +1721,884 @@
           }
         }
       }
+    },
+    "/api/v1/stackboxes": {
+      "get": {
+        "tags": [],
+        "operationId": "list",
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/StackboxView"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [],
+        "operationId": "create",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Job"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/stackboxes/{id}": {
+      "get": {
+        "tags": [],
+        "operationId": "detail",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StackboxView"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [],
+        "operationId": "delete",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "forget",
+            "in": "path",
+            "description": "Remove only the coordinator's record, without asking the host. Whatever the host\nstill keeps stays there; use it when the host is gone or unreachable.",
+            "required": true,
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Job"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/stackboxes/{id}/computes": {
+      "post": {
+        "tags": [],
+        "operationId": "add_compute",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AddComputeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Add the next compute VM to a deployed multi-node stackbox, on the given host or the stackbox's primary host",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Job"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/stackboxes/{id}/deploy": {
+      "post": {
+        "tags": [],
+        "operationId": "deploy",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeployRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Job"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/stackboxes/{id}/endpoints": {
+      "get": {
+        "tags": [],
+        "operationId": "endpoints",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Endpoints"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/stackboxes/{id}/gpu/guest-script": {
+      "get": {
+        "tags": [],
+        "operationId": "gpu_guest_script",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The fake nvidia-smi script, ready to install as /usr/bin/nvidia-smi",
+            "content": {
+              "text/x-shellscript": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/stackboxes/{id}/gpu/user-data": {
+      "get": {
+        "tags": [],
+        "operationId": "gpu_user_data",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "A user-data installer for images that do not apply Nova vendor data (CirrOS): it writes the fake nvidia-smi and prints its XML to the console",
+            "content": {
+              "text/x-shellscript": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/stackboxes/{id}/instances": {
+      "get": {
+        "tags": [],
+        "operationId": "instances",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Nova servers in a GPU stackbox, with each flavor's GPU resource classes and the load stackbox applied",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/StackboxInstance"
+                  }
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Not a deployed GPU stackbox, or Nova is not part of it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/stackboxes/{id}/instances/{server}/gpu-load": {
+      "get": {
+        "tags": [],
+        "operationId": "gpu_load",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "server",
+            "in": "path",
+            "description": "Nova server UUID, or a unique instance name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The load for the instance; a server without one shows the default with applied=false",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GpuLoadView"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [],
+        "operationId": "set_gpu_load",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "server",
+            "in": "path",
+            "description": "Nova server UUID, or a unique instance name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GpuLoad"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The load was written to the instance's metadata; the guest sees it within about 15 seconds",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GpuLoadView"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [],
+        "operationId": "clear_gpu_load",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "server",
+            "in": "path",
+            "description": "Nova server UUID, or a unique instance name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The metadata is removed; the guest returns to its default at the next metadata refresh",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GpuLoadView"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/stackboxes/{id}/logs": {
+      "get": {
+        "tags": [],
+        "operationId": "logs",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "after",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "limit",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/LogEntry"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/stackboxes/{id}/logs/stream": {
+      "get": {
+        "tags": [],
+        "operationId": "log_stream",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "after",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "limit",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "SSE: log events with JSON LogEntry data, gap events on expired cursors, error events on read failures",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/stackboxes/{id}/nodes/{node}/faults": {
+      "put": {
+        "tags": [],
+        "operationId": "set_faults",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "node",
+            "in": "path",
+            "description": "VM of a multi-node stackbox: control, compute-1, ...",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Impair"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The stackbox with the VM's faults applied; no delay and no loss heals it",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StackboxView"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/stackboxes/{id}/settle": {
+      "post": {
+        "tags": [],
+        "operationId": "settle",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "description": "Wait for the stackbox's services to answer again after its VM started from disk; no deployment runs",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Job"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/stackboxes/{id}/snapshots": {
+      "post": {
+        "tags": [],
+        "operationId": "freeze",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SnapshotRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Snapshot job; the stackbox's VM stops for the capture and starts again. With `node: control` every VM stops, computes first, but only the control VM is captured, as a control template",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Job"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -2611,7 +2611,7 @@
               "string",
               "null"
             ],
-            "description": "Compute template snapshot to boot the new VM from instead of installing it clean.\nKolla then only reconfigures it; the template must match the farm's OpenStack\nrelease, components and CPU architecture.",
+            "description": "Compute template snapshot to boot the new VM from instead of installing it clean.\nKolla then only reconfigures it; the template must match the stackbox's OpenStack\nrelease, components and CPU architecture.",
             "default": null
           },
           "host_id": {
@@ -2619,7 +2619,7 @@
               "string",
               "null"
             ],
-            "description": "Host for the new compute VM; omitted for the farm's primary host. A compute on\nanother host joins the farm through its link relay.",
+            "description": "Host for the new compute VM; omitted for the stackbox's primary host. A compute on\nanother host joins the stackbox through its link relay.",
             "default": null
           }
         },
@@ -2713,7 +2713,7 @@
           "computes": {
             "type": "integer",
             "format": "int32",
-            "description": "Compute VMs of the farm the snapshot restores; 0 for all-in-one and templates.",
+            "description": "Compute VMs of the stackbox the snapshot restores; 0 for all-in-one and templates.",
             "minimum": 0
           },
           "created_at": {
@@ -2737,7 +2737,7 @@
               },
               {
                 "$ref": "#/components/schemas/GpuConfig",
-                "description": "Virtual GPU configuration of the frozen farm, if any."
+                "description": "Virtual GPU configuration of the frozen stackbox, if any."
               }
             ]
           },
@@ -2778,7 +2778,7 @@
               },
               {
                 "$ref": "#/components/schemas/TemplateRole",
-                "description": "`control` or `compute` for a template; absent for a snapshot of a whole farm."
+                "description": "`control` or `compute` for a template; absent for a snapshot of a whole stackbox."
               }
             ]
           },
@@ -2799,7 +2799,7 @@
           "snapshot_id": {
             "type": "string"
           },
-          "source_farm": {
+          "source_stackbox": {
             "type": [
               "string",
               "null"
@@ -2841,7 +2841,7 @@
               "string",
               "null"
             ],
-            "description": "The farm job that ran it; none for an import, which the snapshot shows."
+            "description": "The stackbox job that ran it; none for an import, which the snapshot shows."
           },
           "node": {
             "type": [
@@ -3050,7 +3050,7 @@
           },
           "estimated": {
             "type": "boolean",
-            "description": "True while `footprint_mib` is a planning estimate that no farm has measured yet."
+            "description": "True while `footprint_mib` is a planning estimate that no stackbox has measured yet."
           },
           "footprint_mib": {
             "type": "integer",
@@ -3225,7 +3225,7 @@
               "string",
               "null"
             ],
-            "description": "Registered host that runs the farm: this machine's local host or a remote one.\nRequired; it is optional only so the error can say how to register one."
+            "description": "Registered host that runs the stackbox: this machine's local host or a remote one.\nRequired; it is optional only so the error can say how to register one."
           },
           "id": {
             "type": "string"
@@ -3243,8 +3243,8 @@
                 "type": "null"
               },
               {
-                "$ref": "#/components/schemas/FarmLayout",
-                "description": "VMs of a farm without computes (see [`PlanRequest::layout`])."
+                "$ref": "#/components/schemas/StackboxLayout",
+                "description": "VMs of a stackbox without computes (see [`PlanRequest::layout`])."
               }
             ]
           },
@@ -3283,7 +3283,7 @@
               "string",
               "null"
             ],
-            "description": "Start from this snapshot instead of an empty VM. Its services replace `components`.\nA control template starts a multi-node farm with its control VM alone, ready for\ncomputes to be added; a compute template cannot start a farm."
+            "description": "Start from this snapshot instead of an empty VM. Its services replace `components`.\nA control template starts a multi-node stackbox with its control VM alone, ready for\ncomputes to be added; a compute template cannot start a stackbox."
           }
         },
         "additionalProperties": false
@@ -3508,376 +3508,9 @@
           }
         }
       },
-      "FarmInstance": {
-        "type": "object",
-        "description": "A virtual GPU instance as the portal's load editor lists it. `gpu_count` comes\nfrom the flavor's resource class (or 1 when it asks for none, because the guest\nscript defaults to one virtual GPU).",
-        "required": [
-          "id",
-          "name",
-          "status",
-          "flavor",
-          "gpu_count",
-          "resources",
-          "applied"
-        ],
-        "properties": {
-          "applied": {
-            "type": "boolean",
-            "description": "Whether the instance's metadata currently carries `farm_gpu_*`."
-          },
-          "flavor": {
-            "type": "string"
-          },
-          "gpu_count": {
-            "type": "integer",
-            "format": "int32",
-            "description": "Virtual GPUs the flavor asks for, 0 when it asks for no GPU resource.",
-            "minimum": 0
-          },
-          "id": {
-            "type": "string"
-          },
-          "load": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/GpuLoad",
-                "description": "The load farm applied, or one decoded from the instance's metadata after a\ncoordinator lost its state."
-              }
-            ]
-          },
-          "name": {
-            "type": "string"
-          },
-          "project": {
-            "type": "string"
-          },
-          "properties": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            },
-            "description": "The `farm_gpu_*` keys currently set on the instance."
-          },
-          "resources": {
-            "type": "object",
-            "description": "Resource classes the flavor requires, `VGPU: 1`.",
-            "additionalProperties": {
-              "type": "integer",
-              "format": "int32",
-              "minimum": 0
-            },
-            "propertyNames": {
-              "type": "string"
-            }
-          },
-          "status": {
-            "type": "string"
-          }
-        }
-      },
-      "FarmLayout": {
-        "type": "string",
-        "description": "The layout of a farm without computes, kept readable for farms and snapshots made\nbefore every new farm ran a control VM with computes.",
-        "enum": [
-          "all-in-one",
-          "control"
-        ]
-      },
-      "FarmNode": {
-        "type": "object",
-        "required": [
-          "name",
-          "status",
-          "memory_mib"
-        ],
-        "properties": {
-          "index": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int32",
-            "description": "A multi-node compute VM's position, from 1.",
-            "minimum": 0
-          },
-          "ip": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Live eth0 IPv4 for new all-in-one guests; legacy nodes may retain an overlay address."
-          },
-          "memory_mib": {
-            "type": "integer",
-            "format": "int32",
-            "minimum": 0
-          },
-          "name": {
-            "type": "string"
-          },
-          "role": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/Role"
-              }
-            ]
-          },
-          "status": {
-            "type": "string"
-          }
-        }
-      },
-      "FarmOpenStack": {
-        "type": "object",
-        "description": "The OpenStack release a farm installs, named as the images and documents name it: the code\nname beside the number (`2022.2` is `zed`), and whether this coordinator still supports it.",
-        "required": [
-          "release",
-          "series",
-          "codename",
-          "eol",
-          "supported"
-        ],
-        "properties": {
-          "codename": {
-            "type": "string",
-            "description": "The series' code name for display, `Zed` for 2022.2 and `Caracal` for 2024.1; empty\nwhen it has no published name. Display only: `series` keeps the name the images and\nthe upper-constraints path use."
-          },
-          "eol": {
-            "type": "boolean",
-            "description": "kolla-ansible keeps no branch for it any more, so it installs from the series' last tag."
-          },
-          "release": {
-            "type": "string",
-            "description": "What the farm records, `2022.2`."
-          },
-          "series": {
-            "type": "string",
-            "description": "Its series name, `zed`; the same as `release` from 2023.1 on, where the names became\n`year.release`."
-          },
-          "supported": {
-            "type": "boolean",
-            "description": "False below the oldest supported release, whatever the host's\n`FARM_ALLOW_UNSUPPORTED_RELEASES` says: such a farm keeps working but is out of support."
-          }
-        }
-      },
-      "FarmRecord": {
-        "type": "object",
-        "required": [
-          "id",
-          "status",
-          "nodes",
-          "created_at",
-          "updated_at"
-        ],
-        "properties": {
-          "active_job": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "agent_sha256": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "created_at": {
-            "type": "integer",
-            "format": "int64",
-            "minimum": 0
-          },
-          "error": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "expires_at": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int64",
-            "minimum": 0
-          },
-          "exposure": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/Exposure"
-              }
-            ]
-          },
-          "faults": {
-            "type": "object",
-            "description": "Faults set on a multi-node farm's links, by VM (`control`, `compute-1`, ...).",
-            "additionalProperties": {
-              "$ref": "#/components/schemas/Impair"
-            },
-            "propertyNames": {
-              "type": "string"
-            }
-          },
-          "gpu_loads": {
-            "type": "object",
-            "description": "Virtual GPU loads the portal applied, by Nova server UUID. The guest reads the\nsame values from instance metadata; this copy keeps the pattern the portal shows\nafter a coordinator restart. A farm restored from a snapshot recovers the load\nfrom the instance's metadata instead.",
-            "additionalProperties": {
-              "$ref": "#/components/schemas/GpuLoad"
-            },
-            "propertyNames": {
-              "type": "string"
-            }
-          },
-          "host_id": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "id": {
-            "type": "string"
-          },
-          "last_seen_at": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int64",
-            "minimum": 0
-          },
-          "nodes": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/FarmNode"
-            }
-          },
-          "observation_error": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "owner": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "phase": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/Phase"
-              }
-            ]
-          },
-          "plan": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/Plan"
-              }
-            ]
-          },
-          "remote_generation": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
-          "shares": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/HostShare"
-            },
-            "description": "Other hosts that run some of a multi-node farm's compute VMs. `host_id` runs the rest."
-          },
-          "snapshot_id": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Snapshot this farm was restored from."
-          },
-          "status": {
-            "$ref": "#/components/schemas/FarmStatus"
-          },
-          "step": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Finer progress inside `phase`: our marker or the running Ansible task."
-          },
-          "updated_at": {
-            "type": "integer",
-            "format": "int64",
-            "minimum": 0
-          },
-          "uplink_sha256": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "SHA-256 of the token `host_id`'s switch joins the relay with, for a farm with shares."
-          }
-        }
-      },
-      "FarmStatus": {
-        "type": "string",
-        "enum": [
-          "creating",
-          "created",
-          "deploying",
-          "settling",
-          "ready",
-          "failed",
-          "broken",
-          "deleting",
-          "deleted",
-          "snapshotting"
-        ]
-      },
-      "FarmView": {
-        "allOf": [
-          {
-            "$ref": "#/components/schemas/FarmRecord"
-          },
-          {
-            "type": "object",
-            "properties": {
-              "openstack": {
-                "oneOf": [
-                  {
-                    "type": "null"
-                  },
-                  {
-                    "$ref": "#/components/schemas/FarmOpenStack",
-                    "description": "Absent on a farm created before plans kept their release."
-                  }
-                ]
-              }
-            }
-          }
-        ],
-        "description": "A farm as the API returns it: the stored record plus the release facts the portal labels the\nfarm with. Only the record is kept; the release comes from the release tables, so the names\nlive in one place and a farm's state stays what it was created with."
-      },
       "GpuConfig": {
         "type": "object",
-        "description": "A farm's GPU: `count` virtual devices on every compute VM.\n\nThe `simulated` mode's provider layout is farm's own, so a request can describe the\ncontract another deployment's flavor expects: the resource class, the traits it requires\nand how many cards the host has. `mtty` advertises what Nova finds and takes none of them.",
+        "description": "A stackbox's GPU: `count` virtual devices on every compute VM.\n\nThe `simulated` mode's provider layout is stackbox's own, so a request can describe the\ncontract another deployment's flavor expects: the resource class, the traits it requires\nand how many cards the host has. `mtty` advertises what Nova finds and takes none of them.",
         "properties": {
           "count": {
             "type": "integer",
@@ -3904,7 +3537,7 @@
               "string",
               "null"
             ],
-            "description": "The resource class the flavor asks for. Omitted: [`DEFAULT_RESOURCE_CLASS`]. `PGPU`\nand `CUSTOM_*` build another deployment's contract; the inventory is farm's either\nway, so no driver checks it.",
+            "description": "The resource class the flavor asks for. Omitted: [`DEFAULT_RESOURCE_CLASS`]. `PGPU`\nand `CUSTOM_*` build another deployment's contract; the inventory is stackbox's either\nway, so no driver checks it.",
             "example": "VGPU"
           },
           "traits": {
@@ -3922,7 +3555,7 @@
       },
       "GpuKernel": {
         "type": "object",
-        "description": "What the guest kernel of a verification VM reported about the GPU stack. Every flag is\nread inside that VM, so it says the kernel came up with the feature, not that the host\nhas a module for it: farm's kernel is built with VFIO and mdev included.",
+        "description": "What the guest kernel of a verification VM reported about the GPU stack. Every flag is\nread inside that VM, so it says the kernel came up with the feature, not that the host\nhas a module for it: stackbox's kernel is built with VFIO and mdev included.",
         "properties": {
           "kernel": {
             "$ref": "#/components/schemas/GpuKernelKind"
@@ -3932,7 +3565,7 @@
               "string",
               "null"
             ],
-            "description": "Installed kernel's id: the directory name under `~/.local/share/farm/libkrunfw`."
+            "description": "Installed kernel's id: the directory name under `~/.local/share/stackbox/libkrunfw`."
           },
           "kernel_release": {
             "type": "string",
@@ -3968,7 +3601,7 @@
       },
       "GpuKernelKind": {
         "type": "string",
-        "description": "The kernel a verification VM booted: farm's installed kernel, or microsandbox's stock one.",
+        "description": "The kernel a verification VM booted: stackbox's installed kernel, or microsandbox's stock one.",
         "enum": [
           "custom",
           "stock"
@@ -3976,7 +3609,7 @@
       },
       "GpuLoad": {
         "type": "object",
-        "description": "The load a portal sets on one instance. farm turns it into a sample table and\nwrites it to the instance's Nova metadata; the guest script reads that table.\nNothing computes on the values: this exists to exercise monitoring paths.",
+        "description": "The load a portal sets on one instance. stackbox turns it into a sample table and\nwrites it to the instance's Nova metadata; the guest script reads that table.\nNothing computes on the values: this exists to exercise monitoring paths.",
         "properties": {
           "max": {
             "type": "integer",
@@ -4031,7 +3664,7 @@
       },
       "GpuLoadView": {
         "type": "object",
-        "description": "One instance's load plus the metadata keys farm found on it.",
+        "description": "One instance's load plus the metadata keys stackbox found on it.",
         "required": [
           "server",
           "load",
@@ -4050,7 +3683,7 @@
             "items": {
               "type": "string"
             },
-            "description": "`farm_gpu_*` keys currently set on the instance."
+            "description": "`stackbox_gpu_*` keys currently set on the instance."
           },
           "server": {
             "type": "string"
@@ -4059,7 +3692,7 @@
       },
       "GpuMode": {
         "type": "string",
-        "description": "How a farm gets a GPU when the host has none. Both modes are virtual devices: no guest\nsees a real GPU, and nothing computes on one.",
+        "description": "How a stackbox gets a GPU when the host has none. Both modes are virtual devices: no guest\nsees a real GPU, and nothing computes on one.",
         "enum": [
           "simulated",
           "mtty"
@@ -4067,7 +3700,7 @@
       },
       "GpuPattern": {
         "type": "string",
-        "description": "How a virtual GPU's utilization moves through one period. farm samples the\npattern into a small table; the guest picks a sample from the current second, so\nthe guest needs no trigonometry and the portal's preview draws the same table.",
+        "description": "How a virtual GPU's utilization moves through one period. stackbox samples the\npattern into a small table; the guest picks a sample from the current second, so\nthe guest needs no trigonometry and the portal's preview draws the same table.",
         "enum": [
           "constant",
           "sine",
@@ -4158,7 +3791,7 @@
           },
           "golden_image": {
             "type": "string",
-            "description": "msb snapshot new farms start from; the first farm on the host builds it."
+            "description": "msb snapshot new stackboxes start from; the first stackbox on the host builds it."
           },
           "golden_image_available": {
             "type": "boolean"
@@ -4200,7 +3833,7 @@
               "string",
               "null"
             ],
-            "description": "The relay farms that span hosts join through (`FARM_RELAY_URL`); none disables them."
+            "description": "The relay stackboxes that span hosts join through (`STACKBOX_RELAY_URL`); none disables them."
           },
           "state_dir": {
             "type": "string"
@@ -4241,7 +3874,7 @@
               "string",
               "null"
             ],
-            "description": "`FARM_LIBKRUNFW_PATH` the host's agent boots farm VMs from, or the kernel host\npreparation installed under `~/.local/share/farm/libkrunfw`; absent for the stock kernel."
+            "description": "`STACKBOX_LIBKRUNFW_PATH` the host's agent boots stackbox VMs from, or the kernel host\npreparation installed under `~/.local/share/stackbox/libkrunfw`; absent for the stock kernel."
           },
           "custom_kernel_reason": {
             "type": [
@@ -4260,7 +3893,7 @@
           },
           "golden_image_available": {
             "type": "boolean",
-            "description": "This build's golden image is built; otherwise the first farm on the host builds it."
+            "description": "This build's golden image is built; otherwise the first stackbox on the host builds it."
           },
           "gpu_kernel": {
             "oneOf": [
@@ -4301,7 +3934,7 @@
           },
           "mtty_available": {
             "type": "boolean",
-            "description": "The farm kernel ran the host's verification VM and exposed the `mtty` mediated\ndevice type, which an OpenStack 2025.1 or newer `mtty` GPU farm binds as a vGPU."
+            "description": "The stackbox kernel ran the host's verification VM and exposed the `mtty` mediated\ndevice type, which an OpenStack 2025.1 or newer `mtty` GPU stackbox binds as a vGPU."
           },
           "os": {
             "type": "string"
@@ -4311,11 +3944,11 @@
             "items": {
               "$ref": "#/components/schemas/HostPciDevice"
             },
-            "description": "PCI devices on this host bound to `vfio-pci`: the only ones a farm may pass through.\nOnly devices in such a state are listed, so a host's chipset devices stay out of its\ninspection and `state.json`."
+            "description": "PCI devices on this host bound to `vfio-pci`: the only ones a stackbox may pass through.\nOnly devices in such a state are listed, so a host's chipset devices stay out of its\ninspection and `state.json`."
           },
           "pci_passthrough_available": {
             "type": "boolean",
-            "description": "Whether this host can take a PCI passthrough farm now: the farm kernel is installed,\n`msb` supports `--pci`/`--iommu` (`msb_pci_capable`), `/dev/vfio/vfio` exists and at\nleast one of `pci_devices` is `vfio_ready`. The guest kernel is the farm's, so the\nstock kernel answers no."
+            "description": "Whether this host can take a PCI passthrough stackbox now: the stackbox kernel is installed,\n`msb` supports `--pci`/`--iommu` (`msb_pci_capable`), `/dev/vfio/vfio` exists and at\nleast one of `pci_devices` is `vfio_ready`. The guest kernel is the stackbox's, so the\nstock kernel answers no."
           },
           "sudo_available": {
             "type": "boolean"
@@ -4422,7 +4055,7 @@
       },
       "HostKind": {
         "type": "string",
-        "description": "How the coordinator reaches a host's farm-agent.",
+        "description": "How the coordinator reaches a host's stackbox-agent.",
         "enum": [
           "ssh",
           "local",
@@ -4431,7 +4064,7 @@
       },
       "HostPciDevice": {
         "type": "object",
-        "description": "A host PCI device a farm may pass through. Only `vfio-pci`-bound devices are reported.",
+        "description": "A host PCI device a stackbox may pass through. Only `vfio-pci`-bound devices are reported.",
         "required": [
           "bdf",
           "vendor_id",
@@ -4483,7 +4116,7 @@
       },
       "HostReachability": {
         "type": "object",
-        "description": "What the coordinator's last attempts to reach an SSH host found: its inventory scan, or a\nplain connection check for a host that runs no farm.",
+        "description": "What the coordinator's last attempts to reach an SSH host found: its inventory scan, or a\nplain connection check for a host that runs no stackbox.",
         "required": [
           "reachable"
         ],
@@ -4523,7 +4156,7 @@
       },
       "HostShare": {
         "type": "object",
-        "description": "The compute VMs of a farm that one other host runs.",
+        "description": "The compute VMs of a stackbox that one other host runs.",
         "required": [
           "host_id",
           "nodes",
@@ -4639,7 +4272,7 @@
         "type": "object",
         "required": [
           "id",
-          "farm_id",
+          "stackbox_id",
           "kind",
           "status",
           "created_at"
@@ -4662,9 +4295,6 @@
               "string",
               "null"
             ]
-          },
-          "farm_id": {
-            "type": "string"
           },
           "finished_at": {
             "type": [
@@ -4713,6 +4343,9 @@
               "null"
             ],
             "description": "Snapshot captured by a snapshot job, or restored by a restore job."
+          },
+          "stackbox_id": {
+            "type": "string"
           },
           "started_at": {
             "type": [
@@ -4936,7 +4569,7 @@
               "null"
             ],
             "format": "int32",
-            "description": "Position among the farm's compute nodes, from 1; only multi-node compute nodes have one.",
+            "description": "Position among the stackbox's compute nodes, from 1; only multi-node compute nodes have one.",
             "minimum": 0
           },
           "memory_mib": {
@@ -4992,7 +4625,7 @@
           "computes": {
             "type": "integer",
             "format": "int32",
-            "description": "Compute VMs beside the control VM; 0 for an all-in-one farm.",
+            "description": "Compute VMs beside the control VM; 0 for an all-in-one stackbox.",
             "minimum": 0
           },
           "disk_mib": {
@@ -5008,7 +4641,7 @@
               },
               {
                 "$ref": "#/components/schemas/GpuConfig",
-                "description": "The virtual GPU every compute VM offers; absent on farms without one, and on plans\nrecorded before the option existed."
+                "description": "The virtual GPU every compute VM offers; absent on stackboxes without one, and on plans\nrecorded before the option existed."
               }
             ]
           },
@@ -5062,7 +4695,7 @@
               },
               {
                 "$ref": "#/components/schemas/ComputeSize",
-                "description": "Size of every compute VM; omitted for the default. Only for farms with compute VMs."
+                "description": "Size of every compute VM; omitted for the default. Only for stackboxes with compute VMs."
               }
             ],
             "default": null
@@ -5070,7 +4703,7 @@
           "computes": {
             "type": "integer",
             "format": "int32",
-            "description": "Compute VMs beside a control VM, 1-3. A farm always runs Nova and Neutron; a\nrequest with none is refused, as are the legacy layouts below.",
+            "description": "Compute VMs beside a control VM, 1-3. A stackbox always runs Nova and Neutron; a\nrequest with none is refused, as are the legacy layouts below.",
             "default": 0,
             "minimum": 0
           },
@@ -5092,8 +4725,8 @@
                 "type": "null"
               },
               {
-                "$ref": "#/components/schemas/FarmLayout",
-                "description": "Layout of a farm without computes: read only, for farms and snapshots made before\nevery farm gained computes. New farms leave it out; [`require_multi_node`] refuses it."
+                "$ref": "#/components/schemas/StackboxLayout",
+                "description": "Layout of a stackbox without computes: read only, for stackboxes and snapshots made before\nevery stackbox gained computes. New stackboxes leave it out; [`require_multi_node`] refuses it."
               }
             ],
             "default": null
@@ -5103,7 +4736,7 @@
             "items": {
               "type": "string"
             },
-            "description": "Host PCI devices passed through to compute-1 (`DDDD:BB:DD.F`). Each must already be\nbound to `vfio-pci` on the farm's host; see [`normalize_pci_devices`].",
+            "description": "Host PCI devices passed through to compute-1 (`DDDD:BB:DD.F`). Each must already be\nbound to `vfio-pci` on the stackbox's host; see [`normalize_pci_devices`].",
             "default": []
           },
           "release": {
@@ -5119,7 +4752,7 @@
       },
       "PlannedNode": {
         "type": "object",
-        "description": "How one VM of a release farm will be made, and why.",
+        "description": "How one VM of a release stackbox will be made, and why.",
         "required": [
           "node",
           "host_id",
@@ -5145,7 +4778,7 @@
           },
           "node": {
             "type": "string",
-            "description": "`control`, `compute-1`, ... or `all-in-one` for a clean farm without computes."
+            "description": "`control`, `compute-1`, ... or `all-in-one` for a clean stackbox without computes."
           },
           "reason": {
             "type": "string"
@@ -5283,7 +4916,7 @@
       },
       "RelaySettings": {
         "type": "object",
-        "description": "Where farms that span hosts join, set from the portal or `PUT /api/v1/relay`.",
+        "description": "Where stackboxes that span hosts join, set from the portal or `PUT /api/v1/relay`.",
         "required": [
           "mode"
         ],
@@ -5309,7 +4942,7 @@
         "type": "object",
         "description": "The relay as the portal shows it.",
         "required": [
-          "spanning_farms"
+          "spanning_stackboxes"
         ],
         "properties": {
           "bind": {
@@ -5350,12 +4983,12 @@
               }
             ]
           },
-          "spanning_farms": {
+          "spanning_stackboxes": {
             "type": "array",
             "items": {
               "type": "string"
             },
-            "description": "Farms that span hosts; while any lives, the URL and mode stay."
+            "description": "Stackboxes that span hosts; while any lives, the URL and mode stay."
           },
           "tunnel": {
             "oneOf": [
@@ -5373,7 +5006,7 @@
               "string",
               "null"
             ],
-            "description": "The URL new farms that span hosts get: the settings', or a quick tunnel's address."
+            "description": "The URL new stackboxes that span hosts get: the settings', or a quick tunnel's address."
           }
         }
       },
@@ -5388,7 +5021,7 @@
       },
       "ReleaseCatalog": {
         "type": "object",
-        "description": "Releases a farm can be created with on one architecture, newest first.",
+        "description": "Releases a stackbox can be created with on one architecture, newest first.",
         "required": [
           "arch",
           "releases"
@@ -5414,7 +5047,7 @@
       },
       "ReleaseCreateRequest": {
         "type": "object",
-        "description": "Create a farm of an OpenStack release from saved templates: the control VM from a\ncontrol template, each compute from a compute template of the same release when one\ncan boot on its host, otherwise installed clean.",
+        "description": "Create a stackbox of an OpenStack release from saved templates: the control VM from a\ncontrol template, each compute from a compute template of the same release when one\ncan boot on its host, otherwise installed clean.",
         "required": [
           "id",
           "release"
@@ -5432,7 +5065,7 @@
             "items": {
               "type": "string"
             },
-            "description": "Services the farm runs; empty takes the control template's."
+            "description": "Services the stackbox runs; empty takes the control template's."
           },
           "compute": {
             "oneOf": [
@@ -5441,7 +5074,7 @@
               },
               {
                 "$ref": "#/components/schemas/ComputeSize",
-                "description": "Size of the compute VMs this farm installs clean, and of the ones added to it later.\nA compute that boots from a compute template keeps the template's size."
+                "description": "Size of the compute VMs this stackbox installs clean, and of the ones added to it later.\nA compute that boots from a compute template keeps the template's size."
               }
             ]
           },
@@ -5510,8 +5143,8 @@
                 "type": "null"
               },
               {
-                "$ref": "#/components/schemas/FarmLayout",
-                "description": "VMs of a farm without computes: `all-in-one` for one VM that runs everything, or\n`control` for a control VM alone, ready for computes from compute templates to join\nit later. Omitted keeps the previous behaviour (a control template starts its farm\nwith the control VM alone, a clean install runs all-in-one)."
+                "$ref": "#/components/schemas/StackboxLayout",
+                "description": "VMs of a stackbox without computes: `all-in-one` for one VM that runs everything, or\n`control` for a control VM alone, ready for computes from compute templates to join\nit later. Omitted keeps the previous behaviour (a control template starts its stackbox\nwith the control VM alone, a clean install runs all-in-one)."
               }
             ]
           },
@@ -5539,7 +5172,7 @@
         "type": "object",
         "description": "The resolved plan of a [`ReleaseCreateRequest`].",
         "required": [
-          "farm_id",
+          "stackbox_id",
           "release",
           "arch",
           "components",
@@ -5565,9 +5198,6 @@
           "control": {
             "$ref": "#/components/schemas/PlannedNode"
           },
-          "farm_id": {
-            "type": "string"
-          },
           "notes": {
             "type": "array",
             "items": {
@@ -5576,6 +5206,9 @@
             "description": "Buckets that could not be searched, and other things worth knowing."
           },
           "release": {
+            "type": "string"
+          },
+          "stackbox_id": {
             "type": "string"
           }
         }
@@ -5926,7 +5559,7 @@
             "items": {
               "$ref": "#/components/schemas/SnapshotCopy"
             },
-            "description": "Copies kept on hosts other than the original's, which farms and computes there boot\nfrom."
+            "description": "Copies kept on hosts other than the original's, which stackboxes and computes there boot\nfrom."
           },
           "created_at": {
             "type": "integer",
@@ -5935,7 +5568,7 @@
           },
           "deployed": {
             "type": "boolean",
-            "description": "Whether OpenStack was deployed when frozen. Restored farms then start `ready`."
+            "description": "Whether OpenStack was deployed when frozen. Restored stackboxes then start `ready`."
           },
           "error": {
             "type": [
@@ -6006,14 +5639,14 @@
           },
           "source_exposure": {
             "$ref": "#/components/schemas/Exposure",
-            "description": "Public ports the source farm's catalog was registered with; restores rewrite them."
+            "description": "Public ports the source stackbox's catalog was registered with; restores rewrite them."
           },
-          "source_farm": {
+          "source_stackbox": {
             "type": [
               "string",
               "null"
             ],
-            "description": "Farm the snapshot was frozen from; `None` when imported from an archive."
+            "description": "Stackbox the snapshot was frozen from; `None` when imported from an archive."
           },
           "status": {
             "$ref": "#/components/schemas/SnapshotStatus"
@@ -6025,7 +5658,7 @@
               },
               {
                 "$ref": "#/components/schemas/TemplateRole",
-                "description": "The one VM a template holds: `control`, which new farms start from without\ncomputes, or `compute`, which expansions boot new computes from. None for a snapshot\nof a whole farm."
+                "description": "The one VM a template holds: `control`, which new stackboxes start from without\ncomputes, or `compute`, which expansions boot new computes from. None for a snapshot\nof a whole stackbox."
               }
             ]
           },
@@ -6061,7 +5694,7 @@
               "string",
               "null"
             ],
-            "description": "Freeze only this VM of a deployed multi-node farm as a template: a compute VM\n(`compute-1`, ...) that later expansions boot new computes from, or `control`, which\nnew farms start from without computes."
+            "description": "Freeze only this VM of a deployed multi-node stackbox as a template: a compute VM\n(`compute-1`, ...) that later expansions boot new computes from, or `control`, which\nnew stackboxes start from without computes."
           },
           "note": {
             "type": [
@@ -6132,6 +5765,373 @@
         },
         "additionalProperties": false
       },
+      "StackboxInstance": {
+        "type": "object",
+        "description": "A virtual GPU instance as the portal's load editor lists it. `gpu_count` comes\nfrom the flavor's resource class (or 1 when it asks for none, because the guest\nscript defaults to one virtual GPU).",
+        "required": [
+          "id",
+          "name",
+          "status",
+          "flavor",
+          "gpu_count",
+          "resources",
+          "applied"
+        ],
+        "properties": {
+          "applied": {
+            "type": "boolean",
+            "description": "Whether the instance's metadata currently carries `stackbox_gpu_*`."
+          },
+          "flavor": {
+            "type": "string"
+          },
+          "gpu_count": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Virtual GPUs the flavor asks for, 0 when it asks for no GPU resource.",
+            "minimum": 0
+          },
+          "id": {
+            "type": "string"
+          },
+          "load": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/GpuLoad",
+                "description": "The load stackbox applied, or one decoded from the instance's metadata after a\ncoordinator lost its state."
+              }
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "project": {
+            "type": "string"
+          },
+          "properties": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The `stackbox_gpu_*` keys currently set on the instance."
+          },
+          "resources": {
+            "type": "object",
+            "description": "Resource classes the flavor requires, `VGPU: 1`.",
+            "additionalProperties": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "status": {
+            "type": "string"
+          }
+        }
+      },
+      "StackboxLayout": {
+        "type": "string",
+        "description": "The layout of a stackbox without computes, kept readable for stackboxes and snapshots made\nbefore every new stackbox ran a control VM with computes.",
+        "enum": [
+          "all-in-one",
+          "control"
+        ]
+      },
+      "StackboxNode": {
+        "type": "object",
+        "required": [
+          "name",
+          "status",
+          "memory_mib"
+        ],
+        "properties": {
+          "index": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "A multi-node compute VM's position, from 1.",
+            "minimum": 0
+          },
+          "ip": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Live eth0 IPv4 for new all-in-one guests; legacy nodes may retain an overlay address."
+          },
+          "memory_mib": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "name": {
+            "type": "string"
+          },
+          "role": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Role"
+              }
+            ]
+          },
+          "status": {
+            "type": "string"
+          }
+        }
+      },
+      "StackboxOpenStack": {
+        "type": "object",
+        "description": "The OpenStack release a stackbox installs, named as the images and documents name it: the code\nname beside the number (`2022.2` is `zed`), and whether this coordinator still supports it.",
+        "required": [
+          "release",
+          "series",
+          "codename",
+          "eol",
+          "supported"
+        ],
+        "properties": {
+          "codename": {
+            "type": "string",
+            "description": "The series' code name for display, `Zed` for 2022.2 and `Caracal` for 2024.1; empty\nwhen it has no published name. Display only: `series` keeps the name the images and\nthe upper-constraints path use."
+          },
+          "eol": {
+            "type": "boolean",
+            "description": "kolla-ansible keeps no branch for it any more, so it installs from the series' last tag."
+          },
+          "release": {
+            "type": "string",
+            "description": "What the stackbox records, `2022.2`."
+          },
+          "series": {
+            "type": "string",
+            "description": "Its series name, `zed`; the same as `release` from 2023.1 on, where the names became\n`year.release`."
+          },
+          "supported": {
+            "type": "boolean",
+            "description": "False below the oldest supported release, whatever the host's\n`STACKBOX_ALLOW_UNSUPPORTED_RELEASES` says: such a stackbox keeps working but is out of support."
+          }
+        }
+      },
+      "StackboxRecord": {
+        "type": "object",
+        "required": [
+          "id",
+          "status",
+          "nodes",
+          "created_at",
+          "updated_at"
+        ],
+        "properties": {
+          "active_job": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "agent_sha256": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "created_at": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "expires_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
+          "exposure": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Exposure"
+              }
+            ]
+          },
+          "faults": {
+            "type": "object",
+            "description": "Faults set on a multi-node stackbox's links, by VM (`control`, `compute-1`, ...).",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/Impair"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "gpu_loads": {
+            "type": "object",
+            "description": "Virtual GPU loads the portal applied, by Nova server UUID. The guest reads the\nsame values from instance metadata; this copy keeps the pattern the portal shows\nafter a coordinator restart. A stackbox restored from a snapshot recovers the load\nfrom the instance's metadata instead.",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/GpuLoad"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "host_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "last_seen_at": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
+          "nodes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/StackboxNode"
+            }
+          },
+          "observation_error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "owner": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "phase": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Phase"
+              }
+            ]
+          },
+          "plan": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/Plan"
+              }
+            ]
+          },
+          "remote_generation": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "shares": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/HostShare"
+            },
+            "description": "Other hosts that run some of a multi-node stackbox's compute VMs. `host_id` runs the rest."
+          },
+          "snapshot_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Snapshot this stackbox was restored from."
+          },
+          "status": {
+            "$ref": "#/components/schemas/StackboxStatus"
+          },
+          "step": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Finer progress inside `phase`: our marker or the running Ansible task."
+          },
+          "updated_at": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "uplink_sha256": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "SHA-256 of the token `host_id`'s switch joins the relay with, for a stackbox with shares."
+          }
+        }
+      },
+      "StackboxStatus": {
+        "type": "string",
+        "enum": [
+          "creating",
+          "created",
+          "deploying",
+          "settling",
+          "ready",
+          "failed",
+          "broken",
+          "deleting",
+          "deleted",
+          "snapshotting"
+        ]
+      },
+      "StackboxView": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/StackboxRecord"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "openstack": {
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "$ref": "#/components/schemas/StackboxOpenStack",
+                    "description": "Absent on a stackbox created before plans kept their release."
+                  }
+                ]
+              }
+            }
+          }
+        ],
+        "description": "A stackbox as the API returns it: the stored record plus the release facts the portal labels the\nstackbox with. Only the record is kept; the release comes from the release tables, so the names\nlive in one place and a stackbox's state stays what it was created with."
+      },
       "TemplateRole": {
         "type": "string",
         "description": "The VM a template snapshot was frozen from.",
@@ -6174,7 +6174,7 @@
           },
           "unmanaged": {
             "type": "boolean",
-            "description": "`FARM_CLOUDFLARED` names the binary; it is not updated."
+            "description": "`STACKBOX_CLOUDFLARED` names the binary; it is not updated."
           },
           "url": {
             "type": [

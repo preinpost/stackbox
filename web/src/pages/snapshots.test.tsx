@@ -12,7 +12,7 @@ const MiB = 1024 * 1024;
 
 function exportingSnapshot(doneBytes: number, totalBytes: number): Snapshot {
   return {
-    id: "dev-farm-001-clean",
+    id: "dev-stackbox-001-clean",
     status: "exporting",
     arch: "x86_64",
     plan: {
@@ -27,7 +27,7 @@ function exportingSnapshot(doneBytes: number, totalBytes: number): Snapshot {
     source_exposure: { host: "127.0.0.1", bind: "0.0.0.0", port_base: 15000 },
     transfer: {
       bucket: "s3",
-      key: "dev-farm-001-clean.msb",
+      key: "dev-stackbox-001-clean.msb",
       done_bytes: doneBytes,
       total_bytes: totalBytes,
     },

@@ -1,8 +1,8 @@
 #!/bin/sh
-# Turns the stock rockylinux/rockylinux:10 image into the farm golden image. It runs once per
+# Turns the stock rockylinux/rockylinux:10 image into the stackbox golden image. It runs once per
 # host in a VM booted without init; the VM's disks then become the golden snapshot.
-# Farm files (identity, hostname, external network) are added to each farm VM instead,
-# so this script only installs what any farm guest needs from the distribution.
+# Stackbox files (identity, hostname, external network) are added to each stackbox VM instead,
+# so this script only installs what any stackbox guest needs from the distribution.
 set -eu
 # systemd boots the guest. Kolla's bootstrap-servers installs Docker; the Kolla controller
 # runs in the guest and builds its Python dependencies with gcc and the -devel headers.
@@ -18,5 +18,5 @@ dnf install -y -q \
   gcc python3-devel libffi-devel openssl-devel
 dnf clean all
 systemctl enable sshd chronyd
-mkdir -p /root/.ssh /etc/farm
+mkdir -p /root/.ssh /etc/stackbox
 chmod 700 /root/.ssh

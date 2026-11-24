@@ -6,7 +6,7 @@
 #
 #   sh scripts/test-gpu-guest.sh
 #
-# Docker is required; no farm VM is touched.
+# Docker is required; no stackbox VM is touched.
 
 set -eu
 
@@ -24,14 +24,14 @@ cat >"$work/meta_data.json" <<'JSON'
   "uuid": "11111111-2222-3333-4444-555555555555",
   "name": "gpu-test",
   "meta": {
-    "farm_gpu_count": "2",
-    "farm_gpu_0": "v1;p:sim-8g;q:constant;n:77;x:77;d:1;m:30;u:77;id:GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
-    "farm_gpu_1": "v1;p:sim-16g;q:constant;n:77;x:77;d:1;m:50;u:77;id:GPU-bbbbbbbb-bbbb-cccc-dddd-eeeeeeeeeeee"
+    "stackbox_gpu_count": "2",
+    "stackbox_gpu_0": "v1;p:sim-8g;q:constant;n:77;x:77;d:1;m:30;u:77;id:GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+    "stackbox_gpu_1": "v1;p:sim-16g;q:constant;n:77;x:77;d:1;m:50;u:77;id:GPU-bbbbbbbb-bbbb-cccc-dddd-eeeeeeeeeeee"
   }
 }
 JSON
 cat >"$work/zero.json" <<'JSON'
-{"uuid":"11111111-2222-3333-4444-555555555555","meta":{"farm_gpu_count":"0"}}
+{"uuid":"11111111-2222-3333-4444-555555555555","meta":{"stackbox_gpu_count":"0"}}
 JSON
 
 # run <label> <metadata file> [arguments...]
@@ -42,8 +42,8 @@ run() {
     if ! docker run --rm \
         -v "$root/guest/gpu:/gpu:ro" \
         -v "$work:/meta:ro" \
-        -e "FARM_GPU_METADATA_FILE=$metadata" \
-        -e FARM_GPU_CACHE_DIR=/tmp/farm-gpu-test \
+        -e "STACKBOX_GPU_METADATA_FILE=$metadata" \
+        -e STACKBOX_GPU_CACHE_DIR=/tmp/stackbox-gpu-test \
         busybox:1.36 sh /gpu/nvidia-smi.sh "$@" \
         >"$work/out" 2>"$work/err"; then
         echo "FAIL: $label exited non-zero" >&2
@@ -86,8 +86,8 @@ expect "xml uuid" 'GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee' "$work/out"
 run "csv" /meta/meta_data.json --query-gpu=index,name,uuid,utilization.gpu,memory.total,memory.used,temperature.gpu,power.draw,power.limit --format=csv
 expect "csv header" 'utilization.gpu \[%\]' "$work/out"
 expect "csv power header" 'power.draw \[W\]' "$work/out"
-expect "csv first row" '^0, farm-virtual-gpu, GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee, 77 %, 8192 MiB, 2457 MiB, 72 C, 118.9 W, 150.00 W$' "$work/out"
-expect "csv second row" '^1, farm-virtual-gpu, GPU-bbbbbbbb-bbbb-cccc-dddd-eeeeeeeeeeee, 77 %, 16384 MiB, 8192 MiB, 72 C, 198.2 W, 250.00 W$' "$work/out"
+expect "csv first row" '^0, stackbox-virtual-gpu, GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee, 77 %, 8192 MiB, 2457 MiB, 72 C, 118.9 W, 150.00 W$' "$work/out"
+expect "csv second row" '^1, stackbox-virtual-gpu, GPU-bbbbbbbb-bbbb-cccc-dddd-eeeeeeeeeeee, 77 %, 16384 MiB, 8192 MiB, 72 C, 198.2 W, 250.00 W$' "$work/out"
 
 run "csv no units" /meta/meta_data.json --query-gpu=utilization.gpu,memory.used,power.draw --format=csv,noheader,nounits
 expect "nounits value" '^77, 2457, 118.9$' "$work/out"
@@ -97,8 +97,8 @@ expect "nounits value" '^77, 2457, 118.9$' "$work/out"
 }
 
 run "list" /meta/meta_data.json -L
-expect "list first" '^GPU 0: farm-virtual-gpu (UUID: GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee)$' "$work/out"
-expect "list second" '^GPU 1: farm-virtual-gpu (UUID: GPU-bbbbbbbb-bbbb-cccc-dddd-eeeeeeeeeeee)$' "$work/out"
+expect "list first" '^GPU 0: stackbox-virtual-gpu (UUID: GPU-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee)$' "$work/out"
+expect "list second" '^GPU 1: stackbox-virtual-gpu (UUID: GPU-bbbbbbbb-bbbb-cccc-dddd-eeeeeeeeeeee)$' "$work/out"
 
 run "version" /meta/meta_data.json --version
 expect "version" 'Driver version           : 550.54.14' "$work/out"
@@ -110,9 +110,9 @@ expect "text draw" 'Power Draw                        : 118.9 W' "$work/out"
 # No metadata at all: the guest's default is one virtual GPU at 0%, not an error.
 docker run --rm \
     -v "$root/guest/gpu:/gpu:ro" \
-    -e FARM_GPU_METADATA_FILE=/nonexistent \
-    -e FARM_GPU_CACHE_DIR=/tmp/farm-gpu-test \
-    -e FARM_GPU_METADATA_URL=http://127.0.0.1:1/meta_data.json \
+    -e STACKBOX_GPU_METADATA_FILE=/nonexistent \
+    -e STACKBOX_GPU_CACHE_DIR=/tmp/stackbox-gpu-test \
+    -e STACKBOX_GPU_METADATA_URL=http://127.0.0.1:1/meta_data.json \
     busybox:1.36 sh /gpu/nvidia-smi.sh --query-gpu=index,utilization.gpu,memory.total,power.draw --format=csv \
     >"$work/out" 2>"$work/err"
 [ ! -s "$work/err" ] || {
@@ -122,11 +122,11 @@ docker run --rm \
 }
 expect "default row" '^0, 0 %, 8192 MiB, 15.0 W$' "$work/out"
 
-# An explicit zero count is how a farm says this instance has no virtual GPU.
+# An explicit zero count is how a stackbox says this instance has no virtual GPU.
 docker run --rm \
     -v "$root/guest/gpu:/gpu:ro" \
     -v "$work:/meta:ro" \
-    -e FARM_GPU_METADATA_FILE=/meta/zero.json \
+    -e STACKBOX_GPU_METADATA_FILE=/meta/zero.json \
     busybox:1.36 sh /gpu/nvidia-smi.sh -q -x >"$work/out" 2>"$work/err" || status=$?
 [ "${status:-0}" -eq 6 ] || {
     echo "FAIL: a zero GPU count did not exit 6 (got ${status:-0})" >&2
@@ -147,8 +147,8 @@ docker run --rm \
     busybox:1.36 sh -c '
         httpd -f -p 18080 -h /meta >/dev/null 2>&1 &
         sleep 1
-        FARM_GPU_METADATA_URL=http://127.0.0.1:18080/meta_data.json \
-        FARM_GPU_CACHE_DIR=/tmp/farm-gpu-http \
+        STACKBOX_GPU_METADATA_URL=http://127.0.0.1:18080/meta_data.json \
+        STACKBOX_GPU_CACHE_DIR=/tmp/stackbox-gpu-http \
         sh /gpu/nvidia-smi.sh --query-gpu=index,uuid,utilization.gpu --format=csv
     ' >"$work/out" 2>"$work/err"
 [ ! -s "$work/err" ] || {

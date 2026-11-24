@@ -11,7 +11,7 @@ const server = createPortalServer({ root });
 const port = Number(process.env.PORT || 10020);
 server.listen(port, process.env.PORTAL_HOST || "127.0.0.1", () =>
   console.log(
-    `farm portal: http://${process.env.PORTAL_HOST || "127.0.0.1"}:${server.address().port}`,
+    `stackbox portal: http://${process.env.PORTAL_HOST || "127.0.0.1"}:${server.address().port}`,
   ),
 );
 for (const signal of ["SIGINT", "SIGTERM"])

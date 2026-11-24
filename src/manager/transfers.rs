@@ -1,8 +1,8 @@
-//! Copies of single-VM snapshots on other hosts, so a farm or compute there can boot from a
+//! Copies of single-VM snapshots on other hosts, so a stackbox or compute there can boot from a
 //! template another host froze. The original stays on the host that froze it, or on the
 //! local host for snapshots it imported and ones recorded before snapshots had a host.
 //!
-//! [`FarmManager::ensure_snapshot_on_host`] is the one way in. It asks the host's agent
+//! [`StackboxManager::ensure_snapshot_on_host`] is the one way in. It asks the host's agent
 //! whether its copy is still there, and otherwise brings one over, cheapest first:
 //!
 //! 1. The host downloads the archive from a registered bucket itself, when the snapshot
@@ -18,7 +18,7 @@
 //! Only a verified archive is loaded. The copy is recorded on the snapshot (`copies`), and
 //! deleting the snapshot removes the copies too, as far as their hosts can be reached.
 
-use super::{Backend, EventSink, FarmManager, HostKind, NotFound, conflict, store::State};
+use super::{Backend, EventSink, HostKind, NotFound, StackboxManager, conflict, store::State};
 use crate::{
     kolla::DeployEvent,
     model::{CopySource, SnapshotCopy, SnapshotRecord, SnapshotStatus, now},
@@ -78,7 +78,7 @@ pub(super) fn host_arch(state: &State, host_id: &str) -> Option<String> {
     }
 }
 
-impl FarmManager {
+impl StackboxManager {
     /// Make sure host `host_id` keeps snapshot `snapshot_id`, copying it there if needed,
     /// and return its msb reference (and per-VM references for a multi-node snapshot) on
     /// that host. On the host that keeps the original these are the snapshot's own.
@@ -87,7 +87,7 @@ impl FarmManager {
         snapshot_id: &str,
         host_id: &str,
         sink: Option<EventSink>,
-    ) -> Result<(String, Vec<crate::farm::NodeSnapshot>)> {
+    ) -> Result<(String, Vec<crate::stackbox::NodeSnapshot>)> {
         let (snapshot, kind, origin, arch) = self.read(|state| {
             let snapshot = state
                 .snapshots
@@ -144,9 +144,9 @@ impl FarmManager {
         let agent = self.host_agent(host_id)?;
         if !agent.supports_template_transfer().await? {
             return Err(conflict(format!(
-                "the farm-agent on host '{host_id}' predates template transfers; {}",
+                "the stackbox-agent on host '{host_id}' predates template transfers; {}",
                 match kind.kind {
-                    HostKind::Agent => "update farm-agent there and connect it again",
+                    HostKind::Agent => "update stackbox-agent there and connect it again",
                     _ => "install the agent again from Hosts",
                 }
             )));
@@ -259,7 +259,7 @@ impl FarmManager {
             .with_context(|| format!("load snapshot {snapshot_id} on host {host_id}"))?;
         if expected_nodes > 0 && imported.nodes.len() != expected_nodes {
             return Err(anyhow!(
-                "host {host_id} loaded {} VM(s) for multi-node snapshot {snapshot_id}, expected {}; reinstall farm-agent on that host",
+                "host {host_id} loaded {} VM(s) for multi-node snapshot {snapshot_id}, expected {}; reinstall stackbox-agent on that host",
                 imported.nodes.len(),
                 expected_nodes
             ));
@@ -484,7 +484,7 @@ impl FarmManager {
             .with_context(|| format!("stream snapshot {} from host {host_id}", snapshot.id))
     }
 
-    /// The host's agent for operations that belong to no farm.
+    /// The host's agent for operations that belong to no stackbox.
     fn host_agent(&self, host_id: &str) -> Result<crate::remote::backend::AgentBackend> {
         let digest = self.read(|state| {
             state
@@ -505,7 +505,7 @@ impl FarmManager {
         host_id: &str,
         local: bool,
         reference: &str,
-        nodes: &[crate::farm::NodeSnapshot],
+        nodes: &[crate::stackbox::NodeSnapshot],
         labels: &std::collections::BTreeMap<String, String>,
         size_bytes: Option<u64>,
     ) -> Result<()> {
@@ -531,8 +531,8 @@ impl FarmManager {
             if let Some(port_base) = exposure_port_base {
                 snapshot.source_exposure.port_base = port_base;
             }
-            if snapshot.source_farm.is_none() {
-                snapshot.source_farm = labels.get(label::SOURCE).cloned();
+            if snapshot.source_stackbox.is_none() {
+                snapshot.source_stackbox = labels.get(label::SOURCE).cloned();
             }
             if snapshot.note.is_none() {
                 snapshot.note = labels.get(label::NOTE).cloned();
@@ -553,7 +553,7 @@ impl FarmManager {
         snapshot_id: &str,
         host_id: &str,
         reference: &str,
-        nodes: &[crate::farm::NodeSnapshot],
+        nodes: &[crate::stackbox::NodeSnapshot],
         via: CopySource,
         size_bytes: Option<u64>,
     ) -> Result<()> {

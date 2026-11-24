@@ -10,8 +10,8 @@ use super::{
     protocol::{Frame, MAX_FRAME, TerminalFrame},
 };
 use crate::{
-    farm::{ImportedSnapshot, NodeSnapshot},
     manager::Backend,
+    stackbox::{ImportedSnapshot, NodeSnapshot},
 };
 use anyhow::{Context, Result, anyhow, ensure};
 use base64::{Engine, engine::general_purpose::STANDARD};

@@ -1,5 +1,5 @@
 set -euo pipefail
-# Golden images install the build tools; farms made from the former Docker-built image lack them.
+# Golden images install the build tools; stackboxes made from the former Docker-built image lack them.
 if ! command -v gcc >/dev/null; then
   step "빌드 도구 설치 (gcc, python3-devel, libffi, openssl)"
   dnf install -y -q gcc python3-devel libffi-devel openssl-devel
@@ -16,11 +16,11 @@ if ! command -v "$python" >/dev/null; then
   done
 fi
 if ! command -v "$python" >/dev/null; then
-  echo "this VM has no python3; install it in the golden image and start the farm again" >&2
+  echo "this VM has no python3; install it in the golden image and start the stackbox again" >&2
   exit 1
 fi
 stamp="2024.1 unmaintained/2024.1 ansible-core>=2.16,<2.17 $python"
-if [ ! -x /opt/kolla/bin/kolla-ansible ] || [ "$(cat /opt/kolla/.farm-release 2>/dev/null || true)" != "$stamp" ]; then
+if [ ! -x /opt/kolla/bin/kolla-ansible ] || [ "$(cat /opt/kolla/.stackbox-release 2>/dev/null || true)" != "$stamp" ]; then
   step "kolla-ansible 가상환경 생성 (/opt/kolla, $python)"
   rm -rf /opt/kolla
   "$python" -m venv /opt/kolla
@@ -29,7 +29,7 @@ if [ ! -x /opt/kolla/bin/kolla-ansible ] || [ "$(cat /opt/kolla/.farm-release 2>
   /opt/kolla/bin/pip install -q "git+https://opendev.org/openstack/kolla-ansible@unmaintained/2024.1"
   # This branch's requirements.txt leaves Ansible out; its quickstart installs this range.
   /opt/kolla/bin/pip install -q "ansible-core>=2.16,<2.17"
-  printf '%s' "$stamp" > /opt/kolla/.farm-release
+  printf '%s' "$stamp" > /opt/kolla/.stackbox-release
 fi
 export PATH=/opt/kolla/bin:$PATH
 export VIRTUAL_ENV=/opt/kolla
@@ -52,8 +52,8 @@ if patched not in text:
 # Virtio instances leave TCP checksums to the host. The userspace conntrack behind Neutron's OVS firewall
 # checks them as they arrive and drops the replies as invalid, so only ICMP gets through. With
 # userspace TSO, OVS reads the tap's offload flags instead. vswitchd applies it at start, before instances.
-# Only on compute-only VMs: on the network node it breaks the router and DHCP ports and the farm link,
-# so all-in-one farms still drop instance TCP.
+# Only on compute-only VMs: on the network node it breaks the router and DHCP ports and the stackbox link,
+# so all-in-one stackboxes still drop instance TCP.
 text = path.read_text()
 marker = "    - { col: \"other_config\", name: \"hw-offload\", value: true, state: \"{{ 'present' if openvswitch_hw_offload | bool else 'absent' }}\" }\n"
 patched = marker + "    - { col: \"other_config\", name: \"userspace-tso-enable\", value: true, state: \"{{ 'present' if ovs_datapath == 'netdev' and inventory_hostname in groups['compute'] and inventory_hostname not in groups['network'] else 'absent' }}\" }\n"
@@ -61,17 +61,17 @@ if patched not in text:
     if text.count(marker) != 1:
         raise RuntimeError("unexpected Kolla OVS other_config task; review the userspace TSO patch")
     path.write_text(text.replace(marker, patched, 1))
-# A control VM alone has no compute host yet; the farm's globals say so, and the first
+# A control VM alone has no compute host yet; the stackbox's globals say so, and the first
 # compute joins later without redeploying the control plane.
 path = Path("/opt/kolla/share/kolla-ansible/ansible/roles/nova-cell/tasks/precheck.yml")
 text = path.read_text()
 marker = "  when:\n    - groups[nova_cell_compute_group] | length < 1\n    - not nova_compute_ironic.enabled | bool\n"
-patched = marker + "    - not (farm_no_computes | default(false))\n"
+patched = marker + "    - not (stackbox_no_computes | default(false))\n"
 if patched not in text:
     if text.count(marker) != 1:
         raise RuntimeError("unexpected Kolla nova-cell precheck; review the no-compute patch")
     path.write_text(text.replace(marker, patched, 1))
-# The same kernel has no openvswitch module; farms run OVS with the userspace (netdev) datapath.
+# The same kernel has no openvswitch module; stackboxes run OVS with the userspace (netdev) datapath.
 path = Path("/opt/kolla/share/kolla-ansible/ansible/roles/openvswitch/tasks/config-host.yml")
 text = path.read_text()
 marker = "- name: Load and persist openvswitch module\n"
@@ -92,14 +92,14 @@ if patched not in text:
         raise RuntimeError("unexpected Kolla nova-cell when clause; review the br_netfilter patch")
     path.write_text(text.replace(marker, patched, 1))
 PY
-if [ ! -x /opt/osc/bin/openstack ] || [ "$(cat /opt/osc/.farm-release 2>/dev/null || true)" != "$stamp" ]; then
+if [ ! -x /opt/osc/bin/openstack ] || [ "$(cat /opt/osc/.stackbox-release 2>/dev/null || true)" != "$stamp" ]; then
   step "OpenStack CLI 가상환경 생성 (/opt/osc)"
   rm -rf /opt/osc
   "$python" -m venv /opt/osc
   /opt/osc/bin/pip install -q -U pip
   step "python-openstackclient 설치"
   /opt/osc/bin/pip install -q -c https://releases.openstack.org/constraints/upper/2024.1 python-openstackclient
-  printf '%s' "$stamp" > /opt/osc/.farm-release
+  printf '%s' "$stamp" > /opt/osc/.stackbox-release
 fi
 step "kolla-ansible 버전 확인"
 kolla-ansible --version

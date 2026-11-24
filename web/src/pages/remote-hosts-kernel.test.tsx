@@ -45,7 +45,7 @@ const inspection = {
 const custom = {
   ...inspection,
   custom_kernel:
-    "/home/user/.local/share/farm/libkrunfw/72f012b2c2c8c33c/libkrunfw.so.5.6.1",
+    "/home/user/.local/share/stackbox/libkrunfw/72f012b2c2c8c33c/libkrunfw.so.5.6.1",
   mtty_available: true,
   gpu_kernel: {
     kernel: "custom",
@@ -82,16 +82,16 @@ function renderHosts(hosts: unknown[]) {
 test("a prepared host has one environment button and no separate runner install", async () => {
   renderHosts([{ ...host, inspection: custom }]);
   expect(await screen.findByRole("button", { name: /환경 준비/ })).toBeTruthy();
-  expect(screen.queryByRole("button", { name: /Farm 실행기 설치/ })).toBeNull();
+  expect(screen.queryByRole("button", { name: /Stackbox 실행기 설치/ })).toBeNull();
   expect(
-    screen.queryByRole("button", { name: /Farm 실행기 재설치/ }),
+    screen.queryByRole("button", { name: /Stackbox 실행기 재설치/ }),
   ).toBeNull();
 });
 
 /** The kernel and GPU checks come from the verification VM, and the details open up. */
-test("a host that booted the farm kernel shows its kernel, VFIO and mtty count", async () => {
+test("a host that booted the stackbox kernel shows its kernel, VFIO and mtty count", async () => {
   renderHosts([{ ...host, inspection: custom }]);
-  expect(await screen.findByText("Farm 게스트 커널")).toBeTruthy();
+  expect(await screen.findByText("Stackbox 게스트 커널")).toBeTruthy();
   expect(screen.getByText(/72f012b2c2c8c33c 확인됨/)).toBeTruthy();
   expect(screen.getByText("GPU 커널 기능 (VFIO · mdev)")).toBeTruthy();
   expect(screen.getByText("VFIO · mdev")).toBeTruthy();
@@ -128,7 +128,7 @@ test("a host on the stock kernel shows the reason and no mtty devices", async ()
       },
     },
   ]);
-  expect(await screen.findByText("Farm 게스트 커널")).toBeTruthy();
+  expect(await screen.findByText("Stackbox 게스트 커널")).toBeTruthy();
   expect(screen.getAllByText("stock 커널").length).toBeGreaterThan(0);
   expect(screen.getByText("mtty 없음")).toBeTruthy();
   expect(screen.getByText("미탑재")).toBeTruthy();
@@ -152,12 +152,12 @@ test("a host prepared before the GPU probe keeps its mtty result and asks for th
       inspection: {
         ...inspection,
         custom_kernel:
-          "/home/user/.local/share/farm/libkrunfw/72f012b2c2c8c33c/libkrunfw.so.5.6.1",
+          "/home/user/.local/share/stackbox/libkrunfw/72f012b2c2c8c33c/libkrunfw.so.5.6.1",
         mtty_available: true,
       },
     },
   ]);
-  expect(await screen.findByText("Farm 게스트 커널")).toBeTruthy();
+  expect(await screen.findByText("Stackbox 게스트 커널")).toBeTruthy();
   expect(screen.getByText("확인됨 · 상세는 환경 준비 후")).toBeTruthy();
   expect(screen.getAllByText("환경 준비 후 확인").length).toBe(1);
 });

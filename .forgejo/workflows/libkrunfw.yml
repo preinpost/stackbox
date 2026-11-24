@@ -1,5 +1,5 @@
 # Builds the guest kernel (libkrunfw with the scripts/libkrunfw fragments) for each OS and CPU
-# architecture farm runs on, and publishes it to the farm-libkrunfw bucket that src/kernel.rs
+# architecture stackbox runs on, and publishes it to the stackbox-libkrunfw bucket that src/kernel.rs
 # downloads from when a host has no kernel built locally.
 #
 # It is independent of release.yml: a kernel build takes far longer than an agent build, and
@@ -7,9 +7,9 @@
 # architectures are separate jobs and can be run alone with workflow_dispatch.
 #
 # Bucket layout (what src/kernel.rs reads):
-#   farm-libkrunfw/<kid>/manifest.txt                  immutable: the manifest, hashed to <kid>
-#   farm-libkrunfw/<kid>/<os>-<arch>/<library>         immutable: the library the manifest names
-#   farm-libkrunfw/msb-<msb>/<os>-<arch>.json          max-age=60: the index for this msb
+#   stackbox-libkrunfw/<kid>/manifest.txt                  immutable: the manifest, hashed to <kid>
+#   stackbox-libkrunfw/<kid>/<os>-<arch>/<library>         immutable: the library the manifest names
+#   stackbox-libkrunfw/msb-<msb>/<os>-<arch>.json          max-age=60: the index for this msb
 # <kid> is the first 16 hex digits of the manifest's SHA-256 (src/kernel.rs::id_for).
 name: libkrunfw
 
@@ -64,7 +64,7 @@ jobs:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       R2_BUCKET: public-bucket
-      R2_PREFIX: farm-libkrunfw
+      R2_PREFIX: stackbox-libkrunfw
     steps:
       # Every target when started by a push or with `all`; otherwise only the one named.
       # Inputs and matrix values are read here (step scope) and handed on through GITHUB_ENV.
@@ -131,7 +131,7 @@ jobs:
           sh scripts/libkrunfw-publish.sh index "$dir/manifest.txt" linux "$ARCH" >"$RUNNER_TEMP/index.json"
           cat "$RUNNER_TEMP/index.json"
 
-      # Only a published kernel reaches farm: the index is what a host reads to find it.
+      # Only a published kernel reaches stackbox: the index is what a host reads to find it.
       - name: Publish the kernel
         if: ${{ steps.target.outputs.run == 'true' && env.PUBLISH == 'true' }}
         run: |

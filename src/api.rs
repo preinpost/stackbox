@@ -3,7 +3,7 @@ use crate::remote::{
     RegisterLocalHost, RemoteHost, SshTarget,
 };
 use crate::{
-    manager::{BadRequest, Conflict, FarmManager, NotFound},
+    manager::{BadRequest, Conflict, NotFound, StackboxManager},
     model::*,
     s3::{Bucket, BucketCheck, BucketObject, RegisterBucket, catalog::BucketIndex},
 };
@@ -28,7 +28,7 @@ use utoipa::{OpenApi, ToSchema};
 
 #[derive(Clone)]
 struct App {
-    manager: FarmManager,
+    manager: StackboxManager,
     token: Option<Arc<str>>,
     ssh_discovery: Arc<tokio::sync::Semaphore>,
 }
@@ -75,7 +75,7 @@ fn bad(e: anyhow::Error) -> ApiError {
     ApiError(StatusCode::BAD_REQUEST, e.to_string())
 }
 
-pub fn router(manager: FarmManager, token: Option<String>) -> Router {
+pub fn router(manager: StackboxManager, token: Option<String>) -> Router {
     let app = App {
         manager,
         token: token.map(Arc::from),
@@ -104,27 +104,33 @@ pub fn router(manager: FarmManager, token: Option<String>) -> Router {
         .route("/api/v1/host-jobs/{id}", get(host_job))
         .route("/api/v1/catalog", get(catalog_handler))
         .route("/api/v1/plans", post(plan_handler))
-        .route("/api/v1/farms", get(list).post(create))
+        .route("/api/v1/stackboxes", get(list).post(create))
         .route("/api/v1/releases", get(releases))
         .route("/api/v1/releases/plan", post(release_plan))
-        .route("/api/v1/releases/farms", post(create_release))
-        .route("/api/v1/farms/{id}", get(detail).delete(delete))
-        .route("/api/v1/farms/{id}/deploy", post(deploy))
-        .route("/api/v1/farms/{id}/computes", post(add_compute))
-        .route("/api/v1/farms/{id}/instances", get(instances))
+        .route("/api/v1/releases/stackboxes", post(create_release))
+        .route("/api/v1/stackboxes/{id}", get(detail).delete(delete))
+        .route("/api/v1/stackboxes/{id}/deploy", post(deploy))
+        .route("/api/v1/stackboxes/{id}/computes", post(add_compute))
+        .route("/api/v1/stackboxes/{id}/instances", get(instances))
         .route(
-            "/api/v1/farms/{id}/instances/{server}/gpu-load",
+            "/api/v1/stackboxes/{id}/instances/{server}/gpu-load",
             get(gpu_load).put(set_gpu_load).delete(clear_gpu_load),
         )
-        .route("/api/v1/farms/{id}/gpu/guest-script", get(gpu_guest_script))
-        .route("/api/v1/farms/{id}/gpu/user-data", get(gpu_user_data))
-        .route("/api/v1/farms/{id}/settle", post(settle))
-        .route("/api/v1/farms/{id}/endpoints", get(endpoints))
-        .route("/api/v1/farms/{id}/nodes/{node}/faults", put(set_faults))
-        .route("/api/v1/farms/{id}/logs", get(logs))
-        .route("/api/v1/farms/{id}/logs/stream", get(log_stream))
-        .route("/api/v1/farms/{id}/shell", get(shell))
-        .route("/api/v1/farms/{id}/snapshots", post(freeze))
+        .route(
+            "/api/v1/stackboxes/{id}/gpu/guest-script",
+            get(gpu_guest_script),
+        )
+        .route("/api/v1/stackboxes/{id}/gpu/user-data", get(gpu_user_data))
+        .route("/api/v1/stackboxes/{id}/settle", post(settle))
+        .route("/api/v1/stackboxes/{id}/endpoints", get(endpoints))
+        .route(
+            "/api/v1/stackboxes/{id}/nodes/{node}/faults",
+            put(set_faults),
+        )
+        .route("/api/v1/stackboxes/{id}/logs", get(logs))
+        .route("/api/v1/stackboxes/{id}/logs/stream", get(log_stream))
+        .route("/api/v1/stackboxes/{id}/shell", get(shell))
+        .route("/api/v1/stackboxes/{id}/snapshots", post(freeze))
         .route("/api/v1/snapshots", get(snapshots))
         .route("/api/v1/snapshots/import", post(import_snapshot))
         .route(
@@ -191,7 +197,7 @@ pub struct HostInfo {
     pub hypervisor: String,
     pub hypervisor_available: bool,
     pub msb_available: bool,
-    /// msb snapshot new farms start from; the first farm on the host builds it.
+    /// msb snapshot new stackboxes start from; the first stackbox on the host builds it.
     pub golden_image: String,
     pub golden_image_available: bool,
     /// Revision this daemon was built from; a host agent must report the same one.
@@ -202,7 +208,7 @@ pub struct HostInfo {
     pub memory_reserved_mib: u64,
     pub disk_available_mib: Option<u64>,
     pub state_dir: String,
-    /// The relay farms that span hosts join through (`FARM_RELAY_URL`); none disables them.
+    /// The relay stackboxes that span hosts join through (`STACKBOX_RELAY_URL`); none disables them.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub relay_url: Option<String>,
 }
@@ -230,11 +236,11 @@ async fn host(State(app): State<App>) -> Result<Json<HostInfo>, ApiError> {
     command.arg("--version").kill_on_drop(true);
     let output = tokio::time::timeout(Duration::from_secs(5), command.output()).await;
     let msb = matches!(output, Ok(Ok(output)) if output.status.success());
-    let golden_image = crate::farm::golden::current();
+    let golden_image = crate::stackbox::golden::current();
     let golden = msb
         && tokio::time::timeout(
             Duration::from_secs(5),
-            crate::farm::golden::available(&golden_image),
+            crate::stackbox::golden::available(&golden_image),
         )
         .await
         .is_ok_and(|available| available.unwrap_or(false));
@@ -249,7 +255,7 @@ async fn host(State(app): State<App>) -> Result<Json<HostInfo>, ApiError> {
         .list()?
         .iter()
         .filter(|f| local.is_some() && f.host_id == local)
-        .map(FarmRecord::memory_mib)
+        .map(StackboxRecord::memory_mib)
         .sum();
     Ok(Json(HostInfo {
         relay_url: app.manager.relay_url(),
@@ -411,7 +417,7 @@ async fn agent_connect(
         .map_err(|_| unauthorized())?;
     Ok(upgrade.on_upgrade(move |socket| relay_agent(app.manager, host, socket)))
 }
-async fn relay_agent(manager: FarmManager, host: String, socket: WebSocket) {
+async fn relay_agent(manager: StackboxManager, host: String, socket: WebSocket) {
     use futures::{SinkExt, StreamExt};
     let mut attached = manager.attach_agent(&host);
     let (mut sink, mut stream) = socket.split();
@@ -491,7 +497,7 @@ async fn update_host_credentials(
 }
 #[derive(Deserialize, utoipa::IntoParams)]
 struct UnregisterQuery {
-    /// Also delete this coordinator's farms and leftover VMs on the host, then unregister it.
+    /// Also delete this coordinator's stackboxes and leftover VMs on the host, then unregister it.
     #[serde(default)]
     purge: bool,
     /// With purge, also delete the snapshots frozen on the host, whose originals it keeps,
@@ -499,7 +505,7 @@ struct UnregisterQuery {
     #[serde(default)]
     snapshots: bool,
 }
-#[utoipa::path(delete, path="/api/v1/hosts/{id}", params(("id"=String, Path), UnregisterQuery), responses((status=200, description="Unregistered; records and credentials only", body=RemovedHost), (status=202, description="purge=true: host job that deletes the farms, their VMs, with snapshots=true the snapshots, and then the host", body=HostJob), (status=400, body=ErrorBody), (status=409, body=ErrorBody)))]
+#[utoipa::path(delete, path="/api/v1/hosts/{id}", params(("id"=String, Path), UnregisterQuery), responses((status=200, description="Unregistered; records and credentials only", body=RemovedHost), (status=202, description="purge=true: host job that deletes the stackboxes, their VMs, with snapshots=true the snapshots, and then the host", body=HostJob), (status=400, body=ErrorBody), (status=409, body=ErrorBody)))]
 async fn unregister_host(
     State(app): State<App>,
     Path(id): Path<String>,
@@ -542,7 +548,7 @@ async fn prepare_host(
         app.manager.start_host_job(&id, HostJobKind::Prepare)?,
     ))
 }
-/// Install only the agent, without msb, the farm kernel or a verification boot.
+/// Install only the agent, without msb, the stackbox kernel or a verification boot.
 ///
 /// Deprecated: `POST /hosts/{id}/prepare` installs the agent too, after the kernel and the
 /// verification VM, so the portal offers one button. This endpoint stays for older callers.
@@ -587,20 +593,24 @@ async fn plan_handler(
     request.check_release().map_err(bad)?;
     Ok(Json(plan(&request).map_err(bad)?))
 }
-#[utoipa::path(get, path="/api/v1/farms", responses((status=200, body=Vec<FarmView>)))]
-async fn list(State(app): State<App>) -> Result<Json<Vec<FarmView>>, ApiError> {
+#[utoipa::path(get, path="/api/v1/stackboxes", responses((status=200, body=Vec<StackboxView>)))]
+async fn list(State(app): State<App>) -> Result<Json<Vec<StackboxView>>, ApiError> {
     Ok(Json(
-        app.manager.list()?.into_iter().map(FarmView::of).collect(),
+        app.manager
+            .list()?
+            .into_iter()
+            .map(StackboxView::of)
+            .collect(),
     ))
 }
-#[utoipa::path(get, path="/api/v1/farms/{id}", params(("id"=String, Path)), responses((status=200, body=FarmView), (status=404, body=ErrorBody)))]
+#[utoipa::path(get, path="/api/v1/stackboxes/{id}", params(("id"=String, Path)), responses((status=200, body=StackboxView), (status=404, body=ErrorBody)))]
 async fn detail(
     State(app): State<App>,
     Path(id): Path<String>,
-) -> Result<Json<FarmView>, ApiError> {
-    Ok(Json(FarmView::of(app.manager.get(&id)?)))
+) -> Result<Json<StackboxView>, ApiError> {
+    Ok(Json(StackboxView::of(app.manager.get(&id)?)))
 }
-#[utoipa::path(post, path="/api/v1/farms", request_body=CreateRequest, responses((status=202, body=Job), (status=400, body=ErrorBody), (status=409, body=ErrorBody)))]
+#[utoipa::path(post, path="/api/v1/stackboxes", request_body=CreateRequest, responses((status=202, body=Job), (status=400, body=ErrorBody), (status=409, body=ErrorBody)))]
 async fn create(
     State(app): State<App>,
     value: Result<Json<CreateRequest>, JsonRejection>,
@@ -645,7 +655,7 @@ async fn release_plan(
     require_multi_node(request.computes, request.layout).map_err(bad)?;
     Ok(Json(app.manager.preview_release(&request).await?))
 }
-#[utoipa::path(post, path="/api/v1/releases/farms", request_body=ReleaseCreateRequest, responses((status=202, description="Assemble job: the plan's imports, the control VM, then each compute, each step a job of its own listed in `assembly`", body=Job), (status=400, body=ErrorBody), (status=404, body=ErrorBody), (status=409, body=ErrorBody)))]
+#[utoipa::path(post, path="/api/v1/releases/stackboxes", request_body=ReleaseCreateRequest, responses((status=202, description="Assemble job: the plan's imports, the control VM, then each compute, each step a job of its own listed in `assembly`", body=Job), (status=400, body=ErrorBody), (status=404, body=ErrorBody), (status=409, body=ErrorBody)))]
 async fn create_release(
     State(app): State<App>,
     value: Result<Json<ReleaseCreateRequest>, JsonRejection>,
@@ -662,7 +672,7 @@ fn accepted(job: Job) -> Response {
     )
         .into_response()
 }
-#[utoipa::path(post, path="/api/v1/farms/{id}/deploy", params(("id"=String, Path)), request_body=DeployRequest, responses((status=202, body=Job), (status=409, body=ErrorBody)))]
+#[utoipa::path(post, path="/api/v1/stackboxes/{id}/deploy", params(("id"=String, Path)), request_body=DeployRequest, responses((status=202, body=Job), (status=409, body=ErrorBody)))]
 async fn deploy(
     State(app): State<App>,
     Path(id): Path<String>,
@@ -670,7 +680,7 @@ async fn deploy(
 ) -> Result<Response, ApiError> {
     Ok(accepted(app.manager.deploy(&id, body(value)?)?))
 }
-#[utoipa::path(post, path="/api/v1/farms/{id}/computes", params(("id"=String, Path)), request_body=AddComputeRequest, responses((status=202, description="Add the next compute VM to a deployed multi-node farm, on the given host or the farm's primary host", body=Job), (status=400, body=ErrorBody), (status=404, body=ErrorBody), (status=409, body=ErrorBody)))]
+#[utoipa::path(post, path="/api/v1/stackboxes/{id}/computes", params(("id"=String, Path)), request_body=AddComputeRequest, responses((status=202, description="Add the next compute VM to a deployed multi-node stackbox, on the given host or the stackbox's primary host", body=Job), (status=400, body=ErrorBody), (status=404, body=ErrorBody), (status=409, body=ErrorBody)))]
 async fn add_compute(
     State(app): State<App>,
     Path(id): Path<String>,
@@ -678,15 +688,15 @@ async fn add_compute(
 ) -> Result<Response, ApiError> {
     Ok(accepted(app.manager.add_compute(&id, body(value)?)?))
 }
-#[utoipa::path(get, path="/api/v1/farms/{id}/instances", params(("id"=String, Path)), responses((status=200, description="Nova servers in a GPU farm, with each flavor's GPU resource classes and the load farm applied", body=Vec<FarmInstance>), (status=409, description="Not a deployed GPU farm, or Nova is not part of it", body=ErrorBody)))]
+#[utoipa::path(get, path="/api/v1/stackboxes/{id}/instances", params(("id"=String, Path)), responses((status=200, description="Nova servers in a GPU stackbox, with each flavor's GPU resource classes and the load stackbox applied", body=Vec<StackboxInstance>), (status=409, description="Not a deployed GPU stackbox, or Nova is not part of it", body=ErrorBody)))]
 async fn instances(
     State(app): State<App>,
     Path(id): Path<String>,
-) -> Result<Json<Vec<FarmInstance>>, ApiError> {
+) -> Result<Json<Vec<StackboxInstance>>, ApiError> {
     Ok(Json(app.manager.instances(&id).await?))
 }
 
-#[utoipa::path(get, path="/api/v1/farms/{id}/instances/{server}/gpu-load", params(("id"=String, Path), ("server"=String, Path, description="Nova server UUID, or a unique instance name")), responses((status=200, description="The load for the instance; a server without one shows the default with applied=false", body=GpuLoadView), (status=404, body=ErrorBody), (status=409, body=ErrorBody)))]
+#[utoipa::path(get, path="/api/v1/stackboxes/{id}/instances/{server}/gpu-load", params(("id"=String, Path), ("server"=String, Path, description="Nova server UUID, or a unique instance name")), responses((status=200, description="The load for the instance; a server without one shows the default with applied=false", body=GpuLoadView), (status=404, body=ErrorBody), (status=409, body=ErrorBody)))]
 async fn gpu_load(
     State(app): State<App>,
     Path((id, server)): Path<(String, String)>,
@@ -694,7 +704,7 @@ async fn gpu_load(
     Ok(Json(app.manager.gpu_load(&id, &server).await?))
 }
 
-#[utoipa::path(put, path="/api/v1/farms/{id}/instances/{server}/gpu-load", params(("id"=String, Path), ("server"=String, Path, description="Nova server UUID, or a unique instance name")), request_body=GpuLoad, responses((status=200, description="The load was written to the instance's metadata; the guest sees it within about 15 seconds", body=GpuLoadView), (status=400, body=ErrorBody), (status=404, body=ErrorBody), (status=409, body=ErrorBody)))]
+#[utoipa::path(put, path="/api/v1/stackboxes/{id}/instances/{server}/gpu-load", params(("id"=String, Path), ("server"=String, Path, description="Nova server UUID, or a unique instance name")), request_body=GpuLoad, responses((status=200, description="The load was written to the instance's metadata; the guest sees it within about 15 seconds", body=GpuLoadView), (status=400, body=ErrorBody), (status=404, body=ErrorBody), (status=409, body=ErrorBody)))]
 async fn set_gpu_load(
     State(app): State<App>,
     Path((id, server)): Path<(String, String)>,
@@ -705,7 +715,7 @@ async fn set_gpu_load(
     ))
 }
 
-#[utoipa::path(delete, path="/api/v1/farms/{id}/instances/{server}/gpu-load", params(("id"=String, Path), ("server"=String, Path, description="Nova server UUID, or a unique instance name")), responses((status=200, description="The metadata is removed; the guest returns to its default at the next metadata refresh", body=GpuLoadView), (status=404, body=ErrorBody), (status=409, body=ErrorBody)))]
+#[utoipa::path(delete, path="/api/v1/stackboxes/{id}/instances/{server}/gpu-load", params(("id"=String, Path), ("server"=String, Path, description="Nova server UUID, or a unique instance name")), responses((status=200, description="The metadata is removed; the guest returns to its default at the next metadata refresh", body=GpuLoadView), (status=404, body=ErrorBody), (status=409, body=ErrorBody)))]
 async fn clear_gpu_load(
     State(app): State<App>,
     Path((id, server)): Path<(String, String)>,
@@ -713,7 +723,7 @@ async fn clear_gpu_load(
     Ok(Json(app.manager.clear_gpu_load(&id, &server).await?))
 }
 
-#[utoipa::path(get, path="/api/v1/farms/{id}/gpu/guest-script", params(("id"=String, Path)), responses((status=200, description="The fake nvidia-smi script, ready to install as /usr/bin/nvidia-smi", content_type="text/x-shellscript", body=String), (status=409, body=ErrorBody)))]
+#[utoipa::path(get, path="/api/v1/stackboxes/{id}/gpu/guest-script", params(("id"=String, Path)), responses((status=200, description="The fake nvidia-smi script, ready to install as /usr/bin/nvidia-smi", content_type="text/x-shellscript", body=String), (status=409, body=ErrorBody)))]
 async fn gpu_guest_script(
     State(app): State<App>,
     Path(id): Path<String>,
@@ -732,7 +742,7 @@ async fn gpu_guest_script(
         .into_response())
 }
 
-#[utoipa::path(get, path="/api/v1/farms/{id}/gpu/user-data", params(("id"=String, Path)), responses((status=200, description="A user-data installer for images that do not apply Nova vendor data (CirrOS): it writes the fake nvidia-smi and prints its XML to the console", content_type="text/x-shellscript", body=String), (status=409, body=ErrorBody)))]
+#[utoipa::path(get, path="/api/v1/stackboxes/{id}/gpu/user-data", params(("id"=String, Path)), responses((status=200, description="A user-data installer for images that do not apply Nova vendor data (CirrOS): it writes the fake nvidia-smi and prints its XML to the console", content_type="text/x-shellscript", body=String), (status=409, body=ErrorBody)))]
 async fn gpu_user_data(
     State(app): State<App>,
     Path(id): Path<String>,
@@ -743,7 +753,7 @@ async fn gpu_user_data(
             (header::CONTENT_TYPE, "text/x-shellscript; charset=utf-8"),
             (
                 header::CONTENT_DISPOSITION,
-                "attachment; filename=\"farm-gpu-user-data.sh\"",
+                "attachment; filename=\"stackbox-gpu-user-data.sh\"",
             ),
         ],
         script,
@@ -751,7 +761,7 @@ async fn gpu_user_data(
         .into_response())
 }
 
-#[utoipa::path(post, path="/api/v1/farms/{id}/settle", params(("id"=String, Path)), responses((status=202, description="Wait for the farm's services to answer again after its VM started from disk; no deployment runs", body=Job), (status=409, body=ErrorBody)))]
+#[utoipa::path(post, path="/api/v1/stackboxes/{id}/settle", params(("id"=String, Path)), responses((status=202, description="Wait for the stackbox's services to answer again after its VM started from disk; no deployment runs", body=Job), (status=409, body=ErrorBody)))]
 async fn settle(State(app): State<App>, Path(id): Path<String>) -> Result<Response, ApiError> {
     Ok(accepted(app.manager.settle(&id)?))
 }
@@ -762,7 +772,7 @@ struct ForgetQuery {
     #[serde(default)]
     forget: bool,
 }
-#[utoipa::path(delete, path="/api/v1/farms/{id}", params(("id"=String, Path), ForgetQuery), responses((status=202, body=Job), (status=409, body=ErrorBody)))]
+#[utoipa::path(delete, path="/api/v1/stackboxes/{id}", params(("id"=String, Path), ForgetQuery), responses((status=202, body=Job), (status=409, body=ErrorBody)))]
 async fn delete(
     State(app): State<App>,
     Path(id): Path<String>,
@@ -774,13 +784,13 @@ async fn delete(
         app.manager.delete(&id)?
     }))
 }
-#[utoipa::path(get, path="/api/v1/relay", responses((status=200, description="Where farms that span hosts join", body=crate::manager::RelayStatus)))]
+#[utoipa::path(get, path="/api/v1/relay", responses((status=200, description="Where stackboxes that span hosts join", body=crate::manager::RelayStatus)))]
 async fn relay_status(
     State(app): State<App>,
 ) -> Result<Json<crate::manager::RelayStatus>, ApiError> {
     Ok(Json(app.manager.relay_status().await?))
 }
-#[utoipa::path(put, path="/api/v1/relay", request_body=crate::link::relay::RelaySettings, responses((status=200, description="Saved; the relay listens anew at once", body=crate::manager::RelayStatus), (status=400, body=ErrorBody), (status=409, description="Farms that span hosts hold the current URL and CA", body=ErrorBody)))]
+#[utoipa::path(put, path="/api/v1/relay", request_body=crate::link::relay::RelaySettings, responses((status=200, description="Saved; the relay listens anew at once", body=crate::manager::RelayStatus), (status=400, body=ErrorBody), (status=409, description="Stackboxes that span hosts hold the current URL and CA", body=ErrorBody)))]
 async fn set_relay(
     State(app): State<App>,
     value: Result<Json<crate::link::relay::RelaySettings>, JsonRejection>,
@@ -793,7 +803,7 @@ async fn update_cloudflared(
 ) -> Result<Json<crate::manager::RelayStatus>, ApiError> {
     Ok(Json(app.manager.update_cloudflared().await?))
 }
-#[utoipa::path(delete, path="/api/v1/relay", responses((status=200, description="The relay is off; farms cannot span hosts", body=crate::manager::RelayStatus), (status=409, body=ErrorBody)))]
+#[utoipa::path(delete, path="/api/v1/relay", responses((status=200, description="The relay is off; stackboxes cannot span hosts", body=crate::manager::RelayStatus), (status=409, body=ErrorBody)))]
 async fn remove_relay(
     State(app): State<App>,
 ) -> Result<Json<crate::manager::RelayStatus>, ApiError> {
@@ -807,24 +817,24 @@ async fn jobs(State(app): State<App>) -> Result<Json<Vec<Job>>, ApiError> {
 async fn job(State(app): State<App>, Path(id): Path<String>) -> Result<Json<Job>, ApiError> {
     Ok(Json(app.manager.job(&id)?))
 }
-#[utoipa::path(get, path="/api/v1/farms/{id}/endpoints", params(("id"=String, Path)), responses((status=200, body=Endpoints), (status=409, body=ErrorBody)))]
+#[utoipa::path(get, path="/api/v1/stackboxes/{id}/endpoints", params(("id"=String, Path)), responses((status=200, body=Endpoints), (status=409, body=ErrorBody)))]
 async fn endpoints(
     State(app): State<App>,
     Path(id): Path<String>,
 ) -> Result<Json<Endpoints>, ApiError> {
     Ok(Json(app.manager.endpoints(&id).await?))
 }
-#[utoipa::path(put, path="/api/v1/farms/{id}/nodes/{node}/faults", params(("id"=String, Path), ("node"=String, Path, description="VM of a multi-node farm: control, compute-1, ...")), request_body=crate::link::Impair, responses((status=200, description="The farm with the VM's faults applied; no delay and no loss heals it", body=FarmView), (status=400, body=ErrorBody), (status=404, body=ErrorBody), (status=409, body=ErrorBody)))]
+#[utoipa::path(put, path="/api/v1/stackboxes/{id}/nodes/{node}/faults", params(("id"=String, Path), ("node"=String, Path, description="VM of a multi-node stackbox: control, compute-1, ...")), request_body=crate::link::Impair, responses((status=200, description="The stackbox with the VM's faults applied; no delay and no loss heals it", body=StackboxView), (status=400, body=ErrorBody), (status=404, body=ErrorBody), (status=409, body=ErrorBody)))]
 async fn set_faults(
     State(app): State<App>,
     Path((id, node)): Path<(String, String)>,
     value: Result<Json<crate::link::Impair>, JsonRejection>,
-) -> Result<Json<FarmView>, ApiError> {
-    Ok(Json(FarmView::of(
+) -> Result<Json<StackboxView>, ApiError> {
+    Ok(Json(StackboxView::of(
         app.manager.impair(&id, &node, body(value)?).await?,
     )))
 }
-#[utoipa::path(post, path="/api/v1/farms/{id}/snapshots", params(("id"=String, Path)), request_body=SnapshotRequest, responses((status=202, description="Snapshot job; the farm's VM stops for the capture and starts again. With `node: control` every VM stops, computes first, but only the control VM is captured, as a control template", body=Job), (status=400, body=ErrorBody), (status=409, body=ErrorBody)))]
+#[utoipa::path(post, path="/api/v1/stackboxes/{id}/snapshots", params(("id"=String, Path)), request_body=SnapshotRequest, responses((status=202, description="Snapshot job; the stackbox's VM stops for the capture and starts again. With `node: control` every VM stops, computes first, but only the control VM is captured, as a control template", body=Job), (status=400, body=ErrorBody), (status=409, body=ErrorBody)))]
 async fn freeze(
     State(app): State<App>,
     Path(id): Path<String>,
@@ -991,7 +1001,7 @@ struct LogQuery {
 fn default_limit() -> usize {
     1000
 }
-#[utoipa::path(get, path="/api/v1/farms/{id}/logs", params(("id"=String, Path), LogQuery), responses((status=200, body=Vec<LogEntry>)))]
+#[utoipa::path(get, path="/api/v1/stackboxes/{id}/logs", params(("id"=String, Path), LogQuery), responses((status=200, body=Vec<LogEntry>)))]
 async fn logs(
     State(app): State<App>,
     Path(id): Path<String>,
@@ -999,7 +1009,7 @@ async fn logs(
 ) -> Result<Json<Vec<LogEntry>>, ApiError> {
     Ok(Json(app.manager.logs(&id, query.after, query.limit)?))
 }
-#[utoipa::path(get, path="/api/v1/farms/{id}/logs/stream", params(("id"=String, Path), LogQuery), responses((status=200, description="SSE: log events with JSON LogEntry data, gap events on expired cursors, error events on read failures", content_type="text/event-stream", body=String)))]
+#[utoipa::path(get, path="/api/v1/stackboxes/{id}/logs/stream", params(("id"=String, Path), LogQuery), responses((status=200, description="SSE: log events with JSON LogEntry data, gap events on expired cursors, error events on read failures", content_type="text/event-stream", body=String)))]
 async fn log_stream(
     State(app): State<App>,
     Path(id): Path<String>,
@@ -1022,7 +1032,7 @@ async fn log_stream(
                     if let Some(first) = entries.first() && after > 0 && first.id > after + 1 { yield Ok(Event::default().event("gap").data("requested cursor expired; replaying retained tail")); }
                     for entry in entries { after = entry.id; yield Ok(Event::default().event("log").id(entry.id.to_string()).json_data(entry).unwrap()); }
                 }
-                Err(_) => { yield Ok(Event::default().event("error").data("cannot read farm log")); break; }
+                Err(_) => { yield Ok(Event::default().event("error").data("cannot read stackbox log")); break; }
             }
         }
     };
@@ -1066,7 +1076,7 @@ fn same_origin(headers: &HeaderMap) -> Result<(), ApiError> {
         ))
     }
 }
-/// Interactive login shell in the farm's VM over a WebSocket: binary frames carry terminal
+/// Interactive login shell in the stackbox's VM over a WebSocket: binary frames carry terminal
 /// bytes both ways; text frames carry `ShellControl` messages.
 async fn shell(
     State(app): State<App>,
@@ -1076,7 +1086,7 @@ async fn shell(
     upgrade: WebSocketUpgrade,
 ) -> Result<Response, ApiError> {
     same_origin(&headers)?;
-    let size = crate::farm::TerminalSize {
+    let size = crate::stackbox::TerminalSize {
         rows: query.rows,
         cols: query.cols,
     }
@@ -1087,13 +1097,13 @@ async fn shell(
     Ok(upgrade.on_upgrade(move |socket| relay_shell(app.manager, id, node, size, socket)))
 }
 async fn relay_shell(
-    manager: FarmManager,
+    manager: StackboxManager,
     id: String,
     node: Option<String>,
-    size: crate::farm::TerminalSize,
+    size: crate::stackbox::TerminalSize,
     socket: WebSocket,
 ) {
-    use crate::farm::{TerminalInput, TerminalIo, TerminalSize};
+    use crate::stackbox::{TerminalInput, TerminalIo, TerminalSize};
     use futures::{SinkExt, StreamExt};
     let (mut sink, mut stream) = socket.split();
     let (input_tx, input_rx) = tokio::sync::mpsc::channel(64);
@@ -1149,7 +1159,7 @@ async fn relay_shell(
     let notice = match result {
         Ok(()) => ShellControl::Exit,
         Err(error) => {
-            eprintln!("shell for farm {id} ended: {error:#}");
+            eprintln!("shell for stackbox {id} ended: {error:#}");
             ShellControl::Error {
                 message: format!("{error:#}"),
             }
@@ -1188,21 +1198,21 @@ async fn openapi() -> Json<utoipa::openapi::OpenApi> {
 }
 
 pub async fn serve(
-    manager: FarmManager,
+    manager: StackboxManager,
     bind: SocketAddr,
     token: Option<String>,
 ) -> anyhow::Result<()> {
     anyhow::ensure!(
         bind.ip().is_loopback() || token.is_some(),
-        "non-loopback API binding requires FARM_API_TOKEN"
+        "non-loopback API binding requires STACKBOX_API_TOKEN"
     );
     anyhow::ensure!(
         token.as_ref().is_none_or(|t| !t.trim().is_empty()),
-        "FARM_API_TOKEN cannot be empty"
+        "STACKBOX_API_TOKEN cannot be empty"
     );
     let listener = tokio::net::TcpListener::bind(bind).await?;
     println!(
-        "farmd listening on http://{} (state: {})",
+        "stackboxd listening on http://{} (state: {})",
         listener.local_addr()?,
         manager.state_dir().display()
     );
@@ -1226,7 +1236,7 @@ pub async fn serve(
         // A closed terminal sends SIGHUP and then fails writes; that must not abort the drain.
         let _ = writeln!(
             std::io::stdout(),
-            "farmd draining active jobs (running deploys continue on their hosts); a second signal terminates immediately"
+            "stackboxd draining active jobs (running deploys continue on their hosts); a second signal terminates immediately"
         );
         let graceful = async { let result = shutdown_manager.shutdown().await; if let Err(e) = result { eprintln!("shutdown failed: {e:#}"); } };
         tokio::select! { _ = graceful => {}, _ = shutdown_signal() => { std::process::exit(130); } }

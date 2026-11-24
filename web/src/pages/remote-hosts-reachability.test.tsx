@@ -114,7 +114,7 @@ test("an unreachable host reads as disconnected, not Ready, and a stale check sa
   client.clear();
 });
 
-test("a host that failed its check cannot take a new farm", () => {
+test("a host that failed its check cannot take a new stackbox", () => {
   const [gone, , fresh] = hosts;
   expect(hostReady(gone as never, "current")).toBe(false);
   expect(hostReady(fresh as never, "current")).toBe(true);

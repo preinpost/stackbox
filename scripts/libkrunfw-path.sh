@@ -1,12 +1,12 @@
 #!/bin/sh
 # Prints the guest kernel (libkrunfw) scripts/build-libkrunfw.sh built for this OS and
 # architecture: <out>/<arch>/libkrunfw.<abi>.dylib on macOS, <out>/<arch>/libkrunfw.so.<version>
-# on Linux. farm installs that kernel on each host during preparation (docs/libkrunfw.md), so
-# this is for checking the build or trying it with the msb CLI; FARM_LIBKRUNFW_PATH still
+# on Linux. stackbox installs that kernel on each host during preparation (docs/libkrunfw.md), so
+# this is for checking the build or trying it with the msb CLI; STACKBOX_LIBKRUNFW_PATH still
 # overrides the kernel for one process.
 #
 # Only the path goes to stdout, so a caller can use it directly:
-#   export FARM_LIBKRUNFW_PATH="$(sh scripts/libkrunfw-path.sh)"
+#   export STACKBOX_LIBKRUNFW_PATH="$(sh scripts/libkrunfw-path.sh)"
 #
 # Usage: scripts/libkrunfw-path.sh [--build]
 #
@@ -95,9 +95,9 @@ artifact_path() {
 kernel=$(artifact_path)
 if [ -n "$build" ] || [ -z "$kernel" ]; then
     if [ -z "$kernel" ]; then
-        echo "farm: no custom kernel for $host_arch in $dir yet; building it (docs/libkrunfw.md)" >&2
+        echo "stackbox: no custom kernel for $host_arch in $dir yet; building it (docs/libkrunfw.md)" >&2
     else
-        echo "farm: rebuilding the custom kernel for $host_arch in $dir" >&2
+        echo "stackbox: rebuilding the custom kernel for $host_arch in $dir" >&2
     fi
     # The build script reports what it does on stdout; keep stdout for the path alone.
     sh scripts/build-libkrunfw.sh >&2 || die 'the kernel build failed'
