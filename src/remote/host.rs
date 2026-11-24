@@ -86,6 +86,7 @@ pub fn vfio_group_accessible(_group: u32) -> bool {
 
 /// Whether the stackbox-vfio-bind helper is installed root-owned and 0755 and answers `--check`
 /// through sudo, with the protocol it reports.
+#[cfg(unix)]
 async fn helper_status() -> (bool, Option<u32>) {
     use std::os::unix::fs::MetadataExt;
     let installed = std::fs::metadata(super::pci::HELPER_PATH)
@@ -97,6 +98,11 @@ async fn helper_status() -> (bool, Option<u32>) {
         .await
         .and_then(|text| super::pci::parse_helper_check(&text));
     (version.is_some(), version)
+}
+
+#[cfg(not(unix))]
+async fn helper_status() -> (bool, Option<u32>) {
+    (false, None)
 }
 
 /// Runs the helper's `bind` or `unbind` for `bdf` through sudo, as the coordinator's SSH hosts do,

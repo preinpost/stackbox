@@ -361,10 +361,13 @@ pub struct PciBindRequest {
 /// Reads this machine's own candidates, with the root disk and default route the way the helper
 /// sees them, and vfio group access checked as the agent's user.
 pub fn local_candidates(route_text: &str) -> Vec<HostPciCandidate> {
+    #[cfg(unix)]
     let root_dev = std::fs::metadata("/").ok().map(|meta| {
         use std::os::unix::fs::MetadataExt;
         dev_numbers(meta.dev())
     });
+    #[cfg(not(unix))]
+    let root_dev = None;
     candidates_at(
         Path::new("/sys"),
         root_dev,
