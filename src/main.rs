@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 use anyhow::{Result, bail};
 use clap::{Args, Parser, Subcommand};
 use farm::remote::{HostJobKind, RegisterLocalHost};

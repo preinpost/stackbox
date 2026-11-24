@@ -42,7 +42,7 @@ on:
       - '.forgejo/workflows/libkrunfw.yml'
 
 concurrency:
-  group: libkrunfw-${{ github.ref }}-${{ inputs.targets || 'all' }}
+  group: libkrunfw-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
@@ -55,28 +55,54 @@ jobs:
             arch: x86_64
           - target: linux-aarch64
             arch: aarch64
-    # Every target when started by a push or with `all`; otherwise only the one named.
-    if: ${{ (inputs.targets || 'all') == 'all' || (inputs.targets || 'all') == matrix.target }}
     runs-on: docker
     container:
       # docker CLI, git, curl, node and jq; the runner's dind daemon runs the kernel build.
       image: catthehacker/ubuntu:act-24.04
     timeout-minutes: 240
     env:
-      MSB_VERSION: ${{ inputs.msb_version || '0.8.1' }}
-      REVISION: ${{ inputs.revision || 'f0493b6f1873ed6031bc0bb87568db0095a6d3b6' }}
-      PUBLISH: ${{ inputs.publish == false && 'false' || 'true' }}
-      ARCH: ${{ matrix.arch }}
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       R2_BUCKET: public-bucket
       R2_PREFIX: farm-libkrunfw
     steps:
+      # Every target when started by a push or with `all`; otherwise only the one named.
+      # Inputs and matrix values are read here (step scope) and handed on through GITHUB_ENV.
+      - name: Select target
+        id: target
+        env:
+          TARGETS: ${{ inputs.targets || 'all' }}
+          TARGET: ${{ matrix.target }}
+          ARCH: ${{ matrix.arch }}
+          MSB_VERSION: ${{ inputs.msb_version || '0.8.1' }}
+          REVISION: ${{ inputs.revision || 'f0493b6f1873ed6031bc0bb87568db0095a6d3b6' }}
+          PUBLISH_INPUT: ${{ inputs.publish }}
+        run: |
+          set -eu
+          if [ "$TARGETS" = "all" ] || [ "$TARGETS" = "$TARGET" ]; then
+            echo "run=true" >>"$GITHUB_OUTPUT"
+          else
+            echo "run=false" >>"$GITHUB_OUTPUT"
+            echo "skipping $TARGET (requested: $TARGETS)"
+          fi
+          case "$PUBLISH_INPUT" in
+            false|FALSE|0) publish=false ;;
+            *) publish=true ;;
+          esac
+          {
+            echo "ARCH=$ARCH"
+            echo "MSB_VERSION=$MSB_VERSION"
+            echo "REVISION=$REVISION"
+            echo "PUBLISH=$publish"
+          } >>"$GITHUB_ENV"
+
       - uses: actions/checkout@v4
+        if: ${{ steps.target.outputs.run == 'true' }}
 
       # The kid rule is src/kernel.rs::id_for: the first 16 hex digits of SHA-256. Checked
       # against the value the Rust unit test pins before anything is uploaded.
       - name: Check the kid rule
+        if: ${{ steps.target.outputs.run == 'true' }}
         run: |
           set -eu
           got=$(printf 'abc' | sha256sum | cut -c1-16)
@@ -85,6 +111,7 @@ jobs:
       # LIBKRUNFW_DOCKER_COPY: the daemon cannot see this job's workspace, so the sources go
       # in and the kernel comes out with docker cp instead of bind mounts.
       - name: Build the kernel
+        if: ${{ steps.target.outputs.run == 'true' }}
         env:
           LIBKRUNFW_DOCKER_COPY: '1'
         run: |
@@ -93,6 +120,7 @@ jobs:
             --out dist/libkrunfw
           test -s "dist/libkrunfw/$ARCH/manifest.txt"
       - name: Describe the kernel
+        if: ${{ steps.target.outputs.run == 'true' }}
         run: |
           set -eu
           dir=dist/libkrunfw/$ARCH
@@ -105,7 +133,7 @@ jobs:
 
       # Only a published kernel reaches farm: the index is what a host reads to find it.
       - name: Publish the kernel
-        if: ${{ env.PUBLISH == 'true' }}
+        if: ${{ steps.target.outputs.run == 'true' && env.PUBLISH == 'true' }}
         run: |
           set -eu
           dir=dist/libkrunfw/$ARCH
