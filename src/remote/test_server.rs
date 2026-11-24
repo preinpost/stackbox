@@ -558,6 +558,8 @@ impl server::Handler for Handler {
                 Operation::Freeze { .. }
                 | Operation::Impair { .. }
                 | Operation::ImportSnapshot { .. }
+                | Operation::PciBind { .. }
+                | Operation::PciUnbind { .. }
                 | Operation::Inspect => {
                     unimplemented!("the SSH fixture does not emulate snapshots")
                 }

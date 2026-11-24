@@ -7,6 +7,7 @@ pub mod host;
 pub mod hub;
 pub mod job;
 pub mod link;
+pub mod pci;
 pub mod protocol;
 mod secrets;
 pub mod ssh;
@@ -274,8 +275,64 @@ pub struct HostInspection {
     /// stock kernel answers no.
     #[serde(default)]
     pub pci_passthrough_available: bool,
+    /// Every PCI device on the host but bridges, with its driver, IOMMU group and whether a stackbox
+    /// may take it. Unlike `pci_devices`, which lists only `vfio-pci` devices, this is the set the
+    /// portal offers to bind. Absent from older inspections.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pci_candidates: Vec<HostPciCandidate>,
+    /// Whether the host's `stackbox-vfio-bind` helper is installed root-owned, answers `--check`
+    /// through sudo, and so can bind and unbind devices for the coordinator.
+    #[serde(default)]
+    pub pci_bind_helper_available: bool,
+    /// The protocol version the helper reports; absent when it is not available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pci_bind_helper_version: Option<u32>,
     pub vm_boot_verified: bool,
     pub checked_at: u64,
+}
+
+/// A PCI device on a host that a stackbox could take: any device but a bridge, with the facts the
+/// coordinator needs to decide whether binding it is safe.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct HostPciCandidate {
+    /// Lowercase `DDDD:BB:DD.F`, such as `0000:04:00.3`.
+    pub bdf: String,
+    /// Four lowercase hex digits.
+    pub vendor_id: String,
+    /// Four lowercase hex digits.
+    pub product_id: String,
+    /// Six lowercase hex digits: base class, subclass and programming interface.
+    pub class: String,
+    /// A short name for the class: `gpu`, `network`, `audio`, `nvme`, `storage`, `usb` or `other`.
+    pub class_name: String,
+    /// The IOMMU group, or absent when the device has none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub iommu_group: Option<u32>,
+    /// The bound driver, absent when none is bound.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub driver: Option<String>,
+    /// Every other device in the IOMMU group is unbound or bound to `vfio-pci`.
+    #[serde(default)]
+    pub group_exclusive: bool,
+    /// Bound to `vfio-pci`, the group is exclusive and `/dev/vfio/<group>` is readable and writable
+    /// by the agent: a stackbox can use this device now.
+    #[serde(default)]
+    pub vfio_ready: bool,
+    /// Whether the helper may bind this device: nothing protects it, it has an IOMMU group and that
+    /// group is exclusive.
+    #[serde(default)]
+    pub bindable: bool,
+    /// Why the device must not be bound: `no_iommu_group`, `shared_iommu_group`, `root_disk`,
+    /// `default_route_nic`, `usb_in_use`, or `bound_to_stackbox` when a stackbox holds it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protected_reason: Option<String>,
+    /// A condition worth showing that does not block binding, such as `boot_vga` for the display GPU.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
+    /// The stackbox that holds this device on this host. The coordinator fills it in when it answers
+    /// a request; a host never reports it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owning_stackbox: Option<String>,
 }
 
 /// A host PCI device a stackbox may pass through. Only `vfio-pci`-bound devices are reported.
@@ -555,6 +612,10 @@ pub enum HostJobKind {
     InstallAgent,
     /// Delete this coordinator's stackboxes and leftover VMs on the host, then unregister it.
     Purge,
+    /// Bind one PCI device to `vfio-pci` through the host's `stackbox-vfio-bind` helper.
+    PciBind,
+    /// Give one PCI device back to its host driver through the helper.
+    PciUnbind,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
@@ -610,6 +671,9 @@ pub struct HostJob {
     /// A purge that also deletes the snapshots this host keeps.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub delete_snapshots: bool,
+    /// The PCI device a `PciBind` or `PciUnbind` job works on, as `DDDD:BB:DD.F`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pci_bdf: Option<String>,
 }
 
 #[cfg(test)]

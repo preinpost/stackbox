@@ -6,7 +6,7 @@
     "license": {
       "name": ""
     },
-    "version": "0.1.9"
+    "version": "0.1.10"
   },
   "paths": {
     "/api/v1/agent-hosts": {
@@ -958,6 +958,193 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/HostJob"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/hosts/{id}/pci/bind": {
+      "post": {
+        "tags": [],
+        "summary": "Binds a PCI device of the host to `vfio-pci` through its stackbox-vfio-bind helper, so a\nstackbox can pass it through. The job's inspection replaces the host's.",
+        "operationId": "bind_host_pci",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PciBindRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostJob"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/hosts/{id}/pci/helper-install": {
+      "get": {
+        "tags": [],
+        "summary": "The self-contained script that installs the stackbox-vfio-bind helper and its sudoers rule on\nthe host, for the portal to copy and the operator to run there.",
+        "operationId": "host_pci_helper_install",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PciHelperInstall"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/hosts/{id}/pci/unbind": {
+      "post": {
+        "tags": [],
+        "summary": "Gives a PCI device of the host back to its host driver through the helper.",
+        "operationId": "unbind_host_pci",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PciBindRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HostJob"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
                 }
               }
             }
@@ -3939,6 +4126,26 @@
           "os": {
             "type": "string"
           },
+          "pci_bind_helper_available": {
+            "type": "boolean",
+            "description": "Whether the host's `stackbox-vfio-bind` helper is installed root-owned, answers `--check`\nthrough sudo, and so can bind and unbind devices for the coordinator."
+          },
+          "pci_bind_helper_version": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The protocol version the helper reports; absent when it is not available.",
+            "minimum": 0
+          },
+          "pci_candidates": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/HostPciCandidate"
+            },
+            "description": "Every PCI device on the host but bridges, with its driver, IOMMU group and whether a stackbox\nmay take it. Unlike `pci_devices`, which lists only `vfio-pci` devices, this is the set the\nportal offers to bind. Absent from older inspections."
+          },
           "pci_devices": {
             "type": "array",
             "items": {
@@ -4007,6 +4214,13 @@
           "kind": {
             "$ref": "#/components/schemas/HostJobKind"
           },
+          "pci_bdf": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The PCI device a `PciBind` or `PciUnbind` job works on, as `DDDD:BB:DD.F`."
+          },
           "status": {
             "$ref": "#/components/schemas/JobStatus"
           }
@@ -4035,7 +4249,9 @@
           "check",
           "prepare",
           "install_agent",
-          "purge"
+          "purge",
+          "pci_bind",
+          "pci_unbind"
         ]
       },
       "HostKey": {
@@ -4061,6 +4277,88 @@
           "local",
           "agent"
         ]
+      },
+      "HostPciCandidate": {
+        "type": "object",
+        "description": "A PCI device on a host that a stackbox could take: any device but a bridge, with the facts the\ncoordinator needs to decide whether binding it is safe.",
+        "required": [
+          "bdf",
+          "vendor_id",
+          "product_id",
+          "class",
+          "class_name"
+        ],
+        "properties": {
+          "bdf": {
+            "type": "string",
+            "description": "Lowercase `DDDD:BB:DD.F`, such as `0000:04:00.3`."
+          },
+          "bindable": {
+            "type": "boolean",
+            "description": "Whether the helper may bind this device: nothing protects it, it has an IOMMU group and that\ngroup is exclusive."
+          },
+          "class": {
+            "type": "string",
+            "description": "Six lowercase hex digits: base class, subclass and programming interface."
+          },
+          "class_name": {
+            "type": "string",
+            "description": "A short name for the class: `gpu`, `network`, `audio`, `nvme`, `storage`, `usb` or `other`."
+          },
+          "driver": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The bound driver, absent when none is bound."
+          },
+          "group_exclusive": {
+            "type": "boolean",
+            "description": "Every other device in the IOMMU group is unbound or bound to `vfio-pci`."
+          },
+          "iommu_group": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The IOMMU group, or absent when the device has none.",
+            "minimum": 0
+          },
+          "owning_stackbox": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The stackbox that holds this device on this host. The coordinator fills it in when it answers\na request; a host never reports it."
+          },
+          "product_id": {
+            "type": "string",
+            "description": "Four lowercase hex digits."
+          },
+          "protected_reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the device must not be bound: `no_iommu_group`, `shared_iommu_group`, `root_disk`,\n`default_route_nic`, `usb_in_use`, or `bound_to_stackbox` when a stackbox holds it."
+          },
+          "vendor_id": {
+            "type": "string",
+            "description": "Four lowercase hex digits."
+          },
+          "vfio_ready": {
+            "type": "boolean",
+            "description": "Bound to `vfio-pci`, the group is exclusive and `/dev/vfio/<group>` is readable and writable\nby the agent: a stackbox can use this device now."
+          },
+          "warning": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A condition worth showing that does not block binding, such as `boot_vga` for the display GPU."
+          }
+        }
       },
       "HostPciDevice": {
         "type": "object",
@@ -4579,6 +4877,40 @@
           },
           "role": {
             "$ref": "#/components/schemas/Role"
+          }
+        }
+      },
+      "PciBindRequest": {
+        "type": "object",
+        "description": "Binds one PCI device on a host.",
+        "required": [
+          "bdf"
+        ],
+        "properties": {
+          "bdf": {
+            "type": "string",
+            "description": "The device's address, `DDDD:BB:DD.F`; upper-case hex is accepted and lowered."
+          }
+        }
+      },
+      "PciHelperInstall": {
+        "type": "object",
+        "description": "The helper install a host needs, as the portal copies it.",
+        "required": [
+          "script",
+          "helper_path",
+          "sudoers_path"
+        ],
+        "properties": {
+          "helper_path": {
+            "type": "string"
+          },
+          "script": {
+            "type": "string",
+            "description": "A self-contained shell script; paste it into a root-capable shell on the host."
+          },
+          "sudoers_path": {
+            "type": "string"
           }
         }
       },

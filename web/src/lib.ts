@@ -376,8 +376,8 @@ export function hostKernelNote(host: RemoteHost) {
     return `stackbox 커널${id ? ` ${id}` : ""}로 부팅합니다.`;
   }
   return inspection.custom_kernel_reason
-    ? `stock 커널로 부팅합니다: ${inspection.custom_kernel_reason}`
-    : "stock 커널로 부팅합니다. stackbox 커널을 설치하지 않았습니다.";
+    ? `기본 커널로 부팅합니다: ${inspection.custom_kernel_reason}`
+    : "기본 커널로 부팅합니다. stackbox 커널을 설치하지 않았습니다.";
 }
 export const hostLabel = (host: RemoteHost) =>
   `${host.id} · ${host.kind === "local" ? "로컬" : host.kind === "agent" ? "에이전트" : "원격"}`;

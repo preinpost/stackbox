@@ -3558,74 +3558,10 @@ html[data-theme="dark"] .phase-current .phase-marker {
   }
 }
 
-/* Remote host inventory: a workflow strip, the list, then one host in detail. */
-.remote-workflow {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  row-gap: var(--s2);
-  padding: 8px 12px;
-  margin-bottom: var(--s4);
-  border: 1px solid var(--line);
-  border-radius: var(--r-md);
-  background: var(--surface);
-  overflow: hidden;
-}
-.remote-workflow-step {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: var(--fs-xs);
-  color: var(--ink-3);
-  white-space: nowrap;
-}
-.remote-workflow-step + .remote-workflow-step {
-  position: relative;
-  margin-left: 29px;
-}
-.remote-workflow-step + .remote-workflow-step::before {
-  content: "";
-  position: absolute;
-  left: -29px;
-  top: 50%;
-  width: 20px;
-  height: 1px;
-  background: var(--line-2);
-}
-.remote-workflow-step .n {
-  display: grid;
-  place-items: center;
-  width: 20px;
-  height: 20px;
-  border-radius: var(--r-pill);
-  background: var(--surface-2);
-  font-family: var(--font-mono);
-  font-size: var(--fs-2xs);
-  color: var(--ink-3);
-}
-.remote-workflow-step.done {
-  color: var(--ink-2);
-}
-.remote-workflow-step.done .n {
-  background: var(--ok-bg);
-  color: var(--ok);
-}
-.remote-workflow-step.now {
-  color: var(--ink);
-  font-weight: 600;
-}
-.remote-workflow-step.now .n {
-  background: var(--accent);
-  color: #fff;
-}
-.remote-workflow-note {
-  margin-left: auto;
-  font-size: var(--fs-2xs);
-  color: var(--ink-4);
-}
+/* Remote host inventory: the list, then one host in detail. */
 .remote-host-grid {
   display: grid;
-  grid-template-columns: 292px minmax(0, 1fr);
+  grid-template-columns: 340px minmax(0, 1fr);
   gap: var(--s4);
   align-items: start;
 }
@@ -3674,13 +3610,17 @@ html[data-theme="dark"] .phase-current .phase-marker {
   font-size: var(--fs-sm);
   font-weight: 620;
   letter-spacing: -0.01em;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .remote-host-row-text code {
   font-size: var(--fs-2xs);
   color: var(--ink-3);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  white-space: normal;
 }
 .remote-host-row-meter {
   height: 3px;
@@ -3941,6 +3881,37 @@ html[data-theme="dark"] .phase-current .phase-marker {
   margin: 0 0 12px;
   padding-top: 8px;
   border-top: 1px dashed var(--line);
+  word-break: keep-all;
+}
+.remote-pci-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.remote-pci-head .remote-pci-title {
+  margin: 0;
+}
+.remote-pci-head .btn {
+  height: 30px;
+  padding: 0 10px;
+  font-size: var(--fs-xs);
+}
+.remote-pci-ready {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 24px;
+  padding: 0 9px;
+  border: 1px solid var(--ok-line);
+  border-radius: var(--r-pill);
+  background: var(--ok-bg);
+  color: var(--ok);
+  font-size: var(--fs-2xs);
+  font-weight: 600;
+  white-space: nowrap;
 }
 .remote-pci-title {
   margin: 0 0 6px;
@@ -3959,10 +3930,173 @@ html[data-theme="dark"] .phase-current .phase-marker {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 6px 12px;
-  padding: 6px 0;
+  justify-content: space-between;
+  gap: 8px 16px;
+  padding: 8px 0;
   border-bottom: 1px dashed var(--line);
   font-size: var(--fs-xs);
+  color: var(--ink-3);
+}
+.remote-pci-info {
+  display: grid;
+  flex: 1 1 320px;
+  min-width: 0;
+  gap: 4px;
+}
+.remote-pci-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+}
+.remote-pci-meta {
+  color: var(--ink-3);
+}
+.remote-pci-meta code {
+  font-family: var(--font-mono);
+  color: var(--ink-2);
+}
+.remote-pci-class {
+  padding: 0 7px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-pill);
+  color: var(--ink-2);
+  font-size: var(--fs-2xs);
+  white-space: nowrap;
+}
+.remote-pci-badge {
+  padding: 1px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-pill);
+  font-size: var(--fs-2xs);
+  white-space: nowrap;
+}
+.remote-pci-badge.tone-ok {
+  color: var(--ok);
+  background: var(--ok-bg);
+  border-color: var(--ok-line);
+}
+.remote-pci-badge.tone-warn {
+  color: var(--warn);
+  background: var(--warn-bg);
+  border-color: var(--warn-line);
+}
+.remote-pci-badge.tone-bad {
+  color: var(--bad);
+  background: var(--bad-bg);
+  border-color: var(--bad-line);
+}
+.remote-pci-badge.tone-accent {
+  color: var(--accent-ink);
+  background: var(--accent-soft);
+  border-color: var(--accent-line);
+}
+.remote-pci-action {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+  margin-left: auto;
+}
+.remote-pci-action .btn {
+  height: 32px;
+  padding: 0 10px;
+  font-size: var(--fs-xs);
+}
+.remote-pci-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin: 8px 0 2px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--ink-2);
+  font-size: var(--fs-xs);
+  font-weight: 550;
+  cursor: pointer;
+}
+.remote-pci-toggle:hover {
+  color: var(--accent-ink);
+}
+.remote-pci-chevron {
+  transition: transform 0.15s;
+}
+.remote-pci-chevron.open {
+  transform: rotate(180deg);
+}
+.remote-pci-protected {
+  margin-top: 4px;
+  padding-left: 10px;
+  border-left: 2px solid var(--line);
+}
+.remote-pci-helper {
+  display: grid;
+  gap: 8px;
+  margin: 0 0 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  background: var(--surface-2);
+}
+.remote-pci-helper-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 8px;
+}
+.remote-pci-helper-form label {
+  display: grid;
+  gap: 4px;
+  font-size: var(--fs-xs);
+  color: var(--ink-3);
+}
+.remote-pci-helper-form input {
+  height: 34px;
+  min-width: 200px;
+  padding: 0 10px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  color: var(--ink-1);
+  font-size: var(--fs-sm);
+}
+.remote-pci-script {
+  max-height: 260px;
+  margin: 0;
+  padding: 10px 12px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  color: var(--ink-1);
+  font-family: var(--font-mono);
+  font-size: var(--fs-2xs);
+  line-height: 1.55;
+  white-space: pre;
+}
+.remote-pci-helper-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.remote-pci-helper-foot span {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.remote-pci-helper-foot code {
+  font-family: var(--font-mono);
+  font-size: var(--fs-2xs);
+  color: var(--ink-3);
+}
+.hostjob-bdf {
+  font-family: var(--font-mono);
+  font-size: var(--fs-2xs);
   color: var(--ink-3);
 }
 .remote-pci-bdf,
@@ -3998,7 +4132,7 @@ html[data-theme="dark"] .phase-current .phase-marker {
   border-color: var(--bad-line);
 }
 
-/* stock 커널로 부팅한 호스트는 이유와 함께 경고한다. */
+/* 기본 커널로 부팅한 호스트는 이유와 함께 경고한다. */
 .remote-kernel-stock {
   margin: -6px 0 10px;
   color: var(--warn);
@@ -4014,6 +4148,87 @@ html[data-theme="dark"] .phase-current .phase-marker {
   color: var(--ink-3);
   padding: 14px;
   line-height: 1.7;
+  word-break: keep-all;
+}
+/* Empty host inventory: the panel spans the full row, with three ways to add a host. */
+.remote-host-list.is-empty {
+  grid-column: 1 / -1;
+}
+.remote-empty {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 18px 18px 20px;
+  word-break: keep-all;
+}
+.remote-empty h3 {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--ink);
+}
+.remote-empty > p {
+  font-size: var(--fs-xs);
+  color: var(--ink-3);
+  line-height: 1.7;
+  max-width: 62ch;
+}
+.host-choices {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 14px;
+}
+.host-choice {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  min-width: 0;
+  padding: 13px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s;
+}
+.host-choice:hover:not(:disabled) {
+  background: var(--surface-2);
+  border-color: var(--line-strong);
+}
+.host-choice:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.host-choice:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+.host-choice-icon {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  flex-shrink: 0;
+  border-radius: var(--r-md);
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+}
+.host-choice-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  word-break: keep-all;
+}
+.host-choice-text strong {
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  color: var(--ink);
+}
+.host-choice-text small {
+  font-size: var(--fs-2xs);
+  color: var(--ink-3);
+  line-height: 1.5;
 }
 .remote-host-detail .remote-unchecked {
   padding-left: 0;
@@ -4170,6 +4385,11 @@ html[data-theme="dark"] .phase-current .phase-marker {
     overflow: auto;
   }
 }
+@media (max-width: 720px) {
+  .host-choices {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
 @media (max-width: 600px) {
   .remote-host-detail {
     padding: 14px 12px 12px;
@@ -4181,9 +4401,6 @@ html[data-theme="dark"] .phase-current .phase-marker {
     flex-direction: column;
     gap: 4px;
   }
-  .remote-workflow {
-    align-items: flex-start;
-  }
 }
 @media (max-width: 520px) {
   .remote-resources {
@@ -4193,29 +4410,8 @@ html[data-theme="dark"] .phase-current .phase-marker {
     border-left: 0;
     border-top: 1px solid var(--line);
   }
-  .remote-workflow-step .t {
-    display: none;
-  }
-  .remote-workflow-step.now .t {
-    display: inline;
-  }
-  .remote-workflow-note {
-    width: 100%;
-    margin-left: 0;
-  }
 }
-@media (max-width: 600px) {
-  .page-heading:has(+ .remote-workflow) {
-    flex-direction: column;
-  }
-  .page-heading:has(+ .remote-workflow) > .flex {
-    padding-top: 0;
-  }
-  .page-heading:has(+ .remote-workflow) .page-description {
-    max-width: 100%;
-  }
-}
-
+@media
 /* Jobs: live work above, grouped history below. */
 .jobs-scope {
   display: inline-flex;
@@ -6033,4 +6229,48 @@ html[data-theme="dark"] .phase-current .phase-marker {
 }
 .gpu-actions .field-hint {
   max-width: 60ch;
+}
+
+/* A bind or unbind's result, shown above the PCI devices until it is closed. */
+.remote-pci-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font-size: 0.92rem;
+  line-height: 1.45;
+}
+.remote-pci-banner > span {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.remote-pci-banner.tone-ok {
+  color: var(--ok);
+  background: var(--ok-bg);
+  border-color: var(--ok-line);
+  font-weight: 600;
+}
+.remote-pci-banner.tone-bad {
+  color: var(--bad);
+  background: var(--bad-bg);
+  border-color: var(--bad-line);
+}
+.remote-pci-banner.tone-accent {
+  color: var(--accent);
+  background: var(--accent-bg, var(--ok-bg));
+  border-color: var(--accent-line);
+}
+.remote-pci-check {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 10px;
+}
+.remote-pci-check .field-hint {
+  margin: 0;
 }

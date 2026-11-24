@@ -1,4 +1,8 @@
-import { queryOptions } from "@tanstack/react-query";
+import {
+  queryOptions,
+  useMutation,
+  useQueryClient,
+} from "@tanstack/react-query";
 import type { components } from "./schema";
 
 type Schema = components["schemas"];
@@ -29,6 +33,8 @@ export type Datastore = Schema["Datastore"];
 export type RemoteHost = Schema["RemoteHost"];
 export type HostInspection = Schema["HostInspection"];
 export type HostPciDevice = Schema["HostPciDevice"];
+export type HostPciCandidate = Schema["HostPciCandidate"];
+export type HostPciHelperInstall = Schema["PciHelperInstall"];
 export type HostCapacity = Schema["HostCapacity"];
 export type HostJob = Schema["HostJob"];
 export type HostKey = Schema["HostKey"];
@@ -216,6 +222,41 @@ export const logsQuery = (id: string) =>
       request<LogEntry[]>(`/stackboxes/${encode(id)}/logs`, { signal }),
     staleTime: Infinity,
   });
+/** Binds a host PCI device to `vfio-pci` through the host's helper; the job reports the result. */
+export const bindHostPci = (hostId: string, bdf: string) =>
+  request<HostJob>(`/hosts/${encode(hostId)}/pci/bind`, {
+    method: "POST",
+    body: JSON.stringify({ bdf }),
+  });
+/** Gives a device back to its host driver through the helper. */
+export const unbindHostPci = (hostId: string, bdf: string) =>
+  request<HostJob>(`/hosts/${encode(hostId)}/pci/unbind`, {
+    method: "POST",
+    body: JSON.stringify({ bdf }),
+  });
+/** The helper's install script. Non-SSH hosts must name the login user the script is for. */
+export const fetchHostPciHelperInstall = (hostId: string, user?: string) =>
+  request<HostPciHelperInstall>(
+    `/hosts/${encode(hostId)}/pci/helper-install${user ? `?user=${encode(user)}` : ""}`,
+  );
+
+function useHostPciMutation(
+  run: (hostId: string, bdf: string) => Promise<HostJob>,
+) {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: ({ hostId, bdf }: { hostId: string; bdf: string }) =>
+      run(hostId, bdf),
+    onSettled: () =>
+      Promise.all([
+        client.invalidateQueries({ queryKey: keys.hosts }),
+        client.invalidateQueries({ queryKey: keys.hostJobs }),
+      ]),
+  });
+}
+export const useBindHostPci = () => useHostPciMutation(bindHostPci);
+export const useUnbindHostPci = () => useHostPciMutation(unbindHostPci);
+
 export const api = {
   updateHostCredentials: (id: string, body: RegisterHost) =>
     request<RemoteHost>(`/hosts/${encode(id)}`, {

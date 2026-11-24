@@ -1,5 +1,7 @@
+use super::pci::{CandidateFacts, candidate};
 use super::{
-    Credentials, GpuKernel, HostInspection, HostKey, HostPciDevice, RemoteHost, SshTarget,
+    Credentials, GpuKernel, HostInspection, HostKey, HostPciCandidate, HostPciDevice, RemoteHost,
+    SshTarget,
 };
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use base64::{Engine, engine::general_purpose::STANDARD};
@@ -575,8 +577,9 @@ pub(crate) fn install_script() -> String {
 }
 
 /// Report the host's facts; `golden` says whether this build's golden image is built yet.
-fn inspect_script() -> String {
+pub(crate) fn inspect_script() -> String {
     include_str!("inspect.sh")
+        .replace("@PCI_GUARD@", include_str!("pci_guard.sh"))
         .replace("@GOLDEN@", &crate::stackbox::golden::current())
         .replace("@MSB_VERSION@", super::MSB_VERSION)
 }
@@ -726,19 +729,79 @@ pub(crate) fn parse_pci_devices(output: &str) -> Vec<HostPciDevice> {
         .collect()
 }
 
+/// Lowercase hex of exactly `len` digits, or nothing.
+fn hex_field(text: &str, len: usize) -> Option<String> {
+    (text.len() == len && text.bytes().all(|b| b.is_ascii_hexdigit()))
+        .then(|| text.to_ascii_lowercase())
+}
+
+/// The IOMMU group field: empty for none, else a number.
+fn group_field(text: &str) -> Option<Option<u32>> {
+    match text {
+        "" => Some(None),
+        group => group.parse::<u32>().ok().map(Some),
+    }
+}
+
+/// The `STACKBOX\tpci_candidate\t<bdf>,<vendor>,<product>,<class>,<group>,<driver>,<exclusive>,
+/// <access>,<protected>,<warning>` lines of an inspection: every PCI device but bridges. A
+/// malformed line is skipped.
+pub(crate) fn parse_pci_candidates(output: &str) -> Vec<HostPciCandidate> {
+    output
+        .lines()
+        .filter_map(|line| line.strip_prefix("STACKBOX\tpci_candidate\t"))
+        .filter_map(parse_pci_candidate)
+        .collect()
+}
+
+fn parse_pci_candidate(value: &str) -> Option<HostPciCandidate> {
+    let fields: Vec<&str> = value.split(',').collect();
+    let [
+        bdf,
+        vendor,
+        product,
+        class,
+        group,
+        driver,
+        exclusive,
+        access,
+        protected,
+        warning,
+    ] = fields[..]
+    else {
+        return None;
+    };
+    // The reasons are names the host script writes. A protection it wrote in another form
+    // still protects the device, so it reads as `unknown` rather than as no protection.
+    let name = |text: &str| {
+        (!text.is_empty() && text.bytes().all(|b| b.is_ascii_lowercase() || b == b'_'))
+            .then(|| text.to_owned())
+    };
+    let protected_reason = match protected {
+        "" => None,
+        other => Some(name(other).unwrap_or_else(|| "unknown".to_owned())),
+    };
+    Some(candidate(CandidateFacts {
+        bdf: crate::model::normalize_pci_bdf(bdf).ok()?,
+        vendor_id: hex_field(vendor, 4)?,
+        product_id: hex_field(product, 4)?,
+        class: hex_field(class, 6)?,
+        iommu_group: group_field(group)?,
+        driver: (!driver.is_empty()).then(|| driver.to_owned()),
+        group_exclusive: exclusive == "1",
+        group_accessible: access == "1",
+        protected_reason,
+        warning: name(warning),
+    }))
+}
+
 fn parse_pci_device(value: &str) -> Option<HostPciDevice> {
     let fields: Vec<&str> = value.split(',').collect();
     let [bdf, vendor, product, class, group, driver, exclusive, ready] = fields[..] else {
         return None;
     };
-    let hex = |text: &str, len: usize| {
-        (text.len() == len && text.bytes().all(|b| b.is_ascii_hexdigit()))
-            .then(|| text.to_ascii_lowercase())
-    };
-    let iommu_group = match group {
-        "" => None,
-        group => Some(group.parse::<u32>().ok()?),
-    };
+    let hex = |text: &str, len: usize| hex_field(text, len);
+    let iommu_group = group_field(group)?;
     Some(HostPciDevice {
         bdf: crate::model::normalize_pci_bdf(bdf).ok()?,
         vendor_id: hex(vendor, 4)?,
@@ -796,6 +859,12 @@ fn parse_inspection(output: &str) -> Result<HostInspection> {
         .filter(|value| !value.is_empty())
         .map(str::to_owned);
     let pci_devices = parse_pci_devices(output);
+    let pci_candidates = parse_pci_candidates(output);
+    let pci_bind_helper_available = values.get("pci_bind_helper").copied() == Some("1");
+    let pci_bind_helper_version = values
+        .get("pci_bind_helper_version")
+        .and_then(|text| text.parse::<u32>().ok())
+        .filter(|_| pci_bind_helper_available);
     let vfio_device = values.get("vfio").copied() == Some("1");
     let msb_pci_capable = values.get("msb_pci").copied() == Some("1");
     Ok(HostInspection {
@@ -821,6 +890,9 @@ fn parse_inspection(output: &str) -> Result<HostInspection> {
             &pci_devices,
         ),
         pci_devices,
+        pci_candidates,
+        pci_bind_helper_available,
+        pci_bind_helper_version,
         custom_kernel,
         // An installed kernel the host cannot use, such as one built for another msb.
         custom_kernel_reason: values
@@ -1324,5 +1396,135 @@ mod pci_inspection_tests {
             assert!(!script.contains(banned), "inspect.sh pipes into {banned}");
         }
         assert!(script.contains("/sys/bus/pci/devices"));
+    }
+
+    /// The inspection and the helper run the shared guard too, so they are checked composed.
+    #[test]
+    fn the_composed_inspection_and_helper_scripts_avoid_early_closing_pipes() {
+        for (name, script) in [
+            ("inspect.sh", inspect_script()),
+            ("stackbox-vfio-bind", crate::remote::pci::helper_script()),
+        ] {
+            for banned in ["| grep -q", "| grep -m", "| head"] {
+                assert!(!script.contains(banned), "{name} pipes into {banned}");
+            }
+            assert!(
+                !script.contains("@PCI_GUARD@"),
+                "{name} keeps the guard placeholder"
+            );
+        }
+    }
+
+    #[test]
+    fn the_candidate_lines_are_parsed_and_malformed_ones_skipped() {
+        let output = "STACKBOX\tpci_candidate\t0000:04:00.0,10de,2204,030000,12,nvidia,1,0,,boot_vga\n\
+             STACKBOX\tpci_candidate\t0000:05:00.0,8086,1234,010802,13,vfio-pci,1,1,,\n\
+             STACKBOX\tpci_candidate\t0000:06:00.0,8086,1234,020000,,e1000e,0,0,default_route_nic,\n\
+             STACKBOX\tpci_candidate\t0000:07:00.0,8086,1234\n\
+             STACKBOX\tpci_candidate\t0000:08:00.0,8086,1234,020000,,,0,0,Root Disk,\n";
+        let candidates = parse_pci_candidates(output);
+        assert_eq!(candidates.len(), 4, "only the short line is skipped");
+        let gpu = &candidates[0];
+        assert_eq!(gpu.class_name, "gpu");
+        assert_eq!(gpu.iommu_group, Some(12));
+        assert!(
+            gpu.bindable,
+            "a shared-free group with no protection is bindable"
+        );
+        assert_eq!(gpu.warning.as_deref(), Some("boot_vga"));
+        let nvme = &candidates[1];
+        assert_eq!(nvme.class_name, "nvme");
+        assert!(nvme.vfio_ready && nvme.bindable);
+        let nic = &candidates[2];
+        assert_eq!(nic.protected_reason.as_deref(), Some("default_route_nic"));
+        assert!(!nic.bindable);
+        let unreadable = &candidates[3];
+        assert_eq!(unreadable.protected_reason.as_deref(), Some("unknown"));
+        assert!(
+            !unreadable.bindable,
+            "an unreadable protection never reads as bindable"
+        );
+    }
+
+    /// The inspection script, run against the PCI fixture's sysfs and route, reports the same
+    /// candidates and protections the Rust scan gives the same host.
+    #[test]
+    fn the_inspection_script_reports_the_fixture_host_candidates() {
+        use crate::remote::pci::fixture;
+        if fixture::running_as_root() {
+            eprintln!("skipping: root ignores the helper's test seams, which this scan shares");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let sysfs = dir.path().join("sys");
+        fixture::build(&sysfs);
+        let script = inspect_script()
+            .replace("SYSFS=/sys\n", &format!("SYSFS={}\n", sysfs.display()))
+            .replace(
+                "pci_root=$(findmnt -no MAJ:MIN / 2>/dev/null || true)",
+                "pci_root=8:1",
+            )
+            .replace(
+                "pci_routes=$(ip route show default 2>/dev/null || true)",
+                &format!("pci_routes='{}'", fixture::ROUTE.trim_end()),
+            );
+        let output = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(&script)
+            .output()
+            .unwrap();
+        let text = String::from_utf8_lossy(&output.stdout);
+        let candidates = parse_pci_candidates(&text);
+        let reason = |bdf: &str| {
+            candidates
+                .iter()
+                .find(|c| c.bdf == bdf)
+                .unwrap_or_else(|| panic!("{bdf} missing from {text}"))
+                .protected_reason
+                .clone()
+        };
+        assert!(candidates.iter().all(|c| c.bdf != "0000:00:01.0"));
+        assert_eq!(reason("0000:05:00.0").as_deref(), Some("root_disk"));
+        assert_eq!(reason("0000:06:00.0").as_deref(), Some("default_route_nic"));
+        assert_eq!(reason("0000:07:00.0").as_deref(), Some("usb_in_use"));
+        assert_eq!(
+            reason("0000:08:00.0").as_deref(),
+            Some("shared_iommu_group")
+        );
+        assert_eq!(reason("0000:0a:00.0").as_deref(), Some("no_iommu_group"));
+        assert_eq!(reason("0000:0b:00.0"), None);
+        let free = candidates.iter().find(|c| c.bdf == "0000:0b:00.0").unwrap();
+        assert!(free.bindable && free.iommu_group == Some(18));
+        let gpu = candidates.iter().find(|c| c.bdf == "0000:04:00.0").unwrap();
+        assert_eq!(gpu.warning.as_deref(), Some("boot_vga"));
+        // The fixture has no installed helper, so the scan says so.
+        let inspection = parse_inspection(&text).unwrap();
+        assert!(!inspection.pci_bind_helper_available);
+    }
+
+    #[test]
+    fn the_helper_status_comes_from_the_inspection() {
+        let base = |helper: &str| {
+            format!(
+                "STACKBOX\tos\tLinux\nSTACKBOX\tarch\tx86_64\nSTACKBOX\tkvm\t1\nSTACKBOX\tsudo\t1\n\
+                 STACKBOX\tmemory_total\t1\nSTACKBOX\tmemory_available\t1\nSTACKBOX\tdisk_available\t1\n\
+                 STACKBOX\tmsb\tmsb 0.8.1\nSTACKBOX\tdocker\t0\nSTACKBOX\tgolden\t0\n\
+                 STACKBOX\tvfio\t0\nSTACKBOX\tmsb_pci\t0\n{helper}"
+            )
+        };
+        let installed = parse_inspection(&base(
+            "STACKBOX\tpci_bind_helper\t1\nSTACKBOX\tpci_bind_helper_version\t1\n",
+        ))
+        .unwrap();
+        assert!(installed.pci_bind_helper_available);
+        assert_eq!(installed.pci_bind_helper_version, Some(1));
+        let absent = parse_inspection(&base(
+            "STACKBOX\tpci_bind_helper\t0\nSTACKBOX\tpci_bind_helper_version\t\n",
+        ))
+        .unwrap();
+        assert!(!absent.pci_bind_helper_available);
+        assert_eq!(absent.pci_bind_helper_version, None);
+        let older = parse_inspection(&base("")).unwrap();
+        assert!(!older.pci_bind_helper_available && older.pci_candidates.is_empty());
     }
 }

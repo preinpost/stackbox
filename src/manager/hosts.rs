@@ -21,6 +21,7 @@ impl StackboxManager {
             .values()
             .map(|s| {
                 let mut host = s.host.clone();
+                annotate_pci_owners(&store.state, &mut host);
                 let local_budget = self.0.options.memory_budget_mib;
                 host.capacity = host
                     .inspection
@@ -362,8 +363,49 @@ impl StackboxManager {
             .cloned()
             .ok_or_else(|| NotFound(format!("host job '{id}'")).into())
     }
+    /// The self-contained script that installs the stackbox-vfio-bind helper on host `id` for
+    /// `user`, the account the host's agent runs `sudo -n` as: an SSH host's login user by default.
+    pub fn pci_helper_install(
+        &self,
+        id: &str,
+        user: Option<&str>,
+    ) -> Result<crate::remote::pci::PciHelperInstall> {
+        let stored = self.stored_host(id)?;
+        let user = match (user, stored.host.kind) {
+            (Some(user), _) => user.to_owned(),
+            (None, HostKind::Ssh) => stored.host.username.clone(),
+            (None, _) => {
+                return Err(bad_request(
+                    "name the account the host's stackbox-agent runs as with ?user=<name>",
+                ));
+            }
+        };
+        if !crate::remote::pci::valid_agent_user(&user) {
+            return Err(bad_request(format!(
+                "account '{user}' must match [a-z_][a-z0-9_-]*"
+            )));
+        }
+        Ok(crate::remote::pci::PciHelperInstall {
+            script: crate::remote::pci::render_vfio_helper_install_script(&user),
+            helper_path: crate::remote::pci::HELPER_PATH.into(),
+            sudoers_path: crate::remote::pci::SUDOERS_PATH.into(),
+        })
+    }
     pub fn start_host_job(&self, id: &str, kind: HostJobKind) -> Result<HostJob> {
-        self.start_job(id, kind, false)
+        self.start_job(id, kind, false, None)
+    }
+    /// Binds PCI device `bdf` of host `id` to `vfio-pci` through the host's helper. Refused with a
+    /// conflict while a stackbox holds the device, and with a bad request when the host reports
+    /// it protected or has no helper installed. The job's inspection replaces the host's.
+    pub fn bind_host_pci(&self, id: &str, bdf: &str) -> Result<HostJob> {
+        let bdf = normalize_pci_request(bdf)?;
+        self.start_job(id, HostJobKind::PciBind, false, Some(bdf))
+    }
+    /// Gives PCI device `bdf` of host `id` back to its host driver, under the same checks as a bind
+    /// except the protection: a device the helper holds as vfio-pci can always go back.
+    pub fn unbind_host_pci(&self, id: &str, bdf: &str) -> Result<HostJob> {
+        let bdf = normalize_pci_request(bdf)?;
+        self.start_job(id, HostJobKind::PciUnbind, false, Some(bdf))
     }
     /// Reinstalls the agent on every idle SSH host that runs another build's agent, when this
     /// build's artifact for the host is loaded. The daemon runs it at startup, so rebuilding
@@ -414,12 +456,21 @@ impl StackboxManager {
     /// with their copies on other hosts. Copies of other snapshots on it are forgotten either
     /// way, and originals left without the flag stay recorded until the host returns.
     pub fn start_purge(&self, id: &str, delete_snapshots: bool) -> Result<HostJob> {
-        self.start_job(id, HostJobKind::Purge, delete_snapshots)
+        self.start_job(id, HostJobKind::Purge, delete_snapshots, None)
     }
-    fn start_job(&self, id: &str, kind: HostJobKind, delete_snapshots: bool) -> Result<HostJob> {
+    fn start_job(
+        &self,
+        id: &str,
+        kind: HostJobKind,
+        delete_snapshots: bool,
+        pci_bdf: Option<String>,
+    ) -> Result<HostJob> {
         let job = self.update(|state| {
             if !self.is_accepting() {
                 return Err(conflict("daemon is draining"));
+            }
+            if let Some(bdf) = pci_bdf.as_deref() {
+                ensure_pci_request(state, id, bdf, kind)?;
             }
             if state
                 .stackboxes
@@ -451,11 +502,14 @@ impl StackboxManager {
                 created_at: now(),
                 finished_at: None,
                 delete_snapshots,
+                pci_bdf,
             };
             host.active_job = Some(job.id.clone());
             host.error = None;
             host.status = match kind {
-                HostJobKind::Check => HostStatus::Checking,
+                HostJobKind::Check | HostJobKind::PciBind | HostJobKind::PciUnbind => {
+                    HostStatus::Checking
+                }
                 HostJobKind::Prepare | HostJobKind::InstallAgent | HostJobKind::Purge => {
                     HostStatus::Preparing
                 }
@@ -700,6 +754,9 @@ impl StackboxManager {
             return self.purge_host(&job).await;
         }
         let stored = self.stored_host(&job.host_id)?;
+        if matches!(job.kind, HostJobKind::PciBind | HostJobKind::PciUnbind) {
+            return self.run_pci_job(&job, &stored).await;
+        }
         if stored.host.kind != HostKind::Ssh {
             return self.run_agent_host_job(&job, &stored).await;
         }
@@ -842,6 +899,63 @@ impl StackboxManager {
                 ),
             )?;
         }
+        Ok(inspection)
+    }
+    /// Runs the helper's bind or unbind for the job's device, then stores the host's inspection
+    /// as the helper left it. The inspection keeps the verification evidence it still stands on.
+    async fn run_pci_job(&self, job: &HostJob, stored: &StoredHost) -> Result<HostInspection> {
+        let id = job.id.as_str();
+        let bdf = job.pci_bdf.clone().context("PCI job names no device")?;
+        let bind = matches!(job.kind, HostJobKind::PciBind);
+        let verb = if bind { "bind" } else { "unbind" };
+        let previous = stored.host.inspection.clone();
+        let mut inspection = if stored.host.kind == HostKind::Ssh {
+            self.host_event(
+                id,
+                &format!("Running the stackbox-vfio-bind helper: {verb} {bdf}"),
+            )?;
+            let credentials = self.0.vault.unseal(
+                stored
+                    .credentials
+                    .as_ref()
+                    .context("remote host has no credentials")?,
+                &stored.aad(),
+            )?;
+            let ssh = Session::connect(&stored.host, credentials).await?;
+            let output = ssh
+                .run(
+                    &crate::remote::pci::helper_command(verb, &bdf),
+                    60,
+                    "PCI helper",
+                )
+                .await?;
+            crate::remote::pci::ensure_reported(&output, verb, &bdf)?;
+            ssh.inspect().await?
+        } else {
+            self.host_event(
+                id,
+                &format!("Running the stackbox-vfio-bind helper: {verb} {bdf}"),
+            )?;
+            let operation = if bind {
+                Operation::PciBind { bdf: bdf.clone() }
+            } else {
+                Operation::PciUnbind { bdf: bdf.clone() }
+            };
+            let request = Request {
+                version: VERSION,
+                coordinator_id: self.coordinator_id()?,
+                operation,
+            };
+            match self.host_link(stored)?.call(request, None).await? {
+                Reply::Inspection { inspection } => *inspection,
+                _ => anyhow::bail!("unexpected stackbox-agent response to the PCI helper"),
+            }
+        };
+        if let Some(previous) = previous.as_ref() {
+            carry_verification(previous, &mut inspection);
+        }
+        self.host_inspection(&job.host_id, inspection.clone())?;
+        self.host_event(id, &format!("The helper confirmed {verb} of {bdf}"))?;
         Ok(inspection)
     }
     /// Check or prepare a host whose agent needs no installation: this machine, or a host
@@ -1196,6 +1310,98 @@ impl StackboxManager {
             Ok(())
         })
     }
+}
+
+/// Normalizes a PCI address from a request; a malformed one is a bad request.
+fn normalize_pci_request(bdf: &str) -> Result<String> {
+    crate::model::normalize_pci_bdf(bdf).map_err(|error| bad_request(format!("{error:#}")))
+}
+
+/// Checks a bind or unbind of `bdf` on host `host_id` against the state, before the job exists:
+/// a live stackbox holding the device is a conflict; the host must have the helper and the device
+/// among its candidates; a bind refuses a device the host reports protected.
+fn ensure_pci_request(state: &State, host_id: &str, bdf: &str, kind: HostJobKind) -> Result<()> {
+    let stored = state
+        .hosts
+        .get(host_id)
+        .ok_or_else(|| NotFound(format!("host '{host_id}'")))?;
+    if let Some(stackbox) = state.stackboxes.values().find(|stackbox| {
+        stackbox.status != StackboxStatus::Deleted
+            && stackbox.host_of("compute-1") == Some(host_id)
+            && stackbox
+                .plan
+                .as_ref()
+                .is_some_and(|plan| plan.pci_devices.iter().any(|device| device.as_str() == bdf))
+    }) {
+        return Err(conflict(format!(
+            "PCI device '{bdf}' on host '{host_id}' is held by stackbox '{}'; delete that stackbox first",
+            stackbox.id
+        )));
+    }
+    let inspection = stored.host.inspection.as_ref().ok_or_else(|| {
+        bad_request(format!(
+            "host '{host_id}' has not been inspected yet; check it under Hosts first"
+        ))
+    })?;
+    if !inspection.pci_bind_helper_available {
+        return Err(bad_request(format!(
+            "host '{host_id}' has no stackbox-vfio-bind helper; install it with the command under Hosts (GET /api/v1/hosts/{host_id}/pci/helper-install), then check the host again"
+        )));
+    }
+    let candidate = inspection
+        .pci_candidates
+        .iter()
+        .find(|candidate| candidate.bdf == bdf)
+        .ok_or_else(|| {
+            NotFound(format!(
+                "PCI device '{bdf}' on host '{host_id}' (check the host to refresh its devices)"
+            ))
+        })?;
+    if matches!(kind, HostJobKind::PciBind)
+        && let Some(reason) = candidate.protected_reason.as_deref()
+    {
+        return Err(bad_request(format!(
+            "PCI device '{bdf}' on host '{host_id}' is protected ({reason}) and cannot be bound"
+        )));
+    }
+    Ok(())
+}
+
+/// Marks the candidates of `host` that a live stackbox holds, so the portal can name the owner.
+/// A held device cannot be bound, so its protection reads `bound_to_stackbox` unless the host
+/// already gave a reason.
+fn annotate_pci_owners(state: &State, host: &mut RemoteHost) {
+    let Some(inspection) = host.inspection.as_mut() else {
+        return;
+    };
+    for candidate in &mut inspection.pci_candidates {
+        let owner = state.stackboxes.values().find(|stackbox| {
+            stackbox.status != StackboxStatus::Deleted
+                && stackbox.host_of("compute-1") == Some(host.id.as_str())
+                && stackbox
+                    .plan
+                    .as_ref()
+                    .is_some_and(|plan| plan.pci_devices.contains(&candidate.bdf))
+        });
+        if let Some(owner) = owner {
+            candidate.owning_stackbox = Some(owner.id.clone());
+            candidate.bindable = false;
+            candidate
+                .protected_reason
+                .get_or_insert_with(|| "bound_to_stackbox".into());
+        }
+    }
+}
+
+/// What a helper-verified inspection keeps from the last verification of this host: the same
+/// rules as a read-only check of an SSH host, kept with the kernel it verified.
+fn carry_verification(previous: &HostInspection, inspection: &mut HostInspection) {
+    inspection.vm_boot_verified = inspection.runtime_ready()
+        && previous.vm_boot_verified
+        && previous.msb_version == inspection.msb_version;
+    let same_kernel = previous.msb_version == inspection.msb_version
+        && previous.custom_kernel == inspection.custom_kernel;
+    inspection.keep_verification(previous, same_kernel);
 }
 
 /// Rejects an artifact that was built from other sources than the running coordinator.

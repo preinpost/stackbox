@@ -100,6 +100,12 @@ pub fn router(manager: StackboxManager, token: Option<String>) -> Router {
         .route("/api/v1/hosts/{id}/check", post(check_host))
         .route("/api/v1/hosts/{id}/prepare", post(prepare_host))
         .route("/api/v1/hosts/{id}/agent", post(install_agent))
+        .route("/api/v1/hosts/{id}/pci/bind", post(bind_host_pci))
+        .route("/api/v1/hosts/{id}/pci/unbind", post(unbind_host_pci))
+        .route(
+            "/api/v1/hosts/{id}/pci/helper-install",
+            get(host_pci_helper_install),
+        )
         .route("/api/v1/host-jobs", get(host_jobs))
         .route("/api/v1/host-jobs/{id}", get(host_job))
         .route("/api/v1/catalog", get(catalog_handler))
@@ -537,6 +543,46 @@ fn accepted_host(job: HostJob) -> Response {
 async fn check_host(State(app): State<App>, Path(id): Path<String>) -> Result<Response, ApiError> {
     Ok(accepted_host(
         app.manager.start_host_job(&id, HostJobKind::Check)?,
+    ))
+}
+/// Binds a PCI device of the host to `vfio-pci` through its stackbox-vfio-bind helper, so a
+/// stackbox can pass it through. The job's inspection replaces the host's.
+#[utoipa::path(post, path="/api/v1/hosts/{id}/pci/bind", params(("id"=String, Path)), request_body=crate::remote::pci::PciBindRequest, responses((status=202, body=HostJob), (status=400, body=ErrorBody), (status=404, body=ErrorBody), (status=409, body=ErrorBody)))]
+async fn bind_host_pci(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    Json(request): Json<crate::remote::pci::PciBindRequest>,
+) -> Result<Response, ApiError> {
+    Ok(accepted_host(app.manager.bind_host_pci(&id, &request.bdf)?))
+}
+/// Gives a PCI device of the host back to its host driver through the helper.
+#[utoipa::path(post, path="/api/v1/hosts/{id}/pci/unbind", params(("id"=String, Path)), request_body=crate::remote::pci::PciBindRequest, responses((status=202, body=HostJob), (status=400, body=ErrorBody), (status=404, body=ErrorBody), (status=409, body=ErrorBody)))]
+async fn unbind_host_pci(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    Json(request): Json<crate::remote::pci::PciBindRequest>,
+) -> Result<Response, ApiError> {
+    Ok(accepted_host(
+        app.manager.unbind_host_pci(&id, &request.bdf)?,
+    ))
+}
+#[derive(Deserialize)]
+struct HelperInstallQuery {
+    /// The account the host's stackbox-agent runs `sudo -n` as. An SSH host defaults to its login
+    /// user; any other host must name it.
+    #[serde(default)]
+    user: Option<String>,
+}
+/// The self-contained script that installs the stackbox-vfio-bind helper and its sudoers rule on
+/// the host, for the portal to copy and the operator to run there.
+#[utoipa::path(get, path="/api/v1/hosts/{id}/pci/helper-install", params(("id"=String, Path)), responses((status=200, body=crate::remote::pci::PciHelperInstall), (status=400, body=ErrorBody), (status=404, body=ErrorBody)))]
+async fn host_pci_helper_install(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    Query(query): Query<HelperInstallQuery>,
+) -> Result<Json<crate::remote::pci::PciHelperInstall>, ApiError> {
+    Ok(Json(
+        app.manager.pci_helper_install(&id, query.user.as_deref())?,
     ))
 }
 #[utoipa::path(post, path="/api/v1/hosts/{id}/prepare", params(("id"=String, Path)), responses((status=202, body=HostJob), (status=409, body=ErrorBody)))]
@@ -1172,7 +1218,7 @@ async fn relay_shell(
 }
 
 #[derive(OpenApi)]
-#[openapi(paths(host, remote_hosts, remote_host, host_fingerprint, test_connection, register_host, register_local_host, register_agent_host, update_host_credentials, unregister_host, check_host, prepare_host, install_agent, host_jobs, host_job, catalog_handler, plan_handler, list, detail, create, releases, release_plan, create_release, deploy, add_compute, instances, gpu_load, set_gpu_load, clear_gpu_load, gpu_guest_script, gpu_user_data, settle, delete, endpoints, set_faults, logs, log_stream, freeze, snapshots, snapshot, delete_snapshot, delete_snapshot_copy, export_snapshot, import_snapshot, buckets, bucket, register_bucket, update_bucket, unregister_bucket, test_bucket, check_bucket, bucket_objects, rebuild_bucket_index, relay_status, set_relay, remove_relay, update_cloudflared, jobs, job), components(schemas(ErrorBody)), modifiers(&Security))]
+#[openapi(paths(host, remote_hosts, remote_host, host_fingerprint, test_connection, register_host, register_local_host, register_agent_host, update_host_credentials, unregister_host, check_host, prepare_host, install_agent, bind_host_pci, unbind_host_pci, host_pci_helper_install, host_jobs, host_job, catalog_handler, plan_handler, list, detail, create, releases, release_plan, create_release, deploy, add_compute, instances, gpu_load, set_gpu_load, clear_gpu_load, gpu_guest_script, gpu_user_data, settle, delete, endpoints, set_faults, logs, log_stream, freeze, snapshots, snapshot, delete_snapshot, delete_snapshot_copy, export_snapshot, import_snapshot, buckets, bucket, register_bucket, update_bucket, unregister_bucket, test_bucket, check_bucket, bucket_objects, rebuild_bucket_index, relay_status, set_relay, remove_relay, update_cloudflared, jobs, job), components(schemas(ErrorBody)), modifiers(&Security))]
 struct ApiDoc;
 struct Security;
 impl utoipa::Modify for Security {

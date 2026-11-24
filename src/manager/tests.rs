@@ -628,6 +628,9 @@ fn local_host(manager: &StackboxManager) {
                 custom_kernel_reason: None,
                 mtty_available: false,
                 gpu_kernel: None,
+                pci_candidates: Vec::new(),
+                pci_bind_helper_available: false,
+                pci_bind_helper_version: None,
                 vm_boot_verified: true,
                 checked_at: now(),
             });
@@ -1456,8 +1459,24 @@ struct MsbLink {
     legacy_verify: std::sync::atomic::AtomicBool,
     /// The host's PCI devices bound to `vfio-pci`, as its inspection lists them.
     pci: std::sync::Mutex<Vec<crate::remote::HostPciDevice>>,
+    /// The host's PCI candidates as its inspection lists them; a bind or unbind changes them.
+    candidates: std::sync::Mutex<Vec<crate::remote::HostPciCandidate>>,
+    /// Whether the host's stackbox-vfio-bind helper is installed.
+    helper: std::sync::atomic::AtomicBool,
 }
 impl MsbLink {
+    /// What a bind or unbind of `bdf` leaves the device's driver as.
+    fn set_driver(&self, bdf: &str, driver: Option<&str>) {
+        for candidate in self
+            .candidates
+            .lock()
+            .unwrap()
+            .iter_mut()
+            .filter(|c| c.bdf == bdf)
+        {
+            candidate.driver = driver.map(str::to_owned);
+        }
+    }
     /// A reply from this fake: `gpu` is what its verification VM read, and `None` for a
     /// plain inspection, which cannot boot a guest.
     fn inspection(&self, gpu: Option<crate::remote::GpuKernel>) -> crate::remote::HostInspection {
@@ -1490,6 +1509,12 @@ impl MsbLink {
                 &pci,
             ),
             pci_devices: pci,
+            pci_candidates: self.candidates.lock().unwrap().clone(),
+            pci_bind_helper_available: self.helper.load(std::sync::atomic::Ordering::SeqCst),
+            pci_bind_helper_version: self
+                .helper
+                .load(std::sync::atomic::Ordering::SeqCst)
+                .then_some(1),
             vm_boot_verified: false,
             checked_at: now(),
         }
@@ -1553,6 +1578,20 @@ impl crate::remote::link::AgentLink for MsbLink {
                         Reply::Inspection {
                             inspection: Box::new(self.inspection(Some(gpu))),
                         }
+                    }
+                }
+                Operation::PciBind { bdf } => {
+                    self.calls.lock().unwrap().push("pci_bind");
+                    self.set_driver(&bdf, Some("vfio-pci"));
+                    Reply::Inspection {
+                        inspection: Box::new(self.inspection(None)),
+                    }
+                }
+                Operation::PciUnbind { bdf } => {
+                    self.calls.lock().unwrap().push("pci_unbind");
+                    self.set_driver(&bdf, None);
+                    Reply::Inspection {
+                        inspection: Box::new(self.inspection(None)),
                     }
                 }
                 operation => anyhow::bail!("unexpected {operation:?}"),
@@ -1971,6 +2010,7 @@ async fn remote_host_restart_recovers_interrupted_jobs_and_missing_key_never_rep
                     created_at: now(),
                     finished_at: None,
                     delete_snapshots: false,
+                    pci_bdf: None,
                 },
             );
             Ok(())
@@ -7270,6 +7310,9 @@ fn prepared_inspection(mtty: bool, custom_kernel: Option<&str>) -> crate::remote
             kernel_release: "6.12.113".into(),
             reason: None,
         }),
+        pci_candidates: Vec::new(),
+        pci_bind_helper_available: false,
+        pci_bind_helper_version: None,
         vm_boot_verified: true,
         checked_at: now(),
     }
@@ -8249,5 +8292,219 @@ async fn ssh_host_preparation_downloads_the_published_stackbox_kernel_without_a_
     );
     let asked = requests.lock().unwrap().clone();
     assert_eq!(asked.len(), 3, "{asked:?}");
+    settle(&manager).await;
+}
+
+/// A host PCI candidate as the host reports it, for the bind tests.
+fn pci_candidate(
+    bdf: &str,
+    driver: Option<&str>,
+    protected: Option<&str>,
+) -> crate::remote::HostPciCandidate {
+    crate::remote::pci::candidate(crate::remote::pci::CandidateFacts {
+        bdf: bdf.into(),
+        vendor_id: "8086".into(),
+        product_id: "1533".into(),
+        class: "020000".into(),
+        iommu_group: Some(18),
+        driver: driver.map(str::to_owned),
+        group_exclusive: true,
+        group_accessible: false,
+        protected_reason: protected.map(str::to_owned),
+        warning: None,
+    })
+}
+
+/// A bind and an unbind run through the host's agent: each reply's inspection is stored, so the
+/// driver the host reports after the job is what the portal shows.
+#[tokio::test]
+async fn pci_bind_and_unbind_run_through_the_agent_and_store_its_inspection() {
+    use crate::remote::HostJobKind;
+    let dir = tempfile::tempdir().unwrap();
+    let link = Arc::new(MsbLink::default());
+    *link.msb.lock().unwrap() = Some(crate::remote::MSB_VERSION.into());
+    *link.candidates.lock().unwrap() = vec![pci_candidate("0000:0b:00.0", None, None)];
+    link.helper.store(true, std::sync::atomic::Ordering::SeqCst);
+    let manager = StackboxManager::with_link(options(dir.path()), link.clone())
+        .await
+        .unwrap();
+    manager
+        .register_local_host(crate::remote::RegisterLocalHost { id: "local".into() })
+        .unwrap();
+    let check = manager.start_host_job("local", HostJobKind::Check).unwrap();
+    assert_eq!(
+        host_done(&manager, &check.id).await.status,
+        JobStatus::Succeeded
+    );
+    let driver = |manager: &StackboxManager| {
+        manager
+            .host("local")
+            .unwrap()
+            .inspection
+            .unwrap()
+            .pci_candidates
+            .into_iter()
+            .find(|c| c.bdf == "0000:0b:00.0")
+            .unwrap()
+            .driver
+    };
+
+    let bind = manager
+        .bind_host_pci("local", "0000:0B:00.0")
+        .expect("a free device on a host with the helper is accepted");
+    assert_eq!(bind.pci_bdf.as_deref(), Some("0000:0b:00.0"));
+    let finished = host_done(&manager, &bind.id).await;
+    assert_eq!(
+        finished.status,
+        JobStatus::Succeeded,
+        "{:?}",
+        finished.error
+    );
+    assert_eq!(driver(&manager).as_deref(), Some("vfio-pci"));
+
+    let unbind = manager.unbind_host_pci("local", "0000:0b:00.0").unwrap();
+    let finished = host_done(&manager, &unbind.id).await;
+    assert_eq!(
+        finished.status,
+        JobStatus::Succeeded,
+        "{:?}",
+        finished.error
+    );
+    assert_eq!(driver(&manager), None);
+    assert_eq!(
+        link.calls.lock().unwrap().as_slice(),
+        ["pci_bind", "pci_unbind"]
+    );
+    settle(&manager).await;
+}
+
+/// A bind is refused by name before any job starts: no helper, a protected device, an unknown
+/// device, a malformed address. Nothing is started, so no helper runs here.
+#[tokio::test]
+async fn pci_bind_refuses_a_protected_device_and_a_host_without_the_helper() {
+    use crate::manager::{BadRequest, NotFound};
+    let dir = tempfile::tempdir().unwrap();
+    let manager = open_with(options(dir.path()), Arc::new(Fake::default())).await;
+    let set = |helper: bool| {
+        manager
+            .update(|state| {
+                let host = &mut state.hosts.get_mut("local").unwrap().host;
+                let mut inspection = prepared_inspection(false, None);
+                inspection.pci_candidates = vec![
+                    pci_candidate("0000:05:00.0", Some("nvme"), Some("root_disk")),
+                    pci_candidate("0000:0b:00.0", None, None),
+                ];
+                inspection.pci_bind_helper_available = helper;
+                inspection.pci_bind_helper_version = helper.then_some(1);
+                host.inspection = Some(inspection);
+                Ok(())
+            })
+            .unwrap();
+    };
+
+    set(false);
+    let why = manager.bind_host_pci("local", "0000:0b:00.0").unwrap_err();
+    assert!(why.downcast_ref::<BadRequest>().is_some(), "{why:#}");
+    assert!(
+        why.to_string().contains("stackbox-vfio-bind helper"),
+        "{why:#}"
+    );
+
+    set(true);
+    let why = manager.bind_host_pci("local", "0000:05:00.0").unwrap_err();
+    assert!(why.downcast_ref::<BadRequest>().is_some(), "{why:#}");
+    assert!(why.to_string().contains("root_disk"), "{why:#}");
+
+    let why = manager.bind_host_pci("local", "0000:0c:00.0").unwrap_err();
+    assert!(why.downcast_ref::<NotFound>().is_some(), "{why:#}");
+
+    let why = manager.bind_host_pci("local", "0000:0b:00.8").unwrap_err();
+    assert!(why.downcast_ref::<BadRequest>().is_some(), "{why:#}");
+    settle(&manager).await;
+}
+
+/// A device a live stackbox passes through is held: bind and unbind are both conflicts, and the
+/// host's device list names the stackbox that holds it.
+#[tokio::test]
+async fn a_pci_device_a_stackbox_holds_cannot_be_bound_or_unbound() {
+    use crate::manager::Conflict;
+    let dir = tempfile::tempdir().unwrap();
+    let backend = Arc::new(Fake::default());
+    let manager = open_with(options(dir.path()), backend.clone()).await;
+    if !cfg!(target_os = "linux") {
+        *manager.0.guest_agent.write().unwrap() = Some(dir.path().join("stackbox-agent"));
+    }
+    let kernel = "/home/user/.local/share/stackbox/libkrunfw/0123456789abcdef/libkrunfw.so.5.6.1";
+    manager
+        .update(|state| {
+            let host = &mut state.hosts.get_mut("local").unwrap().host;
+            let mut inspection = prepared_inspection(false, Some(kernel));
+            inspection.pci_devices = vec![pci_device("0000:0b:00.0", true)];
+            inspection.pci_passthrough_available = true;
+            inspection.pci_candidates = vec![pci_candidate("0000:0b:00.0", Some("vfio-pci"), None)];
+            inspection.pci_bind_helper_available = true;
+            inspection.pci_bind_helper_version = Some(1);
+            host.inspection = Some(inspection);
+            Ok(())
+        })
+        .unwrap();
+    let made = manager
+        .create(CreateRequest {
+            computes: 1,
+            pci_devices: vec!["0000:0b:00.0".into()],
+            ..request("holder")
+        })
+        .expect("a ready device is accepted");
+    done(&manager, &made).await;
+
+    let why = manager.bind_host_pci("local", "0000:0b:00.0").unwrap_err();
+    assert!(why.downcast_ref::<Conflict>().is_some(), "{why:#}");
+    assert!(why.to_string().contains("held by stackbox"), "{why:#}");
+    let why = manager
+        .unbind_host_pci("local", "0000:0b:00.0")
+        .unwrap_err();
+    assert!(why.downcast_ref::<Conflict>().is_some(), "{why:#}");
+
+    let candidate = manager
+        .host("local")
+        .unwrap()
+        .inspection
+        .unwrap()
+        .pci_candidates
+        .into_iter()
+        .find(|c| c.bdf == "0000:0b:00.0")
+        .unwrap();
+    assert_eq!(candidate.owning_stackbox.as_deref(), Some("holder"));
+    assert_eq!(
+        candidate.protected_reason.as_deref(),
+        Some("bound_to_stackbox")
+    );
+    assert!(!candidate.bindable);
+    settle(&manager).await;
+}
+
+/// The helper-install script is the one the portal copies: an agent host must name the account,
+/// and a name the sudoers rule could not take is refused before anything is rendered.
+#[tokio::test]
+async fn the_helper_install_names_the_agent_account_and_refuses_a_bad_one() {
+    use crate::manager::BadRequest;
+    let dir = tempfile::tempdir().unwrap();
+    let manager = open_with(options(dir.path()), Arc::new(Fake::default())).await;
+    let why = manager.pci_helper_install("local", None).unwrap_err();
+    assert!(why.downcast_ref::<BadRequest>().is_some(), "{why:#}");
+    let why = manager
+        .pci_helper_install("local", Some("bad user"))
+        .unwrap_err();
+    assert!(why.downcast_ref::<BadRequest>().is_some(), "{why:#}");
+    let install = manager
+        .pci_helper_install("local", Some("stackbox"))
+        .unwrap();
+    assert!(
+        install
+            .script
+            .starts_with("sudo -v && sudo bash <<'STACKBOX_VFIO_EOF'")
+    );
+    assert_eq!(install.helper_path, "/usr/local/libexec/stackbox-vfio-bind");
+    assert_eq!(install.sudoers_path, "/etc/sudoers.d/stackbox-vfio");
     settle(&manager).await;
 }

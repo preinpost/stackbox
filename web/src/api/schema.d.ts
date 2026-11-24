@@ -282,6 +282,63 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/v1/hosts/{id}/pci/bind": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /**
+     * Binds a PCI device of the host to `vfio-pci` through its stackbox-vfio-bind helper, so a
+     *     stackbox can pass it through. The job's inspection replaces the host's.
+     */
+    post: operations["bind_host_pci"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/v1/hosts/{id}/pci/helper-install": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * The self-contained script that installs the stackbox-vfio-bind helper and its sudoers rule on
+     *     the host, for the portal to copy and the operator to run there.
+     */
+    get: operations["host_pci_helper_install"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
+  "/api/v1/hosts/{id}/pci/unbind": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put?: never;
+    /** Gives a PCI device of the host back to its host driver through the helper. */
+    post: operations["unbind_host_pci"];
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/v1/hosts/{id}/prepare": {
     parameters: {
       query?: never;
@@ -1265,6 +1322,22 @@ export interface components {
       mtty_available?: boolean;
       os: string;
       /**
+       * @description Whether the host's `stackbox-vfio-bind` helper is installed root-owned, answers `--check`
+       *     through sudo, and so can bind and unbind devices for the coordinator.
+       */
+      pci_bind_helper_available?: boolean;
+      /**
+       * Format: int32
+       * @description The protocol version the helper reports; absent when it is not available.
+       */
+      pci_bind_helper_version?: number | null;
+      /**
+       * @description Every PCI device on the host but bridges, with its driver, IOMMU group and whether a stackbox
+       *     may take it. Unlike `pci_devices`, which lists only `vfio-pci` devices, this is the set the
+       *     portal offers to bind. Absent from older inspections.
+       */
+      pci_candidates?: components["schemas"]["HostPciCandidate"][];
+      /**
        * @description PCI devices on this host bound to `vfio-pci`: the only ones a stackbox may pass through.
        *     Only devices in such a state are listed, so a host's chipset devices stay out of its
        *     inspection and `state.json`.
@@ -1292,6 +1365,8 @@ export interface components {
       host_id: string;
       id: string;
       kind: components["schemas"]["HostJobKind"];
+      /** @description The PCI device a `PciBind` or `PciUnbind` job works on, as `DDDD:BB:DD.F`. */
+      pci_bdf?: string | null;
       status: components["schemas"]["JobStatus"];
     };
     HostJobEvent: {
@@ -1300,7 +1375,13 @@ export interface components {
       message: string;
     };
     /** @enum {string} */
-    HostJobKind: "check" | "prepare" | "install_agent" | "purge";
+    HostJobKind:
+      | "check"
+      | "prepare"
+      | "install_agent"
+      | "purge"
+      | "pci_bind"
+      | "pci_unbind";
     HostKey: {
       algorithm: string;
       fingerprint: string;
@@ -1310,6 +1391,53 @@ export interface components {
      * @enum {string}
      */
     HostKind: "ssh" | "local" | "agent";
+    /**
+     * @description A PCI device on a host that a stackbox could take: any device but a bridge, with the facts the
+     *     coordinator needs to decide whether binding it is safe.
+     */
+    HostPciCandidate: {
+      /** @description Lowercase `DDDD:BB:DD.F`, such as `0000:04:00.3`. */
+      bdf: string;
+      /**
+       * @description Whether the helper may bind this device: nothing protects it, it has an IOMMU group and that
+       *     group is exclusive.
+       */
+      bindable?: boolean;
+      /** @description Six lowercase hex digits: base class, subclass and programming interface. */
+      class: string;
+      /** @description A short name for the class: `gpu`, `network`, `audio`, `nvme`, `storage`, `usb` or `other`. */
+      class_name: string;
+      /** @description The bound driver, absent when none is bound. */
+      driver?: string | null;
+      /** @description Every other device in the IOMMU group is unbound or bound to `vfio-pci`. */
+      group_exclusive?: boolean;
+      /**
+       * Format: int32
+       * @description The IOMMU group, or absent when the device has none.
+       */
+      iommu_group?: number | null;
+      /**
+       * @description The stackbox that holds this device on this host. The coordinator fills it in when it answers
+       *     a request; a host never reports it.
+       */
+      owning_stackbox?: string | null;
+      /** @description Four lowercase hex digits. */
+      product_id: string;
+      /**
+       * @description Why the device must not be bound: `no_iommu_group`, `shared_iommu_group`, `root_disk`,
+       *     `default_route_nic`, `usb_in_use`, or `bound_to_stackbox` when a stackbox holds it.
+       */
+      protected_reason?: string | null;
+      /** @description Four lowercase hex digits. */
+      vendor_id: string;
+      /**
+       * @description Bound to `vfio-pci`, the group is exclusive and `/dev/vfio/<group>` is readable and writable
+       *     by the agent: a stackbox can use this device now.
+       */
+      vfio_ready?: boolean;
+      /** @description A condition worth showing that does not block binding, such as `boot_vga` for the display GPU. */
+      warning?: string | null;
+    };
     /** @description A host PCI device a stackbox may pass through. Only `vfio-pci`-bound devices are reported. */
     HostPciDevice: {
       /** @description Lowercase `DDDD:BB:DD.F`, such as `0000:04:00.3`. */
@@ -1523,6 +1651,18 @@ export interface components {
       /** Format: int32 */
       memory_mib: number;
       role: components["schemas"]["Role"];
+    };
+    /** @description Binds one PCI device on a host. */
+    PciBindRequest: {
+      /** @description The device's address, `DDDD:BB:DD.F`; upper-case hex is accepted and lowered. */
+      bdf: string;
+    };
+    /** @description The helper install a host needs, as the portal copies it. */
+    PciHelperInstall: {
+      helper_path: string;
+      /** @description A self-contained shell script; paste it into a root-capable shell on the host. */
+      script: string;
+      sudoers_path: string;
     };
     /** @enum {string} */
     Phase:
@@ -2850,6 +2990,141 @@ export interface operations {
         };
         content: {
           "application/json": components["schemas"]["HostJob"];
+        };
+      };
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorBody"];
+        };
+      };
+    };
+  };
+  bind_host_pci: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["PciBindRequest"];
+      };
+    };
+    responses: {
+      202: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HostJob"];
+        };
+      };
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorBody"];
+        };
+      };
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorBody"];
+        };
+      };
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorBody"];
+        };
+      };
+    };
+  };
+  host_pci_helper_install: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["PciHelperInstall"];
+        };
+      };
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorBody"];
+        };
+      };
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorBody"];
+        };
+      };
+    };
+  };
+  unbind_host_pci: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["PciBindRequest"];
+      };
+    };
+    responses: {
+      202: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["HostJob"];
+        };
+      };
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorBody"];
+        };
+      };
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorBody"];
         };
       };
       409: {

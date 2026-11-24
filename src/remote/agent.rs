@@ -188,6 +188,9 @@ pub struct Agent {
     backend: Arc<dyn Backend>,
     limits: Limits,
     runner: Runner,
+    /// The command a PCI bind or unbind runs before the helper's verb and device: the real
+    /// `sudo -n` helper, or a stand-in in tests.
+    pci_helper: Vec<String>,
 }
 impl Agent {
     /// An agent that runs inside the coordinator's process, for tests. Its deploys run as
@@ -204,6 +207,7 @@ impl Agent {
                 probe_ports: false,
             },
             runner: Runner::Inline,
+            pci_helper: crate::remote::pci::sudo_command(),
         }
     }
     pub fn local() -> Self {
@@ -213,6 +217,7 @@ impl Agent {
             dir,
             limits: Limits::system(),
             runner: Runner::Detached,
+            pci_helper: crate::remote::pci::sudo_command(),
         }
     }
     /// Destroys every stackbox VM this host's agent created, whatever coordinator reserved it,
@@ -800,6 +805,16 @@ impl Agent {
                 .map(|r| r.exposure.port_base)
                 .collect();
             return Ok(Reply::PublicPorts { bases });
+        }
+        // A PCI bind or unbind changes the host's drivers, so one runs at a time; the reply carries
+        // the fresh inspection the coordinator stores.
+        if let Some((verb, bdf)) = request.operation.pci_request() {
+            let _pci_lock = lock(&self.dir, "pci.lock")?;
+            let bdf = crate::model::normalize_pci_bdf(bdf)?;
+            crate::remote::host::run_pci_helper(&self.pci_helper, verb, &bdf).await?;
+            return Ok(Reply::Inspection {
+                inspection: Box::new(crate::remote::host::inspect().await),
+            });
         }
         // Host-wide checks have no stackbox id either.
         if matches!(request.operation, Operation::Inspect) {
@@ -1414,6 +1429,7 @@ async fn work(dir: &Path, backend: Arc<dyn Backend>) -> Result<()> {
             probe_ports: false,
         },
         runner: Runner::Inline,
+        pci_helper: crate::remote::pci::sudo_command(),
     }
     .run_job(&job)
     .await
@@ -1565,6 +1581,7 @@ mod tests {
                 probe_ports: false,
             },
             runner: Runner::Inline,
+            pci_helper: crate::remote::pci::sudo_command(),
         };
         let other = uuid::Uuid::new_v4().to_string();
         let generation = uuid::Uuid::new_v4().to_string();
@@ -1596,6 +1613,102 @@ mod tests {
                 .contains("reserved by another stackbox")
         );
     }
+    /// A PCI bind through the agent runs the installed helper's script against the fixture's
+    /// sysfs, refuses a device the helper protects without touching it, and replies with the
+    /// host's inspection. The test helper runs as this user, so the seams are honoured.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_pci_bind_runs_the_helper_and_replies_with_the_inspection() {
+        use crate::remote::pci::fixture;
+        if fixture::running_as_root() {
+            eprintln!("skipping: root ignores the helper's test seams");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let sysfs = dir.path().join("sys");
+        let dev = dir.path().join("dev");
+        fixture::build(&sysfs);
+        std::fs::create_dir_all(dev.join("vfio")).unwrap();
+        std::fs::write(dev.join("vfio/18"), "").unwrap();
+        std::fs::write(dev.join("vfio/17"), "").unwrap();
+        let group = std::process::Command::new("id")
+            .arg("-gn")
+            .output()
+            .unwrap();
+        let conf = dir.path().join("vfio.conf");
+        std::fs::write(
+            &conf,
+            format!("GROUP={}\n", String::from_utf8_lossy(&group.stdout).trim()),
+        )
+        .unwrap();
+        let script = dir.path().join("stackbox-vfio-bind");
+        std::fs::write(&script, crate::remote::pci::helper_script()).unwrap();
+        let mut agent = Agent::in_process(dir.path().join("agent"), Arc::new(Fake::default()));
+        let mut command = vec!["env".to_owned()];
+        command.extend(fixture::helper_env(&sysfs, &dev, &conf));
+        command.push("sh".into());
+        command.push(script.display().to_string());
+        agent.pci_helper = command;
+        let owner = uuid::Uuid::new_v4().to_string();
+        let emit: Emitter = Arc::new(|_| Ok(()));
+
+        let reply = agent
+            .execute(
+                request(
+                    &owner,
+                    Operation::PciBind {
+                        bdf: "0000:0B:00.0".into(),
+                    },
+                ),
+                emit.clone(),
+            )
+            .await
+            .unwrap();
+        assert!(matches!(reply, Reply::Inspection { .. }));
+        let bound = sysfs.join("devices/pci0000:00/0000:0b:00.0");
+        assert_eq!(
+            std::fs::read_to_string(bound.join("driver_override")).unwrap(),
+            "vfio-pci\n"
+        );
+
+        let refused = agent
+            .execute(
+                request(
+                    &owner,
+                    Operation::PciBind {
+                        bdf: "0000:05:00.0".into(),
+                    },
+                ),
+                emit.clone(),
+            )
+            .await
+            .unwrap_err();
+        assert!(refused.to_string().contains("root_disk"), "{refused:#}");
+        assert_eq!(
+            std::fs::read_to_string(sysfs.join("devices/pci0000:00/0000:05:00.0/driver_override"))
+                .unwrap(),
+            ""
+        );
+
+        let back = agent
+            .execute(
+                request(
+                    &owner,
+                    Operation::PciUnbind {
+                        bdf: "0000:09:00.0".into(),
+                    },
+                ),
+                emit,
+            )
+            .await
+            .unwrap();
+        assert!(matches!(back, Reply::Inspection { .. }));
+        assert_eq!(
+            std::fs::read_to_string(sysfs.join("bus/pci/drivers_probe")).unwrap(),
+            "0000:09:00.0\n"
+        );
+    }
+
     #[tokio::test]
     async fn durable_ownership_replay_budgets_failure_reservations_and_foreign_vms() {
         let dir = tempfile::tempdir().unwrap();
@@ -1611,6 +1724,7 @@ mod tests {
                 probe_ports: true,
             },
             runner: Runner::Inline,
+            pci_helper: crate::remote::pci::sudo_command(),
         };
         let owner = uuid::Uuid::new_v4().to_string();
         let other = uuid::Uuid::new_v4().to_string();
@@ -1765,6 +1879,7 @@ mod tests {
                 probe_ports: false,
             },
             runner: Runner::Inline,
+            pci_helper: crate::remote::pci::sudo_command(),
         };
         let owner = uuid::Uuid::new_v4().to_string();
         let generation = uuid::Uuid::new_v4().to_string();
@@ -2165,6 +2280,7 @@ mod tests {
                 probe_ports: true,
             },
             runner: Runner::Inline,
+            pci_helper: crate::remote::pci::sudo_command(),
         };
         let owner = uuid::Uuid::new_v4().to_string();
         let other = uuid::Uuid::new_v4().to_string();
@@ -2218,6 +2334,7 @@ mod tests {
                 probe_ports: true,
             },
             runner: Runner::Inline,
+            pci_helper: crate::remote::pci::sudo_command(),
         };
         let owner = uuid::Uuid::new_v4().to_string();
         let generation = uuid::Uuid::new_v4().to_string();
@@ -2315,6 +2432,7 @@ mod tests {
                 probe_ports: true,
             },
             runner: Runner::Inline,
+            pci_helper: crate::remote::pci::sudo_command(),
         });
         let owner = uuid::Uuid::new_v4().to_string();
         let generation = uuid::Uuid::new_v4().to_string();

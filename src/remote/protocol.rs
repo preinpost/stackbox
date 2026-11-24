@@ -226,6 +226,16 @@ pub enum Operation {
     /// Destroy every VM this coordinator reserved on the host, then forget them.
     /// The coordinator runs this only when removing the host.
     Purge,
+    /// Bind one PCI device to `vfio-pci` through the host's stackbox-vfio-bind helper, then
+    /// reply with the host's fresh inspection.
+    PciBind {
+        bdf: String,
+    },
+    /// Give one PCI device back to its host driver through the helper, then reply with the
+    /// host's fresh inspection.
+    PciUnbind {
+        bdf: String,
+    },
 }
 impl Operation {
     pub fn scope(&self) -> Option<(&str, &str)> {
@@ -537,8 +547,22 @@ impl Operation {
     fn reports_output(&self) -> bool {
         !matches!(
             self,
-            Self::Endpoints { .. } | Self::Hello | Self::Scan | Self::PublicPorts | Self::Inspect
+            Self::Endpoints { .. }
+                | Self::Hello
+                | Self::Scan
+                | Self::PublicPorts
+                | Self::Inspect
+                | Self::PciBind { .. }
+                | Self::PciUnbind { .. }
         )
+    }
+    /// The helper verb and the device of a PCI operation: `bind` or `unbind`.
+    pub fn pci_request(&self) -> Option<(&'static str, &str)> {
+        match self {
+            Self::PciBind { bdf } => Some(("bind", bdf)),
+            Self::PciUnbind { bdf } => Some(("unbind", bdf)),
+            _ => None,
+        }
     }
 }
 

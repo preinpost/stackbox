@@ -129,11 +129,11 @@ test("a host on the stock kernel shows the reason and no mtty devices", async ()
     },
   ]);
   expect(await screen.findByText("Stackbox 게스트 커널")).toBeTruthy();
-  expect(screen.getAllByText("stock 커널").length).toBeGreaterThan(0);
+  expect(screen.getAllByText("기본 커널").length).toBeGreaterThan(0);
   expect(screen.getByText("mtty 없음")).toBeTruthy();
   expect(screen.getByText("미탑재")).toBeTruthy();
   // The reason stands next to the checklist, not only behind the detail toggle.
-  expect(screen.getByText(/stock 커널로 부팅합니다/).textContent).toContain(
+  expect(screen.getByText(/기본 커널로 부팅합니다/).textContent).toContain(
     reason,
   );
 

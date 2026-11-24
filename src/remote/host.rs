@@ -1,5 +1,6 @@
 //! This machine as a stackbox host: what the coordinator's own agent runs on.
 
+use super::pci::{sysfs_driver, sysfs_hex};
 use super::{GpuKernel, HostInspection, HostPciDevice};
 use anyhow::{Context, Result, ensure};
 use std::{ffi::OsString, path::Path, sync::Mutex, time::Duration};
@@ -83,19 +84,45 @@ pub fn vfio_group_accessible(_group: u32) -> bool {
     false
 }
 
-/// The name of the driver bound to a sysfs device, if one is bound.
-fn sysfs_driver(dev: &Path) -> Option<String> {
-    let link = std::fs::read_link(dev.join("driver")).ok()?;
-    link.file_name()?.to_str().map(str::to_owned)
+/// Whether the stackbox-vfio-bind helper is installed root-owned and 0755 and answers `--check`
+/// through sudo, with the protocol it reports.
+async fn helper_status() -> (bool, Option<u32>) {
+    use std::os::unix::fs::MetadataExt;
+    let installed = std::fs::metadata(super::pci::HELPER_PATH)
+        .is_ok_and(|meta| meta.uid() == 0 && meta.mode() & 0o777 == 0o755 && meta.is_file());
+    if !installed {
+        return (false, None);
+    }
+    let version = output("sudo", &["-n", super::pci::HELPER_PATH, "--check"])
+        .await
+        .and_then(|text| super::pci::parse_helper_check(&text));
+    (version.is_some(), version)
 }
 
-/// A sysfs attribute such as `vendor` (`0x1022`), as lowercase hex without `0x`.
-fn sysfs_hex(dev: &Path, attribute: &str, digits: usize) -> String {
-    std::fs::read_to_string(dev.join(attribute))
-        .map(|text| text.trim().trim_start_matches("0x").to_ascii_lowercase())
-        .ok()
-        .filter(|text| text.len() == digits)
-        .unwrap_or_default()
+/// Runs the helper's `bind` or `unbind` for `bdf` through sudo, as the coordinator's SSH hosts do,
+/// and checks that it confirmed the change.
+pub async fn run_pci_helper(command: &[String], verb: &str, bdf: &str) -> Result<()> {
+    let Some((program, args)) = command.split_first() else {
+        anyhow::bail!("no PCI helper command configured");
+    };
+    let mut child = tokio::process::Command::new(program);
+    child
+        .args(args)
+        .arg(verb)
+        .arg(bdf)
+        .env("PATH", search_path())
+        .stdin(std::process::Stdio::null())
+        .kill_on_drop(true);
+    let run = tokio::time::timeout(Duration::from_secs(60), child.output())
+        .await
+        .context("the PCI helper timed out")?
+        .context("cannot run sudo for the PCI helper")?;
+    ensure!(
+        run.status.success(),
+        "the PCI helper failed to {verb} {bdf}: {}",
+        String::from_utf8_lossy(&run.stderr).trim()
+    );
+    super::pci::ensure_reported(&String::from_utf8_lossy(&run.stdout), verb, bdf)
 }
 
 pub fn hypervisor() -> &'static str {
@@ -192,6 +219,11 @@ pub async fn inspect() -> HostInspection {
     };
     let kernel = crate::kernel::select_in_process();
     let pci = pci_devices();
+    let route = output("ip", &["route", "show", "default"])
+        .await
+        .unwrap_or_default();
+    let pci_candidates = super::pci::local_candidates(&route);
+    let (pci_bind_helper_available, pci_bind_helper_version) = helper_status().await;
     let vfio_device = Path::new("/dev/vfio/vfio").exists();
     HostInspection {
         compatible: os != "unsupported" && arch != "unsupported",
@@ -218,6 +250,9 @@ pub async fn inspect() -> HostInspection {
             &pci,
         ),
         pci_devices: pci,
+        pci_candidates,
+        pci_bind_helper_available,
+        pci_bind_helper_version,
         vm_boot_verified: false,
         checked_at: crate::model::now(),
     }

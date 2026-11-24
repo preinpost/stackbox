@@ -36,6 +36,7 @@ import {
   type HostPciDevice,
   type RemoteHost,
 } from "../api/client";
+import { PciCandidates } from "../components/host-pci";
 import { CreateStackboxDialog } from "../components/stackbox-actions";
 import {
   Button,
@@ -123,16 +124,7 @@ export function RemoteHostsPage() {
       .sort(
         (a, b) => b.created_at - a.created_at || b.id.localeCompare(a.id),
       ) ?? [];
-  // The strip shows how far the hosts on this page have come, not a fixed script.
-  const hostCount = hosts.data?.length ?? 0;
-  const checked = hosts.data?.filter((h) => h.inspection).length ?? 0;
-  const ready = hosts.data?.filter((h) => hostReady(h, buildId)).length ?? 0;
-  const workflow = [
-    { label: "등록", done: hostCount > 0 },
-    { label: "SSH 점검", done: checked > 0 },
-    { label: "환경 준비", done: ready > 0 },
-    { label: "Stackbox 만들기", done: false },
-  ];
+  const noHosts = hosts.isSuccess && !hosts.data.length;
   return (
     <>
       <PageHeading
@@ -199,23 +191,6 @@ export function RemoteHostsPage() {
           </>
         }
       />
-      <div className="remote-workflow" aria-label="호스트 준비 과정">
-        {workflow.map((step, index) => (
-          <span
-            key={step.label}
-            className={`remote-workflow-step${step.done ? " done" : ""}${
-              index === workflow.length - 1 ? " now" : ""
-            }`}
-          >
-            <span className="n">{String(index + 1).padStart(2, "0")}</span>
-            <span className="t">{step.label}</span>
-          </span>
-        ))}
-        <span className="remote-workflow-note">
-          {ready} / {hostCount} 호스트 준비
-          {hostCount > ready && " · 준비가 필요한 호스트가 있습니다"}
-        </span>
-      </div>
       {(hosts.error ||
         jobs.error ||
         action.error ||
@@ -232,7 +207,10 @@ export function RemoteHostsPage() {
         />
       )}
       <div className="remote-host-grid">
-        <section className="panel remote-host-list" aria-label="호스트 목록">
+        <section
+          className={`panel remote-host-list${noHosts ? " is-empty" : ""}`}
+          aria-label="호스트 목록"
+        >
           <div className="panel-toolbar">
             <h2>
               호스트 <span className="muted">{hosts.data?.length ?? 0}</span>
@@ -301,23 +279,53 @@ export function RemoteHostsPage() {
               </button>
             ))
           )}
-          {hosts.isSuccess && !hosts.data.length && (
-            <p className="remote-unchecked">
-              Stackbox를 실행할 호스트가 없습니다. coordinator가 실행 중인 머신에서
-              실행하려면{" "}
-              <button
-                className="text-link"
-                disabled={registerLocal.isPending}
-                onClick={() => registerLocal.mutate()}
-              >
-                로컬 호스트 등록
-              </button>
-              , 다른 서버에서 실행하려면{" "}
-              <button className="text-link" onClick={() => setOpen(true)}>
-                원격 호스트 등록
-              </button>
-              을 선택하세요.
-            </p>
+          {noHosts && (
+            <div className="remote-empty">
+              <h3>Stackbox를 실행할 호스트가 없습니다</h3>
+              <p>
+                coordinator가 실행 중인 이 머신에서 바로 쓰려면 로컬 호스트를,
+                다른 서버에서 쓰려면 원격 또는 에이전트 호스트를 등록하세요.
+              </p>
+              <div className="host-choices">
+                <button
+                  type="button"
+                  className="host-choice"
+                  disabled={registerLocal.isPending}
+                  onClick={() => registerLocal.mutate()}
+                >
+                  <span className="host-choice-icon" aria-hidden>
+                    <Monitor size={16} strokeWidth={1.7} />
+                  </span>
+                  <span className="host-choice-text">
+                    <strong>로컬 호스트 등록</strong>
+                    <small aria-hidden>이 머신에서 바로 실행</small>
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  className="host-choice"
+                  onClick={() => {
+                    setEditing(undefined);
+                    setOpen(true);
+                  }}
+                >
+                  <span className="host-choice-icon" aria-hidden>
+                    <Server size={16} strokeWidth={1.7} />
+                  </span>
+                  <span className="host-choice-text">
+                    <strong>원격 호스트 등록</strong>
+                    <small aria-hidden>SSH로 접속하는 다른 서버</small>
+                  </span>
+                </button>
+                <RegisterAgentHostDialog
+                  card="서버가 coordinator에 연결"
+                  onRegistered={async (id) => {
+                    setSelectedId(id);
+                    await refresh();
+                  }}
+                />
+              </div>
+            </div>
           )}
         </section>
         {selected && (
@@ -378,6 +386,8 @@ export function RemoteHostsPage() {
                 host={selected}
                 stackboxes={stackboxCount(selected.id)}
                 coordinatorBuildId={buildId}
+                onCheck={() => action.mutate({ id: selected.id, kind: "check" })}
+                checkDisabled={!!selected.active_job || action.isPending}
               />
             ) : (
               <p className="remote-unchecked">
@@ -498,8 +508,11 @@ export function RemoteHostsPage() {
 /** A host whose agent dials in. Its token is shown once, with the command to run there. */
 export function RegisterAgentHostDialog({
   onRegistered,
+  card,
 }: {
   onRegistered: (id: string) => Promise<void>;
+  /** When set, the trigger renders as an empty-state choice card with this hint. */
+  card?: string;
 }) {
   const [open, setOpen] = useState(false);
   const [id, setId] = useState("");
@@ -524,10 +537,22 @@ export function RegisterAgentHostDialog({
         }
       }}
     >
-      <Dialog.Trigger render={<Button />}>
-        <RadioTower size={16} />
-        에이전트 호스트 등록
-      </Dialog.Trigger>
+      {card ? (
+        <Dialog.Trigger render={<button type="button" className="host-choice" />}>
+          <span className="host-choice-icon" aria-hidden>
+            <RadioTower size={16} strokeWidth={1.7} />
+          </span>
+          <span className="host-choice-text">
+            <strong>에이전트 호스트 등록</strong>
+            <small aria-hidden>{card}</small>
+          </span>
+        </Dialog.Trigger>
+      ) : (
+        <Dialog.Trigger render={<Button />}>
+          <RadioTower size={16} />
+          에이전트 호스트 등록
+        </Dialog.Trigger>
+      )}
       {open && (
         <Modal
           title={token ? `${id} 에이전트 연결` : "에이전트 호스트 등록"}
@@ -814,10 +839,14 @@ function HostInspection({
   host,
   stackboxes,
   coordinatorBuildId,
+  onCheck,
+  checkDisabled,
 }: {
   host: RemoteHost;
   stackboxes: number;
   coordinatorBuildId?: string;
+  onCheck?: () => void;
+  checkDisabled?: boolean;
 }) {
   const i = host.inspection!;
   // This machine and dial-in hosts run their own agent and prepare their image by hand.
@@ -857,7 +886,7 @@ function HostInspection({
     {
       label: "Stackbox 게스트 커널",
       ready: Boolean(i.custom_kernel),
-      note: i.custom_kernel ? `${kernelId ?? "설치됨"} 확인됨` : "stock 커널",
+      note: i.custom_kernel ? `${kernelId ?? "설치됨"} 확인됨` : "기본 커널",
     },
     {
       label: "GPU 커널 기능 (VFIO · mdev)",
@@ -947,8 +976,8 @@ function HostInspection({
       {!i.custom_kernel && (
         <p className="field-hint remote-kernel-stock">
           {i.custom_kernel_reason
-            ? `stock 커널로 부팅합니다: ${i.custom_kernel_reason}.`
-            : "stock 커널로 부팅합니다. stackbox 커널이 설치되지 않았습니다."}{" "}
+            ? `기본 커널로 부팅합니다: ${i.custom_kernel_reason}.`
+            : "기본 커널로 부팅합니다. stackbox 커널이 설치되지 않았습니다."}{" "}
           mtty GPU를 쓰려면 환경 준비를 실행하세요.
         </p>
       )}
@@ -958,7 +987,7 @@ function HostInspection({
           <div>
             <dt>게스트 커널</dt>
             <dd className={i.custom_kernel ? "" : "build-mismatch"}>
-              {i.custom_kernel ? "stackbox 커널" : "stock 커널"}
+              {i.custom_kernel ? "stackbox 커널" : "기본 커널"}
             </dd>
           </div>
           {i.custom_kernel && (
@@ -979,7 +1008,7 @@ function HostInspection({
           )}
           {i.custom_kernel_reason && (
             <div>
-              <dt>stock 커널 이유</dt>
+              <dt>기본 커널 이유</dt>
               <dd className="build-mismatch">{i.custom_kernel_reason}</dd>
             </div>
           )}
@@ -1064,7 +1093,15 @@ function HostInspection({
           </div>
         )}
       </dl>
-      <PciDevices devices={i.pci_devices ?? []} />
+      {i.pci_candidates?.length ? (
+        <PciCandidates
+          host={host}
+          onCheck={onCheck}
+          checkDisabled={checkDisabled}
+        />
+      ) : (
+        <PciDevices devices={i.pci_devices ?? []} />
+      )}
       <p className="field-hint">
         최근 점검 {dateTime(i.checked_at)}
         {!i.kvm_available &&
@@ -1074,13 +1111,20 @@ function HostInspection({
   );
 }
 
+// `purge` keeps the fallback below, as it always has.
+const HOST_JOB_KIND_LABELS: Partial<Record<HostJob["kind"], string>> = {
+  check: "점검",
+  install_agent: "Stackbox 실행기 업데이트",
+  prepare: "환경 준비",
+  pci_bind: "PCI 바인딩",
+  pci_unbind: "PCI 원복",
+};
+function hostJobKindLabel(kind: HostJob["kind"]) {
+  return HOST_JOB_KIND_LABELS[kind] ?? "환경 준비";
+}
+
 export function HostJobHistory({ job }: { job: HostJob }) {
-  const kindLabel =
-    job.kind === "check"
-      ? "점검"
-      : job.kind === "install_agent"
-        ? "Stackbox 실행기 업데이트"
-        : "환경 준비";
+  const kindLabel = hostJobKindLabel(job.kind);
   return (
     <details
       className="host-job-history"
@@ -1091,6 +1135,7 @@ export function HostJobHistory({ job }: { job: HostJob }) {
         <span className="job-kind job-kind-label" title={kindLabel}>
           {kindLabel}
         </span>
+        {job.pci_bdf && <code className="hostjob-bdf">{job.pci_bdf}</code>}
         <span className="hostjob-msg">
           {job.events.at(-1)?.message ??
             (job.error ? "작업이 실패했습니다" : "기록된 이벤트가 없습니다")}
@@ -1187,7 +1232,7 @@ function HostActionDialog({
                   </li>
                   <li>
                     stackbox 게스트 커널(VFIO · mdev · mtty 내장) 설치, 이 호스트에
-                    설치할 수 없으면 stock 커널로 진행
+                    설치할 수 없으면 기본 커널로 진행
                   </li>
                   <li>가상화 확인</li>
                   <li>
