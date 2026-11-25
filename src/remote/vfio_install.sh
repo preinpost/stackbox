@@ -31,12 +31,13 @@ STACKBOX_HELPER_EOF
 }
 
 # install_sudoers: writes the sudoers drop-in, checks it with visudo, then moves it into place.
-# The device pattern's colon is escaped with a backslash for sudoers; the unquoted heredoc keeps it.
+# The rule names the helper alone, with no argument patterns: sudo-rs's visudo rejects wildcards in
+# command arguments. The helper itself (root-owned, 0755) checks --check, bind and unbind and the BDF.
 install_sudoers() {
     sudoers_tmp=/etc/sudoers.d/.stackbox-vfio.new
     cat > "$sudoers_tmp" <<STACKBOX_SUDOERS_EOF
 Defaults!@HELPER_PATH@ env_reset
-$agent_user ALL=(root) NOPASSWD: @HELPER_PATH@ --check, @HELPER_PATH@ bind 0000\:*, @HELPER_PATH@ unbind 0000\:*
+$agent_user ALL=(root) NOPASSWD: @HELPER_PATH@
 STACKBOX_SUDOERS_EOF
     if ! { chown root:root "$sudoers_tmp" && chmod 0440 "$sudoers_tmp"; }; then
         rm -f "$sudoers_tmp"

@@ -556,7 +556,11 @@ mod tests {
             .expect("heredoc end");
         // The heredoc is unquoted, so the shell expands $agent_user and leaves `\:` untouched.
         let rule = script[start..start + end].replace("$agent_user", "dev") + "\n";
-        assert!(rule.contains("bind 0000\\:*"), "rule: {rule}");
+        assert!(
+            rule.contains("NOPASSWD: /usr/local/libexec/stackbox-vfio-bind\n"),
+            "rule: {rule}"
+        );
+        assert!(!rule.contains('*'), "wildcards are not allowed: {rule}");
         let path =
             std::env::temp_dir().join(format!("stackbox-vfio-sudoers-test-{}", std::process::id()));
         std::fs::write(&path, &rule).unwrap();
@@ -580,11 +584,12 @@ mod tests {
         assert!(script.starts_with("sudo -v && sudo bash <<'STACKBOX_VFIO_EOF'"));
         assert!(script.contains("STACKBOX_VFIO_EOF\n"));
         assert!(script.contains("agent_user='stackbox'"));
-        assert!(script.contains(
-            "$agent_user ALL=(root) NOPASSWD: /usr/local/libexec/stackbox-vfio-bind --check"
-        ));
-        assert!(script.contains("bind 0000\\:*"));
-        assert!(script.contains("unbind 0000\\:*"));
+        assert!(
+            script.contains(
+                "$agent_user ALL=(root) NOPASSWD: /usr/local/libexec/stackbox-vfio-bind\n"
+            )
+        );
+        assert!(!script.contains("0000\\:*"));
         assert!(script.contains("visudo -cf"));
         assert!(script.contains("chmod 0440"));
         assert!(script.contains("STACKBOX_HELPER_EOF"));
@@ -622,13 +627,19 @@ mod tests {
         assert!(script.trim_end().ends_with("\nmain\nSTACKBOX_VFIO_EOF"));
     }
 
-    /// The sudoers rule keeps the colon escaped, so sudo reads `0000\:*` as a device pattern.
+    /// sudo-rs's visudo rejects wildcards in command arguments, so the rule names the helper alone;
+    /// the helper validates `--check`, `bind` and `unbind` and the BDF itself.
     #[test]
-    fn the_install_script_escapes_the_colon_in_the_sudoers_rule() {
+    fn the_install_script_grants_the_helper_without_argument_wildcards() {
         let script = render_vfio_helper_install_script("stackbox");
-        assert!(script.contains("/usr/local/libexec/stackbox-vfio-bind bind 0000\\:*"));
-        assert!(script.contains("/usr/local/libexec/stackbox-vfio-bind unbind 0000\\:*"));
+        assert!(
+            script.contains(
+                "$agent_user ALL=(root) NOPASSWD: /usr/local/libexec/stackbox-vfio-bind\n"
+            )
+        );
+        assert!(!script.contains("0000\\:*"));
         assert!(!script.contains("0000:*"));
+        assert!(!script.contains("bind 0000"));
     }
 
     /// `print_success` prints the confirmation the operator reads, with the group line filled in:
