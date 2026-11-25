@@ -120,7 +120,6 @@ export function Shell() {
           <span className="brand-name">
             stackbox<span className="brand-period">.</span>
           </span>
-          <span className="version-tag">LOCAL</span>
         </Link>
         <div className="workspace">
           <span className="workspace-avatar">

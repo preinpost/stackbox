@@ -1083,9 +1083,12 @@ export function CreateStackboxForm({
 export function DeployStackboxDialog({
   stackbox,
   lastJob,
+  inMenu = false,
 }: {
   stackbox: Stackbox;
   lastJob?: Job;
+  /** Rendered as an overflow-menu item instead of the page's primary button. */
+  inMenu?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const [from, setFrom] = useState<Phase>("prepare");
@@ -1124,7 +1127,13 @@ export function DeployStackboxDialog({
       }}
     >
       <Dialog.Trigger
-        render={<Button variant="primary" disabled={!allowed} />}
+        render={
+          inMenu ? (
+            <Button disabled={!allowed} />
+          ) : (
+            <Button variant="primary" disabled={!allowed} />
+          )
+        }
         title={
           !isDeployableStackbox(stackbox)
             ? "기존 다중 VM Stackbox는 재배포할 수 없습니다. Stackbox를 새로 만드세요."

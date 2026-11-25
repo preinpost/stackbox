@@ -18,7 +18,6 @@ import {
   Globe,
   LoaderCircle,
   MoreHorizontal,
-  RefreshCw,
   KeyRound,
   MessageSquare,
   MonitorDot,
@@ -140,13 +139,7 @@ export function StackboxDetailPage({ id }: { id: string }) {
     ["failed", "broken"].includes(stackbox.status) &&
     !stackbox.active_job;
   const activeJob = history.find((j) => j.id === stackbox.active_job);
-  // A remote stackbox keeps the agent digest it was created with; updates need a new stackbox.
   const host = hosts.data?.find((h) => h.id === stackbox.host_id);
-  const staleAgent = Boolean(
-    stackbox.agent_sha256 &&
-    host?.agent?.artifact?.sha256 &&
-    stackbox.agent_sha256 !== host.agent.artifact.sha256,
-  );
   // A restored stackbox was deployed before freezing; its VM starts from disk without a deploy job.
   const deployed =
     history.some((j) => j.kind === "deploy" && j.status === "succeeded") ||
@@ -172,11 +165,14 @@ export function StackboxDetailPage({ id }: { id: string }) {
         </div>
         {stackbox.status !== "deleted" && (
           <div className="detail-actions">
-            <DeployStackboxDialog stackbox={stackbox} lastJob={latestDeployment} />
+            {stackbox.status !== "ready" && (
+              <DeployStackboxDialog stackbox={stackbox} lastJob={latestDeployment} />
+            )}
             <StackboxActionsMenu
               stackbox={stackbox}
               deployed={deployed}
               lastExpansion={history.find((j) => j.kind === "expand")}
+              lastDeployment={latestDeployment}
             />
           </div>
         )}
@@ -185,16 +181,6 @@ export function StackboxDetailPage({ id }: { id: string }) {
         <div className="warning-notice">
           기존 다중 VM 구성입니다. 이 Stackbox의 상태 조회와 삭제는 계속 사용할 수
           있습니다. 배포하려면 Stackbox를 새로 만드세요.
-        </div>
-      )}
-      {staleAgent && (
-        <div className="info-notice">
-          <RefreshCw size={18} />
-          <div>
-            <strong>이 stackbox는 예전 Stackbox 실행기에 고정되어 있습니다.</strong>{" "}
-            배포 진행 상황은 그 실행기가 보내는 단계까지만 표시됩니다. 새
-            실행기를 쓰려면 같은 구성으로 stackbox를 새로 만드세요.
-          </div>
         </div>
       )}
       {stackbox.observation_error && (
@@ -454,10 +440,12 @@ function StackboxActionsMenu({
   stackbox,
   deployed,
   lastExpansion,
+  lastDeployment,
 }: {
   stackbox: Stackbox;
   deployed: boolean;
   lastExpansion?: Job;
+  lastDeployment?: Job;
 }) {
   const [open, setOpen] = useState(false);
   const wrap = useRef<HTMLDivElement>(null);
@@ -505,6 +493,14 @@ function StackboxActionsMenu({
           if ((event.target as HTMLElement).closest("button")) setOpen(false);
         }}
       >
+        {/* A Ready stackbox redeploys from here; other states keep the primary button up top. */}
+        {stackbox.status === "ready" && (
+          <DeployStackboxDialog
+            stackbox={stackbox}
+            lastJob={lastDeployment}
+            inMenu
+          />
+        )}
         <AddComputeDialog stackbox={stackbox} lastJob={lastExpansion} />
         <CheckServicesButton stackbox={stackbox} deployed={deployed} />
         <FreezeStackboxDialog stackbox={stackbox} />
