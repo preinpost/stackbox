@@ -137,7 +137,7 @@ export function RemoteHostsPage() {
               <RefreshCw size={16} />
               새로고침
             </Button>
-            <RelaySettingsDialog />
+            <RelaySettingsDialog hostCount={hosts.data?.length ?? 0} />
             {hosts.isSuccess && !localRegistered && (
               <Button
                 disabled={registerLocal.isPending}

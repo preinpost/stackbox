@@ -64,11 +64,11 @@ test("saving a quick tunnel once shows its progress until the address is ready",
   );
   render(
     <QueryClientProvider client={client}>
-      <RelaySettingsDialog />
+      <RelaySettingsDialog hostCount={2} />
     </QueryClientProvider>,
   );
 
-  await userEvent.click(screen.getByRole("button", { name: /릴레이 설정/ }));
+  await userEvent.click(screen.getByRole("button", { name: /호스트 간 릴레이/ }));
   await userEvent.click(await screen.findByRole("button", { name: "설정" }));
 
   // The save leaves the tunnel connecting; the progress shows that step.
@@ -119,7 +119,7 @@ const saved = (settings: RelaySettings | null): RelayStatus =>
     spanning_stackboxes: [],
   }) as RelayStatus;
 
-function renderWith(current: RelayStatus) {
+function renderWith(current: RelayStatus, hostCount = 2) {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
@@ -132,7 +132,7 @@ function renderWith(current: RelayStatus) {
   );
   render(
     <QueryClientProvider client={client}>
-      <RelaySettingsDialog />
+      <RelaySettingsDialog hostCount={hostCount} />
     </QueryClientProvider>,
   );
 }
@@ -145,7 +145,7 @@ const footerButtons = () =>
 
 test("an unconfigured relay offers 설정 and no 저장", async () => {
   renderWith(saved(null));
-  await userEvent.click(screen.getByRole("button", { name: /릴레이 설정/ }));
+  await userEvent.click(screen.getByRole("button", { name: /호스트 간 릴레이/ }));
   expect(await screen.findByRole("button", { name: "설정" })).toBeTruthy();
   expect(footerButtons()).toContain("닫기");
   expect(screen.queryByRole("button", { name: "저장" })).toBeNull();
@@ -155,7 +155,7 @@ test("an unconfigured relay offers 설정 and no 저장", async () => {
 
 test("a saved, unchanged relay shows 릴레이 끄기 and 닫기 but no 저장", async () => {
   renderWith(saved(allocated));
-  await userEvent.click(screen.getByRole("button", { name: /릴레이 설정/ }));
+  await userEvent.click(screen.getByRole("button", { name: /호스트 간 릴레이/ }));
   expect(await screen.findByRole("button", { name: "릴레이 끄기" })).toBeTruthy();
   expect(footerButtons()).toContain("닫기");
   expect(screen.queryByRole("button", { name: "저장" })).toBeNull();
@@ -165,7 +165,7 @@ test("a saved, unchanged relay shows 릴레이 끄기 and 닫기 but no 저장",
 
 test("editing a saved relay's URL, bind or mode brings 저장 back", async () => {
   renderWith(saved(allocated));
-  await userEvent.click(screen.getByRole("button", { name: /릴레이 설정/ }));
+  await userEvent.click(screen.getByRole("button", { name: /호스트 간 릴레이/ }));
   await screen.findByRole("button", { name: "릴레이 끄기" });
 
   // URL edit
@@ -189,4 +189,35 @@ test("editing a saved relay's URL, bind or mode brings 저장 back", async () =>
   // Mode change
   await userEvent.click(screen.getByRole("radio", { name: /직접 연결/ }));
   expect(await screen.findByRole("button", { name: "저장" })).toBeTruthy();
+});
+
+test("with one host and the relay off, the 호스트 간 릴레이 button is hidden", async () => {
+  renderWith(saved(null), 1);
+  expect(screen.queryByRole("button", { name: /호스트 간 릴레이/ })).toBeNull();
+});
+
+test("with two hosts and the relay off, the 호스트 간 릴레이 button is shown", async () => {
+  renderWith(saved(null), 2);
+  expect(await screen.findByRole("button", { name: /호스트 간 릴레이/ })).toBeTruthy();
+});
+
+test("with one host but the relay on, the button stays and the modal explains it is only needed for 2+ hosts", async () => {
+  renderWith(saved(allocated), 1);
+  await userEvent.click(await screen.findByRole("button", { name: /호스트 간 릴레이/ }));
+  expect(
+    await screen.findByRole("heading", { name: "호스트 간 릴레이" }),
+  ).toBeTruthy();
+  expect(
+    screen.getByText(
+      /호스트가 2대 이상일 때만 필요합니다\. 단일 호스트에서는 꺼두어도 각 Stackbox의 외부 접속은 정상 동작합니다\./,
+    ),
+  ).toBeTruthy();
+  expect(footerButtons()).toContain("릴레이 끄기");
+});
+
+test("with two hosts the modal has no single-host note", async () => {
+  renderWith(saved(allocated), 2);
+  await userEvent.click(await screen.findByRole("button", { name: /호스트 간 릴레이/ }));
+  await screen.findByRole("button", { name: "릴레이 끄기" });
+  expect(screen.queryByText(/단일 호스트에서는/)).toBeNull();
 });

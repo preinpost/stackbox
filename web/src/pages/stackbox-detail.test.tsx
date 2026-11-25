@@ -463,7 +463,19 @@ function renderEndpoints() {
 }
 /** Stubs the endpoints, relay exposure, and hosts calls; the Hosts relay is never read here. */
 function stubExposure(initial: Record<string, unknown>) {
-  const state = { exposure: initial as Record<string, unknown> };
+  const state = {
+    exposure: initial as Record<string, unknown>,
+    relay: {
+      settings: null,
+      url: null,
+      tunnel: null,
+      bind: null,
+      listening: null,
+      error: null,
+      ca_sha256: null,
+      spanning_stackboxes: [],
+    } as Record<string, unknown>,
+  };
   const bodies: unknown[] = [];
   const calls: string[] = [];
   vi.stubGlobal(
@@ -473,6 +485,16 @@ function stubExposure(initial: Record<string, unknown>) {
       calls.push(`${method} ${path}`);
       if (options?.body) bodies.push(JSON.parse(options.body as string));
       if (path.endsWith("/hosts")) return Response.json([]);
+      if (path.endsWith("/relay") && method === "GET")
+        return Response.json(state.relay);
+      if (path.endsWith("/relay/cloudflared/update") && method === "POST") {
+        calls.push("update cloudflared");
+        state.relay = {
+          ...state.relay,
+          tunnel: { ...(state.relay.tunnel as object), version: "2026.11.1" },
+        };
+        return Response.json(state.relay);
+      }
       if (path.endsWith("/endpoints"))
         return Response.json({
           services: {},
@@ -520,7 +542,7 @@ test("turns this stackbox's own tunnel on without the Hosts relay, follows start
       "이 Stackbox 전용 Cloudflare 터널을 열어 외부에서 OpenStack API·Horizon·DB에 접속합니다.",
     ),
   ).toBeTruthy();
-  expect(document.body.textContent).not.toContain("Hosts → 릴레이 설정");
+  expect(document.body.textContent).not.toContain("호스트 간 릴레이");
   expect(calls.some((c) => c.endsWith("/api/v1/relay") || c.endsWith("/relay"))).toBe(false);
 
   // Click: PUT, then the tunnel is still starting.
@@ -542,7 +564,7 @@ test("turns this stackbox's own tunnel on without the Hosts relay, follows start
   ).toBeTruthy();
   expect(screen.getByText(exposureRelayUrls.horizon, { selector: "code" })).toBeTruthy();
   expect(screen.queryByText("Cloudflare 터널 연결 중…")).toBeNull();
-  expect(screen.getByRole("button", { name: "Relay" }).getAttribute("aria-pressed")).toBe("true");
+  expect(screen.getByRole("button", { name: "외부 터널" }).getAttribute("aria-pressed")).toBe("true");
   expect(screen.getByRole("button", { name: "LAN" })).toBeTruthy();
   expect(screen.getByRole("button", { name: "토큰 재발급" })).toBeTruthy();
   expect(screen.getByRole("button", { name: "끄기" })).toBeTruthy();
@@ -561,7 +583,7 @@ test("turns this stackbox's own tunnel on without the Hosts relay, follows start
   expect(
     screen.getByText("http://127.0.0.1:15000/v3", { selector: "code" }),
   ).toBeTruthy();
-  await user.click(screen.getByRole("button", { name: "Relay" }));
+  await user.click(screen.getByRole("button", { name: "외부 터널" }));
 
   // Rotate: a new token, sent as rotate: true.
   state.exposure = {
@@ -688,7 +710,7 @@ test("shows Data stores through the relay as a zero-install tunnel bar and reuse
   ).toBeTruthy();
   expect(screen.getByRole("button", { name: "터널 명령 복사" })).toBeTruthy();
   expect(screen.getByText(/MYSQL_PORT=13306/)).toBeTruthy();
-  expect(screen.getByRole("button", { name: "Relay" }).getAttribute("aria-pressed")).toBe("true");
+  expect(screen.getByRole("button", { name: "외부 터널" }).getAttribute("aria-pressed")).toBe("true");
 
   // MariaDB card: the relay-view address and the root account with its password toggle.
   expect(screen.getByText("127.0.0.1:3306", { selector: "code" })).toBeTruthy();
@@ -719,4 +741,41 @@ test("shows Data stores through the relay as a zero-install tunnel bar and reuse
   expect(screen.getByText("localhost:15008")).toBeTruthy();
   expect(panel.textContent).not.toContain("curl -fsSL");
   expect(panel.querySelector(".tunnel-bar")).toBeNull();
+});
+
+test("a ready external tunnel shows cloudflared's version and updates it when a newer one is out", async () => {
+  const user = userEvent.setup();
+  const { state, calls } = stubExposure({
+    enabled: true,
+    state: "ready",
+    relay_url: exposureRelayHost,
+    urls: exposureRelayUrls,
+  });
+  state.relay = {
+    ...state.relay,
+    tunnel: {
+      version: "2026.10.1",
+      latest: "2026.11.1",
+      checked_at: 1_763_000_000,
+      connected: true,
+      url: exposureRelayHost,
+      error: null,
+      unmanaged: false,
+    },
+  };
+  renderEndpoints();
+
+  expect(await screen.findByText("cloudflared 2026.10.1")).toBeTruthy();
+  await user.click(screen.getByRole("button", { name: "지금 업데이트" }));
+  expect(calls).toContain("update cloudflared");
+  expect(await screen.findByText("cloudflared 2026.11.1")).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "지금 업데이트" })).toBeNull();
+});
+
+test("the off state does not read cloudflared's status", async () => {
+  const { calls } = stubExposure({ enabled: false, state: "off", urls: {} });
+  renderEndpoints();
+  expect(await screen.findByRole("button", { name: "외부 접속 켜기" })).toBeTruthy();
+  expect(calls.some((c) => c.endsWith("/relay"))).toBe(false);
+  expect(document.body.textContent).not.toContain("cloudflared");
 });

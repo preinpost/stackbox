@@ -45,23 +45,28 @@ const modes = [
   },
 ] as const;
 
-/** The Hosts page's 릴레이 설정 button, showing whether the relay is up, and its dialog. */
-export function RelaySettingsDialog() {
+/**
+ * The Hosts page's 호스트 간 릴레이 button, showing whether the relay is up, and its dialog.
+ * Hidden until there are 2+ hosts, unless the relay is already set up (so it can be turned off).
+ */
+export function RelaySettingsDialog({ hostCount = 0 }: { hostCount?: number }) {
   const relay = useQuery(relayQuery());
   const [open, setOpen] = useState(false);
-  const state = !relay.data?.settings
+  const configured = !!relay.data?.settings;
+  const state = !configured
     ? "off"
-    : relay.data.error || relay.data.tunnel?.error
+    : relay.data?.error || relay.data?.tunnel?.error
       ? "error"
-      : relay.data.listening &&
+      : relay.data?.listening &&
           (!relay.data.tunnel || relay.data.tunnel.connected)
         ? "up"
         : "pending";
+  if (hostCount < 2 && !configured) return null;
   return (
     <Dialog.Root open={open} onOpenChange={setOpen}>
       <Dialog.Trigger render={<Button />}>
         <Network size={16} />
-        릴레이 설정
+        호스트 간 릴레이
         <span
           className={`relay-dot relay-dot-${state}`}
           title={
@@ -74,13 +79,13 @@ export function RelaySettingsDialog() {
           }
         />
       </Dialog.Trigger>
-      {open && <RelaySettingsForm />}
+      {open && <RelaySettingsForm hostCount={hostCount} />}
     </Dialog.Root>
   );
 }
 
 /** Where stackboxes that span hosts join: the coordinator's relay, with its own CA or behind a proxy. */
-function RelaySettingsForm() {
+function RelaySettingsForm({ hostCount }: { hostCount: number }) {
   const client = useQueryClient();
   const relay = useQuery(relayQuery());
   const saved = relay.data?.settings;
@@ -123,15 +128,15 @@ function RelaySettingsForm() {
     : null;
   return (
     <Modal
-      title="릴레이 설정"
+      title="호스트 간 릴레이"
       description={
         relay.data?.listening
-          ? `호스트 간 relay · listening ${relay.data.listening}`
+          ? `listening ${relay.data.listening}`
           : relay.data?.error
-            ? "호스트 간 relay · listen 실패"
+            ? "listen 실패"
             : saved
-              ? "호스트 간 relay · 대기"
-              : "호스트 간 relay · 꺼짐"
+              ? "대기 중"
+              : "꺼짐"
       }
       closeDisabled={mutation.isPending}
     >
@@ -146,6 +151,11 @@ function RelaySettingsForm() {
         }}
       >
         <div className="modal-body space-y-5">
+          {hostCount < 2 && (
+            <p className="field-hint relay-solo-note">
+              호스트가 2대 이상일 때만 필요합니다. 단일 호스트에서는 꺼두어도 각 Stackbox의 외부 접속은 정상 동작합니다.
+            </p>
+          )}
           <p className="field-hint">
             compute VM을 control VM과 다른 호스트에 둘 때, 호스트들이 이 relay로
             이어집니다. 어떤 방식이든 프레임은 종단 간 암호화됩니다.

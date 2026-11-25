@@ -6288,7 +6288,7 @@ html[data-theme="dark"] .phase-current .phase-marker {
 .relay-exposure-bar {
   display: grid;
   gap: 8px;
-  margin: 0 14px 10px;
+  margin: 14px 14px 12px;
   padding: 10px 12px;
   border: 1px solid var(--line, #e4e4e7);
   border-radius: 8px;
@@ -6410,6 +6410,18 @@ html[data-theme="dark"] .phase-current .phase-marker {
   color: var(--ink-2, #3f3f46);
   font-size: var(--fs-xs);
   font-weight: 600;
+}
+.relay-exposure-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  margin: 0;
+  color: var(--ink-3);
+  font-size: var(--fs-xs);
+}
+.relay-solo-note {
+  margin: 0 0 20px;
 }
 .relay-exposure-error {
   color: var(--danger, #b42318);

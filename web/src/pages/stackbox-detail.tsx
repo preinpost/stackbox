@@ -37,6 +37,7 @@ import {
   jobsQuery,
   keys,
   logsQuery,
+  relayQuery,
   useDisableRelayExposure,
   useEnableRelayExposure,
   type Datastore,
@@ -1005,6 +1006,41 @@ export function relayExposureState(
   return exposure.enabled && hasUrls ? "ready" : "off";
 }
 
+/** The cloudflared behind the external tunnel: its version, and an update when the latest is out. */
+function CloudflaredLine({ enabled }: { enabled: boolean }) {
+  const client = useQueryClient();
+  const relay = useQuery({ ...relayQuery(), enabled });
+  const update = useMutation({
+    mutationFn: api.updateCloudflared,
+    onSuccess: () => client.invalidateQueries({ queryKey: keys.relay }),
+  });
+  const tunnel = relay.data?.tunnel;
+  if (!enabled || !tunnel?.version) return null;
+  const updatable = !tunnel.unmanaged && !!tunnel.latest && tunnel.latest !== tunnel.version;
+  return (
+    <p className="relay-exposure-meta">
+      <span>
+        cloudflared {tunnel.version}
+        {tunnel.unmanaged && " · STACKBOX_CLOUDFLARED"}
+      </span>
+      {updatable && (
+        <>
+          <span>· 최신 {tunnel.latest}</span>
+          <button
+            type="button"
+            className="text-link"
+            disabled={update.isPending}
+            onClick={() => update.mutate()}
+          >
+            {update.isPending ? "업데이트 중…" : "지금 업데이트"}
+          </button>
+        </>
+      )}
+      {update.error && <span className="relay-exposure-error">{update.error.message}</span>}
+    </p>
+  );
+}
+
 export function Endpoints({ stackbox }: { stackbox: Stackbox }) {
   const exposure = stackbox.status !== "deleted" ? stackbox.exposure : null;
   const deployed = stackboxDeployed(stackbox);
@@ -1062,7 +1098,7 @@ export function Endpoints({ stackbox }: { stackbox: Stackbox }) {
         <div className="relay-exposure-bar">
           {host?.kind === "agent" ? (
             <p className="relay-exposure-note">
-              다이얼인 에이전트 호스트는 릴레이 엔드포인트 프록시를 아직 지원하지 않습니다.
+              다이얼인 에이전트 호스트는 외부 터널을 아직 지원하지 않습니다.
             </p>
           ) : login.isPending && !login.data ? null : relayState === "off" ? (
             <div className="relay-exposure-row">
@@ -1111,7 +1147,7 @@ export function Endpoints({ stackbox }: { stackbox: Stackbox }) {
                     aria-pressed={viaRelay}
                     onClick={() => setLanChosen(false)}
                   >
-                    Relay
+                    외부 터널
                   </button>
                 </div>
                 <Button type="button" disabled={busy} onClick={() => turnOn(true)}>
@@ -1128,6 +1164,7 @@ export function Endpoints({ stackbox }: { stackbox: Stackbox }) {
               )}
             </>
           )}
+          <CloudflaredLine enabled={relayState === "ready" || relayState === "error"} />
           {(enable.error || disable.error) && (
             <ErrorNotice error={enable.error ?? disable.error} />
           )}
@@ -1275,7 +1312,7 @@ export function Datastores({ stackbox }: { stackbox: Stackbox }) {
                 aria-pressed={viaRelay}
                 onClick={() => setLanChosen(false)}
               >
-                Relay
+                외부 터널
               </button>
             </div>
           )}
@@ -1315,7 +1352,7 @@ export function Datastores({ stackbox }: { stackbox: Stackbox }) {
             )}
             <p className="field-hint">
               {viaRelay
-                ? "Cloudflare 릴레이 주소입니다. 관리 UI는 브라우저에서 바로 열고, DB·AMQP는 위 터널 명령으로 로컬 포트에 연결합니다."
+                ? "Cloudflare 외부 터널 주소입니다. 관리 UI는 브라우저에서 바로 열고, DB·AMQP는 위 터널 명령으로 로컬 포트에 연결합니다."
                 : "stackbox마다 같은 VM 안에서 실행되는 데이터베이스와 메시지 큐입니다. 포트는 " +
                   `${stackbox.exposure?.port_base ?? "—"}번대 블록의 해당 offset을 씁니다.`}
             </p>
