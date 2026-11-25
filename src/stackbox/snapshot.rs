@@ -78,6 +78,32 @@ fn group(snapshot_id: &str) -> String {
     format!("stackbox-snap-{snapshot_id}")
 }
 
+/// The group of one VM's disk in a multi-node snapshot. msb binds a group to the first sandbox
+/// captured into it, so every VM needs its own.
+fn node_group(snapshot_id: &str, node: &str) -> String {
+    format!("{}-{node}", group(snapshot_id))
+}
+
+/// The group an archive is imported into. A bundle unpacks each VM to `<node>.msb`, so the
+/// file stem names the VM and keeps the group per VM, as at capture.
+fn import_group(snapshot_id: &str, archive: &Path) -> String {
+    let stem = archive
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or_default();
+    let node: String = stem
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    node_group(snapshot_id, &node)
+}
+
 /// Stop the stackbox's VM so MariaDB and RabbitMQ shut down cleanly, capture its disks
 /// (root and both container disks), then start it again.
 pub async fn freeze_stackbox(
@@ -329,7 +355,7 @@ async fn capture_one(
     node: &str,
 ) -> Result<NodeSnapshot> {
     let mut builder = Checkpoint::builder(snapshot_id)
-        .group(group(snapshot_id))
+        .group(node_group(snapshot_id, node))
         .from_sandbox(name)
         .label(snapshot_labels::NODE, node);
     for (key, value) in labels {
@@ -453,7 +479,7 @@ async fn capture_nodes(
     for (i, (name, suffix)) in vms.iter().enumerate() {
         steps.next(format!("capture {name} ({}/{})", i + 1, vms.len()));
         let mut builder = Checkpoint::builder(format!("{snapshot_id}-{suffix}"))
-            .group(group(snapshot_id))
+            .group(node_group(snapshot_id, suffix))
             .from_sandbox(name)
             .label(snapshot_labels::NODE, suffix);
         for (key, value) in labels {
@@ -572,7 +598,7 @@ pub async fn import_snapshot(archive: &Path, snapshot_id: &str) -> Result<Import
     let handle = Checkpoint::load_with_options(
         archive,
         LoadOpts {
-            group: Some(group(snapshot_id)),
+            group: Some(import_group(snapshot_id, archive)),
             ..Default::default()
         },
     )
@@ -622,6 +648,31 @@ mod tests {
         assert_eq!(freeze_steps(3, Some("control")), 6);
         // Without computes nothing stops or starts them.
         assert_eq!(freeze_steps(1, None), 4);
+    }
+
+    #[test]
+    fn snapshot_vms_get_their_own_groups() {
+        // msb binds a group to the first VM captured into it, so the second VM must not share it.
+        assert_ne!(
+            node_group("snap", "control"),
+            node_group("snap", "compute-1")
+        );
+        assert_ne!(
+            node_group("snap", "compute-1"),
+            node_group("snap", "compute-2")
+        );
+    }
+
+    #[test]
+    fn snapshot_bundle_nodes_import_into_their_own_groups() {
+        let control = import_group("snap", Path::new("/tmp/x/control.msb"));
+        let compute = import_group("snap", Path::new("/tmp/x/compute-1.msb"));
+        assert_ne!(control, compute);
+        // A node's import group matches neither the shared group nor another snapshot's.
+        assert_ne!(
+            compute,
+            import_group("other", Path::new("/tmp/x/compute-1.msb"))
+        );
     }
 
     #[test]
