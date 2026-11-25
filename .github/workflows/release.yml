@@ -147,7 +147,7 @@ jobs:
             ext: ""
           - target: macos-aarch64
             arch: macos-aarch64
-            runner: macos-14
+            runner: macos-latest
             ext: ""
           - target: windows-x86_64
             arch: windows-x86_64

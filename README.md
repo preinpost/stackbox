@@ -726,5 +726,5 @@ Ansible의 `no_log` 작업은 이 파일에서도 내용을 숨깁니다.
   보관합니다. 릴리스되지 않은 빌드는 manifest가 없어 건너뜁니다. `STACKBOX_AGENT_URL=`(빈 값)이면 끕니다.
 - macOS와 Windows agent는 `docker/agent-cross.Dockerfile`(cargo-zigbuild, zig 0.16)로 Linux에서 cross 빌드합니다.
   macOS 링크에는 MacOSX.sdk의 `.tbd` 파일이 필요해 로컬에서는 Xcode SDK를 쓰고(`MACOS_SDK`로 바꿀 수 있음),
-  CI의 macOS 빌드 잡(`macos-14`)은 러너에 설치된 Xcode SDK(`xcrun`)를 씁니다. 시크릿: `RELEASE_TOKEN`(선택, 없으면 `GITHUB_TOKEN`을 씀)으로
+  CI의 macOS 빌드 잡(`macos-latest`)은 러너에 설치된 Xcode SDK(`xcrun`)를 씁니다. 시크릿: `RELEASE_TOKEN`(선택, 없으면 `GITHUB_TOKEN`을 씀)으로
   릴리스와 `main`·`dev` push를 하고, GHCR 푸시는 `GITHUB_TOKEN`(`packages: write`)을 씁니다.

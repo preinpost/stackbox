@@ -117,7 +117,7 @@ jobs:
   # written by one run at a time.
   publish:
     needs: kernel
-    if: ${{ !cancelled() && (github.event_name == 'push' || inputs.publish) }}
+    if: ${{ !cancelled() && (github.event_name == 'push' || github.event.inputs.publish == 'true') }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
