@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { ApiError, request } from "./client";
+import { ApiError, api, request } from "./client";
 afterEach(() => vi.unstubAllGlobals());
 describe("API transport", () => {
   it("sends typed JSON requests without putting a token in the browser", async () => {
@@ -42,5 +42,22 @@ describe("API transport", () => {
     );
     await expect(request("/host")).rejects.toThrow("Bad gateway");
     await expect(request("/host")).rejects.toBeInstanceOf(ApiError);
+  });
+  it("addCompute sends PCI devices only when some are picked", async () => {
+    const fetch = vi.fn(
+      async (_url: string, _init?: RequestInit) =>
+        new Response('{"id":"job"}', { status: 202 }),
+    );
+    vi.stubGlobal("fetch", fetch);
+    await api.addCompute("grow", "local", undefined, ["0000:04:00.3"]);
+    expect(JSON.parse(String(fetch.mock.calls[0][1]?.body))).toEqual({
+      host_id: "local",
+      pci_devices: ["0000:04:00.3"],
+    });
+    await api.addCompute("grow", "local", "tpl", []);
+    expect(JSON.parse(String(fetch.mock.calls[1][1]?.body))).toEqual({
+      host_id: "local",
+      from_snapshot: "tpl",
+    });
   });
 });

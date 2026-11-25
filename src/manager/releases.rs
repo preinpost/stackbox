@@ -532,24 +532,8 @@ impl StackboxManager {
         }
         // A GPU stackbox's settings go into the compute configuration Kolla writes at deploy
         // time; a template's VMs boot with the plan they were frozen with, so it installs
-        // clean.
-        // Passed-through devices are installed clean for the same reason: a template's compute
-        // would boot without them.
-        if !request.pci_devices.is_empty() {
-            if !installable {
-                return Err(conflict(format!(
-                    "a PCI passthrough stackbox installs OpenStack {} clean, and this coordinator cannot install that release clean",
-                    request.release.trim()
-                )));
-            }
-            return self.clean_plan(
-                arch,
-                request,
-                "a PCI passthrough stackbox is installed clean so its devices reach compute-1"
-                    .into(),
-                notes,
-            );
-        }
+        // clean. Passed-through devices do not force that: compute-1 is added with them after
+        // the control VM, from a template or clean, and Kolla then applies them to it.
         if let Some(gpu) = &request.gpu {
             // The GPU's release window is about the release itself, so name it before this
             // coordinator's images: a 2025.1 stackbox with a GPU is refused for the GPU, not for
@@ -1012,6 +996,8 @@ impl StackboxManager {
                 let mut restore = self.clean_request(request);
                 restore.compute = None;
                 restore.layout = None;
+                // A control template holds no compute, so the devices wait for compute-1's expansion.
+                restore.pci_devices = Vec::new();
                 self.create(CreateRequest {
                     snapshot_id: Some(snapshot),
                     placement: Default::default(),
@@ -1030,11 +1016,18 @@ impl StackboxManager {
                 if let (Some(snapshot), Some(host)) = (&step.snapshot_id, &step.host_id) {
                     self.ensure_template_on_host(snapshot, host).await?;
                 }
+                // Passed-through devices go to compute-1 only.
+                let pci_devices = if step.node.as_deref() == Some("compute-1") {
+                    request.pci_devices.clone()
+                } else {
+                    Vec::new()
+                };
                 self.add_compute(
                     stackbox,
                     AddComputeRequest {
                         host_id: step.host_id.clone(),
                         from_snapshot: step.snapshot_id.clone(),
+                        pci_devices,
                     },
                 )?
             }

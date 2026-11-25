@@ -58,7 +58,7 @@ field vfio "$(if [ -e /dev/vfio/vfio ]; then echo 1; else echo 0; fi)"
 # any device marked protected.
 SYSFS=/sys
 @PCI_GUARD@
-pci_root=$(findmnt -no MAJ:MIN / 2>/dev/null || true)
+pci_root=$(findmnt -rno MAJ:MIN / 2>/dev/null || true)
 pci_routes=$(ip route show default 2>/dev/null || true)
 pci_protect_setup "$pci_root" "$pci_routes"
 for dev in /sys/bus/pci/devices/*; do

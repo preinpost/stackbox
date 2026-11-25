@@ -1221,7 +1221,10 @@ pub struct CreateRequest {
     /// A virtual GPU on every compute VM (see [`GpuConfig`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gpu: Option<GpuConfig>,
-    /// Host PCI devices passed through to compute-1 (see [`PlanRequest::pci_devices`]).
+    /// Host PCI devices passed through to compute-1 (see [`PlanRequest::pci_devices`]). A stackbox
+    /// restored from a snapshot takes them too: the snapshot must hold a compute-1 (a multi-node
+    /// snapshot), and the devices must be `vfio-pci`-ready on the restore host. The snapshot itself
+    /// is still frozen without them, since a freeze refuses a PCI stackbox.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pci_devices: Vec<String>,
     #[serde(default = "default_host")]
@@ -1309,12 +1312,14 @@ impl CreateRequest {
                 || self.compute.is_some()
                 || self.layout.is_some()
                 || self.gpu.is_some()
-                || !self.pci_devices.is_empty()
             {
                 bail!(
-                    "a stackbox restored from a snapshot runs the snapshot's services and layout; omit components, computes, compute, layout, gpu and pci_devices"
+                    "a stackbox restored from a snapshot runs the snapshot's services and layout; omit components, computes, compute, layout and gpu (pci_devices may be given)"
                 );
             }
+            // Checked here for its format and duplicates; the manager merges them onto the
+            // snapshot's plan, which refuses a snapshot without a compute-1.
+            normalize_pci_devices(&self.pci_devices)?;
         }
         let host = &self.external_host;
         if host.is_empty()
@@ -1328,6 +1333,8 @@ impl CreateRequest {
         {
             bail!("external_host must be an IPv4 address or DNS hostname without a scheme or port");
         }
+        // A snapshot's plan comes from the snapshot, so the request's devices are not planned here.
+        let restored = self.snapshot_id.is_some() || self.bucket.is_some();
         let request = PlanRequest {
             components: self.components.clone(),
             computes: self.computes,
@@ -1335,7 +1342,11 @@ impl CreateRequest {
             release: self.release.clone(),
             layout: self.layout,
             gpu: self.gpu.clone(),
-            pci_devices: self.pci_devices.clone(),
+            pci_devices: if restored {
+                Vec::new()
+            } else {
+                self.pci_devices.clone()
+            },
         };
         request.check_release()?;
         plan(&request)
@@ -1373,6 +1384,11 @@ pub struct AddComputeRequest {
     /// Kolla then only reconfigures it; the template must match the stackbox's OpenStack
     /// release, components and CPU architecture.
     pub from_snapshot: Option<String>,
+    /// Host PCI devices (`DDDD:BB:DD.F`) passed through to the new VM. Only compute-1 takes
+    /// them, so this is accepted only while the stackbox has no compute yet, and each device must
+    /// be `vfio-pci`-ready on the new VM's host. The new VM boots from `from_snapshot` or clean.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pci_devices: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
@@ -1767,8 +1783,9 @@ pub struct ReleaseCreateRequest {
     /// one, because a template's VMs boot with the plan they were frozen with.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gpu: Option<GpuConfig>,
-    /// PCI devices passed through to compute-1 (see [`PlanRequest::pci_devices`]); like a GPU,
-    /// only a clean install can take them.
+    /// PCI devices passed through to compute-1 (see [`PlanRequest::pci_devices`]). Unlike a GPU,
+    /// they do not force a clean install: compute-1 is added with them (from its template or
+    /// clean) once the control VM is up, and a GPU stackbox still installs clean.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pci_devices: Vec<String>,
     /// Control template to use instead of the newest matching one.
@@ -3262,12 +3279,34 @@ mod pci_tests {
     }
 
     #[test]
-    fn a_restored_stackbox_refuses_passthrough() {
-        let request: CreateRequest =
-            serde_json::from_str(r#"{"id":"restored","host_id":"local","snapshot_id":"snap-1","pci_devices":["0000:04:00.3"]}"#)
-                .unwrap();
+    fn a_restored_stackbox_takes_checked_passthrough_devices() {
+        let restore = |devices: &str| -> CreateRequest {
+            serde_json::from_str(&format!(
+                r#"{{"id":"restored","host_id":"local","snapshot_id":"snap-1","pci_devices":{devices}}}"#
+            ))
+            .unwrap()
+        };
+        // A well-formed list passes validation; the manager merges it onto the snapshot's plan.
+        restore(r#"["0000:04:00.3"]"#)
+            .validate()
+            .expect("a restore may take devices");
+        // The format and duplicate checks run here too.
+        let why = restore(r#"["0000:04:20.3"]"#).validate().unwrap_err();
+        assert!(why.to_string().contains("0000:04:20.3"), "{why:#}");
+        let why = restore(r#"["0000:04:00.3", "0000:04:00.3"]"#)
+            .validate()
+            .unwrap_err();
+        assert!(why.to_string().contains("more than once"), "{why:#}");
+        // Everything else a snapshot restore keeps from its snapshot is still refused.
+        let request: CreateRequest = serde_json::from_str(
+            r#"{"id":"restored","host_id":"local","snapshot_id":"snap-1","computes":1,"pci_devices":["0000:04:00.3"]}"#,
+        )
+        .unwrap();
         let why = request.validate().unwrap_err();
-        assert!(why.to_string().contains("pci_devices"), "{why:#}");
+        assert!(
+            why.to_string().contains("omit components, computes"),
+            "{why:#}"
+        );
     }
 
     #[test]

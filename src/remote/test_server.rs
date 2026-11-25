@@ -494,6 +494,7 @@ impl server::Handler for Handler {
                 | Operation::InstallMsb
                 | Operation::Settle { .. }
                 | Operation::ForgetComputes { .. }
+                | Operation::AttachPci { .. }
                 | Operation::ExportSnapshot { .. } => Reply::Done,
                 Operation::RemoveSnapshot { reference } => {
                     self.observed

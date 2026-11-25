@@ -869,6 +869,34 @@ impl StackboxManager {
                     self.event_sink(job, None),
                 )
                 .await?;
+            // The snapshot was frozen without devices; the host's devices join compute-1 now.
+            if !plan.pci_devices.is_empty() {
+                self.log(
+                    &stackbox.id,
+                    &job.id,
+                    None,
+                    format!(
+                        "passing {} PCI device(s) through to compute-1\n",
+                        plan.pci_devices.len()
+                    ),
+                )?;
+                backend
+                    .attach_pci(
+                        stackbox.id.clone(),
+                        plan.release
+                            .clone()
+                            .unwrap_or_else(|| crate::kolla::OPENSTACK_RELEASE.to_owned()),
+                        plan.pci_devices.clone(),
+                        plan.gpu
+                            .as_ref()
+                            .is_some_and(|gpu| gpu.mode == crate::model::GpuMode::Mtty),
+                        self.event_sink(job, None),
+                    )
+                    .await
+                    .context(
+                        "the stackbox restored, but its PCI devices did not attach to compute-1",
+                    )?;
+            }
         }
         Ok(())
     }
@@ -898,7 +926,14 @@ impl StackboxManager {
         // A bucket-backed snapshot may learn its exact source_exposure and labels when first
         // loaded on the host; re-read it after ensure_snapshot_on_host_nodes.
         let snapshot = self.snapshot(&id)?;
-        let plan = snapshot.plan.clone();
+        // The snapshot's plan, plus the devices the restore asked for (`create` put them on the
+        // record); a restore without devices keeps the snapshot's plan as it was frozen.
+        let mut plan = snapshot.plan.clone();
+        if let Some(devices) = stackbox.plan.as_ref().map(|plan| plan.pci_devices.clone())
+            && !devices.is_empty()
+        {
+            plan.pci_devices = devices;
+        }
         self.update(|state| {
             if let Some(record) = state.stackboxes.get_mut(&stackbox.id) {
                 record.plan = Some(plan.clone());

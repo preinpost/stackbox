@@ -800,12 +800,12 @@ pub(crate) mod fixture {
     }
 
     /// The environment that points the installed helper at the fixture, as a test process runs it.
-    pub fn helper_env(sysfs: &Path, dev: &Path, conf: &Path) -> Vec<String> {
+    pub fn helper_env(sysfs: &Path, dev: &Path, conf: &Path, root_dev: &str) -> Vec<String> {
         vec![
             format!("STACKBOX_TEST_SYSFS_ROOT={}", sysfs.display()),
             format!("STACKBOX_TEST_DEV_ROOT={}", dev.display()),
             format!("STACKBOX_TEST_VFIO_CONF={}", conf.display()),
-            "STACKBOX_TEST_ROOT_DEV=8:1".into(),
+            format!("STACKBOX_TEST_ROOT_DEV={root_dev}"),
             format!("STACKBOX_TEST_DEFAULT_ROUTE={ROUTE}"),
         ]
     }
@@ -975,6 +975,11 @@ mod helper_shell_tests {
     }
 
     fn helper() -> Option<Helper> {
+        helper_with_root("8:1")
+    }
+
+    /// The helper whose root device, as `findmnt` reported it, is `root_dev`.
+    fn helper_with_root(root_dev: &str) -> Option<Helper> {
         if running_as_root() {
             eprintln!("skipping the helper shell tests: root ignores the test seams");
             return None;
@@ -992,7 +997,7 @@ mod helper_shell_tests {
         fs::write(&conf, format!("GROUP={group}\n")).unwrap();
         let script = dir.path().join("stackbox-vfio-bind");
         fs::write(&script, helper_script()).unwrap();
-        let env = helper_env(&sysfs, &dev, &conf);
+        let env = helper_env(&sysfs, &dev, &conf, root_dev);
         Some(Helper {
             _dir: dir,
             script,
@@ -1108,6 +1113,57 @@ mod helper_shell_tests {
         let mode = fs::metadata(helper.dev.join("vfio/18")).unwrap();
         use std::os::unix::fs::PermissionsExt;
         assert_eq!(mode.permissions().mode() & 0o777, 0o660);
+    }
+
+    /// `findmnt -no MAJ:MIN /` pads its column, so the root device can arrive as `"8:1  "` or with
+    /// a leading space and a newline. The root disk is still found: only its controller is kept.
+    #[test]
+    fn a_padded_root_device_protects_only_the_root_controller() {
+        for root in ["8:1  ", " 8:1 \n", "  8:1 \n"] {
+            let Some(helper) = helper_with_root(root) else {
+                return;
+            };
+            let root_disk = helper.run(&["bind", "0000:05:00.0"]);
+            assert!(
+                !root_disk.status.success(),
+                "{root:?}: the root disk was bound"
+            );
+            assert!(
+                text(&root_disk.stderr).contains("root_disk"),
+                "{root:?}: {}",
+                text(&root_disk.stderr)
+            );
+            let nic = helper.run(&["bind", "0000:06:00.0"]);
+            assert!(
+                text(&nic.stderr).contains("default_route_nic"),
+                "{root:?}: {}",
+                text(&nic.stderr)
+            );
+            let free = helper.run(&["bind", "0000:0b:00.0"]);
+            assert!(free.status.success(), "{root:?}: {}", text(&free.stderr));
+            assert!(
+                text(&free.stdout).contains("STACKBOX\tpci_bind\t0000:0b:00.0\tvfio-pci\t18"),
+                "{root:?}: {}",
+                text(&free.stdout)
+            );
+        }
+    }
+
+    /// An empty, blank or malformed root device still fails closed: a free device is `root_disk`.
+    #[test]
+    fn an_empty_blank_or_malformed_root_device_still_fails_closed() {
+        for root in ["", "   ", "../foo", "8:1:2"] {
+            let Some(helper) = helper_with_root(root) else {
+                return;
+            };
+            let out = helper.run(&["bind", "0000:0b:00.0"]);
+            assert!(!out.status.success(), "{root:?} bound a free device");
+            assert!(
+                text(&out.stderr).contains("root_disk"),
+                "{root:?}: {}",
+                text(&out.stderr)
+            );
+        }
     }
 
     #[test]

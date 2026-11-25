@@ -59,18 +59,25 @@ pci_default_nic() {
 }
 
 # pci_protect_setup ROOT_DEV ROUTES: ROOT_DEV is the root filesystem's MAJ:MIN (empty when it
-# cannot be found) and ROUTES the default-route text. Sets root_known (0 when the root disk
-# cannot be resolved, which protects every device), and the controller lists root_ctrls,
-# nic_ctrls and usb_ctrls.
+# cannot be found) and ROUTES the default-route text. Whitespace is stripped from ROOT_DEV first,
+# since findmnt pads its column; a value that is not exactly MAJ:MIN counts as unknown. Sets
+# root_known (0 when the root disk cannot be resolved, which protects every device), and the
+# controller lists root_ctrls, nic_ctrls and usb_ctrls.
 pci_protect_setup() {
     root_known=0
     root_ctrls=
     nic_ctrls=
     usb_ctrls=
-    if [ -n "$1" ] && [ -e "$SYSFS/dev/block/$1" ]; then
+    pci_root_dev=$(printf '%s' "$1" | tr -d '[:space:]')
+    case "$pci_root_dev" in
+        '' | *[!0-9:]* | :* | *: | *:*:*) pci_root_dev= ;;
+        *:*) ;;
+        *) pci_root_dev= ;;
+    esac
+    if [ -n "$pci_root_dev" ] && [ -e "$SYSFS/dev/block/$pci_root_dev" ]; then
         root_known=1
         pci_found=
-        pci_block_controllers "$SYSFS/dev/block/$1"
+        pci_block_controllers "$SYSFS/dev/block/$pci_root_dev"
         root_ctrls=$pci_found
     fi
     pci_default_nic "$2"

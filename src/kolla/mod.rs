@@ -474,6 +474,22 @@ pub async fn deploy_compute(
             )
             .await?;
         }
+        // A compute-1 that joins with passed-through devices gets them once its nova roles are up.
+        if index == 1 && !plan.pci_devices.is_empty() {
+            let mtty = plan
+                .gpu
+                .as_ref()
+                .is_some_and(|gpu| gpu.mode == crate::model::GpuMode::Mtty);
+            attach_pci_on(
+                &control,
+                &computes,
+                &plan.pci_devices,
+                mtty,
+                &release,
+                &sink,
+            )
+            .await?;
+        }
         Ok::<_, anyhow::Error>(())
     }
     .await;
@@ -2110,6 +2126,116 @@ async fn probe_guest_pci(
             compute.hostname
         )
     })
+}
+
+/// Gives an already deployed stackbox's compute-1 its host's `vfio-pci` devices. Used by a restore
+/// of a PCI-free snapshot and by an expansion that adds compute-1: the devices are read from the VM,
+/// `nova.conf` and `nova-compute.conf` are written (keeping the mtty sections when `mtty`), the nova
+/// roles of the control VM and compute-1 are reconfigured, and `stackbox.pci` is booted to check it.
+pub async fn attach_pci(
+    stackbox_id: &str,
+    release: &str,
+    pci_devices: &[String],
+    mtty: bool,
+    sink: EventSink,
+) -> Result<()> {
+    if pci_devices.is_empty() {
+        return Ok(());
+    }
+    let info = releases::info(release);
+    let control_name = stackbox::node_name(stackbox_id, stackbox::Role::Control, None);
+    let compute_name = stackbox::node_name(stackbox_id, stackbox::Role::Compute, Some(1));
+    let control = stackbox::connect(&control_name).await?;
+    let mut sandboxes: Vec<Sandbox> = Vec::new();
+    let result = async {
+        stackbox::wait_until_booted(&control).await?;
+        let compute = stackbox::connect(&compute_name).await?;
+        sandboxes.push(compute.clone());
+        let computes = vec![(
+            Compute {
+                name: compute_name.clone(),
+                hostname: PCI_COMPUTE.into(),
+                address: String::new(),
+            },
+            Some(compute),
+        )];
+        attach_pci_on(&control, &computes, pci_devices, mtty, &info, &sink).await
+    }
+    .await;
+    stackbox::detach(&control).await;
+    for sandbox in sandboxes {
+        stackbox::detach(&sandbox).await;
+    }
+    result
+}
+
+/// The PCI half of [`attach_pci`] on a deployer that already reaches compute-1 (`computes`).
+async fn attach_pci_on(
+    deployer: &Sandbox,
+    computes: &[(Compute, Option<Sandbox>)],
+    pci_devices: &[String],
+    mtty: bool,
+    release: &releases::ReleaseInfo,
+    sink: &EventSink,
+) -> Result<()> {
+    step(
+        sink,
+        "compute-1의 PCI passthrough 장치(vfio-pci, IOMMU 그룹, VFIO 노드) 확인",
+    )?;
+    let guest = probe_guest_pci(deployer, computes, pci_devices.len()).await?;
+    step(
+        sink,
+        "nova.conf·nova-compute.conf에 PCI alias와 device_spec 기록",
+    )?;
+    run(deployer, &format!("mkdir -p {CONFIG_DIR}/config/nova")).await?;
+    let fs = deployer.fs();
+    fs.write(
+        &format!("{CONFIG_DIR}/config/nova/nova-compute.conf"),
+        &config::nova_compute_conf(mtty, &guest),
+    )
+    .await?;
+    let nova_global = format!("{CONFIG_DIR}/config/nova.conf");
+    match config::nova_global_conf(&guest) {
+        Some(conf) => fs.write(&nova_global, &conf).await?,
+        None => {
+            run(deployer, &remove_managed_nova_global(&nova_global)).await?;
+        }
+    }
+    step(
+        sink,
+        format!("kolla-ansible reconfigure --tags nova (control VM, {PCI_COMPUTE})"),
+    )?;
+    stream(
+        deployer,
+        &kolla_ansible_nova_reconfigure(release),
+        &format!("{LOG_DIR}/pci-reconfigure.log"),
+        sink,
+    )
+    .await?;
+    step(
+        sink,
+        "PCI passthrough 확인 (compute-1 장치와 stackbox.pci 인스턴스)",
+    )?;
+    let script = format!(
+        "set -euo pipefail\n. {CONFIG_DIR}/admin-openrc.sh\nos={OSC_VENV}/bin/openstack\ncleanup() {{ :; }}\n{}",
+        pci_verify_script(PCI_COMPUTE, &guest)
+    );
+    stream(
+        deployer,
+        &script,
+        &format!("{LOG_DIR}/pci-verify.log"),
+        sink,
+    )
+    .await
+}
+
+/// `reconfigure --tags nova` limited to the control VM and compute-1. The control VM's nova-api and
+/// nova-scheduler need the `[pci]` alias and `PciPassthroughFilter` as much as compute-1 does.
+fn kolla_ansible_nova_reconfigure(release: &releases::ReleaseInfo) -> String {
+    format!(
+        "{env}PATH={VENV}/bin:$PATH kolla-ansible reconfigure -i {INVENTORY} --limit stackbox-control,{PCI_COMPUTE} --tags nova",
+        env = venv_env(release)
+    )
 }
 
 /// Builds the patched Nova files on every host that runs nova_compute: the deployer when the
@@ -5398,6 +5524,47 @@ for _ in $(seq 200); do printf '%s\n' "  <interface type='network'/>"; done
             output.status.success(),
             "{}",
             String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    /// A deployed stackbox that already runs mtty gains PCI: its nova-compute.conf keeps the mtty
+    /// sections and adds `[pci]`, and an mtty-free one gets `[pci]` alone. The nova roles the
+    /// reconfigure touches are the control VM's and compute-1's, and no other compute's.
+    #[test]
+    fn attaching_pci_keeps_the_mtty_sections_and_reconfigures_control_and_compute_1() {
+        let devices = pci_devices_for_verify();
+        let with_mtty = config::nova_compute_conf(true, &devices);
+        assert!(
+            with_mtty.contains("enabled_mdev_types = mtty-1"),
+            "{with_mtty}"
+        );
+        assert!(
+            with_mtty.contains("resume_guests_state_on_host_boot = True"),
+            "{with_mtty}"
+        );
+        assert!(with_mtty.contains("\n[pci]\n"), "{with_mtty}");
+        assert!(
+            with_mtty.contains("\"address\": \"0000:00:05.0\""),
+            "{with_mtty}"
+        );
+        let plain = config::nova_compute_conf(false, &devices);
+        assert!(!plain.contains("mtty"), "{plain}");
+        assert!(plain.contains("\n[pci]\n"), "{plain}");
+        // The scheduler and the aliases the control VM's Nova services read.
+        let global = config::nova_global_conf(&devices).unwrap();
+        assert!(global.contains("PciPassthroughFilter"), "{global}");
+        assert!(global.contains("[pci]\nalias = "), "{global}");
+        // The reconfigure is limited to the control VM and compute-1, and only the nova tags.
+        let info = releases::info(OPENSTACK_RELEASE);
+        let command = kolla_ansible_nova_reconfigure(&info);
+        assert!(command.contains("kolla-ansible reconfigure"), "{command}");
+        assert!(
+            command.ends_with("--limit stackbox-control,stackbox-compute-1 --tags nova"),
+            "{command}"
+        );
+        assert!(
+            !command.contains("--limit stackbox-compute-1 "),
+            "{command}"
         );
     }
 

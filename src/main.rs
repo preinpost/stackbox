@@ -111,7 +111,8 @@ impl GpuArgs {
 struct PciArgs {
     /// Host PCI device to pass through to compute-1, as DDDD:BB:DD.F (repeatable). It must
     /// already be bound to vfio-pci on that host, in an IOMMU group with no other driver; stackbox
-    /// never unbinds a host driver. Needs a compute VM and a clean install.
+    /// never unbinds a host driver. Needs a compute VM: a clean install, a snapshot restore of a
+    /// multi-node snapshot, or the add-compute of compute-1 can take them.
     #[arg(long = "pci", value_name = "BDF")]
     pci: Vec<String>,
 }
@@ -238,6 +239,8 @@ enum Command {
         /// Boot the new VM from this compute template snapshot instead of installing it clean
         #[arg(long)]
         from_snapshot: Option<String>,
+        #[command(flatten)]
+        pci: PciArgs,
     },
     /// Check that a deployed stackbox's services answer again after its VM started from disk
     Settle { id: String },
@@ -802,12 +805,14 @@ async fn main() -> Result<()> {
             id,
             host_id,
             from_snapshot,
+            pci,
         } => {
             let job = manager.add_compute(
                 &id,
                 AddComputeRequest {
                     host_id,
                     from_snapshot,
+                    pci_devices: pci.pci,
                 },
             )?;
             wait(&manager, job).await?;

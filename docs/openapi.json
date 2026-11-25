@@ -6,7 +6,7 @@
     "license": {
       "name": ""
     },
-    "version": "0.1.10"
+    "version": "0.1.11"
   },
   "paths": {
     "/api/v1/agent-hosts": {
@@ -2808,6 +2808,14 @@
             ],
             "description": "Host for the new compute VM; omitted for the stackbox's primary host. A compute on\nanother host joins the stackbox through its link relay.",
             "default": null
+          },
+          "pci_devices": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Host PCI devices (`DDDD:BB:DD.F`) passed through to the new VM. Only compute-1 takes\nthem, so this is accepted only while the stackbox has no compute yet, and each device must\nbe `vfio-pci`-ready on the new VM's host. The new VM boots from `from_snapshot` or clean.",
+            "default": []
           }
         },
         "additionalProperties": false
@@ -3446,7 +3454,7 @@
             "items": {
               "type": "string"
             },
-            "description": "Host PCI devices passed through to compute-1 (see [`PlanRequest::pci_devices`])."
+            "description": "Host PCI devices passed through to compute-1 (see [`PlanRequest::pci_devices`]). A stackbox\nrestored from a snapshot takes them too: the snapshot must hold a compute-1 (a multi-node\nsnapshot), and the devices must be `vfio-pci`-ready on the restore host. The snapshot itself\nis still frozen without them, since a freeze refuses a PCI stackbox."
           },
           "placement": {
             "type": "object",
@@ -5491,7 +5499,7 @@
             "items": {
               "type": "string"
             },
-            "description": "PCI devices passed through to compute-1 (see [`PlanRequest::pci_devices`]); like a GPU,\nonly a clean install can take them."
+            "description": "PCI devices passed through to compute-1 (see [`PlanRequest::pci_devices`]). Unlike a GPU,\nthey do not force a clean install: compute-1 is added with them (from its template or\nclean) once the control VM is up, and a GPU stackbox still installs clean."
           },
           "release": {
             "type": "string",

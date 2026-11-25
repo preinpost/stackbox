@@ -122,6 +122,12 @@ pub enum Operation {
         stackbox_id: String,
         generation: String,
     },
+    /// Give a restored stackbox's compute-1 the PCI devices its reservation recorded (see
+    /// `kolla::attach_pci`), once its services answer.
+    AttachPci {
+        stackbox_id: String,
+        generation: String,
+    },
     /// Stop the stackbox's VM, capture its disks as `snapshot_id`, and start it again. With
     /// `node`, only that VM is captured, as a control or compute template.
     Freeze {
@@ -295,6 +301,10 @@ impl Operation {
                 stackbox_id,
                 generation,
             }
+            | Self::AttachPci {
+                stackbox_id,
+                generation,
+            }
             | Self::Freeze {
                 stackbox_id,
                 generation,
@@ -325,6 +335,7 @@ impl Operation {
             Self::Shell { .. } => 12 * 3600,
             Self::Settle { .. }
             | Self::ForgetComputes { .. }
+            | Self::AttachPci { .. }
             | Self::Freeze { .. }
             | Self::Restore { .. }
             | Self::Prepare { .. }
@@ -536,6 +547,7 @@ impl Operation {
                 | Self::Attach { .. }
                 | Self::Settle { .. }
                 | Self::ForgetComputes { .. }
+                | Self::AttachPci { .. }
                 | Self::DeployCompute { .. }
         )
     }

@@ -15,7 +15,7 @@ import {
   Trash2,
   Upload,
 } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   api,
   bucketObjectsQuery,
@@ -47,6 +47,7 @@ import {
   snapshotOrigin,
 } from "../lib";
 import { bucketLocation } from "./bucket-actions";
+import { PciDevicePicker, occupiedPciOn, pciSelectable } from "./pci-picker";
 import {
   Button,
   CopyText,
@@ -364,6 +365,25 @@ export function RestoreSnapshotDialog({
     hosts?.[0];
   const [pickedHost, setPickedHost] = useState<string>();
   const target = hosts?.find((h) => h.id === pickedHost) ?? defaultHost;
+  // PCI devices go to compute-1, which only a multi-node snapshot holds. They are chosen on the
+  // restore host; a choice is dropped whenever that host changes.
+  const [pickedPci, setPickedPci] = useState<string[]>([]);
+  useEffect(() => {
+    setPickedPci([]);
+  }, [target?.id]);
+  const pciInspection = target?.inspection;
+  const pciDevices = pciInspection?.pci_devices ?? [];
+  const pciShown =
+    (snapshot.plan.computes ?? 0) > 0 &&
+    pciInspection?.pci_passthrough_available === true &&
+    pciDevices.length > 0;
+  const occupiedPci = occupiedPciOn(stackboxes.data, target?.id);
+  const pciSend = pciShown
+    ? pickedPci.filter((bdf) => {
+        const device = pciDevices.find((d) => d.bdf === bdf);
+        return !!device && pciSelectable(device, occupiedPci.get(bdf));
+      })
+    : [];
   const [id, setId] = useState("");
   const [owner, setOwner] = useState("");
   const [editedHostName, setEditedHostName] = useState<string>();
@@ -380,6 +400,7 @@ export function RestoreSnapshotDialog({
         snapshot_id: snapshot.id,
         external_host: hostName,
         ...(owner.trim() ? { owner: owner.trim() } : {}),
+        ...(pciSend.length ? { pci_devices: pciSend } : {}),
       }),
     onSuccess: async (job) => {
       await refresh(client);
@@ -389,6 +410,7 @@ export function RestoreSnapshotDialog({
   });
   const dialog = useDialog(mutation.isPending, () => {
     setPickedHost(undefined);
+    setPickedPci([]);
     setId("");
     setOwner("");
     setEditedHostName(undefined);
@@ -575,6 +597,28 @@ export function RestoreSnapshotDialog({
                 등록합니다.
               </small>
             </label>
+            {pciShown && (
+              <div>
+                <span className="field-label">PCI 패스스루 (compute-1)</span>
+                <PciDevicePicker
+                  devices={pciDevices}
+                  occupied={occupiedPci}
+                  picked={pciSend}
+                  onToggle={(bdf, on) =>
+                    setPickedPci((current) =>
+                      on
+                        ? [...current, bdf]
+                        : current.filter((picked) => picked !== bdf),
+                    )
+                  }
+                  disabled={mutation.isPending}
+                />
+                <p className="field-hint mt-2">
+                  선택한 PCI 장치를 compute-1에 연결하고 Nova PCI 설정을 반영해
+                  복원합니다. PCI가 연결된 Stackbox는 스냅샷을 만들 수 없습니다.
+                </p>
+              </div>
+            )}
             {targetWrongArch && (
               <div className="warning-notice">
                 이 스냅샷은 {snapshot.arch}에서 얼렸습니다. 선택한 호스트(

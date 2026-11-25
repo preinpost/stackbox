@@ -171,6 +171,18 @@ pub trait Backend: Send + Sync + 'static {
     ) -> BoxFuture<'_, Result<Vec<StackboxNode>>> {
         unsupported()
     }
+    /// Give a deployed stackbox's compute-1 the host's `vfio-pci` devices after it booted from a
+    /// snapshot or joined with them (see `kolla::attach_pci`).
+    fn attach_pci(
+        &self,
+        _id: String,
+        _release: String,
+        _pci_devices: Vec<String>,
+        _mtty: bool,
+        _sink: EventSink,
+    ) -> BoxFuture<'_, Result<()>> {
+        unsupported()
+    }
     /// Wait for a deployed stackbox's services after a cold start, optionally moving its
     /// public catalog entries from the first exposure to the second.
     fn settle(
@@ -621,6 +633,16 @@ PY"#).await;
             let rebind = rebind.as_ref().map(|(from, to)| (from, to));
             kolla::settle(&id, rebind, &components, sink).await
         })
+    }
+    fn attach_pci(
+        &self,
+        id: String,
+        release: String,
+        pci_devices: Vec<String>,
+        mtty: bool,
+        sink: EventSink,
+    ) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async move { kolla::attach_pci(&id, &release, &pci_devices, mtty, sink).await })
     }
     fn forget_computes(
         &self,

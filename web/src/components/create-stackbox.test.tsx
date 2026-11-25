@@ -1071,6 +1071,11 @@ test("a vfio-ready PCI device of compute-1 is picked and sent with the plan and 
   const notReady = screen.getByText("0000:02:00.0").closest("label")!;
   expect(notReady.textContent).toContain("준비 안 됨");
   expect(disabledOption(notReady.querySelector("[role=checkbox]")!)).toBe(true);
+  // The hint says a PCI stackbox keeps no snapshot, and no longer that it installs clean.
+  expect(
+    screen.getByText(/PCI가 연결된 stackbox는 스냅샷을 만들 수 없습니다/),
+  ).toBeTruthy();
+  expect(document.body.textContent).not.toContain("클린 설치하며");
 
   await user.click(ready.querySelector("[role=checkbox]")!);
   await waitFor(() =>

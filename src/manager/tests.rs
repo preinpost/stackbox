@@ -25,7 +25,7 @@ pub(crate) struct Fake {
     pub(crate) fail_scan: AtomicBool,
     pub(crate) stackboxes: Mutex<BTreeMap<String, Vec<StackboxNode>>>,
     /// msb snapshot references and their labels.
-    snapshots: Mutex<BTreeMap<String, BTreeMap<String, String>>>,
+    pub(crate) snapshots: Mutex<BTreeMap<String, BTreeMap<String, String>>>,
     /// `(from, to)` of each settle call.
     settled: Mutex<Vec<Option<(Exposure, Exposure)>>>,
     deploys: AtomicUsize,
@@ -74,6 +74,8 @@ pub(crate) struct Fake {
     /// Stackboxes restored from a control template that forgot their source's computes.
     forgotten: Mutex<Vec<String>>,
     pub(crate) fail_forget: AtomicBool,
+    /// `(stackbox, devices, mtty)` of each PCI attach to compute-1.
+    pub(crate) attached: Mutex<Vec<(String, Vec<String>, bool)>>,
 }
 impl Backend for Fake {
     fn relink(&self, id: String, url: String) -> BoxFuture<'_, Result<()>> {
@@ -468,6 +470,19 @@ impl Backend for Fake {
             }
             sink(DeployEvent::Output("services answer".into()))?;
             self.settled.lock().unwrap().push(rebind);
+            Ok(())
+        })
+    }
+    fn attach_pci(
+        &self,
+        id: String,
+        _release: String,
+        pci_devices: Vec<String>,
+        mtty: bool,
+        _sink: EventSink,
+    ) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async move {
+            self.attached.lock().unwrap().push((id, pci_devices, mtty));
             Ok(())
         })
     }
@@ -5037,6 +5052,7 @@ async fn a_compute_template_boots_the_next_compute_and_kolla_only_reconfigures_i
         .add_compute(
             "src",
             AddComputeRequest {
+                pci_devices: Vec::new(),
                 host_id: None,
                 from_snapshot: Some("tpl".into()),
             },
@@ -5105,6 +5121,7 @@ async fn a_compute_template_boots_the_next_compute_and_kolla_only_reconfigures_i
         .add_compute(
             "src",
             AddComputeRequest {
+                pci_devices: Vec::new(),
                 host_id: None,
                 from_snapshot: Some("tpl".into()),
             },
@@ -5132,6 +5149,7 @@ async fn a_compute_template_boots_the_next_compute_and_kolla_only_reconfigures_i
         .add_compute(
             "other",
             AddComputeRequest {
+                pci_devices: Vec::new(),
                 host_id: None,
                 from_snapshot: Some("tpl".into()),
             },
@@ -5154,6 +5172,7 @@ async fn a_compute_template_boots_the_next_compute_and_kolla_only_reconfigures_i
         .add_compute(
             "other",
             AddComputeRequest {
+                pci_devices: Vec::new(),
                 host_id: None,
                 from_snapshot: Some("whole".into()),
             },
@@ -5194,6 +5213,7 @@ async fn a_failed_expansion_from_a_template_is_retried_the_same_way() {
         .unwrap();
     assert_eq!(done(&manager, &job).await.status, JobStatus::Succeeded);
     let from_template = AddComputeRequest {
+        pci_devices: Vec::new(),
         host_id: None,
         from_snapshot: Some("tpl".into()),
     };
@@ -5361,6 +5381,7 @@ async fn a_control_template_starts_a_stackbox_without_computes_that_expands_clea
         .add_compute(
             "copy",
             AddComputeRequest {
+                pci_devices: Vec::new(),
                 host_id: None,
                 from_snapshot: Some("cpt".into()),
             },
@@ -5476,6 +5497,7 @@ async fn a_control_template_needs_a_deployed_multi_node_stackbox_and_a_clean_cop
         .add_compute(
             "src",
             AddComputeRequest {
+                pci_devices: Vec::new(),
                 host_id: None,
                 from_snapshot: Some("ctl".into()),
             },
@@ -5679,6 +5701,7 @@ async fn a_stackbox_can_gain_a_compute_on_a_new_remote_host_and_another_on_its_p
         .add_compute(
             "span",
             AddComputeRequest {
+                pci_devices: Vec::new(),
                 host_id: Some("edge".into()),
                 from_snapshot: None,
             },
@@ -5810,6 +5833,7 @@ async fn a_stackbox_can_gain_a_second_compute_on_a_remote_host_it_already_uses()
             .add_compute(
                 "span",
                 AddComputeRequest {
+                    pci_devices: Vec::new(),
                     host_id: Some(host.into()),
                     from_snapshot: None,
                 },
@@ -6738,6 +6762,50 @@ async fn an_existing_stackbox_of_an_unsupported_release_still_loads_and_deletes(
     assert_eq!(done(&manager, &delete).await.status, JobStatus::Succeeded);
 }
 
+/// A release with devices assembles from the templates, not a clean install: the control VM
+/// restores from its template with no devices (a control template holds no compute), compute-1
+/// is added with the devices from its template, and compute-2 is added without any.
+#[tokio::test]
+async fn a_pci_release_assembles_from_templates_and_gives_its_devices_to_compute_1() {
+    let dir = tempfile::tempdir().unwrap();
+    let (manager, _backend) = release_templates(dir.path()).await;
+    set_pci_host(&manager, true, true);
+    let bdf = "0000:04:00.3";
+    let request = ReleaseCreateRequest {
+        pci_devices: vec![bdf.into()],
+        ..by_release("r", 2)
+    };
+    let plan = manager.preview_release(&request).await.unwrap();
+    assert_eq!(
+        plan.control.source,
+        NodeSource::Template,
+        "{:?}",
+        plan.control.reason
+    );
+    assert_eq!(plan.control.snapshot_id.as_deref(), Some("ctl"));
+    for compute in &plan.computes {
+        assert_eq!(compute.source, NodeSource::Template, "{}", compute.reason);
+        assert_eq!(compute.snapshot_id.as_deref(), Some("cpt"));
+    }
+
+    let job = manager.create_release(request).await.unwrap();
+    let actions: Vec<_> = job.assembly.iter().map(|s| s.action.as_str()).collect();
+    assert_eq!(actions, ["restore", "expand", "expand"]);
+    let finished = done_slowly(&manager, &job).await;
+    assert_eq!(
+        finished.status,
+        JobStatus::Succeeded,
+        "{:?}",
+        finished.error
+    );
+    let stackbox = manager.get("r").unwrap();
+    let plan = stackbox.plan.as_ref().unwrap();
+    assert_eq!(plan.computes, 2);
+    // Only compute-1's expansion accepted devices (compute-2 would have been refused), so the
+    // stackbox now holds them on compute-1.
+    assert_eq!(plan.pci_devices, vec![bdf.to_owned()]);
+}
+
 #[tokio::test]
 async fn a_release_stackbox_restores_its_control_then_adds_each_compute_in_order() {
     let dir = tempfile::tempdir().unwrap();
@@ -6891,6 +6959,7 @@ async fn a_release_stackbox_can_start_as_its_control_vm_alone_and_gain_a_compute
         .add_compute(
             "ctl",
             AddComputeRequest {
+                pci_devices: Vec::new(),
                 host_id: None,
                 from_snapshot: Some("cpt".into()),
             },
@@ -6972,6 +7041,7 @@ async fn an_expansion_retries_when_its_leftover_vm_marked_the_stackbox_broken() 
         .add_compute(
             "r",
             AddComputeRequest {
+                pci_devices: Vec::new(),
                 host_id: None,
                 from_snapshot: Some("cpt".into()),
             },
@@ -7017,6 +7087,7 @@ async fn a_release_stackbox_that_fails_midway_keeps_its_vms_and_is_retried_by_ex
     // Retried the way it started, then expanded further.
     backend.fail_expansion_from.store(0, Ordering::SeqCst);
     let request = AddComputeRequest {
+        pci_devices: Vec::new(),
         host_id: None,
         from_snapshot: Some("cpt".into()),
     };
@@ -8190,6 +8261,237 @@ async fn a_pci_stackbox_needs_a_vfio_ready_device_that_no_live_stackbox_holds() 
         })
         .expect("a deleted stackbox releases its device");
     done(&manager, &third).await;
+    settle(&manager).await;
+}
+
+/// The kernel a PCI-capable host reports in these tests.
+const PCI_KERNEL: &str =
+    "/home/user/.local/share/stackbox/libkrunfw/0123456789abcdef/libkrunfw.so.5.6.1";
+
+/// Makes the local host report `devices` as vfio-ready (or not), with stackbox's kernel when
+/// `kernel` is set and the PCI flags of a fork msb.
+fn set_pci_host(manager: &StackboxManager, kernel: bool, ready: bool) {
+    manager
+        .update(|state| {
+            let host = &mut state.hosts.get_mut("local").unwrap().host;
+            let mut inspection = prepared_inspection(false, kernel.then_some(PCI_KERNEL));
+            inspection.pci_devices = vec![pci_device("0000:04:00.3", ready)];
+            inspection.msb_pci_capable = true;
+            inspection.pci_passthrough_available = kernel && ready;
+            host.inspection = Some(inspection);
+            Ok(())
+        })
+        .unwrap();
+}
+
+/// Path A: a PCI-free multi-node snapshot restores with the host's devices. The copy's plan carries
+/// them, its compute-1 gets them attached once its services answer, and the rules around it hold:
+/// all-in-one and control-only snapshots refuse them, a second stackbox cannot take a held device,
+/// a stock-kernel host is refused before a VM boots, and a copy's freeze still refuses them.
+#[tokio::test]
+async fn a_snapshot_restore_takes_checked_pci_devices_and_attaches_them_to_compute_1() {
+    let dir = tempfile::tempdir().unwrap();
+    let backend = Arc::new(Fake::default());
+    let manager = open_with(options(dir.path()), backend.clone()).await;
+    if !cfg!(target_os = "linux") {
+        *manager.0.guest_agent.write().unwrap() = Some(dir.path().join("stackbox-agent"));
+    }
+    let created = manager
+        .create(CreateRequest {
+            computes: 1,
+            ..request("src")
+        })
+        .unwrap();
+    assert_eq!(done(&manager, &created).await.status, JobStatus::Succeeded);
+    let deployed = manager.deploy("src", DeployRequest::default()).unwrap();
+    assert_eq!(done(&manager, &deployed).await.status, JobStatus::Succeeded);
+    let frozen = manager
+        .freeze(
+            "src",
+            SnapshotRequest {
+                id: "snap".into(),
+                note: None,
+                node: None,
+            },
+        )
+        .unwrap();
+    assert_eq!(done(&manager, &frozen).await.status, JobStatus::Succeeded);
+
+    // An all-in-one snapshot cannot take a device: it has no compute-1.
+    let solo = manager.create(request("solo")).unwrap();
+    assert_eq!(done(&manager, &solo).await.status, JobStatus::Succeeded);
+    let frozen = manager
+        .freeze(
+            "solo",
+            SnapshotRequest {
+                id: "solo-snap".into(),
+                note: None,
+                node: None,
+            },
+        )
+        .unwrap();
+    assert_eq!(done(&manager, &frozen).await.status, JobStatus::Succeeded);
+    set_pci_host(&manager, true, true);
+    let why = manager
+        .create(CreateRequest {
+            snapshot_id: Some("solo-snap".into()),
+            pci_devices: vec!["0000:04:00.3".into()],
+            ..request("solo-copy")
+        })
+        .unwrap_err();
+    assert!(why.to_string().contains("holds no compute VM"), "{why:#}");
+
+    // A stock-kernel host is refused before any VM boots.
+    set_pci_host(&manager, false, true);
+    let why = manager
+        .create(CreateRequest {
+            snapshot_id: Some("snap".into()),
+            pci_devices: vec!["0000:04:00.3".into()],
+            ..request("stock")
+        })
+        .unwrap_err();
+    assert!(
+        why.to_string()
+            .contains("boots the stock microsandbox kernel"),
+        "{why:#}"
+    );
+    // A malformed address is refused by name.
+    set_pci_host(&manager, true, true);
+    let why = manager
+        .create(CreateRequest {
+            snapshot_id: Some("snap".into()),
+            pci_devices: vec!["0000:04:20.3".into()],
+            ..request("badbdf")
+        })
+        .unwrap_err();
+    assert!(why.to_string().contains("0000:04:20.3"), "{why:#}");
+
+    // The multi-node snapshot restores with the device, which compute-1 then gets attached.
+    let restored = manager
+        .create(CreateRequest {
+            snapshot_id: Some("snap".into()),
+            pci_devices: vec!["0000:04:00.3".into()],
+            ..request("copy")
+        })
+        .unwrap();
+    assert_eq!(done(&manager, &restored).await.status, JobStatus::Succeeded);
+    let copy = manager.get("copy").unwrap();
+    assert_eq!(
+        copy.plan.as_ref().unwrap().pci_devices,
+        vec!["0000:04:00.3".to_owned()]
+    );
+    assert_eq!(
+        backend.attached.lock().unwrap().as_slice(),
+        &[("copy".into(), vec!["0000:04:00.3".to_owned()], false)]
+    );
+
+    // The device is held by the copy: another restore asking for it is in conflict.
+    let why = manager
+        .create(CreateRequest {
+            snapshot_id: Some("snap".into()),
+            pci_devices: vec!["0000:04:00.3".into()],
+            ..request("second")
+        })
+        .unwrap_err();
+    assert!(
+        why.to_string()
+            .contains("already passed through to stackbox 'copy'"),
+        "{why:#}"
+    );
+    assert!(why.downcast_ref::<Conflict>().is_some(), "{why:#}");
+
+    // A copy that holds a device is itself a PCI stackbox, which a freeze still refuses.
+    let why = manager
+        .freeze(
+            "copy",
+            SnapshotRequest {
+                id: "copy-snap".into(),
+                note: None,
+                node: None,
+            },
+        )
+        .unwrap_err();
+    assert!(why.to_string().contains("PCI devices through"), "{why:#}");
+    settle(&manager).await;
+}
+
+/// Path B: a control-only stackbox gains compute-1 with PCI devices. Only compute-1 takes them,
+/// the devices are stored on the plan the expansion carries, and a second compute with devices
+/// is refused.
+#[tokio::test]
+async fn a_control_only_stackbox_adds_compute_1_with_pci_devices_and_no_other_compute() {
+    let dir = tempfile::tempdir().unwrap();
+    let backend = Arc::new(Fake::default());
+    let manager = open_with(options(dir.path()), backend.clone()).await;
+    if !cfg!(target_os = "linux") {
+        *manager.0.guest_agent.write().unwrap() = Some(dir.path().join("stackbox-agent"));
+    }
+    let created = manager
+        .create(CreateRequest {
+            computes: 1,
+            ..request("src")
+        })
+        .unwrap();
+    assert_eq!(done(&manager, &created).await.status, JobStatus::Succeeded);
+    let deployed = manager.deploy("src", DeployRequest::default()).unwrap();
+    assert_eq!(done(&manager, &deployed).await.status, JobStatus::Succeeded);
+    let frozen = manager
+        .freeze(
+            "src",
+            SnapshotRequest {
+                id: "ctl".into(),
+                note: None,
+                node: Some("control".into()),
+            },
+        )
+        .unwrap();
+    assert_eq!(done(&manager, &frozen).await.status, JobStatus::Succeeded);
+    let restored = manager
+        .create(CreateRequest {
+            snapshot_id: Some("ctl".into()),
+            ..request("copy")
+        })
+        .unwrap();
+    assert_eq!(done(&manager, &restored).await.status, JobStatus::Succeeded);
+    assert_eq!(
+        manager.get("copy").unwrap().plan.as_ref().unwrap().computes,
+        0
+    );
+
+    set_pci_host(&manager, true, true);
+    // The devices reach compute-1 and are recorded on the stackbox's plan.
+    let job = manager
+        .add_compute(
+            "copy",
+            AddComputeRequest {
+                pci_devices: vec!["0000:04:00.3".into()],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    let finished = done(&manager, &job).await;
+    assert_eq!(
+        finished.status,
+        JobStatus::Succeeded,
+        "{:?}",
+        finished.error
+    );
+    let copy = manager.get("copy").unwrap();
+    let plan = copy.plan.as_ref().unwrap();
+    assert_eq!(plan.computes, 1);
+    assert_eq!(plan.pci_devices, vec!["0000:04:00.3".to_owned()]);
+
+    // compute-2 cannot take devices: compute-1 holds them.
+    let why = manager
+        .add_compute(
+            "copy",
+            AddComputeRequest {
+                pci_devices: vec!["0000:05:00.0".into()],
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+    assert!(why.to_string().contains("compute-1 only"), "{why:#}");
     settle(&manager).await;
 }
 

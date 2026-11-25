@@ -341,13 +341,20 @@ export const api = {
       body: JSON.stringify({ from }),
     }),
   /** Add the next compute VM; a host other than the stackbox's primary joins through the relay.
-   * `fromSnapshot` boots it from a compute template instead of installing it clean. */
-  addCompute: (id: string, hostId?: string, fromSnapshot?: string) =>
+   * `fromSnapshot` boots it from a compute template instead of installing it clean.
+   * `pciDevices` pass through to the VM; the coordinator takes them only for compute-1. */
+  addCompute: (
+    id: string,
+    hostId?: string,
+    fromSnapshot?: string,
+    pciDevices?: string[],
+  ) =>
     request<Job>(`/stackboxes/${encode(id)}/computes`, {
       method: "POST",
       body: JSON.stringify({
         host_id: hostId ?? null,
         ...(fromSnapshot ? { from_snapshot: fromSnapshot } : {}),
+        ...(pciDevices?.length ? { pci_devices: pciDevices } : {}),
       }),
     }),
   /** `forget` removes only the record, without asking the stackbox's host. */

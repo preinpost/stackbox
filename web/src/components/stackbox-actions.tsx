@@ -73,6 +73,7 @@ import {
   Modal,
   SelectInput,
 } from "./ui";
+import { PciDevicePicker, occupiedPciOn, pciSelectable } from "./pci-picker";
 import { archName, releaseLabel, runsOn, sourceLabel } from "./release-create";
 
 /** A `year.release` at least `min`; a legacy series name never is. */
@@ -411,18 +412,24 @@ export function CreateStackboxForm({
   const pciHostId = computeHostIds[0];
   const pciInspection = hosts.data?.find((h) => h.id === pciHostId)?.inspection;
   const pciDevices: HostPciDevice[] = pciInspection?.pci_devices ?? [];
-  const occupiedPci = new Map<string, string>();
-  for (const f of stackboxes.data ?? []) {
-    if (f.host_id !== pciHostId || f.status === "deleted") continue;
-    for (const bdf of f.plan?.pci_devices ?? []) occupiedPci.set(bdf, f.id);
-  }
-  const pciUsable = (bdf: string) =>
-    computes > 0 &&
-    pciInspection?.msb_pci_capable === true &&
-    pciDevices.some((d) => d.bdf === bdf && d.vfio_ready === true) &&
-    !occupiedPci.has(bdf);
+  const occupiedPci = occupiedPciOn(stackboxes.data, pciHostId);
+  const pciUsable = (bdf: string) => {
+    const device = pciDevices.find((d) => d.bdf === bdf);
+    return (
+      computes > 0 &&
+      pciInspection?.msb_pci_capable === true &&
+      !!device &&
+      pciSelectable(device, occupiedPci.get(bdf))
+    );
+  };
   // Only devices still valid for this host and plan are sent; the effect drops the rest.
   const pciPicked = selectedPci.filter(pciUsable);
+  const togglePci = (bdf: string, next: boolean) =>
+    setSelectedPci((current) =>
+      next
+        ? [...current, bdf]
+        : current.filter((picked) => picked !== bdf),
+    );
   const occupiedKey = Array.from(occupiedPci.keys()).join(",");
   useEffect(() => {
     setSelectedPci((current) => {
@@ -744,57 +751,17 @@ export function CreateStackboxForm({
                     <span className="field-label">
                       PCI 패스스루 (compute-1)
                     </span>
-                    <div className="space-y-2">
-                      {pciDevices.map((device) => {
-                        const occupiedBy = occupiedPci.get(device.bdf);
-                        const reason = occupiedBy
-                          ? `사용 중(${occupiedBy})`
-                          : device.vfio_ready
-                            ? undefined
-                            : "준비 안 됨";
-                        const checked = pciPicked.includes(device.bdf);
-                        return (
-                          <label
-                            key={device.bdf}
-                            className="checkbox-row"
-                            title={reason}
-                            aria-disabled={reason ? true : undefined}
-                          >
-                            <Checkbox.Root
-                              checked={checked}
-                              disabled={!!reason || mutation.isPending}
-                              onCheckedChange={(next) =>
-                                setSelectedPci((current) =>
-                                  next
-                                    ? [...current, device.bdf]
-                                    : current.filter(
-                                        (bdf) => bdf !== device.bdf,
-                                      ),
-                                )
-                              }
-                              className="checkbox"
-                            >
-                              <Checkbox.Indicator>
-                                <Check size={14} strokeWidth={3} />
-                              </Checkbox.Indicator>
-                            </Checkbox.Root>
-                            <span>
-                              <code className="font-mono">{device.bdf}</code>{" "}
-                              <small className="font-mono">
-                                {device.vendor_id}:{device.product_id}
-                                {device.iommu_group != null &&
-                                  ` · 그룹 ${device.iommu_group}`}
-                              </small>
-                              <small>{reason ?? "vfio-pci 준비됨"}</small>
-                            </span>
-                          </label>
-                        );
-                      })}
-                    </div>
+                    <PciDevicePicker
+                      devices={pciDevices}
+                      occupied={occupiedPci}
+                      picked={pciPicked}
+                      onToggle={togglePci}
+                      disabled={mutation.isPending}
+                    />
                     <p className="field-hint mt-2">
-                      선택한 장치는 compute-1 VM에 직접 붙습니다. 장치 하나는
-                      stackbox 하나만 쓸 수 있고, PCI stackbox는 클린 설치하며 스냅샷을
-                      만들 수 없습니다.
+                      PCI 장치는 compute-1에 연결되며, PCI가 연결된 stackbox는
+                      스냅샷을 만들 수 없습니다. 장치 하나는 stackbox 하나만 쓸 수
+                      있습니다.
                     </p>
                   </>
                 ) : (
@@ -1260,10 +1227,13 @@ export function AddComputeDialog({
     resumedTemplate ? "snapshot" : "clean",
   );
   const [template, setTemplate] = useState(resumedTemplate);
+  // PCI devices compute-1 takes; only the first compute of a stackbox can have them.
+  const [pciPicked, setPciPicked] = useState<string[]>([]);
   const client = useQueryClient();
   const hosts = useQuery(hostsQuery());
   const coordinator = useQuery(hostQuery());
   const snapshots = useQuery(snapshotsQuery());
+  const stackboxes = useQuery(stackboxesQuery());
   // The guest must boot on the new compute's host.
   const templates = computeTemplatesFor(
     stackbox,
@@ -1296,6 +1266,21 @@ export function AddComputeDialog({
     isMultiNodeStackbox(stackbox) &&
     computes < 3;
   const fromSnapshot = mode === "snapshot";
+  // compute-1 alone takes PCI devices, and a resumed expansion keeps the attempt it failed with.
+  const pciInspection = hosts.data?.find((host) => host.id === hostId)?.inspection;
+  const pciDevices = pciInspection?.pci_devices ?? [];
+  const pciShown =
+    next === 1 &&
+    !resumable &&
+    pciInspection?.pci_passthrough_available === true &&
+    pciDevices.length > 0;
+  const occupiedPci = occupiedPciOn(stackboxes.data, hostId);
+  const pciSend = pciShown
+    ? pciPicked.filter((bdf) => {
+        const device = pciDevices.find((d) => d.bdf === bdf);
+        return !!device && pciSelectable(device, occupiedPci.get(bdf));
+      })
+    : [];
   const canSubmit =
     allowed &&
     Boolean(hostId) &&
@@ -1307,6 +1292,7 @@ export function AddComputeDialog({
         stackbox.id,
         hostId || undefined,
         fromSnapshot ? template : undefined,
+        pciSend,
       ),
     onSuccess: async () => {
       await refresh(client);
@@ -1324,6 +1310,7 @@ export function AddComputeDialog({
             setHostId(lastJob?.target_host ?? stackbox.host_id ?? "");
             setMode(resumedTemplate ? "snapshot" : "clean");
             setTemplate(resumedTemplate);
+            setPciPicked([]);
           }
         }
       }}
@@ -1446,7 +1433,11 @@ export function AddComputeDialog({
               <SelectInput
                 label={`compute-${next} 호스트`}
                 value={hostId}
-                onChange={setHostId}
+                onChange={(value) => {
+                  setHostId(value);
+                  // Devices belong to one host; a choice made for another is dropped.
+                  setPciPicked([]);
+                }}
                 items={ready.map((host) => ({
                   value: host.id,
                   label: hostLabel(host),
@@ -1454,6 +1445,28 @@ export function AddComputeDialog({
                 disabled={mutation.isPending || resumable}
               />
             </label>
+            {pciShown && (
+              <div>
+                <span className="field-label">PCI 패스스루 (compute-1)</span>
+                <PciDevicePicker
+                  devices={pciDevices}
+                  occupied={occupiedPci}
+                  picked={pciSend}
+                  onToggle={(bdf, on) =>
+                    setPciPicked((current) =>
+                      on
+                        ? [...current, bdf]
+                        : current.filter((picked) => picked !== bdf),
+                    )
+                  }
+                  disabled={mutation.isPending}
+                />
+                <p className="field-hint mt-2">
+                  선택한 PCI 장치를 compute-1에 연결하고 Nova PCI 설정을 반영해
+                  추가합니다. PCI가 연결된 Stackbox는 스냅샷을 만들 수 없습니다.
+                </p>
+              </div>
+            )}
             {fromSnapshot && template && hostId && copying && (
               <div className="info-notice">
                 <Cpu size={18} />

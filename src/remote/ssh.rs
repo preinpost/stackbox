@@ -1458,16 +1458,15 @@ mod pci_inspection_tests {
         let dir = tempfile::tempdir().unwrap();
         let sysfs = dir.path().join("sys");
         fixture::build(&sysfs);
-        let script = inspect_script()
+        // util-linux pads the table column (`8:1  `) without -r; the stub reproduces that.
+        let findmnt = "findmnt() {\n    case \"$*\" in\n        '-rno MAJ:MIN /') printf '8:1\\n' ;;\n        '-no MAJ:MIN /') printf '8:1  \\n' ;;\n        *) return 1 ;;\n    esac\n}\n";
+        let inspect = inspect_script()
             .replace("SYSFS=/sys\n", &format!("SYSFS={}\n", sysfs.display()))
-            .replace(
-                "pci_root=$(findmnt -no MAJ:MIN / 2>/dev/null || true)",
-                "pci_root=8:1",
-            )
             .replace(
                 "pci_routes=$(ip route show default 2>/dev/null || true)",
                 &format!("pci_routes='{}'", fixture::ROUTE.trim_end()),
             );
+        let script = format!("{findmnt}{inspect}");
         let output = std::process::Command::new("sh")
             .arg("-c")
             .arg(&script)

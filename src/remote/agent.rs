@@ -1330,6 +1330,38 @@ impl Agent {
                     .await?;
                 Ok(Reply::Done)
             }
+            Operation::AttachPci { .. } => {
+                let entry = self.owned(&request, id, generation)?;
+                ensure!(
+                    entry.publishes(),
+                    "stackbox '{id}' is served from another host"
+                );
+                // The devices are the ones this host's reservation recorded, not a request's.
+                ensure!(
+                    !entry.plan.pci_devices.is_empty(),
+                    "stackbox '{id}' has no PCI devices to attach"
+                );
+                let mtty = entry
+                    .plan
+                    .gpu
+                    .as_ref()
+                    .is_some_and(|gpu| gpu.mode == crate::model::GpuMode::Mtty);
+                let release = entry
+                    .plan
+                    .release
+                    .clone()
+                    .unwrap_or_else(|| crate::kolla::OPENSTACK_RELEASE.to_owned());
+                self.backend
+                    .attach_pci(
+                        id.into(),
+                        release,
+                        entry.plan.pci_devices.clone(),
+                        mtty,
+                        progress(emit),
+                    )
+                    .await?;
+                Ok(Reply::Done)
+            }
             Operation::Freeze {
                 snapshot_id,
                 node,
@@ -1645,7 +1677,7 @@ mod tests {
         std::fs::write(&script, crate::remote::pci::helper_script()).unwrap();
         let mut agent = Agent::in_process(dir.path().join("agent"), Arc::new(Fake::default()));
         let mut command = vec!["env".to_owned()];
-        command.extend(fixture::helper_env(&sysfs, &dev, &conf));
+        command.extend(fixture::helper_env(&sysfs, &dev, &conf, "8:1"));
         command.push("sh".into());
         command.push(script.display().to_string());
         agent.pci_helper = command;
@@ -1864,6 +1896,105 @@ mod tests {
     }
 
     type Frames = Arc<std::sync::Mutex<Vec<Frame>>>;
+    /// A restore and a later attach carry the devices across `Agent::execute`: the reservation
+    /// records them on the plan, and `AttachPci` hands the backend the devices that reservation
+    /// recorded, not any the request could name.
+    #[tokio::test]
+    async fn restore_and_attach_pci_keep_the_devices_across_the_agent_boundary() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = Arc::new(Fake::default());
+        backend
+            .snapshots
+            .lock()
+            .unwrap()
+            .insert("snap-ref".into(), Default::default());
+        let agent = Agent {
+            dir: dir.path().into(),
+            backend: backend.clone(),
+            limits: Limits {
+                memory_budget_mib: 50000,
+                available_mib: 100000,
+                virtualization: true,
+                probe_ports: false,
+            },
+            runner: Runner::Inline,
+            pci_helper: crate::remote::pci::sudo_command(),
+        };
+        let owner = uuid::Uuid::new_v4().to_string();
+        let generation = uuid::Uuid::new_v4().to_string();
+        let emit: Emitter = Arc::new(|_| Ok(()));
+        let plan = layout(&PlanRequest {
+            computes: 1,
+            pci_devices: vec!["0000:04:00.3".into()],
+            ..Default::default()
+        })
+        .unwrap();
+        agent
+            .execute(
+                request(
+                    &owner,
+                    Operation::Restore {
+                        stackbox_id: "restored-pci".into(),
+                        generation: generation.clone(),
+                        reference: "snap-ref".into(),
+                        nodes: Vec::new(),
+                        plan,
+                        exposure: crate::model::Exposure {
+                            host: "target.example".into(),
+                            bind: "0.0.0.0".parse().unwrap(),
+                            port_base: 15040,
+                        },
+                    },
+                ),
+                emit.clone(),
+            )
+            .await
+            .expect("a restore with a PCI plan must reserve and start");
+        let stored = LockedRegistry::open(dir.path()).unwrap();
+        assert_eq!(
+            stored.state.stackboxes["restored-pci"].plan.pci_devices,
+            vec!["0000:04:00.3".to_owned()]
+        );
+        drop(stored);
+
+        agent
+            .execute(
+                request(
+                    &owner,
+                    Operation::AttachPci {
+                        stackbox_id: "restored-pci".into(),
+                        generation: generation.clone(),
+                    },
+                ),
+                emit.clone(),
+            )
+            .await
+            .expect("the attach runs for the devices its reservation recorded");
+        assert_eq!(
+            backend.attached.lock().unwrap().as_slice(),
+            &[(
+                "restored-pci".into(),
+                vec!["0000:04:00.3".to_owned()],
+                false
+            )]
+        );
+
+        // A stackbox whose reservation has no devices has nothing to attach.
+        let plain = agent
+            .execute(
+                request(
+                    &owner,
+                    Operation::AttachPci {
+                        stackbox_id: "no-such-stackbox".into(),
+                        generation,
+                    },
+                ),
+                emit,
+            )
+            .await;
+        assert!(plain.is_err());
+    }
+
     /// Runs a reserve and an expansion through the agent's `execute` boundary, the path the
     /// coordinator's link takes, and checks the stored plan keeps its passthrough devices.
     #[tokio::test]

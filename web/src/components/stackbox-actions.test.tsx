@@ -1379,3 +1379,122 @@ test("places compute VMs on other hosts when the coordinator has a relay", async
   );
   client.clear();
 });
+
+/** The local host with a stackbox-kernel PCI inspection: one ready device, one not ready. */
+function pciLocalHost() {
+  return {
+    id: "local",
+    kind: "local",
+    address: "localhost",
+    status: "ready",
+    inspection: {
+      checked_at: Date.now() / 1000,
+      msb_pci_capable: true,
+      pci_passthrough_available: true,
+      pci_devices: [
+        {
+          bdf: "0000:04:00.3",
+          vendor_id: "1b21",
+          product_id: "2142",
+          class: "0c0330",
+          iommu_group: 17,
+          driver: "vfio-pci",
+          group_exclusive: true,
+          vfio_ready: true,
+        },
+        {
+          bdf: "0000:02:00.0",
+          vendor_id: "10de",
+          product_id: "2684",
+          class: "030000",
+          iommu_group: 9,
+          driver: "vfio-pci",
+          group_exclusive: true,
+          vfio_ready: false,
+        },
+      ],
+    },
+    capacity: { memory_budget_mib: 8000, memory_reserved_mib: 0 },
+  };
+}
+
+/** Answers the compute dialog's reads on `hosts` and records the POST to /computes. */
+function stubComputeApi(hosts: unknown[]) {
+  const posted: { body?: unknown } = {};
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (path: string, options?: RequestInit) => {
+      if (path.endsWith("/hosts")) return Response.json(hosts);
+      if (path.endsWith("/host"))
+        return Response.json({
+          msb_available: true,
+          memory_budget_mib: 0,
+          memory_reserved_mib: 0,
+          relay_url: null,
+        });
+      if (path.endsWith("/computes") && options?.method === "POST") {
+        posted.body = JSON.parse(String(options.body));
+        return Response.json({
+          id: "job",
+          stackbox_id: "grow",
+          kind: "expand",
+          status: "queued",
+        });
+      }
+      return Response.json([]);
+    }),
+  );
+  return posted;
+}
+
+test("compute-1 added to a control-only stackbox takes a PCI device of its host", async () => {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+  });
+  const user = userEvent.setup();
+  const posted = stubComputeApi([pciLocalHost()]);
+  render(
+    <QueryClientProvider client={client}>
+      <AddComputeDialog stackbox={controlOnlyStackbox()} />
+    </QueryClientProvider>,
+  );
+  await user.click(screen.getByRole("button", { name: "Compute 추가" }));
+  expect(await screen.findByText("Compute 1 추가")).toBeTruthy();
+  expect(await screen.findByText("PCI 패스스루 (compute-1)")).toBeTruthy();
+
+  const ready = (await screen.findByText("0000:04:00.3")).closest("label")!;
+  expect(ready.textContent).toContain("vfio-pci 준비됨");
+  const notReady = screen.getByText("0000:02:00.0").closest("label")!;
+  expect(notReady.textContent).toContain("준비 안 됨");
+  await user.click(ready.querySelector("[role=checkbox]")!);
+  await user.click(await screen.findByRole("button", { name: "추가" }));
+  await vi.waitFor(() =>
+    expect(posted.body).toEqual({
+      host_id: "local",
+      pci_devices: ["0000:04:00.3"],
+    }),
+  );
+  cleanup();
+});
+
+test("compute-2 added to a stackbox that already has a compute offers no PCI device", async () => {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+  });
+  const user = userEvent.setup();
+  const posted = stubComputeApi([pciLocalHost()]);
+  render(
+    <QueryClientProvider client={client}>
+      <AddComputeDialog stackbox={grownStackbox()} />
+    </QueryClientProvider>,
+  );
+  await user.click(screen.getByRole("button", { name: "Compute 추가" }));
+  expect(await screen.findByText("Compute 2 추가")).toBeTruthy();
+  // The host would take devices, but compute-1 is the only compute that does.
+  await vi.waitFor(() => expect(screen.getByText("grow-compute-2")).toBeTruthy());
+  expect(screen.queryByText("PCI 패스스루 (compute-1)")).toBeNull();
+  expect(screen.queryByText("0000:04:00.3")).toBeNull();
+  await user.click(await screen.findByRole("button", { name: "추가" }));
+  await vi.waitFor(() => expect(posted.body).toEqual({ host_id: "local" }));
+  cleanup();
+});

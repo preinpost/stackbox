@@ -245,6 +245,18 @@ fn ensure_pci_host(state: &State, host_id: &str, pci_devices: &[String]) -> Resu
             "host '{host_id}' msb binary does not support PCI passthrough (--pci/--iommu)"
         )));
     }
+    // Only stackbox's libkrunfw kernel carries the vfio support a passed-through device needs;
+    // a stock kernel host is refused before any VM boots.
+    if inspection.custom_kernel.is_none() {
+        let why = inspection
+            .custom_kernel_reason
+            .as_deref()
+            .map(|reason| format!(" ({reason})"))
+            .unwrap_or_default();
+        return Err(bad_request(format!(
+            "host '{host_id}' boots the stock microsandbox kernel{why}, which cannot pass PCI devices through; prepare that host so stackbox installs its kernel (`stackbox host prepare {host_id}`), then try again"
+        )));
+    }
     for bdf in pci_devices {
         let ready = inspection
             .pci_devices
@@ -1710,6 +1722,15 @@ impl StackboxManager {
             if let Some(snapshot_id) = &request.snapshot_id {
                 let snapshot = snapshots::restorable(state, snapshot_id, &host_id)?;
                 plan = snapshot.plan.clone();
+                if !request.pci_devices.is_empty() {
+                    if plan.computes == 0 {
+                        return Err(bad_request(format!(
+                            "PCI passthrough needs compute-1, and snapshot '{snapshot_id}' holds no compute VM (it is an all-in-one or control-only snapshot); restore a multi-node snapshot instead"
+                        )));
+                    }
+                    plan.pci_devices = crate::model::normalize_pci_devices(&request.pci_devices)
+                        .map_err(|e| bad_request(e.to_string()))?;
+                }
     // A host other than the original's gets a copy when the restore starts, which
     // needs the original unless the host has a copy or the snapshot has a bucket archive.
     let has_bucket_archive = snapshot.archive.as_ref().is_some_and(|a| {
@@ -1998,6 +2019,26 @@ impl StackboxManager {
             // go on from where it stopped.
             let resuming = matches!(stackbox.status, StackboxStatus::Failed | StackboxStatus::Broken)
                 && previous.is_some();
+            // Devices go to compute-1 only, so they can be asked for only while the stackbox has
+            // no compute. A retried expansion keeps the devices its first attempt stored.
+            let requested_pci = match &request.pci_devices {
+                devices if devices.is_empty() => Vec::new(),
+                devices => crate::model::normalize_pci_devices(devices)
+                    .map_err(|e| bad_request(e.to_string()))?,
+            };
+            if !requested_pci.is_empty() {
+                if plan.computes != 0 {
+                    return Err(bad_request(
+                        "PCI passthrough goes to compute-1 only, and this stackbox already has its compute-1; add the devices when the stackbox has no compute yet",
+                    ));
+                }
+                if (resuming || !plan.pci_devices.is_empty()) && plan.pci_devices != requested_pci {
+                    return Err(bad_request(format!(
+                        "this stackbox's compute-1 passes {} through; retry it with the same devices or none",
+                        plan.pci_devices.join(", ")
+                    )));
+                }
+            }
             let (target_host, target_node) = if resuming {
                 let previous = previous.as_ref().ok_or_else(|| {
                     conflict(
@@ -2059,6 +2100,18 @@ impl StackboxManager {
             {
                 ensure_mtty_host(state, &target_host)?;
             }
+            // The devices go on the stackbox's plan, so the expansion and the coordinator's device
+            // ownership (see `ensure_pci_host`) both see them.
+            let pci_devices = if requested_pci.is_empty() {
+                plan.pci_devices.clone()
+            } else {
+                if plan.pci_devices.is_empty() {
+                    ensure_pci_host(state, &target_host, &requested_pci)?;
+                }
+                requested_pci.clone()
+            };
+            let mut plan = plan;
+            plan.pci_devices = pci_devices.clone();
             let new_plan = self
                 .expand_plan(&plan)
                 .map_err(|error| conflict(error.to_string()))?;
@@ -2166,6 +2219,9 @@ impl StackboxManager {
                 }
             }
             stackbox.status = StackboxStatus::Deploying;
+            if let Some(stored) = stackbox.plan.as_mut() {
+                stored.pci_devices = pci_devices.clone();
+            }
             stackbox.active_job = Some(job.id.clone());
             stackbox.phase = Some(crate::kolla::Phase::Prepare);
             stackbox.step = Some(format!("{} 추가", job.target_node.as_deref().unwrap_or("compute")));

@@ -202,10 +202,9 @@ pub async fn add_nodes(
                 address: addressed.then(|| format!("{}/24", spec.address())),
             });
         }
+        // A VM booted from a compute template gets the same devices and vfio files as a clean one:
+        // create_node attaches the devices and runs install_vfio_files after the boot.
         let pci = pci_devices_of(spec, pci_devices);
-        if !pci.is_empty() && source.is_some() {
-            bail!("{name} passes PCI devices through, so it cannot boot from a compute template");
-        }
         let setup = NodeSetup {
             peers: template
                 .iter()

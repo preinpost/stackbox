@@ -29,7 +29,7 @@ if [ "$(id -u)" -ne 0 ] && [ -n "${STACKBOX_TEST_SYSFS_ROOT:-}" ]; then
     ROOT_DEV=${STACKBOX_TEST_ROOT_DEV:-}
     ROUTES=${STACKBOX_TEST_DEFAULT_ROUTE:-}
 else
-    ROOT_DEV=$(findmnt -no MAJ:MIN / 2>/dev/null || true)
+    ROOT_DEV=$(findmnt -rno MAJ:MIN / 2>/dev/null || true)
     ROUTES=$(ip route show default 2>/dev/null || true)
 fi
 

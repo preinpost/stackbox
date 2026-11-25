@@ -821,6 +821,13 @@ export interface components {
        * @default null
        */
       host_id: string | null;
+      /**
+       * @description Host PCI devices (`DDDD:BB:DD.F`) passed through to the new VM. Only compute-1 takes
+       *     them, so this is accepted only while the stackbox has no compute yet, and each device must
+       *     be `vfio-pci`-ready on the new VM's host. The new VM boots from `from_snapshot` or clean.
+       * @default []
+       */
+      pci_devices: string[];
     };
     AgentArtifactInfo: {
       arch: string;
@@ -1030,7 +1037,12 @@ export interface components {
       key?: string | null;
       layout?: null | components["schemas"]["StackboxLayout"];
       owner?: string | null;
-      /** @description Host PCI devices passed through to compute-1 (see [`PlanRequest::pci_devices`]). */
+      /**
+       * @description Host PCI devices passed through to compute-1 (see [`PlanRequest::pci_devices`]). A stackbox
+       *     restored from a snapshot takes them too: the snapshot must hold a compute-1 (a multi-node
+       *     snapshot), and the devices must be `vfio-pci`-ready on the restore host. The snapshot itself
+       *     is still frozen without them, since a freeze refuses a PCI stackbox.
+       */
       pci_devices?: string[];
       /**
        * @description Compute VMs that run on another host than `host_id`, by VM (`compute-2` → host id).
@@ -1859,8 +1871,9 @@ export interface components {
       layout?: null | components["schemas"]["StackboxLayout"];
       owner?: string | null;
       /**
-       * @description PCI devices passed through to compute-1 (see [`PlanRequest::pci_devices`]); like a GPU,
-       *     only a clean install can take them.
+       * @description PCI devices passed through to compute-1 (see [`PlanRequest::pci_devices`]). Unlike a GPU,
+       *     they do not force a clean install: compute-1 is added with them (from its template or
+       *     clean) once the control VM is up, and a GPU stackbox still installs clean.
        */
       pci_devices?: string[];
       /** @description OpenStack release, such as `2026.2`. */

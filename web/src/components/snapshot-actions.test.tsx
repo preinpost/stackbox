@@ -419,3 +419,239 @@ test("CreateFromBucketDialog shows only usable images with metadata matching reg
     }),
   );
 });
+
+/** Hosts with a stackbox-kernel PCI inspection: one ready device, one taken, one not ready. */
+const pciRestoreHosts = (ids: string[] = ["pci-01"]) =>
+  ids.map((id) => ({
+    id,
+    kind: "ssh",
+    status: "ready",
+    address: "10.0.0.21",
+    port: 22,
+    username: "dev",
+    fingerprint: "SHA256:ccc",
+    connected: false,
+    inspection: {
+      arch: "x86_64",
+      os: "linux",
+      mtty_available: false,
+      msb_pci_capable: true,
+      pci_passthrough_available: true,
+      pci_devices: [
+        {
+          bdf: "0000:04:00.3",
+          vendor_id: "1b21",
+          product_id: "2142",
+          class: "0c0330",
+          iommu_group: 17,
+          driver: "vfio-pci",
+          group_exclusive: true,
+          vfio_ready: true,
+        },
+        {
+          bdf: "0000:02:00.0",
+          vendor_id: "10de",
+          product_id: "2684",
+          class: "030000",
+          iommu_group: 9,
+          driver: "vfio-pci",
+          group_exclusive: true,
+          vfio_ready: true,
+        },
+        {
+          bdf: "0000:03:00.0",
+          vendor_id: "8086",
+          product_id: "1521",
+          class: "020000",
+          iommu_group: 5,
+          driver: "vfio-pci",
+          group_exclusive: true,
+          vfio_ready: false,
+        },
+      ],
+    },
+    agent: {
+      artifact: {
+        sha256: "abc",
+        arch: "x86_64",
+        protocol: 1,
+        supports_single_vm: true,
+        build_id: "b1",
+      },
+    },
+    capacity: { memory_budget_mib: 32768, memory_reserved_mib: 0 },
+  }));
+
+/** A stackbox on pci-01 that already passes 0000:02:00.0 through. */
+const pciBusyStackbox = {
+  id: "busy-stackbox",
+  status: "ready",
+  host_id: "pci-01",
+  created_at: 0,
+  updated_at: 0,
+  plan: {
+    components: ["keystone"],
+    memory_mib: 1024,
+    disk_mib: 1024,
+    warnings: [],
+    nodes: [],
+    pci_devices: ["0000:02:00.0"],
+  },
+};
+
+const pciSnapshot = (computes: number, control = false) =>
+  ({
+    id: "pci-snap",
+    status: "ready",
+    arch: "x86_64",
+    host_id: "pci-01",
+    template: control ? "control" : undefined,
+    plan: {
+      components: ["keystone", "nova"],
+      computes,
+      nodes: control
+        ? [{ role: "control", name: "control" }]
+        : [
+            { role: "control", name: "control" },
+            { role: "compute", name: "compute-1", index: 1 },
+          ],
+      memory_mib: 12544,
+      disk_mib: 100000,
+      warnings: [],
+    },
+    deployed: true,
+    source_exposure: { host: "10.0.0.21", bind: "0.0.0.0", port_base: 15000 },
+    nodes: [],
+    created_at: 1,
+    updated_at: 2,
+  }) as never;
+
+const pciRestoreFetch = (
+  hosts: unknown[],
+  created: { body?: unknown },
+) =>
+  vi.fn(async (path: string, options?: RequestInit) => {
+    if (path.endsWith("/host"))
+      return Response.json({ state_dir: "/tmp/stackbox", arch: "x86_64", build_id: "b1" });
+    if (path.endsWith("/stackboxes") && options?.method === "POST") {
+      created.body = JSON.parse(String(options.body));
+      return Response.json({ id: "job-pci", stackbox_id: "pci-restored", status: "queued" });
+    }
+    if (path.endsWith("/stackboxes")) return Response.json([pciBusyStackbox]);
+    if (path.endsWith("/hosts")) return Response.json(hosts);
+    return Response.json([]);
+  });
+
+const pciCheckbox = async (bdf: string) =>
+  (await screen.findByText(bdf)).closest("label")!;
+const isDisabledCheckbox = (box: Element) =>
+  box.getAttribute("aria-disabled") === "true" ||
+  box.hasAttribute("disabled") ||
+  (box as HTMLElement).dataset.disabled === "true";
+
+test("RestoreSnapshotDialog offers PCI devices for a multi-node snapshot and sends the picked one", async () => {
+  const { RestoreSnapshotDialog } = await import("./snapshot-actions");
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+  });
+  const created: { body?: unknown } = {};
+  vi.stubGlobal("fetch", pciRestoreFetch(pciRestoreHosts(), created));
+  const user = userEvent.setup();
+  render(
+    <QueryClientProvider client={client}>
+      <RestoreSnapshotDialog snapshot={pciSnapshot(1)} />
+    </QueryClientProvider>,
+  );
+  await user.click(await screen.findByRole("button", { name: "Stackbox 만들기" }));
+  expect(await screen.findByText("PCI 패스스루 (compute-1)")).toBeTruthy();
+
+  const ready = await pciCheckbox("0000:04:00.3");
+  expect(ready.textContent).toContain("vfio-pci 준비됨");
+  const checkReady = ready.querySelector("[role=checkbox]")!;
+  expect(isDisabledCheckbox(checkReady)).toBe(false);
+
+  const taken = await pciCheckbox("0000:02:00.0");
+  expect(taken.textContent).toContain("사용 중(busy-stackbox)");
+  expect(isDisabledCheckbox(taken.querySelector("[role=checkbox]")!)).toBe(true);
+
+  const notReady = await pciCheckbox("0000:03:00.0");
+  expect(notReady.textContent).toContain("준비 안 됨");
+  expect(isDisabledCheckbox(notReady.querySelector("[role=checkbox]")!)).toBe(true);
+
+  await user.click(checkReady);
+  await user.type(screen.getByPlaceholderText("dev-openstack"), "pci-restored");
+  await user.click(screen.getAllByRole("button", { name: "Stackbox 만들기" }).at(-1)!);
+  await vi.waitFor(() =>
+    expect(created.body).toEqual({
+      id: "pci-restored",
+      host_id: "pci-01",
+      snapshot_id: "pci-snap",
+      external_host: "10.0.0.21",
+      pci_devices: ["0000:04:00.3"],
+    }),
+  );
+});
+
+test("RestoreSnapshotDialog hides PCI devices for a control-only snapshot", async () => {
+  const { RestoreSnapshotDialog } = await import("./snapshot-actions");
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+  });
+  vi.stubGlobal("fetch", pciRestoreFetch(pciRestoreHosts(), {}));
+  const user = userEvent.setup();
+  render(
+    <QueryClientProvider client={client}>
+      <RestoreSnapshotDialog snapshot={pciSnapshot(0, true)} />
+    </QueryClientProvider>,
+  );
+  await user.click(await screen.findByRole("button", { name: "Stackbox 만들기" }));
+  // The host list has loaded once its name shows in the host select.
+  await vi.waitFor(() =>
+    expect(
+      screen.getByRole("combobox", { name: "실행 호스트" }).textContent,
+    ).toContain("pci-01"),
+  );
+  expect(screen.queryByText("PCI 패스스루 (compute-1)")).toBeNull();
+  expect(screen.queryByText("0000:04:00.3")).toBeNull();
+});
+
+test("RestoreSnapshotDialog drops the picked PCI device when the restore host changes", async () => {
+  const { RestoreSnapshotDialog } = await import("./snapshot-actions");
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+  });
+  const created: { body?: unknown } = {};
+  vi.stubGlobal(
+    "fetch",
+    pciRestoreFetch(pciRestoreHosts(["pci-01", "pci-02"]), created),
+  );
+  const user = userEvent.setup();
+  render(
+    <QueryClientProvider client={client}>
+      <RestoreSnapshotDialog snapshot={pciSnapshot(1)} />
+    </QueryClientProvider>,
+  );
+  await user.click(await screen.findByRole("button", { name: "Stackbox 만들기" }));
+  const ready = await pciCheckbox("0000:04:00.3");
+  await user.click(ready.querySelector("[role=checkbox]")!);
+  expect(ready.querySelector("[role=checkbox]")!.getAttribute("aria-checked")).toBe(
+    "true",
+  );
+
+  await user.click(screen.getByRole("combobox", { name: "실행 호스트" }));
+  await user.click(await screen.findByRole("option", { name: /pci-02/ }));
+  await vi.waitFor(() =>
+    expect(
+      screen.getByRole("combobox", { name: "실행 호스트" }).textContent,
+    ).toContain("pci-02"),
+  );
+  const again = await pciCheckbox("0000:04:00.3");
+  expect(again.querySelector("[role=checkbox]")!.getAttribute("aria-checked")).toBe(
+    "false",
+  );
+  await user.type(screen.getByPlaceholderText("dev-openstack"), "pci-moved");
+  await user.click(screen.getAllByRole("button", { name: "Stackbox 만들기" }).at(-1)!);
+  await vi.waitFor(() => expect(created.body).toBeDefined());
+  expect(created.body).toMatchObject({ host_id: "pci-02" });
+  expect(created.body).not.toHaveProperty("pci_devices");
+});

@@ -553,6 +553,23 @@ impl Backend for AgentBackend {
             Some(sink),
         ))
     }
+    fn attach_pci(
+        &self,
+        id: String,
+        // The agent uses the release, devices and GPU its own reservation recorded.
+        _release: String,
+        _pci_devices: Vec<String>,
+        _mtty: bool,
+        sink: EventSink,
+    ) -> BoxFuture<'_, Result<()>> {
+        Box::pin(self.done(
+            Operation::AttachPci {
+                stackbox_id: id,
+                generation: self.generation.clone(),
+            },
+            Some(sink),
+        ))
+    }
     fn forget_computes(
         &self,
         id: String,

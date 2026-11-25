@@ -572,6 +572,7 @@ async fn a_compute_on_a_remote_host_boots_from_a_template_the_host_downloads() {
         .add_compute(
             "span",
             AddComputeRequest {
+                pci_devices: Vec::new(),
                 host_id: Some("edge".into()),
                 from_snapshot: Some("tmpl".into()),
             },
