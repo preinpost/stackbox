@@ -19,6 +19,7 @@ use anyhow::{Context, Result, anyhow, bail};
 pub use backend::{Backend, MicrosandboxBackend};
 pub use releases::describe as describe_release_plan;
 use std::{
+    collections::BTreeMap,
     net::{IpAddr, Ipv4Addr, TcpListener},
     path::{Path, PathBuf},
     sync::{
@@ -656,9 +657,123 @@ impl StackboxManager {
             ));
         }
         let components = stackbox_components(&stackbox);
-        self.backend_for(&stackbox)?
+        let relay_exposure = if self.read(|state| state.relay_tokens.contains_key(id))? {
+            Some(self.exposure_status(&stackbox)?)
+        } else {
+            None
+        };
+        let mut endpoints = self
+            .backend_for(&stackbox)?
             .endpoints(id.into(), stackbox.exposure, components)
-            .await
+            .await?;
+        endpoints.relay_exposure = relay_exposure;
+        Ok(endpoints)
+    }
+    /// Expose a deployed stackbox's service endpoints through the relay, or rotate its token with
+    /// `rotate`. An exposed stackbox keeps its token otherwise.
+    pub fn set_relay_exposure(
+        &self,
+        id: &str,
+        request: RelayExposureRequest,
+    ) -> Result<RelayExposureStatus> {
+        let stackbox = self.get(id)?;
+        if stackbox.exposure.is_none()
+            || stackbox.status != StackboxStatus::Ready
+            || stackbox.active_job.is_some()
+        {
+            return Err(conflict(
+                "relay endpoint access needs a deployed stackbox with no job running",
+            ));
+        }
+        if let Some(host_id) = stackbox.host_id.as_deref()
+            && self.host(host_id)?.kind == HostKind::Agent
+        {
+            return Err(conflict(
+                "relay endpoint access currently supports local and SSH hosts; dial-in agent hosts are not yet supported",
+            ));
+        }
+        if self.relay_url().is_none() {
+            return Err(conflict("configure the relay first"));
+        }
+        self.update(|state| {
+            if request.rotate || !state.relay_tokens.contains_key(id) {
+                state.relay_tokens.insert(id.to_owned(), new_relay_token()?);
+            }
+            Ok(())
+        })?;
+        self.sync_endpoints();
+        self.exposure_status(&stackbox)
+    }
+    /// Stop serving a stackbox's endpoints through the relay: its token goes, and the URLs and
+    /// cookies handed out so far answer `404`.
+    pub fn remove_relay_exposure(&self, id: &str) -> Result<RelayExposureStatus> {
+        self.get(id)?;
+        self.update(|state| {
+            state.relay_tokens.remove(id);
+            Ok(())
+        })?;
+        self.sync_endpoints();
+        Ok(RelayExposureStatus {
+            enabled: false,
+            relay_url: self.relay_url(),
+            urls: BTreeMap::new(),
+        })
+    }
+    /// A stackbox's relay exposure as its API shows it: the URLs, when there is a token and a
+    /// relay address.
+    fn exposure_status(&self, stackbox: &StackboxRecord) -> Result<RelayExposureStatus> {
+        let relay_url = self.relay_url();
+        let token = self.read(|state| state.relay_tokens.get(&stackbox.id).cloned())?;
+        let urls = match (&relay_url, &token) {
+            (Some(base), Some(token)) => crate::link::endpoint_proxy::exposure_urls(
+                base,
+                &stackbox.id,
+                token,
+                &stackbox_components(stackbox),
+            ),
+            _ => BTreeMap::new(),
+        };
+        Ok(RelayExposureStatus {
+            enabled: relay_url.is_some() && token.is_some(),
+            relay_url,
+            urls,
+        })
+    }
+    /// Rebuild the relay's endpoint table from the saved state and the relay's current address:
+    /// each exposed stackbox, and the base URL its services are reached through. Called wherever
+    /// either changes.
+    pub fn sync_endpoints(&self) {
+        use crate::link::endpoint_proxy::{Exposed, public_services};
+        let base = self
+            .relay_url()
+            .map(|url| url.trim_end_matches('/').to_owned());
+        let exposed = match self.read(|state| {
+            state
+                .stackboxes
+                .values()
+                .filter(|s| s.status != StackboxStatus::Deleted)
+                .filter_map(|s| {
+                    let token = state.relay_tokens.get(&s.id)?;
+                    let exposure = s.exposure.as_ref()?;
+                    Some((
+                        s.id.clone(),
+                        Exposed {
+                            token: token.clone(),
+                            host: exposure.host.clone(),
+                            port_base: exposure.port_base,
+                            services: public_services(&stackbox_components(s)),
+                        },
+                    ))
+                })
+                .collect::<std::collections::HashMap<_, _>>()
+        }) {
+            Ok(exposed) => exposed,
+            Err(error) => {
+                eprintln!("relay: endpoints not synced: {error:#}");
+                return;
+            }
+        };
+        self.0.relay.endpoints.replace(base, exposed);
     }
     /// Set the faults of a multi-node stackbox VM's links (`node` is `control`, `compute-1`, ...),
     /// such as loss 1.0 to cut it off; `Impair::default()` heals it. It applies at once,
@@ -1223,8 +1338,11 @@ impl StackboxManager {
         self.update(|state| {
             state.relay_keys.remove(id);
             state.pending_shares.remove(id);
+            state.relay_tokens.remove(id);
             Ok(())
-        })
+        })?;
+        self.sync_endpoints();
+        Ok(())
     }
     /// Let the switches of a stackbox that spans hosts join its relay.
     fn authorize_uplinks(&self, stackbox: &StackboxRecord) {
@@ -1406,6 +1524,7 @@ impl StackboxManager {
         }
         listener.tunnel = None;
         *lock_unpoisoned(&self.0.tunnel_url) = None;
+        self.sync_endpoints();
         listener.addr = None;
         listener.error = None;
         listener.serving = true;
@@ -1440,6 +1559,7 @@ impl StackboxManager {
                         };
                         let manager = StackboxManager(inner);
                         *lock_unpoisoned(&manager.0.tunnel_url) = Some(url.clone());
+                        manager.sync_endpoints();
                         tokio::spawn(async move { manager.relink(&url).await });
                     });
                     listener.tunnel = Some(crate::link::cloudflared::Tunnel::start(
@@ -1537,6 +1657,7 @@ impl StackboxManager {
         if serving && !(running && current == settings) {
             self.start_relay().await;
         }
+        self.sync_endpoints();
         self.relay_status().await
     }
     fn read<T>(&self, f: impl FnOnce(&State) -> T) -> Result<T> {
@@ -3446,6 +3567,13 @@ fn stackbox_release(stackbox: &StackboxRecord) -> String {
         .as_ref()
         .and_then(|plan| plan.release.clone())
         .unwrap_or_else(|| crate::kolla::OPENSTACK_RELEASE.to_owned())
+}
+
+/// A relay token: 32 random bytes, hex-encoded.
+fn new_relay_token() -> Result<String> {
+    let mut bytes = [0u8; 32];
+    getrandom::getrandom(&mut bytes).map_err(|e| anyhow!("no randomness: {e}"))?;
+    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }
 
 fn stackbox_components(stackbox: &StackboxRecord) -> Vec<String> {

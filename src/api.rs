@@ -130,6 +130,10 @@ pub fn router(manager: StackboxManager, token: Option<String>) -> Router {
         .route("/api/v1/stackboxes/{id}/settle", post(settle))
         .route("/api/v1/stackboxes/{id}/endpoints", get(endpoints))
         .route(
+            "/api/v1/stackboxes/{id}/relay-exposure",
+            put(set_relay_exposure).delete(remove_relay_exposure),
+        )
+        .route(
             "/api/v1/stackboxes/{id}/nodes/{node}/faults",
             put(set_faults),
         )
@@ -870,6 +874,21 @@ async fn endpoints(
 ) -> Result<Json<Endpoints>, ApiError> {
     Ok(Json(app.manager.endpoints(&id).await?))
 }
+#[utoipa::path(put, path="/api/v1/stackboxes/{id}/relay-exposure", params(("id"=String, Path)), request_body=crate::model::RelayExposureRequest, responses((status=200, description="The stackbox's services are reachable through the relay; `rotate` makes a new token", body=crate::model::RelayExposureStatus), (status=400, body=ErrorBody), (status=404, body=ErrorBody), (status=409, description="Not deployed, a dial-in agent host, or no relay configured", body=ErrorBody)))]
+async fn set_relay_exposure(
+    State(app): State<App>,
+    Path(id): Path<String>,
+    value: Result<Json<crate::model::RelayExposureRequest>, JsonRejection>,
+) -> Result<Json<crate::model::RelayExposureStatus>, ApiError> {
+    Ok(Json(app.manager.set_relay_exposure(&id, body(value)?)?))
+}
+#[utoipa::path(delete, path="/api/v1/stackboxes/{id}/relay-exposure", params(("id"=String, Path)), responses((status=200, description="The services are no longer reachable through the relay; old URLs answer 404", body=crate::model::RelayExposureStatus), (status=404, body=ErrorBody)))]
+async fn remove_relay_exposure(
+    State(app): State<App>,
+    Path(id): Path<String>,
+) -> Result<Json<crate::model::RelayExposureStatus>, ApiError> {
+    Ok(Json(app.manager.remove_relay_exposure(&id)?))
+}
 #[utoipa::path(put, path="/api/v1/stackboxes/{id}/nodes/{node}/faults", params(("id"=String, Path), ("node"=String, Path, description="VM of a multi-node stackbox: control, compute-1, ...")), request_body=crate::link::Impair, responses((status=200, description="The stackbox with the VM's faults applied; no delay and no loss heals it", body=StackboxView), (status=400, body=ErrorBody), (status=404, body=ErrorBody), (status=409, body=ErrorBody)))]
 async fn set_faults(
     State(app): State<App>,
@@ -1218,7 +1237,7 @@ async fn relay_shell(
 }
 
 #[derive(OpenApi)]
-#[openapi(paths(host, remote_hosts, remote_host, host_fingerprint, test_connection, register_host, register_local_host, register_agent_host, update_host_credentials, unregister_host, check_host, prepare_host, install_agent, bind_host_pci, unbind_host_pci, host_pci_helper_install, host_jobs, host_job, catalog_handler, plan_handler, list, detail, create, releases, release_plan, create_release, deploy, add_compute, instances, gpu_load, set_gpu_load, clear_gpu_load, gpu_guest_script, gpu_user_data, settle, delete, endpoints, set_faults, logs, log_stream, freeze, snapshots, snapshot, delete_snapshot, delete_snapshot_copy, export_snapshot, import_snapshot, buckets, bucket, register_bucket, update_bucket, unregister_bucket, test_bucket, check_bucket, bucket_objects, rebuild_bucket_index, relay_status, set_relay, remove_relay, update_cloudflared, jobs, job), components(schemas(ErrorBody)), modifiers(&Security))]
+#[openapi(paths(host, remote_hosts, remote_host, host_fingerprint, test_connection, register_host, register_local_host, register_agent_host, update_host_credentials, unregister_host, check_host, prepare_host, install_agent, bind_host_pci, unbind_host_pci, host_pci_helper_install, host_jobs, host_job, catalog_handler, plan_handler, list, detail, create, releases, release_plan, create_release, deploy, add_compute, instances, gpu_load, set_gpu_load, clear_gpu_load, gpu_guest_script, gpu_user_data, settle, delete, endpoints, set_relay_exposure, remove_relay_exposure, set_faults, logs, log_stream, freeze, snapshots, snapshot, delete_snapshot, delete_snapshot_copy, export_snapshot, import_snapshot, buckets, bucket, register_bucket, update_bucket, unregister_bucket, test_bucket, check_bucket, bucket_objects, rebuild_bucket_index, relay_status, set_relay, remove_relay, update_cloudflared, jobs, job), components(schemas(ErrorBody)), modifiers(&Security))]
 struct ApiDoc;
 struct Security;
 impl utoipa::Modify for Security {

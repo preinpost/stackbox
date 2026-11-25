@@ -36,7 +36,7 @@ time = "0.3"
 tar = "0.4"
 flate2 = "1"
 # Published agents; already in the tree through microsandbox's registry client.
-reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "stream"] }
 # S3 part bodies, cloned for retries without copying.
 bytes = "1"
 # Links: the guest side opens a TAP device.

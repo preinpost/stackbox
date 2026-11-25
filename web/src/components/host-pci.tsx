@@ -116,10 +116,13 @@ function HelperInstallPanel({
   host,
   onCheck,
   checkDisabled,
+  outdatedVersion,
 }: {
   host: RemoteHost;
   onCheck?: () => void;
   checkDisabled?: boolean;
+  /** The protocol version of an older helper already on the host, if any. */
+  outdatedVersion?: number;
 }) {
   const ssh = host.kind === "ssh";
   const checkLabel = ssh ? "SSH 점검" : "점검";
@@ -135,6 +138,11 @@ function HelperInstallPanel({
   });
   return (
     <div className="remote-pci-helper">
+      {outdatedVersion != null && (
+        <p className="field-hint remote-pci-outdated" role="note">
+          {`호스트에 구버전 헬퍼(v${outdatedVersion})가 설치되어 있습니다. 아래 최신 스크립트를 호스트에서 실행해 덮어쓴 뒤 '${checkLabel}'을 누르세요.`}
+        </p>
+      )}
       {!ssh && (
         <form
           className="remote-pci-helper-form"
@@ -221,18 +229,18 @@ function PciCandidateRow({
   const protectedBy = device.protected_reason;
   let action: ReactNode = null;
   if (vfio) {
-    if (owned) action = <Button disabled>원복</Button>;
+    if (owned) action = <Button disabled>바인딩 해제</Button>;
     else
       action = helper ? (
         <Button
           disabled={busy}
           onClick={() => onConfirm({ kind: "unbind", device })}
         >
-          원복
+          바인딩 해제
         </Button>
       ) : (
         <CopyCommandButton
-          label="원복 명령 복사"
+          label="바인딩 해제 명령 복사"
           value={unbindCommand(device.bdf)}
         />
       );
@@ -314,7 +322,7 @@ function PciJobNotice({
     return (
       <div className="remote-pci-banner tone-ok" role="status">
         <span>
-          {`✓ ${bdf} ${binding ? "vfio-pci 바인딩이 완료되었습니다." : "원래 드라이버로 원복되었습니다."}`}
+          {`✓ ${bdf} ${binding ? "vfio-pci 바인딩이 완료되었습니다." : "바인딩이 해제되었습니다."}`}
         </span>
         <Button onClick={onDismiss}>닫기</Button>
       </div>
@@ -323,7 +331,7 @@ function PciJobNotice({
     return (
       <div className="remote-pci-banner tone-bad" role="alert">
         <span>
-          {`${bdf} ${binding ? "vfio-pci 바인딩" : "원복"}이 실패했습니다.${job.error ? ` ${job.error}` : ""}`}
+          {`${bdf} ${binding ? "vfio-pci 바인딩이 실패했습니다." : "바인딩 해제가 실패했습니다."}${job.error ? ` ${job.error}` : ""}`}
         </span>
         <Button onClick={onDismiss}>닫기</Button>
       </div>
@@ -331,7 +339,7 @@ function PciJobNotice({
   return (
     <div className="remote-pci-banner tone-accent" role="status">
       <LoaderCircle size={16} className="animate-spin" />
-      <span>{`${bdf} ${binding ? "바인딩" : "원복"} 진행 중…`}</span>
+      <span>{`${bdf} ${binding ? "바인딩" : "바인딩 해제"} 진행 중…`}</span>
     </div>
   );
 }
@@ -349,6 +357,8 @@ export function PciCandidates({
 }) {
   const candidates = host.inspection?.pci_candidates ?? [];
   const helper = host.inspection?.pci_bind_helper_available === true;
+  const helperVersion = host.inspection?.pci_bind_helper_version;
+  const outdated = !helper && helperVersion != null;
   const [helperOpen, setHelperOpen] = useState(false);
   const [protectedOpen, setProtectedOpen] = useState(false);
   const [confirm, setConfirm] = useState<Confirm>();
@@ -396,10 +406,31 @@ export function PciCandidates({
       <div className="remote-pci-head">
         <h4 className="remote-pci-title">PCI 패스스루 장치</h4>
         {helper ? (
-          <span className="remote-pci-ready">
-            <ShieldCheck size={14} />
-            원클릭 바인딩 준비됨
-          </span>
+          <div className="remote-pci-head-actions">
+            <span className="remote-pci-ready">
+              <ShieldCheck size={14} />
+              원클릭 바인딩 준비됨
+            </span>
+            <Button
+              aria-expanded={helperOpen}
+              onClick={() => setHelperOpen((open) => !open)}
+            >
+              헬퍼 재설치
+            </Button>
+          </div>
+        ) : outdated ? (
+          <div className="remote-pci-head-actions">
+            <span className="remote-pci-badge tone-warn">
+              {`헬퍼 업데이트 필요 (v${helperVersion})`}
+            </span>
+            <Button
+              variant="primary"
+              aria-expanded={helperOpen}
+              onClick={() => setHelperOpen((open) => !open)}
+            >
+              헬퍼 업데이트
+            </Button>
+          </div>
         ) : (
           <Button
             aria-expanded={helperOpen}
@@ -412,11 +443,12 @@ export function PciCandidates({
       {tracked && (
         <PciJobNotice job={tracked} onDismiss={() => setSubmitted(undefined)} />
       )}
-      {!helper && helperOpen && (
+      {helperOpen && (
         <HelperInstallPanel
           host={host}
           onCheck={onCheck}
           checkDisabled={checkDisabled}
+          outdatedVersion={outdated ? (helperVersion ?? undefined) : undefined}
         />
       )}
       {primary.length ? (
@@ -464,12 +496,12 @@ export function PciCandidates({
             title={
               confirm.kind === "bind"
                 ? `${device.bdf} vfio-pci 바인딩`
-                : `${device.bdf} 원복`
+                : `${device.bdf} 바인딩 해제`
             }
             description={
               confirm.kind === "bind"
                 ? "호스트 드라이버에서 떼어 vfio-pci에 넘깁니다. 이 장치를 쓰는 프로세스가 있으면 먼저 멈추세요."
-                : "vfio-pci에서 떼어 호스트 드라이버로 되돌립니다. Stackbox가 쓰는 중이면 원복할 수 없습니다."
+                : "vfio-pci에서 떼어 호스트 드라이버로 되돌립니다. Stackbox가 쓰는 중이면 바인딩을 해제할 수 없습니다."
             }
             closeDisabled={pending}
           >
@@ -521,7 +553,7 @@ export function PciCandidates({
                 onClick={run}
               >
                 {pending && <LoaderCircle size={16} className="animate-spin" />}
-                {confirm.kind === "bind" ? "바인딩 실행" : "원복 실행"}
+                {confirm.kind === "bind" ? "바인딩 실행" : "바인딩 해제 실행"}
               </Button>
             </div>
           </Modal>

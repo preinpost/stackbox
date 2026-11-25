@@ -438,3 +438,126 @@ test("names the PCI devices compute-1 holds and refuses a snapshot of that stack
     ),
   ).toBe(true);
 });
+
+/** A ready Keystone + Horizon stackbox whose relay exposure the test drives through the fetch stub. */
+test("switches a ready stackbox between LAN and relay addresses and turns the relay exposure on, rotated and off", async () => {
+  const user = userEvent.setup();
+  const writeText = vi.fn(async (_text: string) => {});
+  Object.defineProperty(navigator, "clipboard", {
+    value: { writeText },
+    configurable: true,
+  });
+  const relayHost = "https://spine-diego-took-expectations.trycloudflare.com";
+  const relayUrls = {
+    keystone: `${relayHost}/x/keystone/v3`,
+    horizon: `${relayHost}/x/horizon/`,
+  };
+  let exposure: Record<string, unknown> = {
+    enabled: false,
+    relay_url: null,
+    urls: {},
+  };
+  const bodies: unknown[] = [];
+  const calls: string[] = [];
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (path: string, options?: RequestInit) => {
+      const method = options?.method ?? "GET";
+      calls.push(`${method} ${path}`);
+      if (options?.body) bodies.push(JSON.parse(options.body as string));
+      if (path.endsWith("/relay"))
+        return Response.json({
+          settings: { mode: "quick_tunnel", url: "", bind: "127.0.0.1:10012" },
+          url: relayHost,
+          tunnel: null,
+          bind: "127.0.0.1:10012",
+          listening: "127.0.0.1:10012",
+          error: null,
+          ca_sha256: null,
+          spanning_stackboxes: [],
+        });
+      if (path.endsWith("/hosts"))
+        return Response.json([]);
+      if (path.endsWith("/endpoints"))
+        return Response.json({
+          services: {},
+          credentials: login,
+          datastores: [],
+          relay_exposure: exposure,
+        });
+      if (path.endsWith("/relay-exposure") && method === "PUT") {
+        exposure = {
+          enabled: true,
+          relay_url: relayHost,
+          urls: relayUrls,
+        };
+        return Response.json(exposure);
+      }
+      if (path.endsWith("/relay-exposure") && method === "DELETE") {
+        exposure = { enabled: false, relay_url: null, urls: {} };
+        return Response.json(exposure);
+      }
+      throw new Error(`unexpected ${method} ${path}`);
+    }),
+  );
+  const ready: Stackbox = {
+    ...stackbox,
+    id: "stackbox-01",
+    status: "ready",
+    exposure: { bind: "127.0.0.1", host: "127.0.0.1", port_base: 15000 },
+    plan: { ...stackbox.plan!, components: ["keystone", "horizon"] },
+  };
+  render(
+    <QueryClientProvider
+      client={
+        new QueryClient({
+          defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+        })
+      }
+    >
+      <Endpoints stackbox={ready} />
+    </QueryClientProvider>,
+  );
+
+  // Off: the relay is available but not yet serving this stackbox.
+  await user.click(
+    await screen.findByRole("button", { name: "릴레이 접속 켜기" }),
+  );
+  expect(calls).toContain("PUT /api/v1/stackboxes/stackbox-01/relay-exposure");
+  expect(bodies).toContainEqual({ rotate: false });
+
+  // On: the Relay view is the default and every URL is the relay's.
+  expect(
+    await screen.findByText(relayUrls.keystone, { selector: "code" }),
+  ).toBeTruthy();
+  expect(screen.getByText(relayUrls.horizon, { selector: "code" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Relay" }).getAttribute("aria-pressed")).toBe("true");
+  expect(screen.getByRole("button", { name: "토큰 재발급" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: "끄기" })).toBeTruthy();
+  await user.click(screen.getByRole("button", { name: "OS_ 환경변수 복사" }));
+  expect(writeText).toHaveBeenLastCalledWith(
+    expect.stringContaining(`export OS_AUTH_URL=${relayUrls.keystone}`),
+  );
+
+  // LAN: an explicit choice stays, and the LAN addresses come back.
+  await user.click(screen.getByRole("button", { name: "LAN" }));
+  expect(
+    screen.getByText("http://127.0.0.1:15000/v3", { selector: "code" }),
+  ).toBeTruthy();
+  await user.click(screen.getByRole("button", { name: "OS_ 환경변수 복사" }));
+  expect(writeText).toHaveBeenLastCalledWith(
+    expect.stringContaining("export OS_AUTH_URL=http://127.0.0.1:15000/v3"),
+  );
+  await user.click(screen.getByRole("button", { name: "Relay" }));
+
+  // Rotate: a new token, sent as rotate: true.
+  await user.click(screen.getByRole("button", { name: "토큰 재발급" }));
+  await waitFor(() => expect(bodies).toContainEqual({ rotate: true }));
+
+  // Off: DELETE, and the offer to turn it on comes back.
+  await user.click(screen.getByRole("button", { name: "끄기" }));
+  expect(calls).toContain("DELETE /api/v1/stackboxes/stackbox-01/relay-exposure");
+  expect(
+    await screen.findByRole("button", { name: "릴레이 접속 켜기" }),
+  ).toBeTruthy();
+});

@@ -923,11 +923,7 @@ impl StackboxManager {
             )?;
             let ssh = Session::connect(&stored.host, credentials).await?;
             let output = ssh
-                .run(
-                    &crate::remote::pci::helper_command(verb, &bdf),
-                    60,
-                    "PCI helper",
-                )
+                .run_pci_helper(&crate::remote::pci::helper_command(verb, &bdf), verb, &bdf)
                 .await?;
             crate::remote::pci::ensure_reported(&output, verb, &bdf)?;
             ssh.inspect().await?
@@ -1343,6 +1339,13 @@ fn ensure_pci_request(state: &State, host_id: &str, bdf: &str, kind: HostJobKind
             "host '{host_id}' has not been inspected yet; check it under Hosts first"
         ))
     })?;
+    if let Some(version) = inspection.pci_bind_helper_version
+        && !crate::remote::pci::helper_matches(Some(version))
+    {
+        return Err(bad_request(crate::remote::pci::outdated_helper_message(
+            version,
+        )));
+    }
     if !inspection.pci_bind_helper_available {
         return Err(bad_request(format!(
             "host '{host_id}' has no stackbox-vfio-bind helper; install it with the command under Hosts (GET /api/v1/hosts/{host_id}/pci/helper-install), then check the host again"

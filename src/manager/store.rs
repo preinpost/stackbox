@@ -38,6 +38,10 @@ pub struct State {
     /// vault. A retry sends the same share, so the host can replay the request safely.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub pending_shares: BTreeMap<String, BTreeMap<String, crate::remote::SealedCredentials>>,
+    /// Each exposed stackbox's relay token, by stackbox ID. It is kept out of the stackbox
+    /// records, which the API lists, and is returned only in the stackbox's relay URLs.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub relay_tokens: BTreeMap<String, String>,
 }
 impl Default for State {
     fn default() -> Self {
@@ -54,6 +58,7 @@ impl Default for State {
             relay: None,
             relay_keys: BTreeMap::new(),
             pending_shares: BTreeMap::new(),
+            relay_tokens: BTreeMap::new(),
         }
     }
 }

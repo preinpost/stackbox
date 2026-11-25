@@ -542,6 +542,7 @@ PY"#).await;
                 services,
                 credentials,
                 datastores,
+                relay_exposure: None,
             })
         })
     }

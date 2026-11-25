@@ -1,9 +1,10 @@
 #!/bin/sh
 # stackbox-vfio-bind: binds one host PCI device to vfio-pci for a stackbox, or gives it back to
 # its host driver. Installed as /usr/local/libexec/stackbox-vfio-bind (root:root 0755) and run
-# only through the sudoers rule that render_vfio_helper_install_script writes. Protocol 1.
+# only through the sudoers rule that render_vfio_helper_install_script writes. Protocol
+# @HELPER_PROTOCOL@; the coordinator's HELPER_PROTOCOL (src/remote/pci.rs) fills it in.
 #
-#   stackbox-vfio-bind --check          prints `stackbox-vfio-bind protocol=1`
+#   stackbox-vfio-bind --check          prints `stackbox-vfio-bind protocol=@HELPER_PROTOCOL@`
 #   stackbox-vfio-bind --version        prints the protocol number
 #   stackbox-vfio-bind bind <bdf>       binds <bdf> to vfio-pci
 #   stackbox-vfio-bind unbind <bdf>     returns <bdf> to its host driver when vfio-pci holds it
@@ -13,7 +14,7 @@ set -eu
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
 
-PROTOCOL_VERSION=1
+PROTOCOL_VERSION=@HELPER_PROTOCOL@
 CONF=/etc/stackbox/vfio.conf
 SYSFS=/sys
 DEV_ROOT=/dev

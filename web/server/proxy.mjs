@@ -36,7 +36,7 @@ function upstreamUrl(req, env) {
  * `proxy.test.mjs` checks every path of `docs/openapi.json` against this expression.
  */
 export const portalApiPath =
-  /^\/api\/v1\/(?:host|local-host|agent-hosts|hosts(?:\/[a-z0-9-]+(?:\/(?:check|prepare|agent|pci\/(?:bind|unbind|helper-install)))?)?|host-jobs(?:\/[a-f0-9-]+)?|catalog|plans|releases(?:\/(?:plan|stackboxes))?|openapi\.json|jobs(?:\/[a-f0-9-]+)?|stackboxes(?:\/[a-z0-9-]+(?:\/(?:deploy|computes|settle|endpoints|instances(?:\/[a-z0-9-]+\/gpu-load)?|nodes\/[a-z0-9-]+\/faults|gpu\/(?:guest-script|user-data)|snapshots|logs(?:\/stream)?))?)?|snapshots(?:\/[a-z0-9-]+(?:\/(?:export|copies\/[a-z0-9-]+))?)?|buckets(?:\/[a-z0-9-]+(?:\/(?:check|objects))?)?|relay(?:\/cloudflared\/update)?)$/;
+  /^\/api\/v1\/(?:host|local-host|agent-hosts|hosts(?:\/[a-z0-9-]+(?:\/(?:check|prepare|agent|pci\/(?:bind|unbind|helper-install)))?)?|host-jobs(?:\/[a-f0-9-]+)?|catalog|plans|releases(?:\/(?:plan|stackboxes))?|openapi\.json|jobs(?:\/[a-f0-9-]+)?|stackboxes(?:\/[a-z0-9-]+(?:\/(?:deploy|computes|settle|endpoints|instances(?:\/[a-z0-9-]+\/gpu-load)?|nodes\/[a-z0-9-]+\/faults|gpu\/(?:guest-script|user-data)|snapshots|logs(?:\/stream)?|relay-exposure))?)?|snapshots(?:\/[a-z0-9-]+(?:\/(?:export|copies\/[a-z0-9-]+))?)?|buckets(?:\/[a-z0-9-]+(?:\/(?:check|objects))?)?|relay(?:\/cloudflared\/update)?)$/;
 
 /** Hostname of a Host header or config value (no port, no IPv6 brackets), or null. */
 function hostName(value) {
@@ -149,6 +149,16 @@ export function proxyApi(req, res, env = process.env) {
                 ? {
                     services: raw.services,
                     credentials,
+                    // The relay's service URLs, once exposed: the token rides in them only.
+                    ...(raw.relay_exposure
+                      ? {
+                          relay_exposure: {
+                            enabled: raw.relay_exposure.enabled === true,
+                            relay_url: raw.relay_exposure.relay_url ?? null,
+                            urls: raw.relay_exposure.urls ?? {},
+                          },
+                        }
+                      : {}),
                     // Published data stores: host port, account and databases.
                     datastores: Array.isArray(raw.datastores)
                       ? raw.datastores.map((store) => ({

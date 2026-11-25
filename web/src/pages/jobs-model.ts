@@ -26,7 +26,7 @@ export const activityLabel = (a: Activity) =>
         install_agent: "Stackbox 실행기 업데이트",
         purge: "호스트 VM 정리",
         pci_bind: "PCI 바인딩",
-        pci_unbind: "PCI 원복",
+        pci_unbind: "PCI 바인딩 해제",
       }[a.job.kind];
 export function activityStep(a: Activity) {
   if (a.job.status === "queued") return "실행 대기";

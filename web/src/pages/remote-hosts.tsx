@@ -1117,7 +1117,7 @@ const HOST_JOB_KIND_LABELS: Partial<Record<HostJob["kind"], string>> = {
   install_agent: "Stackbox 실행기 업데이트",
   prepare: "환경 준비",
   pci_bind: "PCI 바인딩",
-  pci_unbind: "PCI 원복",
+  pci_unbind: "PCI 바인딩 해제",
 };
 function hostJobKindLabel(kind: HostJob["kind"]) {
   return HOST_JOB_KIND_LABELS[kind] ?? "환경 준비";

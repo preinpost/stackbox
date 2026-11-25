@@ -27,7 +27,7 @@ export type LogEntry = Schema["LogEntry"];
 export type CreateRequest = Schema["CreateRequest"];
 export type ServiceEndpoints = Pick<
   Schema["Endpoints"],
-  "services" | "credentials" | "datastores"
+  "services" | "credentials" | "datastores" | "relay_exposure"
 >;
 export type Datastore = Schema["Datastore"];
 export type RemoteHost = Schema["RemoteHost"];
@@ -256,6 +256,41 @@ function useHostPciMutation(
 }
 export const useBindHostPci = () => useHostPciMutation(bindHostPci);
 export const useUnbindHostPci = () => useHostPciMutation(unbindHostPci);
+
+export type RelayExposure = Schema["RelayExposureStatus"];
+/** Serves the stackbox's services through the relay; `rotate` issues a new token and the old addresses stop answering. */
+export const enableRelayExposure = (id: string, rotate = false) =>
+  request<RelayExposure>(`/stackboxes/${encode(id)}/relay-exposure`, {
+    method: "PUT",
+    body: JSON.stringify({ rotate }),
+  });
+/** Turns the relay exposure off; its addresses stop answering at once. */
+export const disableRelayExposure = (id: string) =>
+  request<RelayExposure>(`/stackboxes/${encode(id)}/relay-exposure`, {
+    method: "DELETE",
+  });
+
+function useRelayExposureMutation<V>(
+  id: string,
+  run: (variables: V) => Promise<RelayExposure>,
+) {
+  const client = useQueryClient();
+  return useMutation({
+    mutationFn: run,
+    onSuccess: async (exposure) => {
+      client.setQueryData<ServiceEndpoints>(keys.endpoints(id), (old) =>
+        old ? { ...old, relay_exposure: exposure } : old,
+      );
+      await client.invalidateQueries({ queryKey: keys.endpoints(id) });
+    },
+  });
+}
+export const useEnableRelayExposure = (id: string) =>
+  useRelayExposureMutation(id, (rotate: boolean) =>
+    enableRelayExposure(id, rotate),
+  );
+export const useDisableRelayExposure = (id: string) =>
+  useRelayExposureMutation(id, () => disableRelayExposure(id));
 
 export const api = {
   updateHostCredentials: (id: string, body: RegisterHost) =>

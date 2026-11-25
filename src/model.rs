@@ -2147,6 +2147,30 @@ pub struct Endpoints {
     /// Data stores published next to the service APIs, for integrations.
     #[serde(default)]
     pub datastores: Vec<Datastore>,
+    /// The services' URLs through the relay, once the stackbox is exposed there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub relay_exposure: Option<RelayExposureStatus>,
+}
+
+/// A stackbox's service endpoints through the relay. The token is in the URLs only; no listing
+/// shows it.
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
+pub struct RelayExposureStatus {
+    /// Whether the services answer through the relay now: exposed, with a relay address.
+    pub enabled: bool,
+    /// The relay's base URL the services' URLs start with, when there is one.
+    pub relay_url: Option<String>,
+    /// Each public service's URL through the relay, by service ID.
+    pub urls: BTreeMap<String, String>,
+}
+
+/// The body of `PUT /api/v1/stackboxes/{id}/relay-exposure`.
+#[derive(Clone, Debug, Default, Deserialize, ToSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct RelayExposureRequest {
+    /// Replace the token, so the URLs and cookies handed out so far stop answering. Without it,
+    /// an exposed stackbox keeps its token.
+    pub rotate: bool,
 }
 
 /// One published data store; ports are the host's, not the guest's per-start address.

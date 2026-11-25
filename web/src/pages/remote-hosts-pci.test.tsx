@@ -104,7 +104,12 @@ const candidates = [
   },
 ];
 
-function hostWith(helper: boolean, extra: Record<string, unknown> = {}) {
+/** `helperVersion` defaults to the current protocol (2) when the helper is available, else none. */
+function hostWith(
+  helper: boolean,
+  extra: Record<string, unknown> = {},
+  helperVersion: number | null = helper ? 2 : null,
+) {
   return {
     id: "dev-01",
     kind: "ssh",
@@ -128,7 +133,7 @@ function hostWith(helper: boolean, extra: Record<string, unknown> = {}) {
       ...inspection,
       pci_candidates: candidates,
       pci_bind_helper_available: helper,
-      pci_bind_helper_version: helper ? 1 : null,
+      pci_bind_helper_version: helperVersion,
     },
     ...extra,
   };
@@ -234,12 +239,12 @@ test("with the helper installed, unbinding a vfio-pci device asks first and then
   const { calls } = renderPci([hostWith(true)]);
   const user = userEvent.setup();
 
-  await user.click((await rowOf("0000:04:00.3")).getByRole("button", { name: "원복" }));
+  await user.click((await rowOf("0000:04:00.3")).getByRole("button", { name: "바인딩 해제" }));
   const dialog = await screen.findByRole("dialog");
-  expect(within(dialog).getByText("0000:04:00.3 원복")).toBeTruthy();
+  expect(within(dialog).getByText("0000:04:00.3 바인딩 해제")).toBeTruthy();
   expect(calls.some((c) => c.url.includes("/pci/unbind"))).toBe(false);
 
-  await user.click(within(dialog).getByRole("button", { name: "원복 실행" }));
+  await user.click(within(dialog).getByRole("button", { name: "바인딩 해제 실행" }));
   await waitFor(() =>
     expect(
       calls.find((c) => c.url.includes("/pci/unbind")),
@@ -271,17 +276,17 @@ test("a finished bind shows a green success banner that can be closed", async ()
   expect(screen.queryByText(text)).toBeNull();
 });
 
-test("a finished unbind says the device went back to its host driver", async () => {
+test("a finished unbind says the device's binding was released", async () => {
   renderPci([hostWith(true)], { status: "succeeded" });
   const user = userEvent.setup();
 
-  await user.click((await rowOf("0000:04:00.3")).getByRole("button", { name: "원복" }));
+  await user.click((await rowOf("0000:04:00.3")).getByRole("button", { name: "바인딩 해제" }));
   await user.click(
-    within(await screen.findByRole("dialog")).getByRole("button", { name: "원복 실행" }),
+    within(await screen.findByRole("dialog")).getByRole("button", { name: "바인딩 해제 실행" }),
   );
 
   const banner = (
-    await screen.findByText("✓ 0000:04:00.3 원래 드라이버로 원복되었습니다.")
+    await screen.findByText("✓ 0000:04:00.3 바인딩이 해제되었습니다.")
   ).closest(".remote-pci-banner");
   expect(banner?.className).toContain("tone-ok");
 });
@@ -342,7 +347,7 @@ test("without the helper, the page offers the install script and per-device copy
   // A device the helper would bind gets the manual bind command; a vfio-pci device, the unbind one.
   const wifi = await rowOf("0000:02:00.0");
   expect(wifi.queryByRole("button", { name: "바인딩 명령 복사" })).toBeTruthy();
-  expect((await rowOf("0000:04:00.3")).queryByRole("button", { name: "원복 명령 복사" })).toBeTruthy();
+  expect((await rowOf("0000:04:00.3")).queryByRole("button", { name: "바인딩 해제 명령 복사" })).toBeTruthy();
   expect(wifi.queryByRole("button", { name: "vfio-pci 바인딩" })).toBeNull();
 
   await user.click(wifi.getByRole("button", { name: "바인딩 명령 복사" }));
@@ -388,7 +393,78 @@ test("a device a stackbox holds shows its owner and cannot be unbound", async ()
   renderPci([hostWith(true)]);
 
   const row = await rowOf("0000:04:00.0");
-  expect((row.getByRole("button", { name: "원복" }) as HTMLButtonElement).disabled).toBe(true);
+  expect((row.getByRole("button", { name: "바인딩 해제" }) as HTMLButtonElement).disabled).toBe(true);
   expect(row.getByText("사용 중(gpu-stack)")).toBeTruthy();
   expect(row.getByText("Stackbox 점유 중")).toBeTruthy();
+});
+
+test("with the latest helper, the header offers a reinstall that opens the install script", async () => {
+  const { calls } = renderPci([hostWith(true)]);
+  const user = userEvent.setup();
+
+  expect(await screen.findByText("원클릭 바인딩 준비됨")).toBeTruthy();
+  const reinstall = screen.getByRole("button", { name: "헬퍼 재설치" });
+  expect(reinstall.getAttribute("aria-expanded")).toBe("false");
+  expect(screen.queryByRole("button", { name: "헬퍼 업데이트" })).toBeNull();
+  expect(calls.some((c) => c.url.includes("/pci/helper-install"))).toBe(false);
+
+  await user.click(reinstall);
+  expect(await screen.findByText(helperInstall.sudoers_path)).toBeTruthy();
+  expect(calls.some((c) => c.url === "/api/v1/hosts/dev-01/pci/helper-install")).toBe(true);
+  expect(screen.getByLabelText("헬퍼 설치 스크립트").textContent).toContain("stackbox-vfio-bind helper");
+  expect(screen.getByRole("button", { name: "헬퍼 재설치" }).getAttribute("aria-expanded")).toBe("true");
+  expect(screen.queryByText(/구버전 헬퍼/)).toBeNull();
+});
+
+test("with an outdated v1 helper, the page asks for an update and copy commands stay per device", async () => {
+  renderPci([hostWith(false, {}, 1)]);
+  const user = userEvent.setup();
+
+  expect(await screen.findByText("헬퍼 업데이트 필요 (v1)")).toBeTruthy();
+  expect(screen.queryByText("원클릭 바인딩 준비됨")).toBeNull();
+  expect(screen.queryByRole("button", { name: "원클릭 헬퍼 설치" })).toBeNull();
+
+  await user.click(screen.getByRole("button", { name: "헬퍼 업데이트" }));
+  expect(
+    await screen.findByText(
+      "호스트에 구버전 헬퍼(v1)가 설치되어 있습니다. 아래 최신 스크립트를 호스트에서 실행해 덮어쓴 뒤 'SSH 점검'을 누르세요.",
+    ),
+  ).toBeTruthy();
+  expect(await screen.findByText(helperInstall.sudoers_path)).toBeTruthy();
+
+  const wifi = await rowOf("0000:02:00.0");
+  expect(wifi.queryByRole("button", { name: "바인딩 명령 복사" })).toBeTruthy();
+  expect((await rowOf("0000:04:00.3")).queryByRole("button", { name: "바인딩 해제 명령 복사" })).toBeTruthy();
+  expect(wifi.queryByRole("button", { name: "vfio-pci 바인딩" })).toBeNull();
+});
+
+test("a failed bind shows the helper's stderr reason verbatim", async () => {
+  const reason = "stackbox-vfio-bind: 0000:02:00.0 is protected (root_disk) and cannot be passed through";
+  renderPci([hostWith(true)], { status: "failed", error: reason });
+  const user = userEvent.setup();
+
+  await user.click(
+    (await rowOf("0000:02:00.0")).getByRole("button", { name: "vfio-pci 바인딩" }),
+  );
+  await user.click(
+    within(await screen.findByRole("dialog")).getByRole("button", { name: "바인딩 실행" }),
+  );
+
+  const alert = await screen.findByRole("alert");
+  expect(alert.textContent).toContain("0000:02:00.0 vfio-pci 바인딩이 실패했습니다.");
+  expect(alert.textContent).toContain(reason);
+});
+
+test("a failed unbind names the release, not the old 원복 wording", async () => {
+  renderPci([hostWith(true)], { status: "failed", error: "helper exited 1" });
+  const user = userEvent.setup();
+
+  await user.click((await rowOf("0000:04:00.3")).getByRole("button", { name: "바인딩 해제" }));
+  await user.click(
+    within(await screen.findByRole("dialog")).getByRole("button", { name: "바인딩 해제 실행" }),
+  );
+
+  const alert = await screen.findByRole("alert");
+  expect(alert.textContent).toContain("0000:04:00.3 바인딩 해제가 실패했습니다.");
+  expect(alert.textContent).not.toContain("원복");
 });

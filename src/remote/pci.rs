@@ -7,7 +7,7 @@
 
 use super::HostPciCandidate;
 use crate::model::normalize_pci_bdf;
-use anyhow::{Result, bail};
+use anyhow::{Result, anyhow, bail};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -18,7 +18,7 @@ pub const HELPER_PATH: &str = "/usr/local/libexec/stackbox-vfio-bind";
 /// The sudoers drop-in that lets the agent user run the helper without a password.
 pub const SUDOERS_PATH: &str = "/etc/sudoers.d/stackbox-vfio";
 /// The helper protocol this coordinator speaks; `--check` reports it.
-pub const HELPER_PROTOCOL: u32 = 1;
+pub const HELPER_PROTOCOL: u32 = 2;
 
 const GUARD: &str = include_str!("pci_guard.sh");
 const HELPER: &str = include_str!("vfio_bind.sh");
@@ -26,7 +26,9 @@ const INSTALL: &str = include_str!("vfio_install.sh");
 
 /// The helper script as installed: `vfio_bind.sh` with the shared protection rules in place.
 pub fn helper_script() -> String {
-    HELPER.replace("@PCI_GUARD@", GUARD)
+    HELPER
+        .replace("@HELPER_PROTOCOL@", &HELPER_PROTOCOL.to_string())
+        .replace("@PCI_GUARD@", GUARD)
 }
 
 /// A short name for a PCI class code (six hex digits).
@@ -385,6 +387,59 @@ pub fn ensure_reported(output: &str, verb: &str, bdf: &str) -> Result<()> {
     }
 }
 
+/// Whether an installed helper reporting `version` is the one this coordinator speaks.
+pub fn helper_matches(version: Option<u32>) -> bool {
+    version == Some(HELPER_PROTOCOL)
+}
+
+/// Why a bind needs the helper reinstalled: the installed one speaks another protocol.
+pub fn outdated_helper_message(version: u32) -> String {
+    format!(
+        "installed stackbox-vfio-bind helper (protocol {version}) is outdated; reinstall protocol {HELPER_PROTOCOL} on this host"
+    )
+}
+
+/// Longest helper reason kept in a job error.
+const REASON_LIMIT: usize = 240;
+
+/// The error for a helper that exited non-zero, naming the reason its stderr gave.
+pub fn helper_failure(verb: &str, bdf: &str, stderr: &[u8]) -> anyhow::Error {
+    anyhow!(
+        "the PCI helper failed to {verb} {bdf}: {}",
+        helper_reason(&String::from_utf8_lossy(stderr))
+    )
+}
+
+/// The reason in a helper's stderr: its `stackbox-vfio-bind:` line when it wrote one, else the
+/// last meaningful line (sudo's own complaints, for one). Control characters are dropped and the
+/// text is cut to [`REASON_LIMIT`] characters.
+pub fn helper_reason(stderr: &str) -> String {
+    let lines: Vec<String> = stderr
+        .lines()
+        .map(|line| {
+            line.chars()
+                .filter(|c| !c.is_control())
+                .collect::<String>()
+                .trim()
+                .to_owned()
+        })
+        .filter(|line| !line.is_empty())
+        .collect();
+    let chosen = lines
+        .iter()
+        .rev()
+        .find(|line| line.starts_with("stackbox-vfio-bind:"))
+        .or(lines.last());
+    match chosen {
+        None => "no reason reported".to_owned(),
+        Some(text) if text.chars().count() > REASON_LIMIT => {
+            let cut: String = text.chars().take(REASON_LIMIT).collect();
+            format!("{cut}...")
+        }
+        Some(text) => text.clone(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -426,6 +481,41 @@ mod tests {
         );
         assert_eq!(parse_helper_check("protocol=1"), None);
         assert_eq!(parse_helper_check(""), None);
+    }
+
+    #[test]
+    fn only_the_current_protocol_is_available() {
+        assert!(helper_matches(Some(HELPER_PROTOCOL)));
+        assert!(!helper_matches(Some(1)));
+        assert!(!helper_matches(None));
+        assert!(outdated_helper_message(1).contains("outdated"));
+    }
+
+    #[test]
+    fn the_failure_reason_is_the_helper_line_cleaned_and_cut() {
+        let stderr = "sudo: noise\nstackbox-vfio-bind: 0000:02:00.0 is protected (root_disk) and cannot be passed through\n";
+        assert_eq!(
+            helper_reason(stderr),
+            "stackbox-vfio-bind: 0000:02:00.0 is protected (root_disk) and cannot be passed through"
+        );
+        assert_eq!(
+            helper_reason("\n  \nsudo: a password is required\n"),
+            "sudo: a password is required"
+        );
+        assert_eq!(
+            helper_reason(" \x1b[31mstackbox-vfio-bind: bad\x07\n"),
+            "[31mstackbox-vfio-bind: bad"
+        );
+        assert_eq!(helper_reason(""), "no reason reported");
+        let long = format!("stackbox-vfio-bind: {}", "x".repeat(400));
+        let reason = helper_reason(&long);
+        assert_eq!(reason.chars().count(), REASON_LIMIT + 3);
+        assert!(reason.ends_with("..."));
+        let error = helper_failure("bind", "0000:02:00.0", stderr.as_bytes()).to_string();
+        assert!(
+            error.contains("stackbox-vfio-bind: 0000:02:00.0 is protected (root_disk)"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -498,7 +588,7 @@ mod tests {
         assert!(script.contains("visudo -cf"));
         assert!(script.contains("chmod 0440"));
         assert!(script.contains("STACKBOX_HELPER_EOF"));
-        assert!(script.contains("PROTOCOL_VERSION=1"));
+        assert!(script.contains(&format!("PROTOCOL_VERSION={HELPER_PROTOCOL}\n")));
     }
 
     /// The installer is one function per step, and `main` calls them in order.
@@ -574,9 +664,9 @@ mod tests {
                 stdout.starts_with("✓ stackbox-vfio-bind 설치 완료!\n"),
                 "{stdout}"
             );
-            assert!(
-                stdout.contains("  - 헬퍼: /usr/local/libexec/stackbox-vfio-bind (protocol=1)\n")
-            );
+            assert!(stdout.contains(&format!(
+                "  - 헬퍼: /usr/local/libexec/stackbox-vfio-bind (protocol={HELPER_PROTOCOL})\n"
+            )));
             assert!(stdout.contains(
                 "  - sudoers: /etc/sudoers.d/stackbox-vfio (visudo 검증 통과, stackbox sudo -n 확인)\n"
             ));
@@ -1028,9 +1118,12 @@ mod helper_shell_tests {
         let Some(helper) = helper() else { return };
         let check = helper.run(&["--check"]);
         assert!(check.status.success());
-        assert_eq!(text(&check.stdout).trim(), "stackbox-vfio-bind protocol=1");
+        assert_eq!(
+            text(&check.stdout).trim(),
+            format!("stackbox-vfio-bind protocol={HELPER_PROTOCOL}")
+        );
         let version = helper.run(&["--version"]);
-        assert_eq!(text(&version.stdout).trim(), "1");
+        assert_eq!(text(&version.stdout).trim(), HELPER_PROTOCOL.to_string());
         assert_eq!(
             fs::read_to_string(helper.sysfs.join("bus/pci/devices/0000:0b:00.0/../../../devices/pci0000:00/0000:0b:00.0/driver_override")).unwrap(),
             "",

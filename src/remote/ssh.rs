@@ -17,6 +17,22 @@ use std::{
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_OUTPUT: usize = 128 * 1024;
+
+/// What a remote script left: its exit code and what it wrote to each stream.
+struct Execution {
+    code: Option<u32>,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+fn append(output: &mut Vec<u8>, data: &[u8]) -> Result<()> {
+    ensure!(
+        output.len() + data.len() <= MAX_OUTPUT,
+        "output limit exceeded"
+    );
+    output.extend_from_slice(data);
+    Ok(())
+}
 pub const COMMON: &str = "set -eu\nexport PATH=\"$HOME/.microsandbox/bin:$HOME/.local/bin:$PATH\"\nexport MSB_BACKEND=local\n";
 
 fn upload_command(digest: &str, dir: &str, name: &str, seconds: u64, mode: &str) -> String {
@@ -455,36 +471,68 @@ impl Session {
 
     /// Only fixed, project-owned scripts. Remote stdout/stderr never enters persisted logs.
     pub async fn run(&self, script: &str, seconds: u64, stage: &str) -> Result<String> {
-        let execute = async {
-            let mut channel = self.handle.channel_open_session().await?;
-            // timeout is a remote bound as well, including after coordinator disconnection.
-            channel
-                .exec(true, format!("timeout {seconds} bash -s"))
-                .await?;
-            channel.data(script.as_bytes()).await?;
-            channel.eof().await?;
-            let mut output = Vec::new();
-            let mut code = None;
-            while let Some(message) = channel.wait().await {
-                match message {
-                    ChannelMsg::Data { data } => {
-                        ensure!(
-                            output.len() + data.len() <= MAX_OUTPUT,
-                            "output limit exceeded"
-                        );
-                        output.extend_from_slice(&data);
-                    }
-                    ChannelMsg::ExitStatus { exit_status } => code = Some(exit_status),
-                    _ => {}
-                }
-            }
-            ensure!(code == Some(0), "remote command failed");
-            Ok::<_, anyhow::Error>(String::from_utf8_lossy(&output).into_owned())
-        };
-        match tokio::time::timeout(Duration::from_secs(seconds + 10), execute).await {
-            Ok(Ok(output)) => Ok(output),
+        match tokio::time::timeout(
+            Duration::from_secs(seconds + 10),
+            self.execute(script, seconds),
+        )
+        .await
+        {
+            Ok(Ok(Execution {
+                code: Some(0),
+                stdout,
+                ..
+            })) => Ok(String::from_utf8_lossy(&stdout).into_owned()),
             _ => bail!("{stage} failed or timed out; check remote prerequisites and retry"),
         }
+    }
+    /// Runs the helper's `bind` or `unbind` over SSH. A non-zero exit reports the helper's own
+    /// reason from its stderr; exit 124 from the remote `timeout` is a timeout.
+    pub async fn run_pci_helper(&self, command: &str, verb: &str, bdf: &str) -> Result<String> {
+        let seconds = 60;
+        let execution = tokio::time::timeout(
+            Duration::from_secs(seconds + 10),
+            self.execute(command, seconds),
+        )
+        .await;
+        match execution {
+            Err(_) => bail!("the PCI helper timed out"),
+            Ok(Err(_)) => {
+                bail!("the PCI helper could not run over SSH; check the connection and retry")
+            }
+            Ok(Ok(Execution {
+                code: Some(0),
+                stdout,
+                ..
+            })) => Ok(String::from_utf8_lossy(&stdout).into_owned()),
+            Ok(Ok(Execution {
+                code: Some(124), ..
+            })) => bail!("the PCI helper timed out"),
+            Ok(Ok(Execution { stderr, .. })) => Err(super::pci::helper_failure(verb, bdf, &stderr)),
+        }
+    }
+    /// Runs `script` under the remote `timeout`, collecting stdout and stderr separately.
+    async fn execute(&self, script: &str, seconds: u64) -> Result<Execution> {
+        let mut channel = self.handle.channel_open_session().await?;
+        // timeout is a remote bound as well, including after coordinator disconnection.
+        channel
+            .exec(true, format!("timeout {seconds} bash -s"))
+            .await?;
+        channel.data(script.as_bytes()).await?;
+        channel.eof().await?;
+        let mut execution = Execution {
+            code: None,
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        };
+        while let Some(message) = channel.wait().await {
+            match message {
+                ChannelMsg::Data { data } => append(&mut execution.stdout, &data)?,
+                ChannelMsg::ExtendedData { data, ext: 1 } => append(&mut execution.stderr, &data)?,
+                ChannelMsg::ExitStatus { exit_status } => execution.code = Some(exit_status),
+                _ => {}
+            }
+        }
+        Ok(execution)
     }
     pub async fn inspect(&self) -> Result<HostInspection> {
         parse_inspection(&self.run(&inspect_script(), 45, "Host inspection").await?)
@@ -860,11 +908,11 @@ fn parse_inspection(output: &str) -> Result<HostInspection> {
         .map(str::to_owned);
     let pci_devices = parse_pci_devices(output);
     let pci_candidates = parse_pci_candidates(output);
-    let pci_bind_helper_available = values.get("pci_bind_helper").copied() == Some("1");
+    // The installed helper's protocol, whatever it is; only the current one makes it available.
     let pci_bind_helper_version = values
         .get("pci_bind_helper_version")
-        .and_then(|text| text.parse::<u32>().ok())
-        .filter(|_| pci_bind_helper_available);
+        .and_then(|text| text.parse::<u32>().ok());
+    let pci_bind_helper_available = super::pci::helper_matches(pci_bind_helper_version);
     let vfio_device = values.get("vfio").copied() == Some("1");
     let msb_pci_capable = values.get("msb_pci").copied() == Some("1");
     Ok(HostInspection {
@@ -1304,6 +1352,7 @@ mod tests {
 #[cfg(test)]
 mod pci_inspection_tests {
     use super::*;
+    use crate::remote::pci::HELPER_PROTOCOL;
     use crate::remote::{group_exclusive, pci_passthrough_ready};
 
     const DEVICE: &str = "STACKBOX\tpci_device\t0000:04:00.3,1022,1639,0c0330,12,vfio-pci,1,1";
@@ -1512,11 +1561,18 @@ mod pci_inspection_tests {
             )
         };
         let installed = parse_inspection(&base(
-            "STACKBOX\tpci_bind_helper\t1\nSTACKBOX\tpci_bind_helper_version\t1\n",
+            "STACKBOX\tpci_bind_helper\t1\nSTACKBOX\tpci_bind_helper_version\t2\n",
         ))
         .unwrap();
         assert!(installed.pci_bind_helper_available);
-        assert_eq!(installed.pci_bind_helper_version, Some(1));
+        assert_eq!(installed.pci_bind_helper_version, Some(HELPER_PROTOCOL));
+        // A helper from before protocol 2 is reported as installed but not available.
+        let outdated = parse_inspection(&base(
+            "STACKBOX\tpci_bind_helper\t1\nSTACKBOX\tpci_bind_helper_version\t1\n",
+        ))
+        .unwrap();
+        assert!(!outdated.pci_bind_helper_available);
+        assert_eq!(outdated.pci_bind_helper_version, Some(1));
         let absent = parse_inspection(&base(
             "STACKBOX\tpci_bind_helper\t0\nSTACKBOX\tpci_bind_helper_version\t\n",
         ))
@@ -1525,5 +1581,6 @@ mod pci_inspection_tests {
         assert_eq!(absent.pci_bind_helper_version, None);
         let older = parse_inspection(&base("")).unwrap();
         assert!(!older.pci_bind_helper_available && older.pci_candidates.is_empty());
+        assert_eq!(older.pci_bind_helper_version, None);
     }
 }

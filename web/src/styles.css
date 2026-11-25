@@ -3899,6 +3899,15 @@ html[data-theme="dark"] .phase-current .phase-marker {
   padding: 0 10px;
   font-size: var(--fs-xs);
 }
+.remote-pci-head-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.remote-pci-outdated {
+  margin-top: 0;
+}
 .remote-pci-ready {
   display: inline-flex;
   align-items: center;
@@ -6273,4 +6282,52 @@ html[data-theme="dark"] .phase-current .phase-marker {
 }
 .remote-pci-check .field-hint {
   margin: 0;
+}
+
+/* Relay exposure bar at the top of the Service endpoints card */
+.relay-exposure-bar {
+  display: grid;
+  gap: 8px;
+  margin: 0 14px 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--line, #e4e4e7);
+  border-radius: 8px;
+  background: var(--paper-2, #fafaf9);
+}
+.relay-exposure-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.relay-exposure-row .relay-exposure-note {
+  flex: 1 1 280px;
+}
+.relay-exposure-note {
+  margin: 0;
+  color: var(--ink-3);
+  font-size: var(--fs-xs);
+  line-height: 1.6;
+}
+.relay-view-toggle {
+  display: inline-flex;
+  padding: 2px;
+  border: 1px solid var(--line, #e4e4e7);
+  border-radius: 7px;
+  background: var(--paper, #fff);
+}
+.relay-view-toggle button {
+  min-width: 56px;
+  padding: 4px 10px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--ink-3);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  cursor: pointer;
+}
+.relay-view-toggle button[aria-pressed="true"] {
+  background: var(--color-stackbox-600, #117653);
+  color: #fff;
 }

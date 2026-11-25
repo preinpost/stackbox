@@ -110,6 +110,12 @@ function RelaySettingsForm() {
   });
   const locked = !!relay.data?.spanning_stackboxes?.length;
   const quick = current.mode === "quick_tunnel";
+  // 저장된 값과 달라졌을 때만 저장 버튼을 보입니다. 미설정 상태는 설정 버튼을 보입니다.
+  const dirty =
+    !!saved &&
+    (current.mode !== saved.mode ||
+      current.bind.trim() !== (saved.bind ?? "").trim() ||
+      (!quick && current.url.trim() !== (saved.url ?? "").trim()));
   const tunnel = relay.data?.tunnel;
   const stage = tunnelStage(relay.data);
   const checked = tunnel?.checked_at
@@ -281,20 +287,24 @@ function RelaySettingsForm() {
             <Dialog.Close render={<Button disabled={mutation.isPending} />}>
               닫기
             </Dialog.Close>
-            <Button
-              type="submit"
-              variant="primary"
-              disabled={mutation.isPending || (!quick && !current.url.trim())}
-            >
-              {mutation.isPending ? (
-                <>
-                  <LoaderCircle size={16} className="animate-spin" />
-                  저장 중…
-                </>
-              ) : (
-                "저장"
-              )}
-            </Button>
+            {(!saved || dirty) && (
+              <Button
+                type="submit"
+                variant="primary"
+                disabled={mutation.isPending || (!quick && !current.url.trim())}
+              >
+                {mutation.isPending ? (
+                  <>
+                    <LoaderCircle size={16} className="animate-spin" />
+                    {saved ? "저장 중…" : "설정 중…"}
+                  </>
+                ) : saved ? (
+                  "저장"
+                ) : (
+                  "설정"
+                )}
+              </Button>
+            )}
           </div>
         </div>
       </form>

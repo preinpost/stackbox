@@ -23,6 +23,7 @@
 //! always use TLS, with the coordinator's own CA ([`tls`]).
 
 pub mod cloudflared;
+pub mod endpoint_proxy;
 pub mod guest;
 pub mod host;
 pub mod relay;

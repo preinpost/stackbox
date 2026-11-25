@@ -6,7 +6,7 @@
     "license": {
       "name": ""
     },
-    "version": "0.1.11"
+    "version": "0.1.12"
   },
   "paths": {
     "/api/v1/agent-hosts": {
@@ -2691,6 +2691,110 @@
         }
       }
     },
+    "/api/v1/stackboxes/{id}/relay-exposure": {
+      "put": {
+        "tags": [],
+        "operationId": "set_relay_exposure",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RelayExposureRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The stackbox's services are reachable through the relay; `rotate` makes a new token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RelayExposureStatus"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Not deployed, a dial-in agent host, or no relay configured",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [],
+        "operationId": "remove_relay_exposure",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The services are no longer reachable through the relay; old URLs answer 404",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RelayExposureStatus"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/stackboxes/{id}/settle": {
       "post": {
         "tags": [],
@@ -3632,6 +3736,17 @@
               "$ref": "#/components/schemas/Datastore"
             },
             "description": "Data stores published next to the service APIs, for integrations."
+          },
+          "relay_exposure": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/RelayExposureStatus",
+                "description": "The services' URLs through the relay, once the stackbox is exposed there."
+              }
+            ]
           },
           "services": {
             "type": "object",
@@ -5253,6 +5368,49 @@
           }
         },
         "additionalProperties": false
+      },
+      "RelayExposureRequest": {
+        "type": "object",
+        "description": "The body of `PUT /api/v1/stackboxes/{id}/relay-exposure`.",
+        "properties": {
+          "rotate": {
+            "type": "boolean",
+            "description": "Replace the token, so the URLs and cookies handed out so far stop answering. Without it,\nan exposed stackbox keeps its token.",
+            "default": false
+          }
+        },
+        "additionalProperties": false
+      },
+      "RelayExposureStatus": {
+        "type": "object",
+        "description": "A stackbox's service endpoints through the relay. The token is in the URLs only; no listing\nshows it.",
+        "required": [
+          "enabled",
+          "urls"
+        ],
+        "properties": {
+          "enabled": {
+            "type": "boolean",
+            "description": "Whether the services answer through the relay now: exposed, with a relay address."
+          },
+          "relay_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The relay's base URL the services' URLs start with, when there is one."
+          },
+          "urls": {
+            "type": "object",
+            "description": "Each public service's URL through the relay, by service ID.",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          }
+        }
       },
       "RelaySettings": {
         "type": "object",

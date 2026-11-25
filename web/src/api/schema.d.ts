@@ -771,6 +771,22 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/v1/stackboxes/{id}/relay-exposure": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    get?: never;
+    put: operations["set_relay_exposure"];
+    post?: never;
+    delete: operations["remove_relay_exposure"];
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/v1/stackboxes/{id}/settle": {
     parameters: {
       query?: never;
@@ -1102,6 +1118,7 @@ export interface components {
       };
       /** @description Data stores published next to the service APIs, for integrations. */
       datastores?: components["schemas"]["Datastore"][];
+      relay_exposure?: null | components["schemas"]["RelayExposureStatus"];
       services: {
         [key: string]: string;
       };
@@ -1795,6 +1812,29 @@ export interface components {
     /** @description Register the machine the coordinator runs on as a host. */
     RegisterLocalHost: {
       id?: string;
+    };
+    /** @description The body of `PUT /api/v1/stackboxes/{id}/relay-exposure`. */
+    RelayExposureRequest: {
+      /**
+       * @description Replace the token, so the URLs and cookies handed out so far stop answering. Without it,
+       *     an exposed stackbox keeps its token.
+       * @default false
+       */
+      rotate: boolean;
+    };
+    /**
+     * @description A stackbox's service endpoints through the relay. The token is in the URLs only; no listing
+     *     shows it.
+     */
+    RelayExposureStatus: {
+      /** @description Whether the services answer through the relay now: exposed, with a relay address. */
+      enabled: boolean;
+      /** @description The relay's base URL the services' URLs start with, when there is one. */
+      relay_url?: string | null;
+      /** @description Each public service's URL through the relay, by service ID. */
+      urls: {
+        [key: string]: string;
+      };
     };
     /** @description Where stackboxes that span hosts join, set from the portal or `PUT /api/v1/relay`. */
     RelaySettings: {
@@ -4301,6 +4341,87 @@ export interface operations {
         };
       };
       409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorBody"];
+        };
+      };
+    };
+  };
+  set_relay_exposure: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        id: string;
+      };
+      cookie?: never;
+    };
+    requestBody: {
+      content: {
+        "application/json": components["schemas"]["RelayExposureRequest"];
+      };
+    };
+    responses: {
+      /** @description The stackbox's services are reachable through the relay; `rotate` makes a new token */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["RelayExposureStatus"];
+        };
+      };
+      400: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorBody"];
+        };
+      };
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorBody"];
+        };
+      };
+      /** @description Not deployed, a dial-in agent host, or no relay configured */
+      409: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorBody"];
+        };
+      };
+    };
+  };
+  remove_relay_exposure: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      /** @description The services are no longer reachable through the relay; old URLs answer 404 */
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["RelayExposureStatus"];
+        };
+      };
+      404: {
         headers: {
           [name: string]: unknown;
         };

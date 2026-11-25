@@ -37,6 +37,9 @@ import {
   jobsQuery,
   keys,
   logsQuery,
+  relayQuery,
+  useDisableRelayExposure,
+  useEnableRelayExposure,
   type Datastore,
   type Stackbox,
   type Impair,
@@ -993,13 +996,26 @@ export function Endpoints({ stackbox }: { stackbox: Stackbox }) {
   // Credentials come from the VM, which a snapshot has stopped.
   const showLogin =
     stackbox.status === "ready" && stackboxComponents(stackbox).includes("horizon");
+  // Ready stackboxes always read their endpoints: the relay exposure comes with them, Horizon or not.
   const login = useQuery({
     queryKey: keys.endpoints(stackbox.id),
     queryFn: () => api.endpoints(stackbox.id),
-    enabled: showLogin,
+    enabled: stackbox.status === "ready",
     staleTime: 60_000,
   });
-  const services = exposure
+  const relay = useQuery(relayQuery());
+  const hosts = useQuery(hostsQuery());
+  const host = hosts.data?.find((h) => h.id === stackbox.host_id);
+  const relayUrl = relay.data?.url;
+  const enable = useEnableRelayExposure(stackbox.id);
+  const disable = useDisableRelayExposure(stackbox.id);
+  // Once the LAN view is picked it stays; turning the relay on or off returns to the relay view.
+  const [lanChosen, setLanChosen] = useState(false);
+  const relayUrls = login.data?.relay_exposure?.urls ?? {};
+  const relayExposed =
+    !!login.data?.relay_exposure?.enabled && Object.keys(relayUrls).length > 0;
+  const viaRelay = relayExposed && !lanChosen;
+  const lanServices = exposure
     ? stackboxPublicPorts(stackboxComponents(stackbox)).map((port) => ({
         key: port.id,
         name: port.label ?? componentLabel(port.component),
@@ -1007,6 +1023,10 @@ export function Endpoints({ stackbox }: { stackbox: Stackbox }) {
         url: `http://${exposure.host}:${exposure.port_base + port.offset}${port.path}`,
       }))
     : [];
+  // Services are listed by the view in use: the relay's URL where it has one, the LAN URL otherwise.
+  const services = lanServices.map((s) =>
+    viaRelay && relayUrls[s.key] ? { ...s, url: relayUrls[s.key] } : s,
+  );
   return (
     <section className="panel endpoints-panel">
       <div className="panel-toolbar">
@@ -1016,6 +1036,83 @@ export function Endpoints({ stackbox }: { stackbox: Stackbox }) {
         </h2>
         {exposure && <span className="chip mono">{publicPortRange(stackbox)}</span>}
       </div>
+      {stackbox.status === "ready" && services.length > 0 && (
+        <div className="relay-exposure-bar">
+          {host?.kind === "agent" ? (
+            <p className="relay-exposure-note">
+              다이얼인 에이전트 호스트는 릴레이 엔드포인트 프록시를 아직 지원하지 않습니다.
+            </p>
+          ) : !relayUrl ? (
+            <p className="relay-exposure-note">
+              Hosts → 릴레이 설정에서 Cloudflare 터널을 켜면 외부 접속 주소로 열 수 있습니다.
+            </p>
+          ) : login.isPending && !login.data ? null : !relayExposed ? (
+            <div className="relay-exposure-row">
+              <p className="relay-exposure-note">
+                이 환경의 서비스를 Cloudflare 릴레이 주소로 외부에 엽니다.
+              </p>
+              <Button
+                type="button"
+                disabled={enable.isPending}
+                onClick={() =>
+                  enable.mutate(false, { onSuccess: () => setLanChosen(false) })
+                }
+              >
+                릴레이 접속 켜기
+              </Button>
+            </div>
+          ) : (
+            <>
+              <div className="relay-exposure-row">
+                <div className="relay-view-toggle" role="group" aria-label="주소 보기">
+                  <button
+                    type="button"
+                    aria-pressed={!viaRelay}
+                    onClick={() => setLanChosen(true)}
+                  >
+                    LAN
+                  </button>
+                  <button
+                    type="button"
+                    aria-pressed={viaRelay}
+                    onClick={() => setLanChosen(false)}
+                  >
+                    Relay
+                  </button>
+                </div>
+                <Button
+                  type="button"
+                  disabled={enable.isPending || disable.isPending}
+                  onClick={() =>
+                    enable.mutate(true, { onSuccess: () => setLanChosen(false) })
+                  }
+                >
+                  토큰 재발급
+                </Button>
+                <Button
+                  type="button"
+                  disabled={enable.isPending || disable.isPending}
+                  onClick={() =>
+                    disable.mutate(undefined, {
+                      onSuccess: () => setLanChosen(false),
+                    })
+                  }
+                >
+                  끄기
+                </Button>
+              </div>
+              {viaRelay && (
+                <p className="relay-exposure-note">
+                  Cloudflare 릴레이 주소로 외부에서 OpenStack API·CLI 및 Horizon에 접속할 수 있습니다. 끄거나 토큰을 재발급하면 기존 주소는 즉시 차단됩니다.
+                </p>
+              )}
+            </>
+          )}
+          {(enable.error || disable.error) && (
+            <ErrorNotice error={enable.error ?? disable.error} />
+          )}
+        </div>
+      )}
       {!services.length ? (
         <div className="endpoint-note">
           {stackbox.status === "deleted"

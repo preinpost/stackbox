@@ -572,6 +572,7 @@ impl server::Handler for Handler {
                             "remote-guest-secret".into(),
                         )]),
                         datastores: Vec::new(),
+                        relay_exposure: None,
                     },
                 },
             };

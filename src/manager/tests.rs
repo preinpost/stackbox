@@ -333,6 +333,7 @@ impl Backend for Fake {
         Box::pin(async move {
             Ok(Endpoints {
                 services: exposure.unwrap().urls(Some(&components)),
+                relay_exposure: None,
                 credentials: BTreeMap::from([("OS_PASSWORD".into(), "test-secret".into())]),
                 datastores: vec![Datastore {
                     id: "mariadb".into(),
@@ -1529,7 +1530,7 @@ impl MsbLink {
             pci_bind_helper_version: self
                 .helper
                 .load(std::sync::atomic::Ordering::SeqCst)
-                .then_some(1),
+                .then_some(crate::remote::pci::HELPER_PROTOCOL),
             vm_boot_verified: false,
             checked_at: now(),
         }
@@ -8697,7 +8698,8 @@ async fn pci_bind_refuses_a_protected_device_and_a_host_without_the_helper() {
                     pci_candidate("0000:0b:00.0", None, None),
                 ];
                 inspection.pci_bind_helper_available = helper;
-                inspection.pci_bind_helper_version = helper.then_some(1);
+                inspection.pci_bind_helper_version =
+                    helper.then_some(crate::remote::pci::HELPER_PROTOCOL);
                 host.inspection = Some(inspection);
                 Ok(())
             })
@@ -8711,6 +8713,30 @@ async fn pci_bind_refuses_a_protected_device_and_a_host_without_the_helper() {
         why.to_string().contains("stackbox-vfio-bind helper"),
         "{why:#}"
     );
+
+    // A helper from before the current protocol is named as outdated, not as missing.
+    manager
+        .update(|state| {
+            let host = &mut state.hosts.get_mut("local").unwrap().host;
+            let inspection = host.inspection.as_mut().unwrap();
+            inspection.pci_bind_helper_available = false;
+            inspection.pci_bind_helper_version = Some(1);
+            Ok(())
+        })
+        .unwrap();
+    let why = manager.bind_host_pci("local", "0000:0b:00.0").unwrap_err();
+    assert!(why.downcast_ref::<BadRequest>().is_some(), "{why:#}");
+    assert!(
+        why.to_string().contains("(protocol 1) is outdated")
+            && why
+                .to_string()
+                .contains(&format!("protocol {}", crate::remote::pci::HELPER_PROTOCOL)),
+        "{why:#}"
+    );
+    let why = manager
+        .unbind_host_pci("local", "0000:0b:00.0")
+        .unwrap_err();
+    assert!(why.to_string().contains("is outdated"), "{why:#}");
 
     set(true);
     let why = manager.bind_host_pci("local", "0000:05:00.0").unwrap_err();
@@ -8745,7 +8771,7 @@ async fn a_pci_device_a_stackbox_holds_cannot_be_bound_or_unbound() {
             inspection.pci_passthrough_available = true;
             inspection.pci_candidates = vec![pci_candidate("0000:0b:00.0", Some("vfio-pci"), None)];
             inspection.pci_bind_helper_available = true;
-            inspection.pci_bind_helper_version = Some(1);
+            inspection.pci_bind_helper_version = Some(crate::remote::pci::HELPER_PROTOCOL);
             host.inspection = Some(inspection);
             Ok(())
         })
@@ -8809,4 +8835,159 @@ async fn the_helper_install_names_the_agent_account_and_refuses_a_bad_one() {
     assert_eq!(install.helper_path, "/usr/local/libexec/stackbox-vfio-bind");
     assert_eq!(install.sudoers_path, "/etc/sudoers.d/stackbox-vfio");
     settle(&manager).await;
+}
+
+/// The URL-bearing relay token of `urls`, which every service URL carries.
+fn relay_token_of(urls: &BTreeMap<String, String>) -> String {
+    let url = urls.get("keystone").expect("keystone URL");
+    url.split('/').nth(5).unwrap().to_owned()
+}
+
+#[tokio::test]
+async fn relay_exposure_hands_out_tokens_that_listings_never_show() {
+    let dir = tempfile::tempdir().unwrap();
+    let backend = Arc::new(Fake::default());
+    let manager = open_with(options(dir.path()), backend.clone()).await;
+    let with_dashboard = CreateRequest {
+        components: vec!["horizon".into()],
+        ..request("src")
+    };
+    done(&manager, &manager.create(with_dashboard).unwrap()).await;
+
+    // Not deployed yet.
+    let early = manager
+        .set_relay_exposure("src", RelayExposureRequest::default())
+        .unwrap_err();
+    assert!(early.is::<Conflict>(), "{early:#}");
+
+    done(
+        &manager,
+        &manager.deploy("src", DeployRequest::default()).unwrap(),
+    )
+    .await;
+
+    // Deployed, but no relay configured yet.
+    let no_relay = manager
+        .set_relay_exposure("src", RelayExposureRequest::default())
+        .unwrap_err();
+    assert!(no_relay.is::<Conflict>(), "{no_relay:#}");
+    assert!(format!("{no_relay:#}").contains("configure the relay first"));
+
+    use crate::link::relay::{RelaySettings, RelayTlsMode};
+    manager
+        .set_relay(Some(RelaySettings {
+            url: "https://coordinator.example:10011".into(),
+            mode: RelayTlsMode::Private,
+            bind: Some("127.0.0.1:0".parse().unwrap()),
+        }))
+        .await
+        .unwrap();
+
+    let exposed = manager
+        .set_relay_exposure("src", RelayExposureRequest::default())
+        .unwrap();
+    assert!(exposed.enabled);
+    assert_eq!(
+        exposed.relay_url.as_deref(),
+        Some("https://coordinator.example:10011")
+    );
+    let token = relay_token_of(&exposed.urls);
+    assert_eq!(token.len(), 64);
+    assert!(token.bytes().all(|b| b.is_ascii_hexdigit()));
+    assert_eq!(
+        exposed.urls["keystone"],
+        format!("https://coordinator.example:10011/x/src/{token}/keystone/v3")
+    );
+    assert_eq!(
+        exposed.urls["horizon"],
+        format!("https://coordinator.example:10011/x/src/{token}/horizon")
+    );
+    assert!(!exposed.urls.contains_key("mariadb"));
+    assert!(!exposed.urls.contains_key("rabbitmq"));
+    assert!(manager.0.relay.endpoints.is_exposed("src", &token));
+
+    // The token rides on the endpoints call and in the URLs, never in a listing.
+    let endpoints = manager.endpoints("src").await.unwrap();
+    assert_eq!(endpoints.relay_exposure.unwrap().urls, exposed.urls);
+    let listing = serde_json::to_string(&manager.list().unwrap()).unwrap();
+    assert!(!listing.contains(&token), "listing leaks the token");
+
+    // Without rotation the token stays; with it, the old one stops answering at once.
+    let again = manager
+        .set_relay_exposure("src", RelayExposureRequest { rotate: false })
+        .unwrap();
+    assert_eq!(relay_token_of(&again.urls), token);
+    let rotated = manager
+        .set_relay_exposure("src", RelayExposureRequest { rotate: true })
+        .unwrap();
+    let fresh = relay_token_of(&rotated.urls);
+    assert_ne!(fresh, token);
+    assert!(!manager.0.relay.endpoints.is_exposed("src", &token));
+    assert!(manager.0.relay.endpoints.is_exposed("src", &fresh));
+
+    // The token survives a restart: the state file keeps it, the stackbox lists without it.
+    drop(manager);
+    let manager = open_with(options(dir.path()), backend.clone()).await;
+    manager.start_relay().await;
+    assert!(manager.0.relay.endpoints.is_exposed("src", &fresh));
+    let endpoints = manager.endpoints("src").await.unwrap();
+    assert_eq!(
+        relay_token_of(&endpoints.relay_exposure.unwrap().urls),
+        fresh
+    );
+
+    // Removing the exposure revokes it everywhere, at once.
+    let removed = manager.remove_relay_exposure("src").unwrap();
+    assert!(!removed.enabled);
+    assert!(removed.urls.is_empty());
+    assert!(!manager.0.relay.endpoints.is_exposed("src", &fresh));
+    assert!(
+        manager
+            .endpoints("src")
+            .await
+            .unwrap()
+            .relay_exposure
+            .is_none()
+    );
+
+    // Deleting the stackbox also drops its token.
+    manager
+        .set_relay_exposure("src", RelayExposureRequest::default())
+        .unwrap();
+    done(&manager, &manager.forget("src").unwrap()).await;
+    let state = manager.read(|state| state.relay_tokens.clone()).unwrap();
+    assert!(!state.contains_key("src"));
+}
+
+#[tokio::test]
+async fn relay_exposure_refuses_dial_in_agent_hosts() {
+    let dir = tempfile::tempdir().unwrap();
+    let backend = Arc::new(Fake::default());
+    let manager = open_with(options(dir.path()), backend).await;
+    use crate::link::relay::{RelaySettings, RelayTlsMode};
+    manager
+        .set_relay(Some(RelaySettings {
+            url: "https://coordinator.example:10011".into(),
+            mode: RelayTlsMode::Private,
+            bind: Some("127.0.0.1:0".parse().unwrap()),
+        }))
+        .await
+        .unwrap();
+    done(&manager, &manager.create(request("agent")).unwrap()).await;
+    done(
+        &manager,
+        &manager.deploy("agent", DeployRequest::default()).unwrap(),
+    )
+    .await;
+    manager
+        .update(|state| {
+            state.hosts.get_mut("local").unwrap().host.kind = crate::remote::HostKind::Agent;
+            Ok(())
+        })
+        .unwrap();
+    let error = manager
+        .set_relay_exposure("agent", RelayExposureRequest::default())
+        .unwrap_err();
+    assert!(error.is::<Conflict>(), "{error:#}");
+    assert!(format!("{error:#}").contains("dial-in agent hosts are not yet supported"));
 }

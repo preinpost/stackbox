@@ -20,7 +20,7 @@ use anyhow::{Result, anyhow, ensure};
 use axum::{
     Router,
     extract::{
-        Query, State,
+        Query, Request, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
     http::{HeaderMap, StatusCode, header::AUTHORIZATION},
@@ -130,12 +130,17 @@ pub async fn listen(
     Ok((addr, task))
 }
 
-/// The relay's one route.
+/// The relay's routes: the switches' WebSocket, and each exposed stackbox's service endpoints
+/// (see [`super::endpoint_proxy`]). Anything else is `404`.
 pub fn router(relay: Arc<Relay>) -> Router {
     Router::new()
         .route(super::RELAY_PATH, get(upgrade))
-        .fallback(|| async { (StatusCode::NOT_FOUND, "route not found\n") })
+        .fallback(endpoints)
         .with_state(relay)
+}
+
+async fn endpoints(State(relay): State<Arc<Relay>>, request: Request) -> Response {
+    relay.endpoints.handle(request).await
 }
 
 #[derive(Deserialize)]
@@ -177,6 +182,8 @@ struct Stackbox {
 pub struct Relay {
     stackboxes: Mutex<HashMap<String, Stackbox>>,
     next: AtomicU64,
+    /// The stackboxes' service endpoints the relay serves, kept current by the manager.
+    pub endpoints: super::endpoint_proxy::EndpointProxy,
 }
 
 /// An accepted uplink, from [`Relay::accept`] until [`Relay::serve`] ends.

@@ -293,6 +293,69 @@ test("forwards the relay settings and cloudflared update only", async (t) => {
   }
   assert.equal(seen.length, allowed.length);
 });
+test("forwards the stackbox relay exposure and nothing else of it", async (t) => {
+  const seen = [];
+  const address = await setup(t, (req, res) => {
+    seen.push(`${req.method} ${req.url}`);
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(
+      JSON.stringify({
+        enabled: true,
+        relay_url: "https://relay.example",
+        urls: { keystone: "https://relay.example/x/sb/t/keystone/v3" },
+        token_secret: "not-forwarded",
+      }),
+    );
+  });
+  const id = "4c4b1c0e-1f4a-4c40-9c39-2b5a3f7c0f11";
+  const put = await fetch(`${address}/api/v1/stackboxes/${id}/relay-exposure`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ rotate: true }),
+  });
+  assert.equal(put.status, 200);
+  assert.equal((await put.json()).urls.keystone.includes("/x/sb/t/"), true);
+  const del = await fetch(`${address}/api/v1/stackboxes/${id}/relay-exposure`, {
+    method: "DELETE",
+  });
+  assert.equal(del.status, 200);
+  assert.deepEqual(seen, [
+    `PUT /api/v1/stackboxes/${id}/relay-exposure`,
+    `DELETE /api/v1/stackboxes/${id}/relay-exposure`,
+  ]);
+  for (const path of [
+    `/api/v1/stackboxes/${id}/relay-exposure/x`,
+    `/api/v1/stackboxes/${id}/relay`,
+  ]) {
+    assert.equal((await fetch(address + path, { method: "PUT" })).status, 404, path);
+  }
+});
+test("keeps the relay exposure in the endpoints response", async (t) => {
+  const address = await setup(t, (_req, res) => {
+    res.setHeader("content-type", "application/json");
+    res.end(
+      JSON.stringify({
+        services: { keystone: "http://localhost:15000/v3" },
+        credentials: { OS_PASSWORD: "x" },
+        relay_exposure: {
+          enabled: true,
+          relay_url: "https://relay.example",
+          urls: { horizon: "https://relay.example/x/sb/t/horizon" },
+          extra: "dropped",
+        },
+      }),
+    );
+  });
+  const response = await fetch(
+    `${address}/api/v1/stackboxes/4c4b1c0e-1f4a-4c40-9c39-2b5a3f7c0f11/endpoints`,
+  );
+  const body = await response.json();
+  assert.deepEqual(body.relay_exposure, {
+    enabled: true,
+    relay_url: "https://relay.example",
+    urls: { horizon: "https://relay.example/x/sb/t/horizon" },
+  });
+});
 test("forwards local host registration and service checks", async (t) => {
   const seen = [];
   const address = await setup(t, (req, res) => {

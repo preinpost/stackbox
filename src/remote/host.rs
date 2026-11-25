@@ -97,7 +97,7 @@ async fn helper_status() -> (bool, Option<u32>) {
     let version = output("sudo", &["-n", super::pci::HELPER_PATH, "--check"])
         .await
         .and_then(|text| super::pci::parse_helper_check(&text));
-    (version.is_some(), version)
+    (super::pci::helper_matches(version), version)
 }
 
 #[cfg(not(unix))]
@@ -123,11 +123,9 @@ pub async fn run_pci_helper(command: &[String], verb: &str, bdf: &str) -> Result
         .await
         .context("the PCI helper timed out")?
         .context("cannot run sudo for the PCI helper")?;
-    ensure!(
-        run.status.success(),
-        "the PCI helper failed to {verb} {bdf}: {}",
-        String::from_utf8_lossy(&run.stderr).trim()
-    );
+    if !run.status.success() {
+        return Err(super::pci::helper_failure(verb, bdf, &run.stderr));
+    }
     super::pci::ensure_reported(&String::from_utf8_lossy(&run.stdout), verb, bdf)
 }
 
@@ -356,4 +354,27 @@ pub async fn smoke(token: &str) -> Result<GpuKernel> {
         *stored = Some(gpu.clone());
     }
     Ok(gpu)
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_helper_that_exits_non_zero_reports_its_stderr_reason() {
+        let command = vec![
+            "sh".to_owned(),
+            "-c".to_owned(),
+            "echo 'stackbox-vfio-bind: 0000:02:00.0 is protected (root_disk) and cannot be passed through' >&2; exit 1".to_owned(),
+        ];
+        let error = run_pci_helper(&command, "bind", "0000:02:00.0")
+            .await
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("stackbox-vfio-bind: 0000:02:00.0 is protected (root_disk)"),
+            "{error:#}"
+        );
+    }
 }

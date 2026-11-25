@@ -1741,6 +1741,39 @@ mod tests {
         );
     }
 
+    /// A helper that refuses a device says why on stderr; the agent's error carries that reason,
+    /// not the generic SSH wording, so the coordinator's job shows what the host refused.
+    #[tokio::test]
+    async fn a_refused_helper_reports_its_stderr_reason_through_execute() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut agent = Agent::in_process(dir.path().join("agent"), Arc::new(Fake::default()));
+        agent.pci_helper = vec![
+            "sh".into(),
+            "-c".into(),
+            "printf 'sudo: noise\\nstackbox-vfio-bind: 0000:02:00.0 is protected (root_disk) and cannot be passed through\\n' >&2; exit 1".into(),
+        ];
+        let owner = uuid::Uuid::new_v4().to_string();
+        let emit: Emitter = Arc::new(|_| Ok(()));
+        let error = agent
+            .execute(
+                request(
+                    &owner,
+                    Operation::PciBind {
+                        bdf: "0000:02:00.0".into(),
+                    },
+                ),
+                emit,
+            )
+            .await
+            .unwrap_err();
+        let text = error.to_string();
+        assert!(
+            text.contains("stackbox-vfio-bind: 0000:02:00.0 is protected (root_disk) and cannot be passed through"),
+            "{text}"
+        );
+        assert!(!text.contains("check remote prerequisites"), "{text}");
+    }
+
     #[tokio::test]
     async fn durable_ownership_replay_budgets_failure_reservations_and_foreign_vms() {
         let dir = tempfile::tempdir().unwrap();
