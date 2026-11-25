@@ -3,7 +3,9 @@
 //! `<relay>/x/<stackbox>/<token>/<service><path>`; the dashboards (`horizon`, `skyline-console`)
 //! are entered once there, which sets a cookie that carries their stackbox, token and service for
 //! the rest of their pages. Only the public service ports of the stackbox's enabled components
-//! are reachable: the infrastructure ports (MariaDB, RabbitMQ) never are.
+//! are reachable. The infrastructure ports never are as plain HTTP: the RabbitMQ management UI is
+//! entered as a dashboard, and MariaDB and RabbitMQ AMQP are reached only by WebSocket, through
+//! [`EndpointProxy::resolve_tcp`] and [`super::relay`].
 //!
 //! The relay's other routes are untouched; [`super::relay::router`] sends everything that is not
 //! the WebSocket here.
@@ -16,6 +18,8 @@ use axum::{
     http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
 };
+use bytes::Bytes;
+use futures::{StreamExt, stream};
 use subtle::ConstantTimeEq;
 
 use crate::model::COMPONENTS;
@@ -23,10 +27,15 @@ use crate::model::COMPONENTS;
 /// The cookie a dashboard's pages carry: `<stackbox>:<token>:<service>`.
 pub const COOKIE: &str = "__stackbox_ui";
 /// Web dashboards: entered once, then their own pages use the cookie.
-pub const DASHBOARDS: &[&str] = &["horizon", "skyline-console"];
+pub const DASHBOARDS: &[&str] = &["horizon", "skyline-console", "rabbitmq-management"];
+/// The data stores a WebSocket tunnel reaches (`/x/<stackbox>/<token>/tcp/<service>`).
+const TCP_SERVICES: &[&str] = &["mariadb", "rabbitmq"];
 /// JSON bodies up to this size are read and have their URLs rewritten; larger or other bodies
 /// stream through untouched.
 const REWRITE_LIMIT: u64 = 4 * 1024 * 1024;
+/// The `client.mjs` a developer pipes into `node --input-type=module`; `__MYSQL_URL__` and
+/// `__AMQP_URL__` are replaced with the stackbox's two tunnel URLs, JSON-encoded.
+const TUNNEL_SCRIPT: &str = include_str!("endpoint_proxy/tunnel.mjs");
 
 /// A public service of an exposed stackbox, at `port_base + offset` on its host.
 #[derive(Clone, Debug, PartialEq)]
@@ -93,6 +102,15 @@ pub fn base_url(host: &str, port: u16) -> String {
     format!("http://{host}:{port}")
 }
 
+/// The two URLs a service on `host:port` may name itself by, `http://` and `https://`, each mapped
+/// to `relay`. An upstream behind a TLS-terminating proxy answers with the `https://` one.
+fn address_pairs(host: &str, port: u16, relay: &str) -> Vec<(String, String)> {
+    ["http", "https"]
+        .into_iter()
+        .map(|scheme| (format!("{scheme}://{host}:{port}"), relay.to_owned()))
+        .collect()
+}
+
 /// Each public service's URL through the relay, by service ID. A dashboard's is its entry point,
 /// which sets its cookie; an API's keeps its path (`/v3`, `/v2.1`, ...).
 pub fn exposure_urls(
@@ -102,7 +120,7 @@ pub fn exposure_urls(
     components: &[String],
 ) -> BTreeMap<String, String> {
     let base = relay_base.trim_end_matches('/');
-    public_services(components)
+    let mut urls: BTreeMap<String, String> = public_services(components)
         .into_iter()
         .map(|service| {
             let entry = format!("{base}/x/{stackbox}/{token}/{}", service.id);
@@ -113,7 +131,32 @@ pub fn exposure_urls(
             };
             (service.id.to_owned(), url)
         })
-        .collect()
+        .collect();
+    let entry = format!("{base}/x/{stackbox}/{token}");
+    urls.insert(
+        "rabbitmq-management".to_owned(),
+        format!("{entry}/rabbitmq-management"),
+    );
+    for id in TCP_SERVICES {
+        urls.insert((*id).to_owned(), format!("{entry}/tcp/{id}"));
+    }
+    urls.insert(
+        "tunnel-script".to_owned(),
+        format!("{entry}/tcp/client.mjs"),
+    );
+    urls
+}
+
+/// The RabbitMQ management UI: an infrastructure port, reachable only as a dashboard.
+fn management(service: &str) -> Option<Service> {
+    let port = crate::model::INFRA_PORTS
+        .iter()
+        .find(|p| p.id == "rabbitmq-management")?;
+    (service == port.id).then_some(Service {
+        id: port.id,
+        offset: port.offset,
+        path: "",
+    })
 }
 
 /// Where a request goes and how its answer is rewritten.
@@ -149,6 +192,48 @@ impl EndpointProxy {
             .is_some_and(|e| bool::from(e.token.as_bytes().ct_eq(token.as_bytes())))
     }
 
+    /// The host and port of a data store a WebSocket tunnel may reach: MariaDB or RabbitMQ AMQP of
+    /// an exposed stackbox, under its current token. `None` for anything else, including the
+    /// management UI and the plain HTTP paths.
+    pub fn resolve_tcp(&self, id: &str, token: &str, service: &str) -> Option<(String, u16)> {
+        let table = self.table.read().unwrap_or_else(|p| p.into_inner());
+        table.relay_base.as_ref()?;
+        let exposed = table.stackboxes.get(id)?;
+        if !bool::from(exposed.token.as_bytes().ct_eq(token.as_bytes())) {
+            return None;
+        }
+        if !TCP_SERVICES.contains(&service) {
+            return None;
+        }
+        let port = crate::model::INFRA_PORTS
+            .iter()
+            .find(|p| p.id == service)?
+            .offset;
+        let port = exposed.port_base.checked_add(port)?;
+        Some((exposed.host.clone(), port))
+    }
+
+    /// The `client.mjs` that opens an exposed stackbox's MariaDB and RabbitMQ AMQP ports locally.
+    /// It names only the two relay URLs, never a password. `None` unless the relay is on and
+    /// `token` is the stackbox's current one (compared in constant time).
+    pub fn client_script(&self, id: &str, token: &str) -> Option<String> {
+        let table = self.table.read().unwrap_or_else(|p| p.into_inner());
+        let relay_base = table.relay_base.as_ref()?;
+        let exposed = table.stackboxes.get(id)?;
+        if !bool::from(exposed.token.as_bytes().ct_eq(token.as_bytes())) {
+            return None;
+        }
+        let ws = crate::link::tcp_tunnel::to_ws_url(relay_base.trim_end_matches('/')).ok()?;
+        let entry = format!("{ws}/x/{id}/{token}/tcp");
+        let mysql = serde_json::to_string(&format!("{entry}/mariadb")).ok()?;
+        let amqp = serde_json::to_string(&format!("{entry}/rabbitmq")).ok()?;
+        Some(
+            TUNNEL_SCRIPT
+                .replace("__MYSQL_URL__", &mysql)
+                .replace("__AMQP_URL__", &amqp),
+        )
+    }
+
     /// Serve one request that the relay's WebSocket route does not take.
     pub async fn handle(&self, request: Request) -> Response {
         let rest = request.uri().path().strip_prefix("/x/").map(str::to_owned);
@@ -174,7 +259,12 @@ impl EndpointProxy {
         if !bool::from(exposed.token.as_bytes().ct_eq(token.as_bytes())) {
             return None;
         }
-        let service = exposed.services.iter().find(|s| s.id == service)?.clone();
+        let service = exposed
+            .services
+            .iter()
+            .find(|s| s.id == service)
+            .cloned()
+            .or_else(|| management(service))?;
         Some(Target {
             exposed: exposed.clone(),
             service,
@@ -212,10 +302,11 @@ impl EndpointProxy {
                 .exposed
                 .services
                 .iter()
-                .map(|s| {
-                    (
-                        base_url(host, target.exposed.port_base + s.offset),
-                        format!("{}/x/{id}/{token}/{}", target.relay_base, s.id),
+                .flat_map(|s| {
+                    address_pairs(
+                        host,
+                        target.exposed.port_base + s.offset,
+                        &format!("{}/x/{id}/{token}/{}", target.relay_base, s.id),
                     )
                 })
                 .collect(),
@@ -247,7 +338,7 @@ impl EndpointProxy {
             url: format!("{upstream}{path}"),
             host: format!("{}:{port}", target.exposed.host),
             origin: Some((target.relay_base.clone(), upstream.clone())),
-            pairs: vec![(upstream, target.relay_base)],
+            pairs: address_pairs(&target.exposed.host, port, &target.relay_base),
             json: false,
             strip_domain: true,
         };
@@ -258,7 +349,13 @@ impl EndpointProxy {
         let (parts, body) = request.into_parts();
         let mut headers = HeaderMap::new();
         for (name, value) in &parts.headers {
-            if hop_by_hop(name) {
+            if hop_by_hop(name) || forwarding_header(name) {
+                continue;
+            }
+            if *name == header::COOKIE {
+                if let Some(cookie) = without_relay_cookie(value) {
+                    headers.append(name.clone(), cookie);
+                }
                 continue;
             }
             let rewritten = match &plan.origin {
@@ -295,11 +392,12 @@ impl EndpointProxy {
                 return (StatusCode::BAD_GATEWAY, "the service did not answer\n").into_response();
             }
         };
+        // A body without a length (chunked) is read up to the limit too, not skipped.
         let rewrite_json = plan.json
             && is_json(response.headers())
             && response
                 .content_length()
-                .is_some_and(|length| length <= REWRITE_LIMIT);
+                .is_none_or(|length| length <= REWRITE_LIMIT);
         let mut out = HeaderMap::new();
         for (name, value) in response.headers() {
             if hop_by_hop(name) || (rewrite_json && *name == header::CONTENT_LENGTH) {
@@ -316,11 +414,8 @@ impl EndpointProxy {
         }
         let status = response.status();
         let body = if rewrite_json {
-            match response.bytes().await {
-                Ok(bytes) => match std::str::from_utf8(&bytes) {
-                    Ok(text) => Body::from(replace_all(text, &plan.pairs)),
-                    Err(_) => Body::from(bytes),
-                },
+            match rewrite_body(response, &plan.pairs).await {
+                Ok(body) => body,
                 Err(_) => {
                     return (StatusCode::BAD_GATEWAY, "the service did not answer\n")
                         .into_response();
@@ -405,6 +500,62 @@ fn hop_by_hop(name: &HeaderName) -> bool {
     ) || name.as_str().starts_with("proxy-")
 }
 
+/// Headers that a Cloudflare tunnel or another front proxy adds for the relay's own visitor. The
+/// upstream speaks plain HTTP and must not see them: it would believe the connection is HTTPS and
+/// answer with `https://` URLs.
+fn forwarding_header(name: &HeaderName) -> bool {
+    let name = name.as_str();
+    name.starts_with("x-forwarded-")
+        || name.starts_with("cf-")
+        || matches!(name, "forwarded" | "x-real-ip" | "cdn-loop")
+}
+
+/// A `Cookie` header without the relay's own `__stackbox_ui` cookie, or `None` when nothing else
+/// is left in it.
+fn without_relay_cookie(value: &HeaderValue) -> Option<HeaderValue> {
+    let Ok(text) = value.to_str() else {
+        return Some(value.clone());
+    };
+    let kept: Vec<&str> = text
+        .split(';')
+        .map(str::trim)
+        .filter(|pair| {
+            let relay = pair
+                .strip_prefix(COOKIE)
+                .is_some_and(|rest| rest.starts_with('='));
+            !pair.is_empty() && !relay
+        })
+        .collect();
+    if kept.is_empty() {
+        return None;
+    }
+    HeaderValue::from_str(&kept.join("; ")).ok()
+}
+
+/// Reads a JSON body of at most [`REWRITE_LIMIT`] bytes and rewrites its URLs. A body that turns
+/// out larger is not held in memory: the bytes read so far go on with the rest of the stream,
+/// unrewritten.
+async fn rewrite_body(
+    response: reqwest::Response,
+    pairs: &[(String, String)],
+) -> Result<Body, reqwest::Error> {
+    let mut upstream = response.bytes_stream();
+    let mut read: Vec<u8> = Vec::new();
+    while let Some(chunk) = upstream.next().await {
+        let chunk = chunk?;
+        if read.len() as u64 + chunk.len() as u64 > REWRITE_LIMIT {
+            let head = stream::once(async move { Ok::<Bytes, reqwest::Error>(Bytes::from(read)) });
+            let next = stream::once(async move { Ok::<Bytes, reqwest::Error>(chunk) });
+            return Ok(Body::from_stream(head.chain(next).chain(upstream)));
+        }
+        read.extend_from_slice(&chunk);
+    }
+    Ok(match std::str::from_utf8(&read) {
+        Ok(text) => Body::from(replace_all(text, pairs)),
+        Err(_) => Body::from(read),
+    })
+}
+
 fn is_json(headers: &HeaderMap) -> bool {
     headers
         .get(header::CONTENT_TYPE)
@@ -485,6 +636,51 @@ mod tests {
             assert!(services.iter().all(|s| s.id != infra.id));
             assert!(services.iter().all(|s| s.offset != infra.offset));
         }
+        // Plain HTTP never reaches them, but their relay URLs are listed for the portal.
+        let urls = exposure_urls("https://relay:10011", "sb", "tok", &all);
+        assert_eq!(
+            urls["rabbitmq-management"],
+            "https://relay:10011/x/sb/tok/rabbitmq-management"
+        );
+        assert_eq!(urls["mariadb"], "https://relay:10011/x/sb/tok/tcp/mariadb");
+        assert_eq!(
+            urls["rabbitmq"],
+            "https://relay:10011/x/sb/tok/tcp/rabbitmq"
+        );
+        assert_eq!(
+            urls["tunnel-script"],
+            "https://relay:10011/x/sb/tok/tcp/client.mjs"
+        );
+    }
+
+    #[test]
+    fn data_store_tunnels_are_only_mariadb_and_amqp() {
+        let proxy = EndpointProxy::default();
+        proxy.replace(
+            Some("https://relay:10011".into()),
+            HashMap::from([(
+                "sb".to_owned(),
+                Exposed {
+                    token: "tok".into(),
+                    host: "10.0.0.5".into(),
+                    port_base: 20_000,
+                    services: Vec::new(),
+                },
+            )]),
+        );
+        assert_eq!(
+            proxy.resolve_tcp("sb", "tok", "mariadb"),
+            Some(("10.0.0.5".into(), 20_006))
+        );
+        assert_eq!(
+            proxy.resolve_tcp("sb", "tok", "rabbitmq"),
+            Some(("10.0.0.5".into(), 20_007))
+        );
+        assert_eq!(proxy.resolve_tcp("sb", "tok", "rabbitmq-management"), None);
+        assert_eq!(proxy.resolve_tcp("sb", "bad", "mariadb"), None);
+        assert_eq!(proxy.resolve_tcp("other", "tok", "mariadb"), None);
+        proxy.replace(None, HashMap::new());
+        assert_eq!(proxy.resolve_tcp("sb", "tok", "mariadb"), None);
     }
 
     #[test]

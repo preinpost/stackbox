@@ -5,6 +5,7 @@ import type { Stackbox, Job } from "../api/client";
 import { userEvent } from "@testing-library/user-event";
 import type { Datastore } from "../api/client";
 import {
+  Datastores,
   DatastoreCard,
   DeploymentPhases,
   Endpoints,
@@ -560,4 +561,108 @@ test("switches a ready stackbox between LAN and relay addresses and turns the re
   expect(
     await screen.findByRole("button", { name: "릴레이 접속 켜기" }),
   ).toBeTruthy();
+});
+
+/** The relay-published data stores the endpoints call returns alongside the LAN ports. */
+const dataStoreRelayHost = "https://spine-diego-took-expectations.trycloudflare.com";
+const dataStoreRelayUrls = {
+  mariadb: `${dataStoreRelayHost}/x/7c1e5a/tcp/mariadb`,
+  rabbitmq: `${dataStoreRelayHost}/x/7c1e5a/tcp/rabbitmq`,
+  "rabbitmq-management": `${dataStoreRelayHost}/x/7c1e5a/rabbitmq-management`,
+  "tunnel-script": `${dataStoreRelayHost}/x/7c1e5a/tcp/client.mjs`,
+};
+const dataStoreTunnelCommand = `curl -fsSL ${dataStoreRelayUrls["tunnel-script"]} | node --input-type=module`;
+const rabbitmq: Datastore = {
+  id: "rabbitmq",
+  label: "RabbitMQ (AMQP)",
+  protocol: "amqp",
+  host: "localhost",
+  port: 15007,
+  username: "openstack",
+  password: "rabbit-secret-value",
+  url: "amqp://openstack@localhost:15007/",
+  vhost: "/",
+};
+const rabbitmqManagement: Datastore = {
+  id: "rabbitmq-management",
+  label: "RabbitMQ 관리 UI",
+  protocol: "http",
+  host: "localhost",
+  port: 15008,
+  username: "openstack",
+  url: "http://localhost:15008/",
+};
+
+test("shows Data stores through the relay as a zero-install tunnel bar and reuses the store cards", async () => {
+  const user = userEvent.setup();
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (path: string) => {
+      if (path.endsWith("/endpoints"))
+        return Response.json({
+          services: {},
+          credentials: login,
+          datastores: [mariadb, rabbitmq, rabbitmqManagement],
+          relay_exposure: { enabled: true, relay_url: dataStoreRelayHost, urls: dataStoreRelayUrls },
+        });
+      throw new Error(`unexpected ${path}`);
+    }),
+  );
+  const ready: Stackbox = {
+    ...stackbox,
+    id: "stackbox-01",
+    status: "ready",
+    exposure: { bind: "127.0.0.1", host: "127.0.0.1", port_base: 15000 },
+    plan: { ...stackbox.plan!, components: ["keystone", "horizon"] },
+  };
+  render(
+    <QueryClientProvider
+      client={
+        new QueryClient({
+          defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+        })
+      }
+    >
+      <Datastores stackbox={ready} />
+    </QueryClientProvider>,
+  );
+
+  // Relay is the default view: one curl | node command bar with a copy button.
+  const panel = document.querySelector(".datastore-panel") as HTMLElement;
+  expect(
+    await screen.findByText(dataStoreTunnelCommand, { selector: "code" }),
+  ).toBeTruthy();
+  expect(screen.getByRole("button", { name: "터널 명령 복사" })).toBeTruthy();
+  expect(screen.getByText(/MYSQL_PORT=13306/)).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Relay" }).getAttribute("aria-pressed")).toBe("true");
+
+  // MariaDB card: the relay-view address and the root account with its password toggle.
+  expect(screen.getByText("127.0.0.1:3306", { selector: "code" })).toBeTruthy();
+  expect(screen.getByText("root", { selector: "code" })).toBeTruthy();
+  expect(screen.getAllByRole("button", { name: "비밀번호 표시" }).length).toBe(2);
+  expect(screen.getByText("keystone")).toBeTruthy();
+
+  // RabbitMQ AMQP card: the AMQP address with the openstack account.
+  expect(screen.getByText("127.0.0.1:5672", { selector: "code" })).toBeTruthy();
+  expect(screen.getAllByText("openstack", { selector: "code" }).length).toBeGreaterThanOrEqual(2);
+
+  // RabbitMQ management UI card: the relay URL, opening in a new tab.
+  const consoleLink = screen.getByRole("link", { name: "RabbitMQ 관리 UI 열기" });
+  expect(consoleLink.getAttribute("href")).toBe(dataStoreRelayUrls["rabbitmq-management"]);
+  expect(consoleLink.getAttribute("target")).toBe("_blank");
+  expect(
+    screen.getByText(dataStoreRelayUrls["rabbitmq-management"], { selector: "code" }),
+  ).toBeTruthy();
+  // The relay view never shows the LAN passwords until revealed.
+  expect(panel.textContent).not.toContain("database-secret-value");
+  expect(panel.textContent).not.toContain("localhost:15006");
+
+  // LAN: the tunnel bar goes away and the original host:port cards come back.
+  await user.click(screen.getByRole("button", { name: "LAN" }));
+  expect(screen.getByRole("button", { name: "LAN" }).getAttribute("aria-pressed")).toBe("true");
+  expect(screen.getByText("localhost:15006")).toBeTruthy();
+  expect(screen.getByText("localhost:15007")).toBeTruthy();
+  expect(screen.getByText("localhost:15008")).toBeTruthy();
+  expect(panel.textContent).not.toContain("curl -fsSL");
+  expect(panel.querySelector(".tunnel-bar")).toBeNull();
 });

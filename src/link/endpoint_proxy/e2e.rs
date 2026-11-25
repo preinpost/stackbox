@@ -3,8 +3,10 @@
 
 use super::*;
 use crate::link::relay::{self, Relay};
-use axum::{Router, extract::Request, response::IntoResponse};
-use std::{net::SocketAddr, sync::Arc};
+use axum::{Router, body::Body, extract::Request, response::IntoResponse};
+use std::process::Stdio;
+use std::{net::SocketAddr, sync::Arc, time::Duration};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 const TOKEN: &str = "t0k3n";
 
@@ -45,6 +47,36 @@ fn mock(base: u16, offset: u16) -> Router {
                 [(header::LOCATION, format!("http://127.0.0.1:{base}/v3/auth/tokens"))],
             )
                 .into_response(),
+            (0, "/v3/chunked") => {
+                let body = format!(
+                    r#"{{"version":{{"links":[{{"href":"https://127.0.0.1:{base}/v3/"}}]}},"compute":"http://127.0.0.1:{}/v2.1"}}"#,
+                    base + 5
+                );
+                // A stream without a length goes out `Transfer-Encoding: chunked`.
+                let stream = futures::stream::iter([Ok::<_, std::io::Error>(bytes::Bytes::from(body))]);
+                let mut response = Body::from_stream(stream).into_response();
+                response.headers_mut().insert(
+                    header::CONTENT_TYPE,
+                    HeaderValue::from_static("application/json"),
+                );
+                response.headers_mut().insert(
+                    "x-seen-xfp",
+                    HeaderValue::from_str(&header("x-forwarded-proto")).unwrap(),
+                );
+                response
+            }
+            (3, "/auth/probe/") => (
+                StatusCode::FOUND,
+                [
+                    ("location", format!("https://127.0.0.1:{}/auth/login/?next=/", base + 3)),
+                    ("x-seen-xfp", header("x-forwarded-proto")),
+                    ("x-seen-forwarded", header("forwarded")),
+                    ("x-seen-cf-visitor", header("cf-visitor")),
+                    ("x-seen-cookie", header("cookie")),
+                ],
+            )
+                .into_response(),
+            (8, "/") => "rabbitmq management ui\n".into_response(),
             (1, "/v2/images/file") => (
                 [(header::CONTENT_TYPE, "application/octet-stream")],
                 image_bytes(),
@@ -74,8 +106,9 @@ fn image_bytes() -> Vec<u8> {
     (0..300_000u32).map(|i| (i % 251) as u8).collect()
 }
 
-/// Serve the mocks on six consecutive ports (offsets 0 through 5, which covers Keystone, Glance,
-/// Horizon and Nova), and return the first one.
+/// Serve the mocks on nine consecutive ports (offsets 0 through 8: Keystone, Glance, Horizon,
+/// Nova, MariaDB, RabbitMQ AMQP and its management UI), and return the first one. Offsets 6 and 7
+/// are TCP echo servers (MariaDB, AMQP), the rest are HTTP mocks.
 async fn upstream_block() -> u16 {
     loop {
         let probe = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -85,22 +118,37 @@ async fn upstream_block() -> u16 {
             continue;
         }
         let mut listeners = Vec::new();
-        for offset in 0..6 {
+        for offset in 0..=8 {
             match std::net::TcpListener::bind(("127.0.0.1", base + offset)) {
                 Ok(listener) => listeners.push(listener),
                 Err(_) => break,
             }
         }
-        if listeners.len() < 6 {
+        if listeners.len() < 9 {
             continue;
         }
         for (offset, listener) in listeners.into_iter().enumerate() {
             listener.set_nonblocking(true).unwrap();
             let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+            if offset == 6 || offset == 7 {
+                tokio::spawn(echo(listener));
+                continue;
+            }
             let app = mock(base, offset as u16);
             tokio::spawn(async move { axum::serve(listener, app).await });
         }
         return base;
+    }
+}
+
+/// A TCP echo server: each connection's bytes go back to it, then it closes.
+async fn echo(listener: tokio::net::TcpListener) {
+    while let Ok((socket, _)) = listener.accept().await {
+        tokio::spawn(async move {
+            let (mut reader, mut writer) = socket.into_split();
+            let _ = tokio::io::copy(&mut reader, &mut writer).await;
+            let _ = writer.shutdown().await;
+        });
     }
 }
 
@@ -150,7 +198,9 @@ async fn routes_outside_an_exposed_service_answer_404_and_the_switch_socket_is_g
     not_found(format!("{relay_base}/")).await;
     not_found(format!("{relay_base}/x/sb/bad/keystone/v3")).await;
     not_found(format!("{relay_base}/x/sb/{TOKEN}/mariadb/")).await;
-    not_found(format!("{relay_base}/x/sb/{TOKEN}/rabbitmq-management/")).await;
+    not_found(format!("{relay_base}/x/sb/{TOKEN}/mariadb")).await;
+    not_found(format!("{relay_base}/x/sb/{TOKEN}/rabbitmq")).await;
+    not_found(format!("{relay_base}/x/sb/{TOKEN}/rabbitmq/")).await;
     not_found(format!("{relay_base}/x/nope/{TOKEN}/keystone/v3")).await;
     // The switches' WebSocket route is still there, and it still wants an uplink token.
     let upgrade = client
@@ -306,6 +356,74 @@ async fn the_dashboard_cookie_gates_its_pages_and_rewrites_their_origins() {
 }
 
 #[tokio::test]
+async fn cloudflare_forwarding_headers_stay_off_the_upstream_and_the_internal_cookie() {
+    let base = upstream_block().await;
+    let (_relay, relay_base) = relay_for(base, Some(TOKEN)).await;
+    let response = client()
+        .get(format!("{relay_base}/auth/probe/"))
+        .header(
+            header::COOKIE,
+            format!("__stackbox_ui=sb:{TOKEN}:horizon; sessionid=abc"),
+        )
+        .header("x-forwarded-proto", "https")
+        .header("forwarded", "proto=https")
+        .header("cf-visitor", r#"{"scheme":"https"}"#)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::FOUND);
+    assert_eq!(
+        response.headers()["x-seen-xfp"],
+        "-",
+        "x-forwarded-proto reached the upstream"
+    );
+    assert_eq!(
+        response.headers()["x-seen-forwarded"],
+        "-",
+        "forwarded reached the upstream"
+    );
+    assert_eq!(
+        response.headers()["x-seen-cf-visitor"],
+        "-",
+        "cf-visitor reached the upstream"
+    );
+    assert_eq!(
+        response.headers()["x-seen-cookie"],
+        "sessionid=abc",
+        "the internal cookie reached the upstream"
+    );
+    assert_eq!(
+        response.headers()[header::LOCATION],
+        format!("{relay_base}/auth/login/?next=/").as_str(),
+        "an https Location was not rewritten to the relay"
+    );
+}
+
+#[tokio::test]
+async fn chunked_json_is_rewritten_and_forwarding_headers_are_dropped() {
+    let base = upstream_block().await;
+    let (_relay, relay_base) = relay_for(base, Some(TOKEN)).await;
+    let response = client()
+        .get(format!("{relay_base}/x/sb/{TOKEN}/keystone/v3/chunked"))
+        .header("x-forwarded-proto", "https")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["x-seen-xfp"], "-");
+    let body = response.text().await.unwrap();
+    let href = format!("{relay_base}/x/sb/{TOKEN}/keystone/v3/");
+    let compute = format!("{relay_base}/x/sb/{TOKEN}/nova/v2.1");
+    assert!(body.contains(&href), "keystone href not rewritten: {body}");
+    assert!(body.contains(&compute), "nova url not rewritten: {body}");
+    assert!(
+        !body.contains(&format!("127.0.0.1:{base}"))
+            && !body.contains(&format!("127.0.0.1:{}", base + 5)),
+        "upstream address leaked: {body}"
+    );
+}
+
+#[tokio::test]
 async fn rotating_or_removing_the_exposure_revokes_old_urls_and_cookies_at_once() {
     let base = upstream_block().await;
     let (relay, relay_base) = relay_for(base, Some(TOKEN)).await;
@@ -351,4 +469,222 @@ async fn rotating_or_removing_the_exposure_revokes_old_urls_and_cookies_at_once(
         client.get(&fresh).send().await.unwrap().status(),
         StatusCode::NOT_FOUND
     );
+}
+
+/// The `ws://` URL of a stackbox's data store tunnel, from the relay's `http://` base.
+fn tunnel_url(relay_base: &str, token: &str, service: &str) -> String {
+    format!(
+        "{}/x/sb/{token}/tcp/{service}",
+        crate::link::tcp_tunnel::to_ws_url(relay_base).unwrap()
+    )
+}
+
+#[tokio::test]
+async fn rabbitmq_management_is_a_dashboard_behind_its_cookie() {
+    let base = upstream_block().await;
+    let (_relay, relay_base) = relay_for(base, Some(TOKEN)).await;
+    let client = client();
+    let entry = client
+        .get(format!("{relay_base}/x/sb/{TOKEN}/rabbitmq-management"))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(entry.status(), StatusCode::FOUND);
+    assert_eq!(entry.headers()[header::LOCATION], "/");
+    let cookie = entry.headers()[header::SET_COOKIE].to_str().unwrap();
+    assert!(
+        cookie.starts_with(&format!(
+            "__stackbox_ui=sb:{TOKEN}:rabbitmq-management; Path=/; HttpOnly"
+        )),
+        "cookie: {cookie}"
+    );
+    let page = client
+        .get(format!("{relay_base}/"))
+        .header(
+            header::COOKIE,
+            format!("__stackbox_ui=sb:{TOKEN}:rabbitmq-management"),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(page.status(), StatusCode::OK);
+    assert_eq!(page.text().await.unwrap(), "rabbitmq management ui\n");
+    let no_cookie = client.get(format!("{relay_base}/")).send().await.unwrap();
+    assert_eq!(no_cookie.status(), StatusCode::NOT_FOUND);
+}
+
+fn payload(seed: u8) -> Vec<u8> {
+    (0..300_000u32)
+        .map(|i| (i as u8).wrapping_mul(31).wrapping_add(seed))
+        .collect()
+}
+
+#[tokio::test]
+async fn tunnel_carries_two_concurrent_mariadb_connections_byte_for_byte() {
+    let base = upstream_block().await;
+    let (_relay, relay_base) = relay_for(base, Some(TOKEN)).await;
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let local = listener.local_addr().unwrap();
+    tokio::spawn(crate::link::tcp_tunnel::serve(
+        listener,
+        tunnel_url(&relay_base, TOKEN, "mariadb"),
+    ));
+    let exchange = |seed: u8| async move {
+        let data = payload(seed);
+        let stream = tokio::net::TcpStream::connect(local).await.unwrap();
+        let (mut reader, mut writer) = stream.into_split();
+        let sent = data.clone();
+        // The write half lives until the echo is read back: dropping it would send a FIN.
+        let write = async move {
+            writer.write_all(&sent).await.unwrap();
+            writer
+        };
+        let read = async {
+            let mut back = vec![0u8; data.len()];
+            reader.read_exact(&mut back).await.unwrap();
+            back
+        };
+        let (_writer, back) = tokio::join!(write, read);
+        assert!(back == data, "echo differs for connection {seed}");
+    };
+    tokio::time::timeout(Duration::from_secs(30), async {
+        tokio::join!(exchange(1), exchange(2));
+    })
+    .await
+    .expect("the tunnel moved both connections");
+}
+
+/// Whether the relay refuses a WebSocket upgrade to `url` with `404`.
+async fn refused(url: String) -> bool {
+    match tokio_tungstenite::connect_async(url).await {
+        Err(tokio_tungstenite::tungstenite::Error::Http(response)) => {
+            response.status() == StatusCode::NOT_FOUND
+        }
+        _ => false,
+    }
+}
+
+#[tokio::test]
+async fn tunnel_script_is_served_to_the_current_token_only() {
+    let base = upstream_block().await;
+    let (relay, relay_base) = relay_for(base, Some(TOKEN)).await;
+    let client = client();
+    let url = format!("{relay_base}/x/sb/{TOKEN}/tcp/client.mjs");
+    let response = client.get(&url).send().await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(
+        response.headers()[header::CONTENT_TYPE]
+            .to_str()
+            .unwrap()
+            .starts_with("text/javascript")
+    );
+    assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+    let body = response.text().await.unwrap();
+    let ws = relay_base.replacen("http://", "ws://", 1);
+    assert!(
+        body.contains(&format!("\"{ws}/x/sb/{TOKEN}/tcp/mariadb\"")),
+        "{body}"
+    );
+    assert!(
+        body.contains(&format!("\"{ws}/x/sb/{TOKEN}/tcp/rabbitmq\"")),
+        "{body}"
+    );
+    assert_eq!(
+        client
+            .get(format!("{relay_base}/x/sb/bad/tcp/client.mjs"))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    relay.endpoints.replace(None, HashMap::new());
+    assert_eq!(
+        client.get(&url).send().await.unwrap().status(),
+        StatusCode::NOT_FOUND
+    );
+}
+
+/// Connect to a tunnel's local port, send `data`, and read the echo back.
+async fn echo_through(port: u16, data: &[u8]) {
+    let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+        .await
+        .unwrap();
+    stream.write_all(data).await.unwrap();
+    let mut back = vec![0u8; data.len()];
+    tokio::time::timeout(Duration::from_secs(10), stream.read_exact(&mut back))
+        .await
+        .expect("the echo arrived")
+        .unwrap();
+    assert!(back == data, "echo differs");
+}
+
+#[tokio::test]
+async fn node_runs_the_tunnel_script_and_both_stores_echo_through_it() {
+    use tokio::io::{AsyncBufReadExt, BufReader};
+    let base = upstream_block().await;
+    let (_relay, relay_base) = relay_for(base, Some(TOKEN)).await;
+    let script = client()
+        .get(format!("{relay_base}/x/sb/{TOKEN}/tcp/client.mjs"))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
+    // Two free ports for the script's listeners, held until node is about to bind them.
+    let held: Vec<std::net::TcpListener> = (0..2)
+        .map(|_| std::net::TcpListener::bind("127.0.0.1:0").unwrap())
+        .collect();
+    let mysql_port = held[0].local_addr().unwrap().port();
+    let amqp_port = held[1].local_addr().unwrap().port();
+    drop(held);
+
+    let mut child = tokio::process::Command::new("node")
+        .arg("--input-type=module")
+        .env("MYSQL_PORT", mysql_port.to_string())
+        .env("AMQP_PORT", amqp_port.to_string())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .kill_on_drop(true)
+        .spawn()
+        .expect("node on PATH");
+    {
+        // Dropping stdin at the end of the block closes it, which ends node's read of the script.
+        let mut stdin = child.stdin.take().unwrap();
+        stdin.write_all(script.as_bytes()).await.unwrap();
+    }
+    let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
+    let mut mysql_ready = false;
+    let mut amqp_ready = false;
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while !(mysql_ready && amqp_ready) {
+            let Some(line) = lines.next_line().await.unwrap() else {
+                panic!("node exited before it listened");
+            };
+            mysql_ready |= line == format!("MariaDB (MySQL) -> 127.0.0.1:{mysql_port}");
+            amqp_ready |= line == format!("RabbitMQ (AMQP) -> 127.0.0.1:{amqp_port}");
+        }
+    })
+    .await
+    .expect("the script listened on both ports");
+
+    echo_through(mysql_port, &payload(7)).await;
+    echo_through(amqp_port, b"AMQP\x00\x00\x09\x01").await;
+
+    child.kill().await.unwrap();
+    child.wait().await.unwrap();
+}
+
+#[tokio::test]
+async fn tunnel_upgrades_are_refused_for_bad_tokens_services_and_a_disabled_relay() {
+    let base = upstream_block().await;
+    let (relay, relay_base) = relay_for(base, Some(TOKEN)).await;
+    assert!(refused(tunnel_url(&relay_base, "bad", "mariadb")).await);
+    assert!(refused(tunnel_url(&relay_base, TOKEN, "rabbitmq-management")).await);
+    assert!(refused(tunnel_url(&relay_base, TOKEN, "keystone")).await);
+    assert!(refused(tunnel_url(&relay_base, "nope", "mariadb")).await);
+    relay.endpoints.replace(None, HashMap::new());
+    assert!(refused(tunnel_url(&relay_base, TOKEN, "mariadb")).await);
 }

@@ -29,6 +29,7 @@ pub mod host;
 pub mod relay;
 pub mod seal;
 pub mod switch;
+pub mod tcp_tunnel;
 pub mod tls;
 
 use std::collections::BTreeMap;

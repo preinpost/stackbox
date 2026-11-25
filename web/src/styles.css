@@ -6331,3 +6331,71 @@ html[data-theme="dark"] .phase-current .phase-marker {
   background: var(--color-stackbox-600, #117653);
   color: #fff;
 }
+
+/* Data stores: LAN | Relay toggle in the header, relay tunnel commands and console link */
+.datastore-toolbar-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  min-width: 0;
+  margin-left: auto;
+}
+.datastore-panel {
+  scroll-margin-top: 80px;
+}
+.datastore-list > * {
+  min-width: 0;
+}
+/* Zero-install tunnel one-liner, above the cards in the Relay view */
+.tunnel-bar {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  margin-bottom: var(--s4);
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--surface-2);
+  min-width: 0;
+}
+.tunnel-bar-command {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s3);
+  min-width: 0;
+}
+.tunnel-bar-command code {
+  flex: 1;
+  min-width: 0;
+  padding: 6px 9px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  background: var(--code-bg);
+  color: var(--ink);
+  font-size: var(--fs-xs);
+  white-space: normal;
+  word-break: break-all;
+  overflow-wrap: anywhere;
+}
+.tunnel-bar-note {
+  margin: 0;
+  color: var(--ink-4);
+  font-size: var(--fs-xs);
+  overflow-wrap: anywhere;
+}
+/* Relay cards: long relay URLs wrap inside the card instead of widening it */
+.relay-datastore .datastore-conn {
+  align-items: flex-start;
+}
+.relay-datastore .datastore-conn code {
+  flex: 1;
+  min-width: 0;
+  overflow: visible;
+  white-space: normal;
+  word-break: break-all;
+  overflow-wrap: anywhere;
+}
+.relay-datastore .datastore-title strong {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}

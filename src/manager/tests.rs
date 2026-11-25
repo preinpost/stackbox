@@ -8902,8 +8902,15 @@ async fn relay_exposure_hands_out_tokens_that_listings_never_show() {
         exposed.urls["horizon"],
         format!("https://coordinator.example:10011/x/src/{token}/horizon")
     );
-    assert!(!exposed.urls.contains_key("mariadb"));
-    assert!(!exposed.urls.contains_key("rabbitmq"));
+    // The data stores are reached only through their WebSocket tunnels, never plain HTTP.
+    assert_eq!(
+        exposed.urls["mariadb"],
+        format!("https://coordinator.example:10011/x/src/{token}/tcp/mariadb")
+    );
+    assert_eq!(
+        exposed.urls["rabbitmq"],
+        format!("https://coordinator.example:10011/x/src/{token}/tcp/rabbitmq")
+    );
     assert!(manager.0.relay.endpoints.is_exposed("src", &token));
 
     // The token rides on the endpoints call and in the URLs, never in a listing.

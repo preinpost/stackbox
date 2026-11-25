@@ -20,17 +20,20 @@ use anyhow::{Result, anyhow, ensure};
 use axum::{
     Router,
     extract::{
-        Query, Request, State,
+        Path, Query, Request, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
-    http::{HeaderMap, StatusCode, header::AUTHORIZATION},
+    http::{
+        HeaderMap, StatusCode,
+        header::{AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE},
+    },
     response::{IntoResponse, Response},
     routing::get,
 };
 use bytes::Bytes;
 use futures::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc;
+use tokio::{io::AsyncReadExt, io::AsyncWriteExt, net::TcpStream, sync::mpsc};
 
 use super::{MAX_MESSAGE, decode_trunk, token_hash};
 
@@ -135,12 +138,100 @@ pub async fn listen(
 pub fn router(relay: Arc<Relay>) -> Router {
     Router::new()
         .route(super::RELAY_PATH, get(upgrade))
+        .route(
+            "/x/{stackbox}/{token}/tcp/client.mjs",
+            get(tcp_client_script),
+        )
+        .route("/x/{stackbox}/{token}/tcp/{service}", get(tcp_upgrade))
         .fallback(endpoints)
         .with_state(relay)
 }
 
 async fn endpoints(State(relay): State<Arc<Relay>>, request: Request) -> Response {
     relay.endpoints.handle(request).await
+}
+
+/// The `node --input-type=module` script that opens a stackbox's MariaDB and AMQP ports locally.
+/// A wrong token, or a relay that is off, is a plain `404`.
+async fn tcp_client_script(
+    State(relay): State<Arc<Relay>>,
+    Path((stackbox, token)): Path<(String, String)>,
+) -> Response {
+    match relay.endpoints.client_script(&stackbox, &token) {
+        Some(script) => (
+            [
+                (CONTENT_TYPE, "text/javascript; charset=utf-8"),
+                (CACHE_CONTROL, "no-store"),
+            ],
+            script,
+        )
+            .into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+/// A stackbox's MariaDB or RabbitMQ AMQP port, as a WebSocket of binary frames. The token and the
+/// service are checked before the upgrade, so a wrong one is a plain `404`.
+async fn tcp_upgrade(
+    State(relay): State<Arc<Relay>>,
+    Path((stackbox, token, service)): Path<(String, String, String)>,
+    ws: WebSocketUpgrade,
+) -> Response {
+    let Some((host, port)) = relay.endpoints.resolve_tcp(&stackbox, &token, &service) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let limit = super::MAX_MESSAGE + 256;
+    ws.max_message_size(limit)
+        .max_frame_size(limit)
+        .on_upgrade(move |socket| bridge(socket, host, port))
+}
+
+/// Copy bytes both ways between a WebSocket and `host:port` until either side ends. A `Ping` every
+/// [`PING_EVERY`] keeps a proxy in front from closing the quiet connection.
+async fn bridge(socket: WebSocket, host: String, port: u16) {
+    let (mut sink, mut stream) = socket.split();
+    let tcp = match TcpStream::connect((host.as_str(), port)).await {
+        Ok(tcp) => tcp,
+        Err(error) => {
+            eprintln!("relay: tcp {host}:{port}: {error}");
+            let _ = sink.send(Message::Close(None)).await;
+            return;
+        }
+    };
+    let _ = tcp.set_nodelay(true);
+    let (mut reader, mut writer) = tcp.into_split();
+    let mut buf = vec![0u8; 16 * 1024];
+    let mut ping = tokio::time::interval(PING_EVERY);
+    ping.tick().await;
+    loop {
+        tokio::select! {
+            read = reader.read(&mut buf) => {
+                let n = match read {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => n,
+                };
+                if sink.send(Message::Binary(Bytes::copy_from_slice(&buf[..n]))).await.is_err() {
+                    break;
+                }
+            }
+            message = stream.next() => match message {
+                Some(Ok(Message::Binary(data))) => {
+                    if writer.write_all(&data).await.is_err() {
+                        break;
+                    }
+                }
+                Some(Ok(Message::Close(_)) | Err(_)) | None => break,
+                Some(Ok(_)) => {}
+            },
+            _ = ping.tick() => {
+                if sink.send(Message::Ping(Bytes::new())).await.is_err() {
+                    break;
+                }
+            }
+        }
+    }
+    let _ = writer.shutdown().await;
+    let _ = sink.send(Message::Close(None)).await;
 }
 
 #[derive(Deserialize)]

@@ -153,6 +153,14 @@ struct ReleaseArgs {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Forward a local TCP port to a stackbox data store (MariaDB / RabbitMQ) over its Cloudflare relay URL
+    Tunnel {
+        /// The stackbox's relay URL for the service, such as https://relay/x/<stackbox>/<token>/tcp/mariadb
+        url: String,
+        /// Local address to listen on; defaults to 127.0.0.1:3306 (MariaDB) or 127.0.0.1:5672 (RabbitMQ)
+        #[arg(short, long)]
+        listen: Option<String>,
+    },
     /// Run the REST API daemon (STACKBOX_API_TOKEN enables bearer authentication)
     Serve {
         #[arg(long, default_value = "127.0.0.1:10010")]
@@ -510,6 +518,9 @@ async fn wait(manager: &StackboxManager, job: Job) -> Result<()> {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    if let Command::Tunnel { url, listen } = &cli.command {
+        return stackbox::link::tcp_tunnel::run(url, listen.as_deref()).await;
+    }
     // Planning and schema commands need neither msb nor the daemon's writer lock, nor a
     // usable stackbox kernel: computing a plan never boots a VM, and whether a host can bind the
     // `mtty` device is decided by that host's inspection when the stackbox is created.
@@ -1053,7 +1064,8 @@ async fn main() -> Result<()> {
         | Command::Plan { .. }
         | Command::Openapi
         | Command::Golden { .. }
-        | Command::Agent { .. } => {
+        | Command::Agent { .. }
+        | Command::Tunnel { .. } => {
             unreachable!()
         }
     }

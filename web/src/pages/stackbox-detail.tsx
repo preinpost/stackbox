@@ -1201,7 +1201,7 @@ const storeIcons: Record<string, React.ReactNode> = {
  * MariaDB and RabbitMQ ship with every stackbox; integrations connect through their published ports.
  * Shares the endpoints query cache with the service panel above.
  */
-function Datastores({ stackbox }: { stackbox: Stackbox }) {
+export function Datastores({ stackbox }: { stackbox: Stackbox }) {
   const deployed = stackboxDeployed(stackbox);
   const query = useQuery({
     queryKey: keys.endpoints(stackbox.id),
@@ -1210,6 +1210,30 @@ function Datastores({ stackbox }: { stackbox: Stackbox }) {
     staleTime: 60_000,
   });
   const stores = query.data?.datastores ?? [];
+  const relayUrls = query.data?.relay_exposure?.urls ?? {};
+  const relayExposed =
+    !!query.data?.relay_exposure?.enabled && Object.keys(relayUrls).length > 0;
+  // Relay is the default once exposed; picking LAN sticks for this view.
+  const [lanChosen, setLanChosen] = useState(false);
+  const viaRelay = relayExposed && !lanChosen;
+  const tunnelScript = relayUrls["tunnel-script"];
+  // Zero-install one-liner: Node 22+ opens MariaDB 3306 and AMQP 5672 locally.
+  const tunnelCommand =
+    viaRelay && tunnelScript
+      ? `curl -fsSL ${tunnelScript} | node --input-type=module`
+      : undefined;
+  /** Relay view swaps the address (and console link) per store; LAN view keeps the published ports. */
+  const relayOverride = (id: string): { addressOverride?: string; hrefOverride?: string } => {
+    if (!viaRelay) return {};
+    if (id === "rabbitmq-management") {
+      const url = relayUrls["rabbitmq-management"];
+      return url ? { addressOverride: url, hrefOverride: url } : {};
+    }
+    if (!tunnelScript) return {};
+    if (id === "mariadb") return { addressOverride: "127.0.0.1:3306" };
+    if (id === "rabbitmq") return { addressOverride: "127.0.0.1:5672" };
+    return {};
+  };
   return (
     <section className="panel datastore-panel">
       <div className="panel-toolbar">
@@ -1217,9 +1241,29 @@ function Datastores({ stackbox }: { stackbox: Stackbox }) {
           <Database size={16} />
           Data stores
         </h2>
-        {deployed && stores.length > 0 && (
-          <span className="chip mono">{stores.length}</span>
-        )}
+        <div className="datastore-toolbar-actions">
+          {relayExposed && (
+            <div className="relay-view-toggle" role="group" aria-label="데이터 스토어 주소 보기">
+              <button
+                type="button"
+                aria-pressed={!viaRelay}
+                onClick={() => setLanChosen(true)}
+              >
+                LAN
+              </button>
+              <button
+                type="button"
+                aria-pressed={viaRelay}
+                onClick={() => setLanChosen(false)}
+              >
+                Relay
+              </button>
+            </div>
+          )}
+          {deployed && stores.length > 0 && (
+            <span className="chip mono">{stores.length}</span>
+          )}
+        </div>
       </div>
       <div className="panel-body">
         {!deployed ? (
@@ -1237,24 +1281,44 @@ function Datastores({ stackbox }: { stackbox: Stackbox }) {
           </div>
         ) : (
           <>
+            {tunnelCommand && (
+              <div className="tunnel-bar">
+                <div className="tunnel-bar-command">
+                  <code>{tunnelCommand}</code>
+                  <CopyText value={tunnelCommand} hideValue label="터널 명령" />
+                </div>
+                <p className="tunnel-bar-note">
+                  stackbox 설치 없이 Node 22+로 MariaDB(127.0.0.1:3306)와 RabbitMQ
+                  AMQP(127.0.0.1:5672)를 한 번에 엽니다. (포트 변경: MYSQL_PORT=13306
+                  AMQP_PORT=15672)
+                </p>
+              </div>
+            )}
             <p className="field-hint">
-              stackbox마다 같은 VM 안에서 실행되는 데이터베이스와 메시지 큐입니다.
-              포트는 {stackbox.exposure?.port_base ?? "—"}번대 블록의 해당 offset을
-              씁니다.
+              {viaRelay
+                ? "Cloudflare 릴레이 주소입니다. 관리 UI는 브라우저에서 바로 열고, DB·AMQP는 위 터널 명령으로 로컬 포트에 연결합니다."
+                : "stackbox마다 같은 VM 안에서 실행되는 데이터베이스와 메시지 큐입니다. 포트는 " +
+                  `${stackbox.exposure?.port_base ?? "—"}번대 블록의 해당 offset을 씁니다.`}
             </p>
             <div className="datastore-list">
               {stores.map((store) => (
-                <DatastoreCard store={store} key={store.id} />
+                <DatastoreCard
+                  store={store}
+                  key={store.id}
+                  {...relayOverride(store.id)}
+                />
               ))}
             </div>
-            <div className="credential-note">
-              <ShieldCheck size={16} />
-              <p>
-                이 포트는 stackbox VM의 고정 주소로 DNAT됩니다. 외부에 공개한
-                포털이라면 인증정보 표시를 끄고 방화벽으로 3306·5672·15672를
-                제한하세요.
-              </p>
-            </div>
+            {!viaRelay && (
+              <div className="credential-note">
+                <ShieldCheck size={16} />
+                <p>
+                  이 포트는 stackbox VM의 고정 주소로 DNAT됩니다. 외부에 공개한
+                  포털이라면 인증정보 표시를 끄고 방화벽으로 3306·5672·15672를
+                  제한하세요.
+                </p>
+              </div>
+            )}
           </>
         )}
       </div>
@@ -1263,11 +1327,24 @@ function Datastores({ stackbox }: { stackbox: Stackbox }) {
 }
 
 /** One data store: connection, account, and the schemas a client may open. */
-export function DatastoreCard({ store }: { store: Datastore }) {
+export function DatastoreCard({
+  store,
+  addressOverride,
+  hrefOverride,
+}: {
+  store: Datastore;
+  /** Relay view: the address shown and copied instead of host:port. */
+  addressOverride?: string;
+  /** Relay view: the console link target. */
+  hrefOverride?: string;
+}) {
   const [revealed, setRevealed] = useState(false);
   const console_ = store.protocol === "http";
+  const relay = addressOverride !== undefined || hrefOverride !== undefined;
+  const address = addressOverride ?? `${store.host}:${store.port}`;
+  const copyValue = addressOverride ?? store.url;
   return (
-    <article className="datastore">
+    <article className={relay ? "datastore relay-datastore" : "datastore"}>
       <header className="datastore-head">
         <span className="datastore-icon">
           {storeIcons[store.id] ?? <Database size={16} />}
@@ -1278,7 +1355,7 @@ export function DatastoreCard({ store }: { store: Datastore }) {
         </div>
         {console_ && (
           <a
-            href={store.url}
+            href={hrefOverride ?? store.url}
             target="_blank"
             rel="noreferrer"
             className="icon-button datastore-open"
@@ -1291,10 +1368,8 @@ export function DatastoreCard({ store }: { store: Datastore }) {
       <div className="datastore-body">
         <div className="datastore-conn">
           <KeyRound size={16} />
-          <code>
-            {store.host}:{store.port}
-          </code>
-          <CopyText value={store.url} hideValue label="URL" />
+          <code>{address}</code>
+          <CopyText value={copyValue} hideValue label="URL" />
         </div>
         <dl className="datastore-fields">
           {store.username && (
