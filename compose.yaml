@@ -1,0 +1,35 @@
+# stackbox coordinator + web portal (production-style single container).
+#
+# Quick start:
+#   export STACKBOX_API_TOKEN="$(openssl rand -hex 32)"   # required before exposing beyond this machine
+#   docker compose up -d --build
+#   open http://127.0.0.1:10020
+#
+# Cloudflare Named Tunnel: route the tunnel hostname to http://127.0.0.1:10020 and set the
+#   hostname the portal must accept (Host header check), e.g. in your shell or an .env file:
+#   PORTAL_ALLOWED_HOSTS=stackbox.example.com
+#
+# Private relay (hosts reach the coordinator directly over TLS): uncomment the 10011 port below and
+#   set STACKBOX_RELAY_TLS=private and STACKBOX_RELAY_BIND=0.0.0.0:10011 in `environment`. See README.md.
+#
+# Set STACKBOX_PORT to publish the portal on another host port (default 10020).
+
+services:
+  stackbox:
+    build: .
+    image: stackbox:local
+    restart: unless-stopped
+    stop_grace_period: 30s
+    ports:
+      - "${STACKBOX_PORT:-10020}:10020"
+      # - "10011:10011"   # private relay, see the comment above
+    volumes:
+      - stackbox-data:/data   # state.json and other stackbox state (STACKBOX_STATE_DIR=/data)
+    environment:
+      # Bearer token for the API; the portal proxy adds it. Empty means no authentication.
+      STACKBOX_API_TOKEN: ${STACKBOX_API_TOKEN:-}
+      # Extra Host names the portal accepts, comma-separated (loopback names are always accepted).
+      PORTAL_ALLOWED_HOSTS: ${PORTAL_ALLOWED_HOSTS:-}
+
+volumes:
+  stackbox-data:
