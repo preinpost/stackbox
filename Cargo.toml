@@ -1,6 +1,6 @@
 [package]
 name = "stackbox"
-version = "0.1.17"
+version = "0.1.18"
 edition = "2024"
 default-run = "stackbox"
 description = "Deploy and manage multi-node OpenStack environments on microsandbox VMs with Kolla"
