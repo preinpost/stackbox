@@ -145,12 +145,12 @@ cargo run -- serve
 ```
 
 실행기는 daemon 시작 시 로드하며 형식·아키텍처·크기를 검사한다. 변경 시 daemon을 재시작한다.
-로드한 실행기가 없는 플랫폼은 `STACKBOX_AGENT_URL`(기본 `https://public-bucket.preinpost.in/stackbox-agent`)에 이 빌드의
-`<build id>/manifest.json`이 있으면 그 실행기를 쓴다. 호스트에 처음 설치할 때 받아 크기·sha256·플랫폼·build id를
+로드한 실행기가 없는 플랫폼은 `STACKBOX_AGENT_URL`(기본 `https://github.com/preinpost/stackbox/releases/download`)에서 이 빌드의
+릴리스 `v<version>/manifest.json`을 찾아 그 실행기를 쓴다. 호스트에 처음 설치할 때 받아 크기·sha256·플랫폼·build id를
 확인하고 `<state-dir>/agents/<sha256>/`에 보관한다. 릴리스 태그로 빌드한 coordinator만 해당하며, 빈 값이면 끈다.
 SSH 설치는 아직 Linux 호스트만 지원한다.
 `task dev`는 coordinator를 빌드한 뒤 `task agent-build`(기본 `ARCHS="x86_64 aarch64"`, 소스가 그대로면 건너뜀)로 실행기를
-함께 빌드한다. 빌드한 coordinator의 build id로 릴리스된 manifest가 있으면(`scripts/agents-published.sh`) 실행기는 R2에서
+함께 빌드한다. 빌드한 coordinator의 build id로 릴리스된 manifest가 있으면(`scripts/agents-published.sh`) 실행기는 릴리스에서
 받으므로 빌드하지 않는다.
 `stackbox serve`는 시작할 때, 다른 빌드의 실행기가 설치돼 있고 작업 중이 아닌 SSH 호스트마다 현재 빌드의 실행기가
 로드돼 있으면 `install_agent` host job을 시작한다. 그래서 coordinator를 다시 빌드해도 호스트를 손으로 재설치할 필요가 없다.

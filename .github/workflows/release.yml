@@ -1,0 +1,345 @@
+# Cuts a release for every push to main: bumps the version (patch unless a commit since the last
+# release says #minor/[minor] or #major/[major]), builds the stackbox-agent for every platform a
+# host can run, commits and tags the version on main, publishes a GitHub Release with the agents
+# and a manifest, pushes a container image to GHCR, and merges the result back into dev.
+#
+# The guest kernels are not part of this release: .github/workflows/libkrunfw.yml builds and
+# publishes them on its own schedule (push to main when the kernel scripts change, or
+# workflow_dispatch). A release therefore neither waits for a kernel build nor changes the kernel a
+# host installs.
+name: release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Smallest bump to make; commit markers can raise it
+        type: choice
+        options: [patch, minor, major]
+        default: patch
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  # The same gates as ci.yml, run on the commit before anything is bumped, tagged, or published.
+  # Every later job needs it, so a failing gate releases nothing.
+  gate:
+    if: ${{ github.ref == 'refs/heads/main' && !startsWith(github.event.head_commit.message, 'Release v') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+      CARGO_BUILD_JOBS: 2
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99.1"
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Rust tests
+        run: cargo test
+
+      - name: Install the portal dependencies
+        run: npm --prefix web ci
+
+      - name: Portal tests
+        run: |
+          set -eu
+          (cd web && npx vitest run)
+          node --test web/server/*.test.mjs
+
+      - name: Portal build
+        run: npm --prefix web run build
+
+  # Picks the version. Same rules as before: the next patch unless a commit since the last tag asks
+  # for more, and a version that is not tagged yet ships as written.
+  prepare:
+    needs: gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      prev: ${{ steps.version.outputs.prev }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Pick the version
+        id: version
+        env:
+          BUMP: ${{ inputs.bump || 'patch' }}
+        run: |
+          set -eu
+          current=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+          prev=$(git describe --tags --abbrev=0 --match 'v[0-9]*.[0-9]*.[0-9]*' 2>/dev/null || true)
+          if git rev-parse -q --verify "refs/tags/v$current" >/dev/null; then
+            log=$(git log --format=%B "${prev:+$prev..}HEAD")
+            rank() { case $1 in major) echo 2 ;; minor) echo 1 ;; *) echo 0 ;; esac; }
+            level=$BUMP
+            if printf '%s\n' "$log" | grep -Eqi '#major|\[major\]'; then marked=major
+            elif printf '%s\n' "$log" | grep -Eqi '#minor|\[minor\]'; then marked=minor
+            else marked=patch
+            fi
+            if [ "$(rank "$marked")" -gt "$(rank "$level")" ]; then level=$marked; fi
+            major=${current%%.*} rest=${current#*.}
+            minor=${rest%%.*} patch=${rest#*.}
+            case $level in
+              major) next=$((major + 1)).0.0 ;;
+              minor) next=$major.$((minor + 1)).0 ;;
+              *) next=$major.$minor.$((patch + 1)) ;;
+            esac
+            echo "$level bump: $current -> $next"
+          else
+            # A version set by hand on dev (or the first release) ships as written.
+            next=$current
+            echo "v$current is untagged; releasing it as is"
+          fi
+          if git rev-parse -q --verify "refs/tags/v$next" >/dev/null; then
+            echo "v$next already exists" >&2
+            exit 1
+          fi
+          echo "version=$next" >>"$GITHUB_OUTPUT"
+          echo "prev=$prev" >>"$GITHUB_OUTPUT"
+
+  # Built from the version the release will carry: set-version runs here too, so every platform
+  # hashes the same sources and gets the same build id. Nothing is pushed until all of them build.
+  build:
+    needs: prepare
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - target: linux-x86_64
+            arch: x86_64
+            runner: ubuntu-latest
+            ext: ""
+          - target: linux-aarch64
+            arch: aarch64
+            runner: ubuntu-24.04-arm
+            ext: ""
+          - target: macos-aarch64
+            arch: macos-aarch64
+            runner: macos-14
+            ext: ""
+          - target: windows-x86_64
+            arch: windows-x86_64
+            runner: ubuntu-latest
+            ext: ".exe"
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set the version
+        run: sh scripts/set-version.sh "${{ needs.prepare.outputs.version }}"
+
+      - name: Install the Rust toolchain
+        if: matrix.target == 'macos-aarch64'
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99.1"
+          targets: aarch64-apple-darwin
+
+      - name: Rust cache
+        if: matrix.target == 'macos-aarch64'
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build the agent
+        run: sh scripts/build-agent.sh "${{ matrix.arch }}"
+
+      - name: Check the build id stamp
+        run: |
+          set -eu
+          file="dist/agent/${{ matrix.arch }}/stackbox-agent${{ matrix.ext }}"
+          test -f "$file" || { echo "missing $file" >&2; exit 1; }
+          ids=$(grep -aoE 'stackbox-agent-build:[0-9a-f]{16}' "$file" | sort -u || true)
+          if [ "$(printf '%s\n' "$ids" | grep -c .)" -ne 1 ]; then
+            echo "expected exactly one build id in $file, found: $ids" >&2
+            exit 1
+          fi
+          echo "$ids"
+
+      - name: Upload the agent
+        uses: actions/upload-artifact@v4
+        with:
+          name: stackbox-agent-${{ matrix.target }}${{ matrix.ext }}
+          path: dist/agent/${{ matrix.arch }}/stackbox-agent${{ matrix.ext }}
+          if-no-files-found: error
+
+  # Commits and tags the version, then publishes the GitHub Release with the agents. The agents
+  # come from the same sources as the commit, so their build ids must all agree.
+  publish:
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      PREV: ${{ needs.prepare.outputs.prev }}
+      GH_TOKEN: ${{ secrets.RELEASE_TOKEN || github.token }}
+      AGENT_BASE_URL: https://github.com/preinpost/stackbox/releases/download
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.RELEASE_TOKEN || github.token }}
+
+      - name: Download the agents
+        uses: actions/download-artifact@v4
+        with:
+          pattern: stackbox-agent-*
+          path: ${{ runner.temp }}/artifacts
+
+      - name: Check the build ids and stage the assets
+        run: |
+          set -eu
+          src=$RUNNER_TEMP/artifacts
+          out=$RUNNER_TEMP/assets
+          mkdir -p "$out"
+          ids=
+          for platform in linux-x86_64 linux-aarch64 macos-aarch64 windows-x86_64; do
+            case $platform in windows-*) ext=.exe ;; *) ext= ;; esac
+            file=$src/stackbox-agent-$platform$ext/stackbox-agent$ext
+            test -f "$file" || { echo "missing $file" >&2; exit 1; }
+            id=$(grep -aoE 'stackbox-agent-build:[0-9a-f]{16}' "$file" | sort -u || true)
+            if [ "$(printf '%s\n' "$id" | grep -c .)" -ne 1 ]; then
+              echo "$platform: expected one build id, found: $id" >&2
+              exit 1
+            fi
+            if [ -z "$ids" ]; then
+              ids=$id
+            elif [ "$ids" != "$id" ]; then
+              echo "the agents disagree on the build id: $ids vs $id ($platform)" >&2
+              exit 1
+            fi
+            cp "$file" "$out/stackbox-agent-$platform$ext"
+          done
+          echo "BUILD_ID=${ids#stackbox-agent-build:}" >>"$GITHUB_ENV"
+          echo "ASSETS=$out" >>"$GITHUB_ENV"
+
+      - name: Write the manifest
+        run: |
+          set -eu
+          agents='{}'
+          for platform in linux-x86_64 linux-aarch64 macos-aarch64 windows-x86_64; do
+            case $platform in windows-*) ext=.exe ;; *) ext= ;; esac
+            file=stackbox-agent-$platform$ext
+            sha=$(sha256sum "$ASSETS/$file" | cut -d' ' -f1)
+            size=$(wc -c <"$ASSETS/$file" | tr -d ' ')
+            agents=$(printf '%s' "$agents" | jq -c \
+              --arg p "$platform" --arg path "v$VERSION/$file" --arg sha "$sha" --argjson size "$size" \
+              '.[$p] = {path: $path, sha256: $sha, size: $size}')
+          done
+          jq -n --arg version "$VERSION" --arg build_id "$BUILD_ID" --argjson agents "$agents" \
+            '{version: $version, build_id: $build_id, agents: $agents}' >"$ASSETS/manifest.json"
+          cat "$ASSETS/manifest.json"
+
+      - name: Commit and tag
+        run: |
+          set -eu
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          sh scripts/set-version.sh "$VERSION"
+          if ! git diff --quiet; then
+            git commit -am "Release v$VERSION"
+          fi
+          git tag -a "v$VERSION" -m "Release v$VERSION"
+
+      - name: Push
+        run: git push --atomic origin HEAD:refs/heads/main "refs/tags/v$VERSION"
+
+      - name: Publish the GitHub Release
+        run: |
+          set -eu
+          notes=$RUNNER_TEMP/notes.md
+          {
+            git log --no-merges --format='- %s (%h)' "${PREV:+$PREV..}v$VERSION" \
+              | grep -v '^- Release v' || true
+            printf '\n### stackbox-agent\n\nBuild id `%s`. A coordinator built from this tag accepts these agents ([manifest](%s/v%s/manifest.json)).\n\n' \
+              "$BUILD_ID" "$AGENT_BASE_URL" "$VERSION"
+            printf '| platform | sha256 |\n|---|---|\n'
+            jq -r --arg base "$AGENT_BASE_URL" --arg v "$VERSION" \
+              '.agents | to_entries[] | "| [\(.key)](\($base)/v\($v)/\(.value.path | split("/") | last)) | `\(.value.sha256)` |"' \
+              "$ASSETS/manifest.json"
+            printf '\n### Container image\n\n`docker pull ghcr.io/preinpost/stackbox:v%s`\n' "$VERSION"
+          } >"$notes"
+          gh release create "v$VERSION" --title "v$VERSION" --notes-file "$notes" --verify-tag \
+            "$ASSETS/manifest.json" "$ASSETS"/stackbox-agent-*
+
+      - name: Merge back into dev
+        run: |
+          set -eu
+          if ! git ls-remote --exit-code --heads origin dev >/dev/null; then
+            echo "no dev branch; nothing to merge into"
+            exit 0
+          fi
+          git fetch origin dev
+          git checkout -B dev origin/dev
+          git merge --no-edit -m "Merge v$VERSION into dev" "v$VERSION^{commit}"
+          git push origin HEAD:refs/heads/dev
+
+  # The image for the tagged commit, pushed to GHCR under the version, latest, and the short sha.
+  docker:
+    needs: [prepare, publish]
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: "v${{ needs.prepare.outputs.version }}"
+
+      - name: Read the short sha
+        id: meta
+        run: echo "short=$(git rev-parse --short=7 HEAD)" >>"$GITHUB_OUTPUT"
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ghcr.io/preinpost/stackbox:v${{ needs.prepare.outputs.version }}
+            ghcr.io/preinpost/stackbox:latest
+            ghcr.io/preinpost/stackbox:sha-${{ steps.meta.outputs.short }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

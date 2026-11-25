@@ -544,9 +544,10 @@ pub fn install_would_replace(library: &Path) -> bool {
         .any(|pair| pair[0] == ".microsandbox" && pair[1] == "lib")
 }
 
-/// Where kernels published by stackbox are served from: `<kid>/manifest.txt`, the library under
-/// `<kid>/<os>-<arch>/`, and per-msb indexes under `msb-<version>/<os>-<arch>.json`.
-pub const RELEASE_URL: &str = "https://public-bucket.preinpost.in/stackbox-libkrunfw";
+/// Where kernels published by stackbox are served from: a GitHub release per kernel, tagged
+/// `libkrunfw-<kid>`, holding `manifest.txt` and the flat asset `<os>-<arch>-<file>`; and the
+/// per-msb indexes in the release tagged `libkrunfw-index`, as `msb-<version>-<os>-<arch>.json`.
+pub const RELEASE_URL: &str = "https://github.com/preinpost/stackbox/releases/download";
 
 /// Environment variable overriding [`RELEASE_URL`]. Empty turns the published kernels off.
 pub const URL_VAR: &str = "STACKBOX_LIBKRUNFW_URL";
@@ -566,7 +567,7 @@ fn release_url_from(value: Option<&str>) -> Option<String> {
     }
 }
 
-/// The index a published kernel is announced by, as `scripts/libkrunfw-index.sh` writes it.
+/// The index a published kernel is announced by, as `scripts/libkrunfw-publish.sh index` writes it.
 #[derive(serde::Deserialize)]
 struct Index {
     kid: String,
@@ -575,6 +576,10 @@ struct Index {
     arch: String,
     manifest_path: String,
     artifact_path: String,
+    /// The library's file name, its soname. Older indexes leave it out; it is then the artifact
+    /// path's basename without its `<os>-<arch>-` prefix.
+    #[serde(default)]
+    filename: Option<String>,
     sha256: String,
     size: u64,
 }
@@ -606,6 +611,26 @@ fn safe_relative(path: &str) -> Result<()> {
 }
 
 impl Index {
+    /// The file the library is stored as, which is what the host loads: a soname such as
+    /// `libkrunfw.so.5.6.1` or `libkrunfw.5.dylib`, never a path.
+    fn library_name(&self) -> Result<String> {
+        let name = match &self.filename {
+            Some(name) => name.clone(),
+            None => {
+                let base = self.artifact_path.rsplit('/').next().unwrap_or_default();
+                base.strip_prefix(&format!("{}-{}-", self.os, self.arch))
+                    .unwrap_or(base)
+                    .to_owned()
+            }
+        };
+        validate_filename(&name)?;
+        ensure!(
+            name.starts_with("libkrunfw"),
+            "the published kernel library {name:?} is not a libkrunfw"
+        );
+        Ok(name)
+    }
+
     fn validate(&self, os: &str, arch: &str, msb_version: &str) -> Result<()> {
         ensure!(
             self.msb == msb_version && self.os == os && self.arch == arch,
@@ -624,10 +649,22 @@ impl Index {
             "invalid published kernel size {}",
             self.size
         );
+        // The layout the publish script writes: one release per kernel, flat asset names.
+        let manifest_path = format!("libkrunfw-{}/manifest.txt", self.kid);
+        ensure!(
+            self.manifest_path == manifest_path,
+            "the published kernel manifest is at {:?}, not {manifest_path}",
+            self.manifest_path
+        );
         safe_relative(&self.manifest_path)?;
+        let filename = self.library_name()?;
+        let artifact_path = format!("libkrunfw-{}/{os}-{arch}-{filename}", self.kid);
+        ensure!(
+            self.artifact_path == artifact_path,
+            "the published kernel library is at {:?}, not {artifact_path}",
+            self.artifact_path
+        );
         safe_relative(&self.artifact_path)?;
-        let filename = self.artifact_path.rsplit('/').next().unwrap_or_default();
-        validate_filename(filename)?;
         Ok(())
     }
 }
@@ -683,7 +720,7 @@ pub async fn fetch_published(
     cache_dir: &Path,
 ) -> Result<Option<Artifact>> {
     let base = base_url.trim_end_matches('/');
-    let index_url = format!("{base}/msb-{msb_version}/{os}-{arch}.json");
+    let index_url = format!("{base}/libkrunfw-index/msb-{msb_version}-{os}-{arch}.json");
     let Some(body) =
         get_optional(&index_url, 64 * 1024, std::time::Duration::from_secs(20)).await?
     else {
@@ -692,12 +729,7 @@ pub async fn fetch_published(
     let index: Index = serde_json::from_slice(&body)
         .with_context(|| format!("read the published kernel index {index_url}"))?;
     index.validate(os, arch, msb_version)?;
-    let filename = index
-        .artifact_path
-        .rsplit('/')
-        .next()
-        .unwrap_or_default()
-        .to_owned();
+    let filename = index.library_name()?;
     // The manifest's own os name for the library: a dylib on macOS, a .so elsewhere.
     let manifest_os = if os == "darwin" { "macos" } else { os };
     let dir = cache_dir.join(&index.kid);
@@ -790,8 +822,9 @@ fn published_manifest(
         .artifact_for(manifest_os)
         .with_context(|| format!("the published kernel has no library for {manifest_os}"))?;
     safe_relative(path)?;
+    let filename = index.library_name()?;
     ensure!(
-        path.rsplit('/').next() == index.artifact_path.rsplit('/').next() && sha256 == index.sha256,
+        path.rsplit('/').next() == Some(filename.as_str()) && sha256 == index.sha256,
         "the published manifest does not list the library its index names"
     );
     Ok(())
@@ -1114,8 +1147,9 @@ mod published_tests {
             "os": "linux",
             "arch": "x86_64",
             "revision": "f0493b6f1873ed6031bc0bb87568db0095a6d3b6",
-            "manifest_path": format!("{kid}/manifest.txt"),
-            "artifact_path": format!("{kid}/linux-x86_64/libkrunfw.so.5.6.1"),
+            "manifest_path": format!("libkrunfw-{kid}/manifest.txt"),
+            "artifact_path": format!("libkrunfw-{kid}/linux-x86_64-libkrunfw.so.5.6.1"),
+            "filename": "libkrunfw.so.5.6.1",
             "sha256": sha,
             "size": LIBRARY.len(),
         });
@@ -1131,15 +1165,21 @@ mod published_tests {
         {
             let mut files = bucket.files.lock().unwrap();
             files.insert(
-                format!("/msb-{}/linux-x86_64.json", crate::remote::MSB_VERSION),
+                format!(
+                    "/libkrunfw-index/msb-{}-linux-x86_64.json",
+                    crate::remote::MSB_VERSION
+                ),
                 index.to_string().into_bytes(),
             );
             files.insert(
-                format!("/{}/manifest.txt", published.kid),
+                format!("/libkrunfw-{}/manifest.txt", published.kid),
                 published.manifest.clone().into_bytes(),
             );
             files.insert(
-                format!("/{}/linux-x86_64/libkrunfw.so.5.6.1", published.kid),
+                format!(
+                    "/libkrunfw-{}/linux-x86_64-libkrunfw.so.5.6.1",
+                    published.kid
+                ),
                 LIBRARY.to_vec(),
             );
         }
@@ -1200,7 +1240,10 @@ mod published_tests {
         assert_eq!(asked.len(), 4, "{asked:?}");
         assert_eq!(
             asked[3],
-            format!("/msb-{}/linux-x86_64.json", crate::remote::MSB_VERSION)
+            format!(
+                "/libkrunfw-index/msb-{}-linux-x86_64.json",
+                crate::remote::MSB_VERSION
+            )
         );
 
         // A cached library that no longer matches is downloaded again, not reused.
@@ -1253,7 +1296,10 @@ mod published_tests {
         let published = published(crate::remote::MSB_VERSION);
         let bucket = bucket_with(&published, published.index.clone());
         bucket.files.lock().unwrap().insert(
-            format!("/{}/linux-x86_64/libkrunfw.so.5.6.1", published.kid),
+            format!(
+                "/libkrunfw-{}/linux-x86_64-libkrunfw.so.5.6.1",
+                published.kid
+            ),
             b"tampered kernel fixture".to_vec(),
         );
         let base = serve(bucket).await;
@@ -1305,6 +1351,9 @@ mod published_tests {
             ("artifact_path", "../../etc/passwd"),
             ("manifest_path", "/etc/passwd"),
             ("artifact_path", "a/./b\tc"),
+            ("filename", "../libkrunfw.so.5.6.1"),
+            ("filename", "evil.so"),
+            ("artifact_path", "libkrunfw-x/other-name"),
         ] {
             let mut index = published.index.clone();
             index[field] = value.into();
@@ -1364,6 +1413,47 @@ mod published_tests {
             .await
             .is_err()
         );
+    }
+}
+
+#[cfg(test)]
+mod library_name_tests {
+    use super::*;
+    use crate::remote::MSB_VERSION as MSB;
+
+    /// The library is stored under its soname, whether the index names it or the artifact
+    /// path does, and never under a path.
+    #[test]
+    fn the_library_is_stored_under_its_soname() {
+        let kid = "0123456789abcdef";
+        let mut index = Index {
+            kid: kid.into(),
+            msb: MSB.into(),
+            os: "linux".into(),
+            arch: "x86_64".into(),
+            manifest_path: format!("libkrunfw-{kid}/manifest.txt"),
+            artifact_path: format!("libkrunfw-{kid}/linux-x86_64-libkrunfw.so.5.6.1"),
+            filename: Some("libkrunfw.so.5.6.1".into()),
+            sha256: "a".repeat(64),
+            size: 1,
+        };
+        assert_eq!(index.library_name().unwrap(), "libkrunfw.so.5.6.1");
+        index.validate("linux", "x86_64", MSB).unwrap();
+
+        index.filename = None;
+        assert_eq!(index.library_name().unwrap(), "libkrunfw.so.5.6.1");
+        index.validate("linux", "x86_64", MSB).unwrap();
+
+        index.os = "darwin".into();
+        index.arch = "aarch64".into();
+        index.artifact_path = format!("libkrunfw-{kid}/darwin-aarch64-libkrunfw.5.dylib");
+        assert_eq!(index.library_name().unwrap(), "libkrunfw.5.dylib");
+        index.validate("darwin", "aarch64", MSB).unwrap();
+
+        index.filename = Some("../libkrunfw.5.dylib".into());
+        assert!(index.library_name().is_err());
+        index.filename = Some("notkrunfw.5.dylib".into());
+        assert!(index.library_name().is_err());
     }
 }
 

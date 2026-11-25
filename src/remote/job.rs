@@ -250,7 +250,8 @@ fn alive(dir: &Path) -> bool {
     let Ok(file) = File::open(dir.join("worker.lock")) else {
         return false;
     };
-    let free = file.try_lock_shared().is_ok();
+    // The fs2 trait method: `File::try_lock_shared` is newer than the crate's rust-version.
+    let free = FileExt::try_lock_shared(&file).is_ok();
     if free {
         let _ = FileExt::unlock(&file);
     }

@@ -1,7 +1,7 @@
 # VCS, agent/tooling state and local artifacts; none are build inputs.
 .git
 .agents
-.forgejo
+.github
 .task
 .screens
 .github

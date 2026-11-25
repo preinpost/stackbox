@@ -299,7 +299,7 @@ impl Agent {
         ensure!(
             exposure.port_base >= 15000
                 && exposure.port_base <= 23990
-                && exposure.port_base.is_multiple_of(10),
+                && exposure.port_base % 10 == 0,
             "exposure requires a valid port block"
         );
         // Reuse public-host validation.

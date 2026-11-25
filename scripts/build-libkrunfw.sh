@@ -380,11 +380,21 @@ docker version --format '{{.Server.Version}}' >/dev/null 2>&1 ||
 # resolves to now, and an image that is not pulled yet lets the next run miss once.
 image_id=$(docker image inspect --format '{{.Id}}' "$image" 2>/dev/null || true)
 
+# GET $1 from the GitHub API. GITHUB_TOKEN, when set, authenticates the request: CI runners share
+# unauthenticated rate limits.
+github_api() {
+    if [ -n "${GITHUB_TOKEN:-}" ]; then
+        curl -fsSL -m 30 -H "Authorization: Bearer ${GITHUB_TOKEN}" "$1"
+    else
+        curl -fsSL -m 30 "$1"
+    fi
+}
+
 # Reads the libkrunfw revision microsandbox version $1 pins in its vendor/ gitlink.
 pinned_revision() {
     version=$1
     echo "Looking up the libkrunfw that microsandbox v$version pins" >&2
-    entry=$(curl -fsSL -m 30 \
+    entry=$(github_api \
         "https://api.github.com/repos/microsandbox/microsandbox/contents/vendor/libkrunfw?ref=v$version") ||
         die "cannot read vendor/libkrunfw at microsandbox v$version; pass --revision"
     case $entry in

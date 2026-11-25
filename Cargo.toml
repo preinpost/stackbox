@@ -3,6 +3,11 @@ name = "stackbox"
 version = "0.1.16"
 edition = "2024"
 default-run = "stackbox"
+description = "Deploy and manage multi-node OpenStack environments on microsandbox VMs with Kolla"
+license = "Apache-2.0"
+repository = "https://github.com/preinpost/stackbox"
+rust-version = "1.85"
+publish = false
 
 [dependencies]
 anyhow = "1.0.104"

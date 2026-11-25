@@ -32,8 +32,8 @@ EOL 시리즈를 opt-in으로 켜면 그 태그의 기본값(`ubuntu`)과 그 �
 
 - 2024.1·2024.2와 zed 이미지는 `github.com/preinpost/kolla`의
   `.github/workflows/eol-images.yml`이 빌드하고, 이미지 목록은 `.github/kolla/groups.json`에
-  있습니다. 이 저장소는 그 이미지를 소비할 뿐이며, 로컬의 `microsandbox/kolla-images` 체크아웃은
-  별도 작업 공간입니다.
+  있습니다. 이 저장소는 그 이미지를 소비할 뿐이며, 이미지 빌드는 `github.com/preinpost/kolla`에서
+  관리합니다. 이 저장소에서 이미지를 직접 빌드하지 않습니다.
 - registry와 namespace는 `src/kolla/releases.rs`의 `EOL_REGISTRY`·`EOL_NAMESPACE` 한 곳에서
   정합니다. 사설 미러는 `STACKBOX_EOL_REGISTRY`·`STACKBOX_EOL_NAMESPACE`로 바꾸며, 값이 registry 경로에
   쓸 수 있는 문자(`[A-Za-z0-9._:/-]`)가 아니면 경고를 남기고 기본값을 씁니다.

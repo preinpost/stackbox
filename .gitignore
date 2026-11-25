@@ -11,3 +11,6 @@ __pycache__/
 *.pyc
 /.task/
 .screens/
+
+# Local agent retrospectives and notes; not part of the project.
+/.agents/

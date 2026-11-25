@@ -1,0 +1,162 @@
+# Builds the guest kernel (libkrunfw with the scripts/libkrunfw fragments) for each CPU
+# architecture stackbox runs on, and publishes it as GitHub Release assets that src/kernel.rs
+# downloads from when a host has no kernel built locally.
+#
+# It is independent of release.yml: a kernel build takes far longer than an agent build, and a
+# kernel change moves no agent's build id, so a release does not wait for it. The two
+# architectures build in parallel; one publish job then uploads whatever was built.
+#
+# Release layout (what src/kernel.rs reads, relative to the releases/download base URL):
+#   libkrunfw-<kid>/manifest.txt                 immutable: the manifest, hashed to <kid>
+#   libkrunfw-<kid>/<os>-<arch>-<library>        immutable: the library the manifest names
+#   libkrunfw-index/msb-<msb>-<os>-<arch>.json   the index for this msb (replaced on each publish)
+# <kid> is the first 16 hex digits of the manifest's SHA-256 (src/kernel.rs::id_for).
+name: libkrunfw
+
+on:
+  workflow_dispatch:
+    inputs:
+      targets:
+        description: Which kernels to build
+        type: choice
+        options: [all, linux-x86_64, linux-aarch64]
+        default: all
+      msb_version:
+        description: msb version the kernel is for (recorded in the manifest and the index)
+        type: string
+        default: '0.8.1'
+      revision:
+        description: libkrunfw revision to build (msb 0.8.1 pins f0493b6f)
+        type: string
+        default: f0493b6f1873ed6031bc0bb87568db0095a6d3b6
+      publish:
+        description: Upload to the release (off to only build and keep the result as a log)
+        type: boolean
+        default: true
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/libkrunfw/**'
+      - 'scripts/build-libkrunfw.sh'
+      - 'scripts/libkrunfw-publish.sh'
+      - '.github/workflows/libkrunfw.yml'
+
+concurrency:
+  group: libkrunfw-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  kernel:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-x86_64
+            arch: x86_64
+            runner: ubuntu-latest
+          - target: linux-aarch64
+            arch: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 240
+    steps:
+      # Every target when started by a push or with `all`; otherwise only the one named.
+      - name: Select target
+        id: target
+        env:
+          TARGETS: ${{ inputs.targets || 'all' }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -eu
+          if [ "$TARGETS" = "all" ] || [ "$TARGETS" = "$TARGET" ]; then
+            echo "run=true" >>"$GITHUB_OUTPUT"
+          else
+            echo "run=false" >>"$GITHUB_OUTPUT"
+            echo "skipping $TARGET (requested: $TARGETS)"
+          fi
+
+      - uses: actions/checkout@v4
+        if: ${{ steps.target.outputs.run == 'true' }}
+
+      # The kid rule is src/kernel.rs::id_for: the first 16 hex digits of SHA-256. Checked against the
+      # value the Rust unit test pins before anything is uploaded.
+      - name: Check the kid rule
+        if: ${{ steps.target.outputs.run == 'true' }}
+        run: |
+          set -eu
+          got=$(printf 'abc' | sha256sum | cut -c1-16)
+          [ "$got" = ba7816bf8f01cfea ] || { echo "kid rule changed: $got" >&2; exit 1; }
+
+      - name: Build the kernel
+        if: ${{ steps.target.outputs.run == 'true' }}
+        env:
+          ARCH: ${{ matrix.arch }}
+          MSB_VERSION: ${{ inputs.msb_version || '0.8.1' }}
+          REVISION: ${{ inputs.revision || 'f0493b6f1873ed6031bc0bb87568db0095a6d3b6' }}
+          LIBKRUNFW_DOCKER_COPY: '1'
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          sh scripts/build-libkrunfw.sh --arch "$ARCH" --revision "$REVISION" --msb "$MSB_VERSION" \
+            --out dist/libkrunfw
+          test -s "dist/libkrunfw/$ARCH/manifest.txt"
+
+      # The manifest and the library it names, under the architecture directory publish reads.
+      - name: Upload the kernel
+        if: ${{ steps.target.outputs.run == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: libkrunfw-${{ matrix.target }}
+          path: dist/libkrunfw/${{ matrix.arch }}
+          if-no-files-found: error
+
+  # One job publishes every kernel that was built, so the shared index release is only ever
+  # written by one run at a time.
+  publish:
+    needs: kernel
+    if: ${{ !cancelled() && (github.event_name == 'push' || inputs.publish) }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download the kernels
+        uses: actions/download-artifact@v4
+        with:
+          pattern: libkrunfw-linux-*
+          path: ${{ runner.temp }}/kernels
+
+      - name: Stage the kernels
+        run: |
+          set -eu
+          for dir in "$RUNNER_TEMP"/kernels/libkrunfw-linux-*; do
+            arch=${dir##*libkrunfw-linux-}
+            mkdir -p "dist/libkrunfw/$arch"
+            cp -R "$dir"/. "dist/libkrunfw/$arch/"
+            sh scripts/libkrunfw-publish.sh stage "dist/libkrunfw/$arch/manifest.txt" linux "$arch" dist/stage
+          done
+
+      - name: Publish the kernels
+        run: |
+          set -eu
+          index=libkrunfw-index
+          gh release view "$index" >/dev/null 2>&1 || gh release create "$index" --prerelease \
+            --title "libkrunfw index" --notes "msb -> libkrunfw bundle index"
+          for arch in x86_64 aarch64; do
+            dir=dist/libkrunfw/$arch
+            [ -f "$dir/manifest.txt" ] || continue
+            kid=$(sh scripts/libkrunfw-publish.sh kid "$dir/manifest.txt")
+            file=$(sh scripts/libkrunfw-publish.sh file-name "$dir/manifest.txt")
+            tag=libkrunfw-$kid
+            gh release view "$tag" >/dev/null 2>&1 || gh release create "$tag" --prerelease \
+              --title "libkrunfw $kid" --notes "Immutable libkrunfw kernel bundle ($kid)"
+            gh release upload "$tag" "dist/stage/libkrunfw-$kid/manifest.txt" \
+              "dist/stage/libkrunfw-$kid/linux-$arch-$file" --clobber
+            gh release upload "$index" dist/stage/libkrunfw-index/msb-*-linux-"$arch".json --clobber
+            echo "published $kid for linux-$arch"
+          done

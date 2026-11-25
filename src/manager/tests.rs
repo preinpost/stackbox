@@ -4376,17 +4376,18 @@ async fn a_released_build_installs_agents_it_never_loaded() {
         .bytes(),
     );
     let sha256 = format!("{:x}", Sha256::digest(&agent));
-    let path = format!("{}/windows-x86_64/stackbox-agent.exe", crate::BUILD_ID);
+    let version = env!("CARGO_PKG_VERSION");
+    let path = format!("v{version}/stackbox-agent-windows-x86_64.exe");
     let manifest = serde_json::json!({
         "build_id": crate::BUILD_ID,
-        "version": "0.0.0",
+        "version": env!("CARGO_PKG_VERSION"),
         "agents": {"windows-x86_64": {"path": path, "sha256": sha256, "size": agent.len()}},
     });
     let served = Arc::new(Mutex::new(agent.clone()));
     let downloads = Arc::new(AtomicUsize::new(0));
     let app = axum::Router::new()
         .route(
-            &format!("/stackbox-agent/{}/manifest.json", crate::BUILD_ID),
+            &format!("/stackbox-agent/v{version}/manifest.json"),
             axum::routing::get(move || async move { axum::Json(manifest) }),
         )
         .route(
@@ -8519,19 +8520,23 @@ async fn ssh_host_preparation_downloads_the_published_stackbox_kernel_without_a_
         "os": "linux",
         "arch": arch,
         "revision": "56bf194627a07996dc4ce21211fe86ada4c76080",
-        "manifest_path": format!("{kid}/manifest.txt"),
-        "artifact_path": format!("{kid}/linux-{arch}/libkrunfw.so.5.6.1"),
+        "manifest_path": format!("libkrunfw-{kid}/manifest.txt"),
+        "artifact_path": format!("libkrunfw-{kid}/linux-{arch}-libkrunfw.so.5.6.1"),
+        "filename": "libkrunfw.so.5.6.1",
         "sha256": sha,
         "size": library.len(),
     });
     let mut files = std::collections::BTreeMap::new();
     files.insert(
-        format!("/msb-{MSB_VERSION}/linux-{arch}.json"),
+        format!("/libkrunfw-index/msb-{MSB_VERSION}-linux-{arch}.json"),
         index.to_string().into_bytes(),
     );
-    files.insert(format!("/{kid}/manifest.txt"), manifest.into_bytes());
     files.insert(
-        format!("/{kid}/linux-{arch}/libkrunfw.so.5.6.1"),
+        format!("/libkrunfw-{kid}/manifest.txt"),
+        manifest.into_bytes(),
+    );
+    files.insert(
+        format!("/libkrunfw-{kid}/linux-{arch}-libkrunfw.so.5.6.1"),
         library.clone(),
     );
     let files = Arc::new(files);

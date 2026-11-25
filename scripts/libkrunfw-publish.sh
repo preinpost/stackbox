@@ -1,16 +1,26 @@
 #!/bin/sh
-# Describes one built libkrunfw for the stackbox-libkrunfw bucket, the way src/kernel.rs reads it.
+# Describes and stages one built libkrunfw for its GitHub release, the way src/kernel.rs reads it.
 #
 #   scripts/libkrunfw-publish.sh kid MANIFEST
 #       the kernel id: the first 16 hex digits of SHA-256 over the manifest's bytes, which is
-#       src/kernel.rs::id_for. The bucket keys <kid>/ on it.
+#       src/kernel.rs::id_for. The release tag is libkrunfw-<kid>.
 #   scripts/libkrunfw-publish.sh index MANIFEST OS ARCH
-#       the msb-<version>/<os>-<arch>.json document for MANIFEST, on stdout. The library it
+#       the msb-<version>-<os>-<arch>.json document for MANIFEST, on stdout. The library it
 #       names is read from the build directory beside the manifest's architecture directory.
 #   scripts/libkrunfw-publish.sh file-name MANIFEST
-#       the library's file name, for the object path <kid>/<os>-<arch>/<file-name>.
+#       the library's file name (its soname), as the index names it.
+#   scripts/libkrunfw-publish.sh stage MANIFEST OS ARCH OUTDIR
+#       writes the release assets for MANIFEST under OUTDIR, ready for `gh release create`:
+#         OUTDIR/libkrunfw-<kid>/manifest.txt             (tag libkrunfw-<kid>)
+#         OUTDIR/libkrunfw-<kid>/<os>-<arch>-<file>       (tag libkrunfw-<kid>)
+#         OUTDIR/libkrunfw-index/msb-<version>-<os>-<arch>.json   (tag libkrunfw-index)
 #
-# OS is the bucket's name for the platform: linux or darwin.
+# OS is the platform's name in the release: linux or darwin.
+#
+# Release layout (served as <base>/<tag>/<asset>, base = .../releases/download):
+#   manifest_path  libkrunfw-<kid>/manifest.txt
+#   artifact_path  libkrunfw-<kid>/<os>-<arch>-<file>
+#   index          libkrunfw-index/msb-<version>-<os>-<arch>.json
 set -eu
 
 die() {
@@ -37,24 +47,11 @@ artifact_line() {
         grep -E "$pattern" | head -n 1
 }
 
-[ $# -ge 2 ] || die "usage: $0 kid|index|file-name MANIFEST [OS ARCH]"
-command=$1
-manifest=$2
-[ -f "$manifest" ] || die "$manifest is not a file"
-
-case $command in
-kid)
-    sha256_of "$manifest" | cut -c1-16
-    ;;
-file-name)
-    line=$(artifact_line "$manifest" linux)
-    [ -n "$line" ] || die "$manifest names no libkrunfw.so library"
-    printf '%s\n' "${line%% *}" | sed 's|.*/||'
-    ;;
-index)
-    [ $# -eq 4 ] || die "usage: $0 index MANIFEST OS ARCH"
-    os=$3
-    arch=$4
+# $1 manifest, $2 os, $3 arch: the index document on stdout.
+index_document() {
+    manifest=$1
+    os=$2
+    arch=$3
     case $os in linux | darwin) ;; *) die "unknown os $os" ;; esac
     msb=$(awk '$1 == "msb" { print $2; exit }' "$manifest")
     [ -n "$msb" ] && [ "$msb" != none ] || die "$manifest states no msb"
@@ -77,11 +74,48 @@ index)
     printf '  "os": "%s",\n' "$os"
     printf '  "arch": "%s",\n' "$arch"
     printf '  "revision": "%s",\n' "$revision"
-    printf '  "manifest_path": "%s/manifest.txt",\n' "$kid"
-    printf '  "artifact_path": "%s/%s-%s/%s",\n' "$kid" "$os" "$arch" "$name"
+    printf '  "filename": "%s",\n' "$name"
+    printf '  "manifest_path": "libkrunfw-%s/manifest.txt",\n' "$kid"
+    printf '  "artifact_path": "libkrunfw-%s/%s-%s-%s",\n' "$kid" "$os" "$arch" "$name"
     printf '  "sha256": "%s",\n' "$digest"
     printf '  "size": %s\n' "$size"
     printf '}\n'
+}
+
+[ $# -ge 2 ] || die "usage: $0 kid|index|file-name|stage MANIFEST [OS ARCH [OUTDIR]]"
+command=$1
+manifest=$2
+[ -f "$manifest" ] || die "$manifest is not a file"
+
+case $command in
+kid)
+    sha256_of "$manifest" | cut -c1-16
+    ;;
+file-name)
+    line=$(artifact_line "$manifest" linux)
+    [ -n "$line" ] || die "$manifest names no libkrunfw.so library"
+    printf '%s\n' "${line%% *}" | sed 's|.*/||'
+    ;;
+index)
+    [ $# -eq 4 ] || die "usage: $0 index MANIFEST OS ARCH"
+    index_document "$manifest" "$3" "$4"
+    ;;
+stage)
+    [ $# -eq 5 ] || die "usage: $0 stage MANIFEST OS ARCH OUTDIR"
+    os=$3
+    arch=$4
+    outdir=$5
+    kid=$(sha256_of "$manifest" | cut -c1-16)
+    index=$(index_document "$manifest" "$os" "$arch")
+    msb=$(printf '%s\n' "$index" | sed -n 's/^  "msb": "\(.*\)",$/\1/p')
+    line=$(artifact_line "$manifest" "$os")
+    rel=${line%% *}
+    name=${rel##*/}
+    mkdir -p "$outdir/libkrunfw-$kid" "$outdir/libkrunfw-index"
+    cp "$manifest" "$outdir/libkrunfw-$kid/manifest.txt"
+    cp "$(dirname "$manifest")/../$rel" "$outdir/libkrunfw-$kid/$os-$arch-$name"
+    printf '%s\n' "$index" >"$outdir/libkrunfw-index/msb-$msb-$os-$arch.json"
+    echo "staged $outdir/libkrunfw-$kid and $outdir/libkrunfw-index/msb-$msb-$os-$arch.json"
     ;;
 *)
     die "unknown command $command"

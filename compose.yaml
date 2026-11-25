@@ -1,18 +1,24 @@
-# stackbox coordinator + web portal (production-style single container).
+# stackbox coordinator and web portal, packaged as one container.
 #
 # Quick start:
-#   export STACKBOX_API_TOKEN="$(openssl rand -hex 32)"   # required before exposing beyond this machine
 #   docker compose up -d --build
 #   open http://127.0.0.1:10020
 #
-# Cloudflare Named Tunnel: route the tunnel hostname to http://127.0.0.1:10020 and set the
-#   hostname the portal must accept (Host header check), e.g. in your shell or an .env file:
-#   PORTAL_ALLOWED_HOSTS=stackbox.example.com
+# Set STACKBOX_API_TOKEN to a random secret before using the service for anything real.
+# Without it, the API accepts requests without authentication.
+#   export STACKBOX_API_TOKEN="$(openssl rand -hex 32)"
+#
+# To reach the portal from other machines (for example, behind a reverse proxy or tunnel):
+#   1. Set STACKBOX_API_TOKEN as above.
+#   2. Set PORTAL_ALLOWED_HOSTS to the host name clients use, e.g. stackbox.example.com.
+#      Loopback names are always accepted.
+#   3. Change the port binding below from 127.0.0.1 to 0.0.0.0 (or another address you choose).
 #
 # Private relay (hosts reach the coordinator directly over TLS): uncomment the 10011 port below and
-#   set STACKBOX_RELAY_TLS=private and STACKBOX_RELAY_BIND=0.0.0.0:10011 in `environment`. See README.md.
+#   set STACKBOX_RELAY_TLS=private and STACKBOX_RELAY_BIND=0.0.0.0:10011 in `environment`.
+#   See README.md.
 #
-# Set STACKBOX_PORT to publish the portal on another host port (default 10020).
+# STACKBOX_PORT changes the host port (default 10020).
 
 services:
   stackbox:
@@ -21,7 +27,8 @@ services:
     restart: unless-stopped
     stop_grace_period: 30s
     ports:
-      - "${STACKBOX_PORT:-10020}:10020"
+      # Loopback only by default, so the unauthenticated API is not exposed to the network.
+      - "127.0.0.1:${STACKBOX_PORT:-10020}:10020"
       # - "10011:10011"   # private relay, see the comment above
     volumes:
       - stackbox-data:/data   # state.json and other stackbox state (STACKBOX_STATE_DIR=/data)

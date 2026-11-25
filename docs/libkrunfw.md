@@ -258,15 +258,14 @@ VM을 만드는 명령만 파일이 아니면 실패한다.
 
 지금 커널은 **개발 산출물**(`target/libkrunfw`)에서만 설치된다. 릴리스 빌드에는 이 디렉터리가
 없으므로 `stackbox host prepare`는 "stackbox 커널 없음" 이벤트를 남기고 stock 커널로 동작한다. agent
-아티팩트처럼 릴리스 버킷에서 받아 오려면 다음이 필요하다.
+아티팩트처럼 GitHub Release에서 받아 오려면 다음이 필요하다.
 
-- 릴리스 파이프라인이 `stackbox-agent` 매니페스트와 같은 버킷(`public-bucket.preinpost.in`)에
-  `<kernel-id>/<arch>/manifest.txt`와 산출물을 게시한다. `<kernel-id>`는 이 문서의 manifest
+- 릴리스 파이프라인이 `libkrunfw-<kid>` 릴리스에 `manifest.txt`와 산출물을 게시한다. `<kid>`는 이 문서의 manifest
   sha256 앞 16자다. macOS dylib은 coordinator와 같은 아키텍처에만 필요하고, SSH 호스트는 Linux
   `.so`만 받는다.
-- stackbox는 `STACKBOX_LIBKRUNFW_DIR`이 없거나 로컬 산출물이 없을 때 그 버킷을 조회해, 이 빌드의
+- stackbox는 `STACKBOX_LIBKRUNFW_DIR`이 없거나 로컬 산출물이 없을 때 그 릴리스를 조회해, 이 빌드의
   `msb`와 맞는 커널만 내려받아 설치 전에 sha256을 확인한다.
-- 게시 경로와 공개 여부는 agent 매니페스트와 같게 두고, 서명·만료 정책도 함께 정한다.
+- 게시 경로와 공개 여부는 stackbox-agent 릴리스와 같게 두고, 서명·만료 정책도 함께 정한다.
 
 이 절이 구현되기 전까지는 `target/libkrunfw`가 있는 개발 체크아웃에서만 mtty가 동작한다.
 
@@ -295,18 +294,19 @@ VM을 만드는 명령만 파일이 아니면 실패한다.
 ## 배포본 자동 다운로드
 
 로컬에 빌드 산출물(`<dir>/<arch>/manifest.txt`)이 없는 호스트는 stackbox가 배포한 커널을 받는다.
-대상 URL은 `STACKBOX_LIBKRUNFW_URL`(기본 `https://public-bucket.preinpost.in/stackbox-libkrunfw`)이고,
+대상 URL은 `STACKBOX_LIBKRUNFW_URL`(기본 `https://github.com/preinpost/stackbox/releases/download`, 커널은 `libkrunfw-<kid>` 릴리스 자산)이고,
 빈 값이면 끈다. 준비 순서는 로컬 산출물 → 배포본이며, 받은 커널은 SHA-256·크기·매니페스트 해시
 (`kernel::id_for`)·msb·arch를 모두 확인한 뒤 `<state-dir>/libkrunfw-cache/<kid>/`에 캐시하고
 기존 설치 경로로 호스트에 올린다. 같은 kid가 캐시에 있으면 매니페스트와 라이브러리는 다시 받지 않는다.
 
 ```
-stackbox-libkrunfw/<kid>/manifest.txt                  immutable
-stackbox-libkrunfw/<kid>/<os>-<arch>/<library>         immutable (예: linux-x86_64/libkrunfw.so.5.6.1)
-stackbox-libkrunfw/msb-<msb>/<os>-<arch>.json          max-age=60 (인덱스: kid, sha256, size, 경로)
+libkrunfw-<kid> 릴리스:  manifest.txt                 (immutable)
+libkrunfw-<kid> 릴리스:  <os>-<arch>-<library>        (immutable, 예: linux-x86_64-libkrunfw.so.5.6.1)
+libkrunfw-index 릴리스:  msb-<msb>-<os>-<arch>.json    (인덱스: kid, sha256, size, 경로)
 ```
 
 `<kid>`는 `manifest.txt` 바이트의 SHA-256 앞 16자리다. 업로드는
-`.forgejo/workflows/libkrunfw.yml`이 `linux-x86_64`(조각 3개)와 `linux-aarch64`(조각 2개)를 따로
-빌드해 올린다(`scripts/libkrunfw-publish.sh kid|index`로 키와 인덱스를 만든다). `darwin-aarch64`는
+`.github/workflows/libkrunfw.yml`이 `linux-x86_64`(조각 3개)와 `linux-aarch64`(조각 2개)를 따로
+빌드한 뒤 단일 `publish` 잡이 GitHub Release(`libkrunfw-<kid>`, `libkrunfw-index`)로 올린다
+(`scripts/libkrunfw-publish.sh kid|index`로 키와 인덱스를 만든다). `darwin-aarch64`는
 같은 레이아웃을 쓰지만 macOS 링커가 필요해 Linux CI에서는 만들지 않는다.

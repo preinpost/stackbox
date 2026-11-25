@@ -14,9 +14,21 @@ Nova는 microsandbox nested virtualization으로 게스트에 `/dev/kvm`이 있�
 
 ## 시작
 
-`msb`와 `libkrunfw`가 `~/.microsandbox`에 설치되어 있어야 합니다
-(`MSB_PATH`, `MSB_LIBKRUNFW_PATH`로 지정 가능). macOS에서는 호스트에서 직접 실행하고,
-Linux에서는 접근 가능한 `/dev/kvm`이 필요합니다.
+### 필수 도구
+
+- **msb**: microsandbox 런타임. [microsandbox 릴리스](https://github.com/preinpost/microsandbox/releases)에서
+  받아 `~/.microsandbox/bin/msb`에 두거나 `MSB_PATH`로 지정합니다.
+- **libkrunfw**: msb가 쓰는 커널 라이브러리. `~/.microsandbox/lib`에 두거나 `MSB_LIBKRUNFW_PATH`로 지정합니다.
+- **go-task**: `task` 명령(`Taskfile.yaml`). <https://taskfile.dev>
+- **rustup**: 이 저장소의 Rust 툴체인(`rust-toolchain`/CI 기준 1.99.1)을 설치합니다. <https://rustup.rs>
+- **node 22**: 웹포탈(`web/`) 빌드와 실행용(`>=22.12`).
+- macOS에서는 호스트에서 직접 실행하고, Linux에서는 접근 가능한 `/dev/kvm`이 필요합니다.
+
+필요한 파일이 없으면 coordinator가 GitHub Releases에서 자동으로 받습니다. 받지 않으려면 환경변수를
+빈 값으로 설정하세요.
+
+- `STACKBOX_AGENT_URL=` : stackbox-agent 자동 다운로드 끄기 (기본 `https://github.com/preinpost/stackbox/releases/download`)
+- `STACKBOX_LIBKRUNFW_URL=` : libkrunfw 커널 자동 다운로드 끄기 (기본 `https://github.com/preinpost/stackbox/releases/download`)
 
 ```bash
 task golden                     # 선택: golden image를 미리 빌드 (없으면 첫 stackbox가 빌드)
@@ -692,28 +704,27 @@ Ansible의 `no_log` 작업은 이 파일에서도 내용을 숨깁니다.
 ## 릴리스
 
 작업은 `dev`(기본 브랜치)에서 하고, `main`에 push될 때마다
-[`.forgejo/workflows/release.yml`](.forgejo/workflows/release.yml)이 릴리스를 만듭니다.
+[`.github/workflows/release.yml`](.github/workflows/release.yml)이 GitHub Release를 만듭니다.
 
 - 기본은 patch입니다. 직전 태그 이후 커밋 메시지에 `#minor`/`[minor]`나 `#major`/`[major]`가
   있으면 그만큼 올립니다. Actions의 수동 실행(`workflow_dispatch`)에서도 bump를 고를 수 있습니다.
 - `scripts/set-version.sh`로 `Cargo.toml`·`Cargo.lock`·`web/package.json`·`web/package-lock.json`의
-  버전을 바꿔 `Release vX.Y.Z` 커밋을 `main`에 올리고, `vX.Y.Z` 태그와 Forgejo 릴리스(직전 태그 이후
+  버전을 바꿔 `Release vX.Y.Z` 커밋을 `main`에 올리고, `vX.Y.Z` 태그와 GitHub Release(직전 태그 이후
   커밋 목록)를 만든 뒤 `main`을 `dev`에 다시 merge합니다.
 - `Cargo.toml`의 버전에 아직 태그가 없으면(첫 릴리스나 `dev`에서 직접 올린 경우) 올리지 않고 그 버전으로
   릴리스합니다.
 - 버전 커밋은 `Cargo.toml`을 바꾸므로 릴리스마다 `STACKBOX_BUILD_ID`도 바뀝니다. 새 릴리스를 배포하면
   원격 호스트의 agent를 다시 설치해야 합니다.
-- 릴리스 커밋에서 `scripts/build-agent.sh`로 linux x86_64·aarch64, macOS aarch64, Windows x86_64
-  stackbox-agent를 빌드해 R2 `public-bucket`의 `stackbox-agent/<build_id>/<os>-<arch>/`에 올리고, 플랫폼별 sha256을
-  담은 `manifest.json`과 `stackbox-agent/v<version>.json`·`latest.json`(버전 → build id)도 올립니다.
-  릴리스 노트에는 `https://public-bucket.preinpost.in/stackbox-agent/...` 링크가 들어갑니다. 같은 태그로 빌드한
-  coordinator는 이 agent를 그대로 받아들입니다. 빌드가 실패하거나 agent들의 build id가 다르면 아무것도
-  push하지 않습니다.
+- 릴리스 커밋에서 네 플랫폼(linux x86_64·aarch64, macOS aarch64, Windows x86_64)의 stackbox-agent를
+  빌드합니다. 네 빌드의 build id가 모두 같아야 하며, 다르면 아무것도 push하지 않습니다. 성공하면 GitHub Release
+  `vX.Y.Z`에 바이너리 4개와 플랫폼별 sha256·크기를 담은 `manifest.json`을 함께 올립니다. 릴리스 노트에는
+  build id와 sha256 표가 들어갑니다. 같은 태그로 빌드한 coordinator는 이 agent를 그대로 받아들입니다.
+- 같은 릴리스 이미지를 GHCR `ghcr.io/preinpost/stackbox`(`vX.Y.Z`, `latest`, `sha-<short>`)에도 올립니다.
 - coordinator는 `stackbox serve`와 `stackbox host prepare`를 시작할 때 `STACKBOX_AGENT_URL`(기본
-  `https://public-bucket.preinpost.in/stackbox-agent`)에서 자기 build id의 `manifest.json`을 읽고, `dist/agent`에 없는
+  `https://github.com/preinpost/stackbox/releases/download`)에서 받은 릴리스의 `manifest.json`을 읽고, `dist/agent`에 없는
   플랫폼의 실행기를 호스트에 처음 설치할 때 받아 sha256과 build id를 확인한 뒤 `<state-dir>/agents/<sha256>/`에
   보관합니다. 릴리스되지 않은 빌드는 manifest가 없어 건너뜁니다. `STACKBOX_AGENT_URL=`(빈 값)이면 끕니다.
 - macOS와 Windows agent는 `docker/agent-cross.Dockerfile`(cargo-zigbuild, zig 0.16)로 Linux에서 cross 빌드합니다.
   macOS 링크에는 MacOSX.sdk의 `.tbd` 파일이 필요해 로컬에서는 Xcode SDK를 쓰고(`MACOS_SDK`로 바꿀 수 있음),
-  CI는 비공개 Forgejo 패키지 `macos-sdk`에서 받습니다. 시크릿: `CLOUDFLARE_API_TOKEN`·`CLOUDFLARE_ACCOUNT_ID`(R2 업로드),
-  `PACKAGE_TOKEN`(`read:package` 권한, SDK 다운로드).
+  CI의 macOS 빌드 잡(`macos-14`)은 러너에 설치된 Xcode SDK(`xcrun`)를 씁니다. 시크릿: `RELEASE_TOKEN`(선택, 없으면 `GITHUB_TOKEN`을 씀)으로
+  릴리스와 `main`·`dev` push를 하고, GHCR 푸시는 `GITHUB_TOKEN`(`packages: write`)을 씁니다.

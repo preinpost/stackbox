@@ -9,8 +9,9 @@ use std::{
     time::Duration,
 };
 
-/// Where releases publish their agents, under `<build id>/manifest.json`.
-pub const RELEASE_URL: &str = "https://public-bucket.preinpost.in/stackbox-agent";
+/// Where releases publish their agents: a GitHub release per version, tagged `v<version>`, whose
+/// `manifest.json` names each agent as `v<version>/<asset>`.
+pub const RELEASE_URL: &str = "https://github.com/preinpost/stackbox/releases/download";
 const MAX_SIZE: u64 = 128 * 1024 * 1024;
 
 pub struct Artifact {
@@ -144,17 +145,19 @@ fn client() -> Result<reqwest::Client> {
         .build()?)
 }
 
-/// This build's published agents, by platform. A build that was never released has none.
+/// This version's published agents, by platform. A version that was never released has none.
+/// A release built from other sources than this binary (a local dev build) publishes none for it
+/// either, so such a build falls back to its own agents.
 pub async fn fetch_published(base: &str) -> Result<BTreeMap<String, Published>> {
     let base = base.trim_end_matches('/');
-    let url = format!("{base}/{}/manifest.json", crate::BUILD_ID);
+    let url = format!("{base}/v{}/manifest.json", env!("CARGO_PKG_VERSION"));
     let response = client()?
         .get(&url)
         .timeout(Duration::from_secs(20))
         .send()
         .await
         .with_context(|| format!("fetch {url}"))?;
-    // R2 answers 404 for a missing object; a private bucket answers 403.
+    // GitHub answers 404 for a missing release asset; a private mirror may answer 403.
     if matches!(response.status().as_u16(), 403 | 404) {
         return Ok(BTreeMap::new());
     }
@@ -168,11 +171,9 @@ pub async fn fetch_published(base: &str) -> Result<BTreeMap<String, Published>> 
 }
 
 fn published(manifest: Manifest, base: &str) -> Result<BTreeMap<String, Published>> {
-    ensure!(
-        manifest.build_id == crate::BUILD_ID,
-        "the published manifest is for build {}",
-        manifest.build_id
-    );
+    if manifest.build_id != crate::BUILD_ID {
+        return Ok(BTreeMap::new());
+    }
     let mut agents = BTreeMap::new();
     for (platform, agent) in manifest.agents {
         let (os, arch) = platform
@@ -373,22 +374,28 @@ mod tests {
             .into(),
         };
         let id = crate::BUILD_ID;
+        let version = env!("CARGO_PKG_VERSION");
         let agents = published(
             manifest(
                 id,
                 "macos-aarch64",
-                &format!("{id}/macos-aarch64/stackbox-agent"),
+                &format!("v{version}/stackbox-agent-macos-aarch64"),
             ),
-            "https://example.test/stackbox-agent",
+            "https://example.test/download",
         )
         .unwrap();
         let agent = &agents["macos-aarch64"];
         assert_eq!(agent.info.os, "macos");
         assert_eq!(
             agent.url,
-            format!("https://example.test/stackbox-agent/{id}/macos-aarch64/stackbox-agent")
+            format!("https://example.test/download/v{version}/stackbox-agent-macos-aarch64")
         );
-        assert!(published(manifest("other", "linux-x86_64", "a"), "b").is_err());
+        // A release of another build publishes nothing for this one.
+        assert!(
+            published(manifest("other", "linux-x86_64", "a"), "b")
+                .unwrap()
+                .is_empty()
+        );
         assert!(published(manifest(id, "darwin-aarch64", "a"), "b").is_err());
         assert!(published(manifest(id, "linux-x86_64", "../a"), "b").is_err());
         assert!(published(manifest(id, "linux-x86_64", "/a"), "b").is_err());
