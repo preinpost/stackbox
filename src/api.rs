@@ -874,15 +874,17 @@ async fn endpoints(
 ) -> Result<Json<Endpoints>, ApiError> {
     Ok(Json(app.manager.endpoints(&id).await?))
 }
-#[utoipa::path(put, path="/api/v1/stackboxes/{id}/relay-exposure", params(("id"=String, Path)), request_body=crate::model::RelayExposureRequest, responses((status=200, description="The stackbox's services are reachable through the relay; `rotate` makes a new token", body=crate::model::RelayExposureStatus), (status=400, body=ErrorBody), (status=404, body=ErrorBody), (status=409, description="Not deployed, a dial-in agent host, or no relay configured", body=ErrorBody)))]
+#[utoipa::path(put, path="/api/v1/stackboxes/{id}/relay-exposure", params(("id"=String, Path)), request_body=crate::model::RelayExposureRequest, responses((status=200, description="The stackbox's services are reachable through its own Cloudflare quick tunnel; `state` is `starting` until the tunnel has its address, then `ready`. `rotate` makes a new token without restarting the tunnel", body=crate::model::RelayExposureStatus), (status=400, body=ErrorBody), (status=404, body=ErrorBody), (status=409, description="Not deployed or a job is running, or a dial-in agent host", body=ErrorBody)))]
 async fn set_relay_exposure(
     State(app): State<App>,
     Path(id): Path<String>,
     value: Result<Json<crate::model::RelayExposureRequest>, JsonRejection>,
 ) -> Result<Json<crate::model::RelayExposureStatus>, ApiError> {
-    Ok(Json(app.manager.set_relay_exposure(&id, body(value)?)?))
+    Ok(Json(
+        app.manager.set_relay_exposure(&id, body(value)?).await?,
+    ))
 }
-#[utoipa::path(delete, path="/api/v1/stackboxes/{id}/relay-exposure", params(("id"=String, Path)), responses((status=200, description="The services are no longer reachable through the relay; old URLs answer 404", body=crate::model::RelayExposureStatus), (status=404, body=ErrorBody)))]
+#[utoipa::path(delete, path="/api/v1/stackboxes/{id}/relay-exposure", params(("id"=String, Path)), responses((status=200, description="The stackbox's tunnel is stopped; old URLs answer nothing", body=crate::model::RelayExposureStatus), (status=404, body=ErrorBody)))]
 async fn remove_relay_exposure(
     State(app): State<App>,
     Path(id): Path<String>,

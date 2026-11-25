@@ -8843,127 +8843,309 @@ fn relay_token_of(urls: &BTreeMap<String, String>) -> String {
     url.split('/').nth(5).unwrap().to_owned()
 }
 
+/// The loopback listener a stackbox's own tunnel points at.
+fn listener_of(manager: &StackboxManager, id: &str) -> std::net::SocketAddr {
+    lock_unpoisoned(&manager.0.stackbox_tunnels)[id].addr
+}
+
+/// A request to a stackbox's listener, sent as its tunnel would send it. Not `404` means the
+/// token and service were accepted; the upstream here is not running, so that is `502`.
+async fn answer(addr: std::net::SocketAddr, path: &str) -> reqwest::StatusCode {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap()
+        .get(format!("http://{addr}{path}"))
+        .send()
+        .await
+        .unwrap()
+        .status()
+}
+
+/// A stackbox's exposure once its tunnel has its address, as the endpoints call shows it.
+async fn ready_exposure(manager: &StackboxManager, id: &str) -> RelayExposureStatus {
+    let exposure = manager.endpoints(id).await.unwrap().relay_exposure.unwrap();
+    assert_eq!(exposure.state, RelayExposureState::Ready, "{exposure:?}");
+    exposure
+}
+
+/// A stackbox with the given name, deployed and ready for exposure.
+async fn deployed(manager: &StackboxManager, name: &str, components: &[&str]) {
+    // Keystone is always there, so the tests have a plain-HTTP service to reach.
+    let create = CreateRequest {
+        components: std::iter::once("keystone")
+            .chain(components.iter().copied())
+            .map(str::to_owned)
+            .collect(),
+        ..request(name)
+    };
+    done(manager, &manager.create(create).unwrap()).await;
+    done(
+        manager,
+        &manager.deploy(name, DeployRequest::default()).unwrap(),
+    )
+    .await;
+}
+
 #[tokio::test]
-async fn relay_exposure_hands_out_tokens_that_listings_never_show() {
+async fn relay_exposure_gives_each_stackbox_its_own_tunnel_with_the_hosts_relay_off() {
     let dir = tempfile::tempdir().unwrap();
     let backend = Arc::new(Fake::default());
     let manager = open_with(options(dir.path()), backend.clone()).await;
-    let with_dashboard = CreateRequest {
-        components: vec!["horizon".into()],
-        ..request("src")
-    };
-    done(&manager, &manager.create(with_dashboard).unwrap()).await;
+    deployed(&manager, "stackbox-01", &["horizon"]).await;
+    deployed(&manager, "freeze-box", &["horizon"]).await;
+    // The shared relay of Hosts stays off: each stackbox still gets its own tunnel.
+    assert!(manager.relay_url().is_none());
 
-    // Not deployed yet.
-    let early = manager
-        .set_relay_exposure("src", RelayExposureRequest::default())
-        .unwrap_err();
-    assert!(early.is::<Conflict>(), "{early:#}");
-
-    done(
-        &manager,
-        &manager.deploy("src", DeployRequest::default()).unwrap(),
-    )
-    .await;
-
-    // Deployed, but no relay configured yet.
-    let no_relay = manager
-        .set_relay_exposure("src", RelayExposureRequest::default())
-        .unwrap_err();
-    assert!(no_relay.is::<Conflict>(), "{no_relay:#}");
-    assert!(format!("{no_relay:#}").contains("configure the relay first"));
-
-    use crate::link::relay::{RelaySettings, RelayTlsMode};
-    manager
-        .set_relay(Some(RelaySettings {
-            url: "https://coordinator.example:10011".into(),
-            mode: RelayTlsMode::Private,
-            bind: Some("127.0.0.1:0".parse().unwrap()),
-        }))
+    let first = manager
+        .set_relay_exposure("stackbox-01", RelayExposureRequest::default())
         .await
         .unwrap();
-
-    let exposed = manager
-        .set_relay_exposure("src", RelayExposureRequest::default())
+    assert!(first.enabled);
+    assert_eq!(first.state, RelayExposureState::Starting);
+    assert!(first.relay_url.is_none() && first.urls.is_empty() && first.error.is_none());
+    let second = manager
+        .set_relay_exposure("freeze-box", RelayExposureRequest::default())
+        .await
         .unwrap();
-    assert!(exposed.enabled);
-    assert_eq!(
-        exposed.relay_url.as_deref(),
-        Some("https://coordinator.example:10011")
-    );
-    let token = relay_token_of(&exposed.urls);
-    assert_eq!(token.len(), 64);
-    assert!(token.bytes().all(|b| b.is_ascii_hexdigit()));
-    assert_eq!(
-        exposed.urls["keystone"],
-        format!("https://coordinator.example:10011/x/src/{token}/keystone/v3")
-    );
-    assert_eq!(
-        exposed.urls["horizon"],
-        format!("https://coordinator.example:10011/x/src/{token}/horizon")
-    );
-    // The data stores are reached only through their WebSocket tunnels, never plain HTTP.
-    assert_eq!(
-        exposed.urls["mariadb"],
-        format!("https://coordinator.example:10011/x/src/{token}/tcp/mariadb")
-    );
-    assert_eq!(
-        exposed.urls["rabbitmq"],
-        format!("https://coordinator.example:10011/x/src/{token}/tcp/rabbitmq")
-    );
-    assert!(manager.0.relay.endpoints.is_exposed("src", &token));
+    assert_eq!(second.state, RelayExposureState::Starting);
 
-    // The token rides on the endpoints call and in the URLs, never in a listing.
-    let endpoints = manager.endpoints("src").await.unwrap();
-    assert_eq!(endpoints.relay_exposure.unwrap().urls, exposed.urls);
+    // Each tunnel hands out its own address.
+    manager.announce_test_tunnel("stackbox-01", "https://sb1.trycloudflare.com");
+    manager.announce_test_tunnel("freeze-box", "https://sb2.trycloudflare.com");
+    let ready = manager.endpoints("stackbox-01").await.unwrap();
+    let ready = ready.relay_exposure.unwrap();
+    assert_eq!(ready.state, RelayExposureState::Ready);
+    assert_eq!(
+        ready.relay_url.as_deref(),
+        Some("https://sb1.trycloudflare.com")
+    );
+    let token1 = relay_token_of(&ready.urls);
+    assert!(ready.urls["horizon"].starts_with("https://sb1.trycloudflare.com/x/stackbox-01/"));
+    let other = manager
+        .set_relay_exposure("freeze-box", RelayExposureRequest::default())
+        .await
+        .unwrap();
+    assert_eq!(other.state, RelayExposureState::Ready);
+    assert_eq!(
+        other.relay_url.as_deref(),
+        Some("https://sb2.trycloudflare.com")
+    );
+    let token2 = relay_token_of(&other.urls);
+    assert_ne!(token1, token2);
+
+    // Each listener serves only its own stackbox, under its own token.
+    let (addr1, addr2) = (
+        listener_of(&manager, "stackbox-01"),
+        listener_of(&manager, "freeze-box"),
+    );
+    assert_ne!(addr1, addr2);
+    assert_ne!(
+        answer(addr1, &format!("/x/stackbox-01/{token1}/keystone/v3")).await,
+        reqwest::StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        answer(addr1, &format!("/x/freeze-box/{token2}/keystone/v3")).await,
+        reqwest::StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        answer(addr2, &format!("/x/stackbox-01/{token1}/keystone/v3")).await,
+        reqwest::StatusCode::NOT_FOUND
+    );
+    assert_ne!(
+        answer(addr2, &format!("/x/freeze-box/{token2}/keystone/v3")).await,
+        reqwest::StatusCode::NOT_FOUND
+    );
+    // The listings never show a token.
     let listing = serde_json::to_string(&manager.list().unwrap()).unwrap();
-    assert!(!listing.contains(&token), "listing leaks the token");
+    assert!(!listing.contains(&token1) && !listing.contains(&token2));
+}
 
-    // Without rotation the token stays; with it, the old one stops answering at once.
+#[tokio::test]
+async fn relay_exposure_rotation_swaps_the_token_without_restarting_the_tunnel() {
+    let dir = tempfile::tempdir().unwrap();
+    let manager = open_with(options(dir.path()), Arc::new(Fake::default())).await;
+    deployed(&manager, "stackbox-01", &["horizon"]).await;
+    manager
+        .set_relay_exposure("stackbox-01", RelayExposureRequest::default())
+        .await
+        .unwrap();
+    manager.announce_test_tunnel("stackbox-01", "https://sb1.trycloudflare.com");
+    let old = relay_token_of(&ready_exposure(&manager, "stackbox-01").await.urls);
+    let addr = listener_of(&manager, "stackbox-01");
+
+    // Without rotation the token and the address stay.
     let again = manager
-        .set_relay_exposure("src", RelayExposureRequest { rotate: false })
+        .set_relay_exposure("stackbox-01", RelayExposureRequest { rotate: false })
+        .await
         .unwrap();
-    assert_eq!(relay_token_of(&again.urls), token);
+    assert_eq!(relay_token_of(&again.urls), old);
+
     let rotated = manager
-        .set_relay_exposure("src", RelayExposureRequest { rotate: true })
+        .set_relay_exposure("stackbox-01", RelayExposureRequest { rotate: true })
+        .await
         .unwrap();
-    let fresh = relay_token_of(&rotated.urls);
-    assert_ne!(fresh, token);
-    assert!(!manager.0.relay.endpoints.is_exposed("src", &token));
-    assert!(manager.0.relay.endpoints.is_exposed("src", &fresh));
-
-    // The token survives a restart: the state file keeps it, the stackbox lists without it.
-    drop(manager);
-    let manager = open_with(options(dir.path()), backend.clone()).await;
-    manager.start_relay().await;
-    assert!(manager.0.relay.endpoints.is_exposed("src", &fresh));
-    let endpoints = manager.endpoints("src").await.unwrap();
+    // Ready at once: the tunnel and its address were kept.
+    assert_eq!(rotated.state, RelayExposureState::Ready);
     assert_eq!(
-        relay_token_of(&endpoints.relay_exposure.unwrap().urls),
-        fresh
+        rotated.relay_url.as_deref(),
+        Some("https://sb1.trycloudflare.com")
     );
+    let fresh = relay_token_of(&rotated.urls);
+    assert_ne!(fresh, old);
+    assert_eq!(listener_of(&manager, "stackbox-01"), addr);
+    assert_eq!(
+        answer(addr, &format!("/x/stackbox-01/{old}/keystone/v3")).await,
+        reqwest::StatusCode::NOT_FOUND
+    );
+    assert_ne!(
+        answer(addr, &format!("/x/stackbox-01/{fresh}/keystone/v3")).await,
+        reqwest::StatusCode::NOT_FOUND
+    );
+}
 
-    // Removing the exposure revokes it everywhere, at once.
-    let removed = manager.remove_relay_exposure("src").unwrap();
+#[tokio::test]
+async fn relay_exposure_removal_and_deletion_stop_the_tunnel() {
+    let dir = tempfile::tempdir().unwrap();
+    let manager = open_with(options(dir.path()), Arc::new(Fake::default())).await;
+    deployed(&manager, "stackbox-01", &["horizon"]).await;
+    deployed(&manager, "freeze-box", &["horizon"]).await;
+    for id in ["stackbox-01", "freeze-box"] {
+        manager
+            .set_relay_exposure(id, RelayExposureRequest::default())
+            .await
+            .unwrap();
+        manager.announce_test_tunnel(id, &format!("https://{id}.trycloudflare.com"));
+    }
+    let addr = listener_of(&manager, "stackbox-01");
+
+    let removed = manager.remove_relay_exposure("stackbox-01").unwrap();
     assert!(!removed.enabled);
+    assert_eq!(removed.state, RelayExposureState::Off);
     assert!(removed.urls.is_empty());
-    assert!(!manager.0.relay.endpoints.is_exposed("src", &fresh));
+    assert!(!lock_unpoisoned(&manager.0.stackbox_tunnels).contains_key("stackbox-01"));
+    // The dropped listener stops answering.
+    let closed = tokio::time::timeout(Duration::from_secs(5), async {
+        while tokio::net::TcpStream::connect(addr).await.is_ok() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    assert!(
+        closed.is_ok(),
+        "the removed stackbox's listener still answers"
+    );
     assert!(
         manager
-            .endpoints("src")
+            .endpoints("stackbox-01")
             .await
             .unwrap()
             .relay_exposure
             .is_none()
     );
 
-    // Deleting the stackbox also drops its token.
+    // Deleting a stackbox drops its token and its tunnel too.
+    let freeze = listener_of(&manager, "freeze-box");
+    done(&manager, &manager.forget("freeze-box").unwrap()).await;
+    let state = manager.read(|state| state.relay_tokens.clone()).unwrap();
+    assert!(!state.contains_key("freeze-box"));
+    assert!(!lock_unpoisoned(&manager.0.stackbox_tunnels).contains_key("freeze-box"));
+    let closed = tokio::time::timeout(Duration::from_secs(5), async {
+        while tokio::net::TcpStream::connect(freeze).await.is_ok() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    assert!(
+        closed.is_ok(),
+        "the deleted stackbox's listener still answers"
+    );
+}
+
+#[tokio::test]
+async fn relay_exposure_tunnels_come_back_after_a_restart_and_keep_their_token() {
+    let dir = tempfile::tempdir().unwrap();
+    let backend = Arc::new(Fake::default());
+    let manager = open_with(options(dir.path()), backend.clone()).await;
+    deployed(&manager, "src", &["horizon"]).await;
     manager
         .set_relay_exposure("src", RelayExposureRequest::default())
+        .await
         .unwrap();
-    done(&manager, &manager.forget("src").unwrap()).await;
-    let state = manager.read(|state| state.relay_tokens.clone()).unwrap();
-    assert!(!state.contains_key("src"));
+    manager.announce_test_tunnel("src", "https://src.trycloudflare.com");
+    let token = relay_token_of(&ready_exposure(&manager, "src").await.urls);
+    drop(manager);
+
+    let manager = open_with(options(dir.path()), backend.clone()).await;
+    assert!(!lock_unpoisoned(&manager.0.stackbox_tunnels).contains_key("src"));
+    // The coordinator's start restores each ready stackbox's tunnel with its saved token.
+    manager.start_relay().await;
+    assert!(lock_unpoisoned(&manager.0.stackbox_tunnels).contains_key("src"));
+    let restored = manager
+        .endpoints("src")
+        .await
+        .unwrap()
+        .relay_exposure
+        .unwrap();
+    assert_eq!(restored.state, RelayExposureState::Starting);
+    manager.announce_test_tunnel("src", "https://src.trycloudflare.com");
+    // The same token: the restored tunnel serves the URLs handed out before the restart.
+    assert_eq!(
+        relay_token_of(&ready_exposure(&manager, "src").await.urls),
+        token
+    );
+    assert_eq!(
+        answer(
+            listener_of(&manager, "src"),
+            &format!("/x/src/{token}/keystone/v3")
+        )
+        .await,
+        reqwest::StatusCode::BAD_GATEWAY
+    );
+}
+
+#[tokio::test]
+async fn relay_exposure_dashboards_clear_the_other_sessions_on_entry() {
+    let dir = tempfile::tempdir().unwrap();
+    let manager = open_with(options(dir.path()), Arc::new(Fake::default())).await;
+    deployed(&manager, "dash", &["horizon"]).await;
+    manager
+        .set_relay_exposure("dash", RelayExposureRequest::default())
+        .await
+        .unwrap();
+    manager.announce_test_tunnel("dash", "https://dash.trycloudflare.com");
+    let token = relay_token_of(&ready_exposure(&manager, "dash").await.urls);
+    let response = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap()
+        .get(format!(
+            "http://{}/x/dash/{token}/horizon",
+            listener_of(&manager, "dash")
+        ))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), reqwest::StatusCode::FOUND);
+    let cookies: Vec<String> = response
+        .headers()
+        .get_all(reqwest::header::SET_COOKIE)
+        .iter()
+        .map(|v| v.to_str().unwrap().to_owned())
+        .collect();
+    assert!(
+        cookies
+            .iter()
+            .any(|c| c.starts_with(&format!("__stackbox_ui=dash:{token}:horizon;")))
+    );
+    assert!(
+        cookies.contains(&"sessionid=; Path=/; Max-Age=0".to_owned()),
+        "{cookies:?}"
+    );
+    assert!(
+        cookies.contains(&"csrftoken=; Path=/; Max-Age=0".to_owned()),
+        "{cookies:?}"
+    );
 }
 
 #[tokio::test]
@@ -8971,15 +9153,6 @@ async fn relay_exposure_refuses_dial_in_agent_hosts() {
     let dir = tempfile::tempdir().unwrap();
     let backend = Arc::new(Fake::default());
     let manager = open_with(options(dir.path()), backend).await;
-    use crate::link::relay::{RelaySettings, RelayTlsMode};
-    manager
-        .set_relay(Some(RelaySettings {
-            url: "https://coordinator.example:10011".into(),
-            mode: RelayTlsMode::Private,
-            bind: Some("127.0.0.1:0".parse().unwrap()),
-        }))
-        .await
-        .unwrap();
     done(&manager, &manager.create(request("agent")).unwrap()).await;
     done(
         &manager,
@@ -8994,7 +9167,75 @@ async fn relay_exposure_refuses_dial_in_agent_hosts() {
         .unwrap();
     let error = manager
         .set_relay_exposure("agent", RelayExposureRequest::default())
+        .await
         .unwrap_err();
     assert!(error.is::<Conflict>(), "{error:#}");
     assert!(format!("{error:#}").contains("dial-in agent hosts are not yet supported"));
+}
+
+#[tokio::test]
+async fn importing_without_a_local_host_is_refused_before_a_record_is_kept() {
+    let dir = tempfile::tempdir().unwrap();
+    let backend = Arc::new(Fake::default());
+    let manager = open_with(options(dir.path()), backend.clone()).await;
+    if manager.host("local").is_ok() {
+        manager.unregister_host("local").unwrap();
+    }
+    let file = dir.path().join("orphan.msb");
+    std::fs::write(&file, b"not an archive").unwrap();
+    let error = manager
+        .import_snapshot(ImportRequest {
+            path: Some(file.display().to_string()),
+            id: Some("orphan".into()),
+            ..Default::default()
+        })
+        .unwrap_err();
+    assert!(error.is::<Conflict>(), "{error:#}");
+    assert!(
+        error
+            .to_string()
+            .contains("register the local host under Hosts to keep snapshots on it"),
+        "{error:#}"
+    );
+    assert!(manager.snapshot("orphan").unwrap_err().is::<NotFound>());
+    assert!(
+        manager
+            .snapshots()
+            .unwrap()
+            .iter()
+            .all(|s| s.id != "orphan")
+    );
+    settle(&manager).await;
+}
+
+#[tokio::test]
+async fn an_empty_failed_snapshot_is_deleted_without_asking_its_unregistered_host() {
+    let dir = tempfile::tempdir().unwrap();
+    let backend = Arc::new(Fake::default());
+    let manager = open_with(options(dir.path()), backend.clone()).await;
+    local_host(&manager);
+    let file = dir.path().join("ghost.msb");
+    std::fs::write(&file, b"not an archive").unwrap();
+    manager
+        .import_snapshot(ImportRequest {
+            path: Some(file.display().to_string()),
+            id: Some("ghost".into()),
+            ..Default::default()
+        })
+        .unwrap();
+    let failed = manager.wait_snapshot("ghost").await.unwrap();
+    assert_eq!(failed.status, SnapshotStatus::Failed);
+    manager
+        .update(|state| {
+            let ghost = state.snapshots.get_mut("ghost").unwrap();
+            ghost.reference = Some(String::new());
+            ghost.nodes.clear();
+            ghost.copies.clear();
+            Ok(())
+        })
+        .unwrap();
+    manager.unregister_host("local").unwrap();
+    manager.delete_snapshot("ghost").await.unwrap();
+    assert!(manager.snapshot("ghost").unwrap_err().is::<NotFound>());
+    settle(&manager).await;
 }

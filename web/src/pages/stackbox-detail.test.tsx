@@ -440,24 +440,30 @@ test("names the PCI devices compute-1 holds and refuses a snapshot of that stack
   ).toBe(true);
 });
 
-/** A ready Keystone + Horizon stackbox whose relay exposure the test drives through the fetch stub. */
-test("switches a ready stackbox between LAN and relay addresses and turns the relay exposure on, rotated and off", async () => {
-  const user = userEvent.setup();
-  const writeText = vi.fn(async (_text: string) => {});
-  Object.defineProperty(navigator, "clipboard", {
-    value: { writeText },
-    configurable: true,
-  });
-  const relayHost = "https://spine-diego-took-expectations.trycloudflare.com";
-  const relayUrls = {
-    keystone: `${relayHost}/x/keystone/v3`,
-    horizon: `${relayHost}/x/horizon/`,
-  };
-  let exposure: Record<string, unknown> = {
-    enabled: false,
-    relay_url: null,
-    urls: {},
-  };
+/** A ready Keystone + Horizon stackbox whose own relay exposure the test drives through the fetch stub. */
+const exposureStackbox: Stackbox = {
+  ...stackbox,
+  id: "stackbox-01",
+  status: "ready",
+  exposure: { bind: "127.0.0.1", host: "127.0.0.1", port_base: 15000 },
+  plan: { ...stackbox.plan!, components: ["keystone", "horizon"] },
+};
+function renderEndpoints() {
+  return render(
+    <QueryClientProvider
+      client={
+        new QueryClient({
+          defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+        })
+      }
+    >
+      <Endpoints stackbox={exposureStackbox} />
+    </QueryClientProvider>,
+  );
+}
+/** Stubs the endpoints, relay exposure, and hosts calls; the Hosts relay is never read here. */
+function stubExposure(initial: Record<string, unknown>) {
+  const state = { exposure: initial as Record<string, unknown> };
   const bodies: unknown[] = [];
   const calls: string[] = [];
   vi.stubGlobal(
@@ -466,78 +472,88 @@ test("switches a ready stackbox between LAN and relay addresses and turns the re
       const method = options?.method ?? "GET";
       calls.push(`${method} ${path}`);
       if (options?.body) bodies.push(JSON.parse(options.body as string));
-      if (path.endsWith("/relay"))
-        return Response.json({
-          settings: { mode: "quick_tunnel", url: "", bind: "127.0.0.1:10012" },
-          url: relayHost,
-          tunnel: null,
-          bind: "127.0.0.1:10012",
-          listening: "127.0.0.1:10012",
-          error: null,
-          ca_sha256: null,
-          spanning_stackboxes: [],
-        });
-      if (path.endsWith("/hosts"))
-        return Response.json([]);
+      if (path.endsWith("/hosts")) return Response.json([]);
       if (path.endsWith("/endpoints"))
         return Response.json({
           services: {},
           credentials: login,
           datastores: [],
-          relay_exposure: exposure,
+          relay_exposure: state.exposure,
         });
       if (path.endsWith("/relay-exposure") && method === "PUT") {
-        exposure = {
-          enabled: true,
-          relay_url: relayHost,
-          urls: relayUrls,
-        };
-        return Response.json(exposure);
+        const body = JSON.parse(options!.body as string) as { rotate: boolean };
+        state.exposure = { enabled: false, state: "starting", urls: {} };
+        return Response.json({ ...state.exposure, rotated: body.rotate });
       }
       if (path.endsWith("/relay-exposure") && method === "DELETE") {
-        exposure = { enabled: false, relay_url: null, urls: {} };
-        return Response.json(exposure);
+        state.exposure = { enabled: false, state: "off", urls: {} };
+        return Response.json(state.exposure);
       }
       throw new Error(`unexpected ${method} ${path}`);
     }),
   );
-  const ready: Stackbox = {
-    ...stackbox,
-    id: "stackbox-01",
-    status: "ready",
-    exposure: { bind: "127.0.0.1", host: "127.0.0.1", port_base: 15000 },
-    plan: { ...stackbox.plan!, components: ["keystone", "horizon"] },
-  };
-  render(
-    <QueryClientProvider
-      client={
-        new QueryClient({
-          defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
-        })
-      }
-    >
-      <Endpoints stackbox={ready} />
-    </QueryClientProvider>,
-  );
+  return { state, bodies, calls };
+}
 
-  // Off: the relay is available but not yet serving this stackbox.
-  await user.click(
-    await screen.findByRole("button", { name: "릴레이 접속 켜기" }),
-  );
+const exposureRelayHost = "https://spine-diego-took-expectations.trycloudflare.com";
+const exposureRelayUrls = {
+  keystone: `${exposureRelayHost}/x/keystone/v3`,
+  horizon: `${exposureRelayHost}/x/horizon/`,
+};
+
+test("turns this stackbox's own tunnel on without the Hosts relay, follows starting to ready, then rotates and turns it off", async () => {
+  const user = userEvent.setup();
+  const writeText = vi.fn(async (_text: string) => {});
+  Object.defineProperty(navigator, "clipboard", {
+    value: { writeText },
+    configurable: true,
+  });
+  const { state, bodies, calls } = stubExposure({ enabled: false, state: "off", urls: {} });
+  renderEndpoints();
+
+  // Hosts → 릴레이 is never consulted, so the off state offers the tunnel directly.
+  expect(
+    await screen.findByRole("button", { name: "외부 접속 켜기" }),
+  ).toBeTruthy();
+  expect(
+    screen.getByText(
+      "이 Stackbox 전용 Cloudflare 터널을 열어 외부에서 OpenStack API·Horizon·DB에 접속합니다.",
+    ),
+  ).toBeTruthy();
+  expect(document.body.textContent).not.toContain("Hosts → 릴레이 설정");
+  expect(calls.some((c) => c.endsWith("/api/v1/relay") || c.endsWith("/relay"))).toBe(false);
+
+  // Click: PUT, then the tunnel is still starting.
+  await user.click(screen.getByRole("button", { name: "외부 접속 켜기" }));
   expect(calls).toContain("PUT /api/v1/stackboxes/stackbox-01/relay-exposure");
   expect(bodies).toContainEqual({ rotate: false });
+  expect(await screen.findByText("Cloudflare 터널 연결 중…")).toBeTruthy();
+  expect(screen.getByRole("button", { name: "끄기" })).toBeTruthy();
 
-  // On: the Relay view is the default and every URL is the relay's.
+  // The tunnel publishes its URLs; the endpoints poll (1.5 s) picks them up and the page turns ready.
+  state.exposure = {
+    enabled: true,
+    state: "ready",
+    relay_url: exposureRelayHost,
+    urls: exposureRelayUrls,
+  };
   expect(
-    await screen.findByText(relayUrls.keystone, { selector: "code" }),
+    await screen.findByText(exposureRelayUrls.keystone, { selector: "code" }, { timeout: 4000 }),
   ).toBeTruthy();
-  expect(screen.getByText(relayUrls.horizon, { selector: "code" })).toBeTruthy();
+  expect(screen.getByText(exposureRelayUrls.horizon, { selector: "code" })).toBeTruthy();
+  expect(screen.queryByText("Cloudflare 터널 연결 중…")).toBeNull();
   expect(screen.getByRole("button", { name: "Relay" }).getAttribute("aria-pressed")).toBe("true");
+  expect(screen.getByRole("button", { name: "LAN" })).toBeTruthy();
   expect(screen.getByRole("button", { name: "토큰 재발급" })).toBeTruthy();
   expect(screen.getByRole("button", { name: "끄기" })).toBeTruthy();
+  expect(
+    screen.getByText(
+      "이 Stackbox 전용 Cloudflare 주소입니다. 다른 Stackbox 대시보드와 세션이 섞이지 않으며, 끄거나 토큰을 재발급하면 즉시 차단됩니다.",
+    ),
+  ).toBeTruthy();
   await user.click(screen.getByRole("button", { name: "OS_ 환경변수 복사" }));
   expect(writeText).toHaveBeenLastCalledWith(
-    expect.stringContaining(`export OS_AUTH_URL=${relayUrls.keystone}`),
+    expect.stringContaining(`export OS_AUTH_URL=${exposureRelayUrls.keystone}`),
   );
 
   // LAN: an explicit choice stays, and the LAN addresses come back.
@@ -545,21 +561,54 @@ test("switches a ready stackbox between LAN and relay addresses and turns the re
   expect(
     screen.getByText("http://127.0.0.1:15000/v3", { selector: "code" }),
   ).toBeTruthy();
-  await user.click(screen.getByRole("button", { name: "OS_ 환경변수 복사" }));
-  expect(writeText).toHaveBeenLastCalledWith(
-    expect.stringContaining("export OS_AUTH_URL=http://127.0.0.1:15000/v3"),
-  );
   await user.click(screen.getByRole("button", { name: "Relay" }));
 
   // Rotate: a new token, sent as rotate: true.
+  state.exposure = {
+    enabled: true,
+    state: "ready",
+    relay_url: exposureRelayHost,
+    urls: exposureRelayUrls,
+  };
   await user.click(screen.getByRole("button", { name: "토큰 재발급" }));
   await waitFor(() => expect(bodies).toContainEqual({ rotate: true }));
 
   // Off: DELETE, and the offer to turn it on comes back.
-  await user.click(screen.getByRole("button", { name: "끄기" }));
+  await user.click(await screen.findByRole("button", { name: "끄기" }));
   expect(calls).toContain("DELETE /api/v1/stackboxes/stackbox-01/relay-exposure");
   expect(
-    await screen.findByRole("button", { name: "릴레이 접속 켜기" }),
+    await screen.findByRole("button", { name: "외부 접속 켜기" }),
+  ).toBeTruthy();
+});
+
+test("shows the tunnel's failure with retry and off when the exposure is in error", async () => {
+  const user = userEvent.setup();
+  const { bodies, calls } = stubExposure({
+    enabled: false,
+    state: "error",
+    error: "cloudflared 프로세스가 종료되었습니다",
+    urls: {},
+  });
+  renderEndpoints();
+
+  expect(
+    await screen.findByText("cloudflared 프로세스가 종료되었습니다"),
+  ).toBeTruthy();
+  expect(screen.getByRole("button", { name: "다시 시도" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: "끄기" })).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "외부 접속 켜기" })).toBeNull();
+
+  await user.click(screen.getByRole("button", { name: "다시 시도" }));
+  expect(calls).toContain("PUT /api/v1/stackboxes/stackbox-01/relay-exposure");
+  expect(bodies).toContainEqual({ rotate: false });
+  expect(await screen.findByText("Cloudflare 터널 연결 중…")).toBeTruthy();
+});
+
+test("falls back to the default error text when the tunnel gives no reason", async () => {
+  stubExposure({ enabled: false, state: "error", urls: {} });
+  renderEndpoints();
+  expect(
+    await screen.findByText("Cloudflare 터널을 시작하지 못했습니다."),
   ).toBeTruthy();
 });
 
@@ -603,7 +652,12 @@ test("shows Data stores through the relay as a zero-install tunnel bar and reuse
           services: {},
           credentials: login,
           datastores: [mariadb, rabbitmq, rabbitmqManagement],
-          relay_exposure: { enabled: true, relay_url: dataStoreRelayHost, urls: dataStoreRelayUrls },
+          relay_exposure: {
+            enabled: true,
+            state: "ready",
+            relay_url: dataStoreRelayHost,
+            urls: dataStoreRelayUrls,
+          },
         });
       throw new Error(`unexpected ${path}`);
     }),

@@ -37,13 +37,13 @@ import {
   jobsQuery,
   keys,
   logsQuery,
-  relayQuery,
   useDisableRelayExposure,
   useEnableRelayExposure,
   type Datastore,
   type Stackbox,
   type Impair,
   type Job,
+  type RelayExposure,
   type RemoteHost,
 } from "../api/client";
 import {
@@ -990,6 +990,21 @@ export function DeploymentPhases({ stackbox }: { stackbox: Stackbox }) {
     </section>
   );
 }
+/**
+ * The stackbox's own relay exposure, read as its `state`. `enabled` only says the addresses answer now,
+ * so it is the fallback for an answer that predates `state`.
+ */
+export function relayExposureState(
+  exposure: RelayExposure | null | undefined,
+): NonNullable<RelayExposure["state"]> {
+  if (!exposure) return "off";
+  const hasUrls = Object.keys(exposure.urls ?? {}).length > 0;
+  if (exposure.state) {
+    return exposure.state === "ready" && !hasUrls ? "off" : exposure.state;
+  }
+  return exposure.enabled && hasUrls ? "ready" : "off";
+}
+
 export function Endpoints({ stackbox }: { stackbox: Stackbox }) {
   const exposure = stackbox.status !== "deleted" ? stackbox.exposure : null;
   const deployed = stackboxDeployed(stackbox);
@@ -1002,18 +1017,20 @@ export function Endpoints({ stackbox }: { stackbox: Stackbox }) {
     queryFn: () => api.endpoints(stackbox.id),
     enabled: stackbox.status === "ready",
     staleTime: 60_000,
+    // The stackbox's own tunnel publishes its URLs once it is up; poll until it leaves `starting`.
+    refetchInterval: (query) =>
+      query.state.data?.relay_exposure?.state === "starting" ? 1500 : false,
   });
-  const relay = useQuery(relayQuery());
   const hosts = useQuery(hostsQuery());
   const host = hosts.data?.find((h) => h.id === stackbox.host_id);
-  const relayUrl = relay.data?.url;
   const enable = useEnableRelayExposure(stackbox.id);
   const disable = useDisableRelayExposure(stackbox.id);
-  // Once the LAN view is picked it stays; turning the relay on or off returns to the relay view.
+  // Once the LAN view is picked it stays; turning the exposure on or off returns to the relay view.
   const [lanChosen, setLanChosen] = useState(false);
-  const relayUrls = login.data?.relay_exposure?.urls ?? {};
-  const relayExposed =
-    !!login.data?.relay_exposure?.enabled && Object.keys(relayUrls).length > 0;
+  const relayExposure = login.data?.relay_exposure;
+  const relayState = relayExposureState(relayExposure);
+  const relayUrls = relayExposure?.urls ?? {};
+  const relayExposed = relayState === "ready";
   const viaRelay = relayExposed && !lanChosen;
   const lanServices = exposure
     ? stackboxPublicPorts(stackboxComponents(stackbox)).map((port) => ({
@@ -1027,6 +1044,11 @@ export function Endpoints({ stackbox }: { stackbox: Stackbox }) {
   const services = lanServices.map((s) =>
     viaRelay && relayUrls[s.key] ? { ...s, url: relayUrls[s.key] } : s,
   );
+  const turnOn = (rotate: boolean) =>
+    enable.mutate(rotate, { onSuccess: () => setLanChosen(false) });
+  const turnOff = () =>
+    disable.mutate(undefined, { onSuccess: () => setLanChosen(false) });
+  const busy = enable.isPending || disable.isPending;
   return (
     <section className="panel endpoints-panel">
       <div className="panel-toolbar">
@@ -1042,23 +1064,35 @@ export function Endpoints({ stackbox }: { stackbox: Stackbox }) {
             <p className="relay-exposure-note">
               다이얼인 에이전트 호스트는 릴레이 엔드포인트 프록시를 아직 지원하지 않습니다.
             </p>
-          ) : !relayUrl ? (
-            <p className="relay-exposure-note">
-              Hosts → 릴레이 설정에서 Cloudflare 터널을 켜면 외부 접속 주소로 열 수 있습니다.
-            </p>
-          ) : login.isPending && !login.data ? null : !relayExposed ? (
+          ) : login.isPending && !login.data ? null : relayState === "off" ? (
             <div className="relay-exposure-row">
               <p className="relay-exposure-note">
-                이 환경의 서비스를 Cloudflare 릴레이 주소로 외부에 엽니다.
+                이 Stackbox 전용 Cloudflare 터널을 열어 외부에서 OpenStack API·Horizon·DB에 접속합니다.
               </p>
-              <Button
-                type="button"
-                disabled={enable.isPending}
-                onClick={() =>
-                  enable.mutate(false, { onSuccess: () => setLanChosen(false) })
-                }
-              >
-                릴레이 접속 켜기
+              <Button type="button" disabled={busy} onClick={() => turnOn(false)}>
+                외부 접속 켜기
+              </Button>
+            </div>
+          ) : relayState === "starting" ? (
+            <div className="relay-exposure-row">
+              <p className="relay-exposure-status">
+                <LoaderCircle size={15} className="animate-spin" />
+                Cloudflare 터널 연결 중…
+              </p>
+              <Button type="button" disabled={busy} onClick={turnOff}>
+                끄기
+              </Button>
+            </div>
+          ) : relayState === "error" ? (
+            <div className="relay-exposure-row">
+              <p className="relay-exposure-note relay-exposure-error" role="alert">
+                {relayExposure?.error || "Cloudflare 터널을 시작하지 못했습니다."}
+              </p>
+              <Button type="button" disabled={busy} onClick={() => turnOn(false)}>
+                다시 시도
+              </Button>
+              <Button type="button" disabled={busy} onClick={turnOff}>
+                끄기
               </Button>
             </div>
           ) : (
@@ -1080,30 +1114,16 @@ export function Endpoints({ stackbox }: { stackbox: Stackbox }) {
                     Relay
                   </button>
                 </div>
-                <Button
-                  type="button"
-                  disabled={enable.isPending || disable.isPending}
-                  onClick={() =>
-                    enable.mutate(true, { onSuccess: () => setLanChosen(false) })
-                  }
-                >
+                <Button type="button" disabled={busy} onClick={() => turnOn(true)}>
                   토큰 재발급
                 </Button>
-                <Button
-                  type="button"
-                  disabled={enable.isPending || disable.isPending}
-                  onClick={() =>
-                    disable.mutate(undefined, {
-                      onSuccess: () => setLanChosen(false),
-                    })
-                  }
-                >
+                <Button type="button" disabled={busy} onClick={turnOff}>
                   끄기
                 </Button>
               </div>
               {viaRelay && (
                 <p className="relay-exposure-note">
-                  Cloudflare 릴레이 주소로 외부에서 OpenStack API·CLI 및 Horizon에 접속할 수 있습니다. 끄거나 토큰을 재발급하면 기존 주소는 즉시 차단됩니다.
+                  이 Stackbox 전용 Cloudflare 주소입니다. 다른 Stackbox 대시보드와 세션이 섞이지 않으며, 끄거나 토큰을 재발급하면 즉시 차단됩니다.
                 </p>
               )}
             </>
@@ -1211,8 +1231,7 @@ export function Datastores({ stackbox }: { stackbox: Stackbox }) {
   });
   const stores = query.data?.datastores ?? [];
   const relayUrls = query.data?.relay_exposure?.urls ?? {};
-  const relayExposed =
-    !!query.data?.relay_exposure?.enabled && Object.keys(relayUrls).length > 0;
+  const relayExposed = relayExposureState(query.data?.relay_exposure) === "ready";
   // Relay is the default once exposed; picking LAN sticks for this view.
   const [lanChosen, setLanChosen] = useState(false);
   const viaRelay = relayExposed && !lanChosen;

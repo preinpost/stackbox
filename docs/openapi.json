@@ -6,7 +6,7 @@
     "license": {
       "name": ""
     },
-    "version": "0.1.12"
+    "version": "0.1.14"
   },
   "paths": {
     "/api/v1/agent-hosts": {
@@ -2717,7 +2717,7 @@
         },
         "responses": {
           "200": {
-            "description": "The stackbox's services are reachable through the relay; `rotate` makes a new token",
+            "description": "The stackbox's services are reachable through its own Cloudflare quick tunnel; `state` is `starting` until the tunnel has its address, then `ready`. `rotate` makes a new token without restarting the tunnel",
             "content": {
               "application/json": {
                 "schema": {
@@ -2747,7 +2747,7 @@
             }
           },
           "409": {
-            "description": "Not deployed, a dial-in agent host, or no relay configured",
+            "description": "Not deployed or a job is running, or a dial-in agent host",
             "content": {
               "application/json": {
                 "schema": {
@@ -2773,7 +2773,7 @@
         ],
         "responses": {
           "200": {
-            "description": "The services are no longer reachable through the relay; old URLs answer 404",
+            "description": "The stackbox's tunnel is stopped; old URLs answer nothing",
             "content": {
               "application/json": {
                 "schema": {
@@ -5381,6 +5381,16 @@
         },
         "additionalProperties": false
       },
+      "RelayExposureState": {
+        "type": "string",
+        "description": "Where a stackbox's own relay exposure stands.",
+        "enum": [
+          "off",
+          "starting",
+          "ready",
+          "error"
+        ]
+      },
       "RelayExposureStatus": {
         "type": "object",
         "description": "A stackbox's service endpoints through the relay. The token is in the URLs only; no listing\nshows it.",
@@ -5393,12 +5403,23 @@
             "type": "boolean",
             "description": "Whether the services answer through the relay now: exposed, with a relay address."
           },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the tunnel failed, in the `Error` state."
+          },
           "relay_url": {
             "type": [
               "string",
               "null"
             ],
-            "description": "The relay's base URL the services' URLs start with, when there is one."
+            "description": "The stackbox's own relay base URL (`https://<slug>.trycloudflare.com`), once its tunnel\nhas one."
+          },
+          "state": {
+            "$ref": "#/components/schemas/RelayExposureState",
+            "description": "Where the exposure stands: off, starting its tunnel, ready, or failed."
           },
           "urls": {
             "type": "object",

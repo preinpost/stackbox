@@ -37,6 +37,12 @@ function bridge(sock, url) {
   sock.pause();
   const ws = new WebSocket(url);
   ws.binaryType = "arraybuffer";
+  // A socket already closed under the WebSocket must not throw out of the script.
+  function closeWs() {
+    try {
+      ws.close();
+    } catch {}
+  }
   ws.addEventListener("open", () => sock.resume());
   sock.on("data", (chunk) => {
     if (ws.readyState === WebSocket.OPEN) ws.send(chunk);
@@ -46,8 +52,8 @@ function bridge(sock, url) {
   });
   ws.addEventListener("close", () => sock.destroy());
   ws.addEventListener("error", () => sock.destroy());
-  sock.on("close", () => ws.close());
-  sock.on("error", () => ws.close());
+  sock.on("close", closeWs);
+  sock.on("error", closeWs);
 }
 
 for (const target of targets) {

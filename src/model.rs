@@ -2152,16 +2152,38 @@ pub struct Endpoints {
     pub relay_exposure: Option<RelayExposureStatus>,
 }
 
+/// Where a stackbox's own relay exposure stands.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RelayExposureState {
+    /// Not exposed.
+    #[default]
+    Off,
+    /// Exposed; its Cloudflare quick tunnel has not given an address yet.
+    Starting,
+    /// Exposed; `relay_url` and `urls` answer now.
+    Ready,
+    /// Exposed, but its tunnel failed; `error` says why.
+    Error,
+}
+
 /// A stackbox's service endpoints through the relay. The token is in the URLs only; no listing
 /// shows it.
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
 pub struct RelayExposureStatus {
     /// Whether the services answer through the relay now: exposed, with a relay address.
     pub enabled: bool,
-    /// The relay's base URL the services' URLs start with, when there is one.
+    /// Where the exposure stands: off, starting its tunnel, ready, or failed.
+    #[serde(default)]
+    pub state: RelayExposureState,
+    /// The stackbox's own relay base URL (`https://<slug>.trycloudflare.com`), once its tunnel
+    /// has one.
     pub relay_url: Option<String>,
     /// Each public service's URL through the relay, by service ID.
     pub urls: BTreeMap<String, String>,
+    /// Why the tunnel failed, in the `Error` state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 /// The body of `PUT /api/v1/stackboxes/{id}/relay-exposure`.

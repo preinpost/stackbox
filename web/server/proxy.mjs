@@ -149,13 +149,15 @@ export function proxyApi(req, res, env = process.env) {
                 ? {
                     services: raw.services,
                     credentials,
-                    // The relay's service URLs, once exposed: the token rides in them only.
+                    // The stackbox's own relay URLs, once exposed: the token rides in them only.
                     ...(raw.relay_exposure
                       ? {
                           relay_exposure: {
                             enabled: raw.relay_exposure.enabled === true,
+                            state: raw.relay_exposure.state ?? "off",
                             relay_url: raw.relay_exposure.relay_url ?? null,
                             urls: raw.relay_exposure.urls ?? {},
+                            error: raw.relay_exposure.error ?? null,
                           },
                         }
                       : {}),

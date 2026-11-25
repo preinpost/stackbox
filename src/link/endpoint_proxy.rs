@@ -10,17 +10,23 @@
 //! The relay's other routes are untouched; [`super::relay::router`] sends everything that is not
 //! the WebSocket here.
 
-use std::{collections::BTreeMap, collections::HashMap, sync::RwLock};
+use std::{collections::BTreeMap, collections::HashMap, sync::Arc, sync::RwLock};
 
 use axum::{
+    Router,
     body::Body,
-    extract::Request,
+    extract::{
+        Path, Request, State,
+        ws::{WebSocket, WebSocketUpgrade},
+    },
     http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
+    routing::get,
 };
 use bytes::Bytes;
 use futures::{StreamExt, stream};
 use subtle::ConstantTimeEq;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::model::COMPONENTS;
 
@@ -30,6 +36,9 @@ pub const COOKIE: &str = "__stackbox_ui";
 pub const DASHBOARDS: &[&str] = &["horizon", "skyline-console", "rabbitmq-management"];
 /// The data stores a WebSocket tunnel reaches (`/x/<stackbox>/<token>/tcp/<service>`).
 const TCP_SERVICES: &[&str] = &["mariadb", "rabbitmq"];
+/// How many WebSocket tunnels may be open at once across all stackboxes; a request past it is
+/// refused with `503 Service Unavailable` until one closes.
+pub const MAX_TCP_TUNNELS: usize = 64;
 /// JSON bodies up to this size are read and have their URLs rewritten; larger or other bodies
 /// stream through untouched.
 const REWRITE_LIMIT: u64 = 4 * 1024 * 1024;
@@ -66,6 +75,8 @@ struct Table {
 pub struct EndpointProxy {
     table: RwLock<Table>,
     client: reqwest::Client,
+    /// One permit per open WebSocket tunnel; see [`MAX_TCP_TUNNELS`].
+    tcp_slots: Arc<Semaphore>,
 }
 
 impl Default for EndpointProxy {
@@ -78,8 +89,87 @@ impl Default for EndpointProxy {
         Self {
             table: RwLock::default(),
             client,
+            tcp_slots: Arc::new(Semaphore::new(MAX_TCP_TUNNELS)),
         }
     }
+}
+
+impl EndpointProxy {
+    /// A proxy that allows `limit` WebSocket tunnels at once, for tests of the refusal.
+    #[cfg(test)]
+    pub fn with_tcp_limit(limit: usize) -> Self {
+        Self {
+            tcp_slots: Arc::new(Semaphore::new(limit)),
+            ..Self::default()
+        }
+    }
+
+    /// A permit for one more WebSocket tunnel, or `None` when [`MAX_TCP_TUNNELS`] are open. The
+    /// permit returns to the pool when it is dropped.
+    pub fn try_acquire_tcp(&self) -> Option<OwnedSemaphorePermit> {
+        self.tcp_slots.clone().try_acquire_owned().ok()
+    }
+}
+
+/// The proxy's own routes, for a proxy that serves one stackbox or the relay's table: the
+/// `client.mjs` and the data store tunnels are matched first, and everything else goes to
+/// [`EndpointProxy::handle`].
+pub fn router(proxy: Arc<EndpointProxy>) -> Router {
+    Router::new()
+        .route(
+            "/x/{stackbox}/{token}/tcp/client.mjs",
+            get(tcp_client_script),
+        )
+        .route("/x/{stackbox}/{token}/tcp/{service}", get(tcp_upgrade))
+        .fallback(endpoints)
+        .with_state(proxy)
+}
+
+async fn endpoints(State(proxy): State<Arc<EndpointProxy>>, request: Request) -> Response {
+    proxy.handle(request).await
+}
+
+/// The `node --input-type=module` script that opens a stackbox's MariaDB and AMQP ports locally.
+/// A wrong token, or a relay that is off, is a plain `404`.
+async fn tcp_client_script(
+    State(proxy): State<Arc<EndpointProxy>>,
+    Path((stackbox, token)): Path<(String, String)>,
+) -> Response {
+    match proxy.client_script(&stackbox, &token) {
+        Some(script) => (
+            [
+                (header::CONTENT_TYPE, "text/javascript; charset=utf-8"),
+                (header::CACHE_CONTROL, "no-store"),
+            ],
+            script,
+        )
+            .into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+/// A stackbox's MariaDB or RabbitMQ AMQP port, as a WebSocket of binary frames. The token and the
+/// service are checked before the upgrade, so a wrong one is a plain `404`.
+async fn tcp_upgrade(
+    State(proxy): State<Arc<EndpointProxy>>,
+    Path((stackbox, token, service)): Path<(String, String, String)>,
+    ws: WebSocketUpgrade,
+) -> Response {
+    let Some((host, port)) = proxy.resolve_tcp(&stackbox, &token, &service) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    // Checked before the upgrade, so a refused client gets a plain answer it can retry.
+    let Some(slot) = proxy.try_acquire_tcp() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "too many active TCP tunnels\n",
+        )
+            .into_response();
+    };
+    let limit = crate::link::MAX_MESSAGE + 256;
+    ws.max_message_size(limit)
+        .max_frame_size(limit)
+        .on_upgrade(move |socket: WebSocket| crate::link::relay::bridge(socket, host, port, slot))
 }
 
 /// The public services of the enabled components, in catalog order. Infrastructure ports are not
@@ -460,7 +550,12 @@ fn cookie_target(headers: &HeaderMap) -> Option<(String, String, String)> {
     None
 }
 
-/// The entry point of a dashboard: its cookie, then the root of its pages.
+/// Cookies a dashboard's upstream session uses. They are cleared on entry, so switching between
+/// the dashboards of one stackbox (Horizon, Skyline, RabbitMQ) does not mix their sessions.
+const SESSION_COOKIES: &[&str] = &["sessionid", "csrftoken"];
+
+/// The entry point of a dashboard: its cookie, the other dashboards' session cookies cleared,
+/// then the root of its pages.
 fn dashboard_entry(id: &str, token: &str, service: &str, relay_base: &str) -> Response {
     let mut cookie = format!("{COOKIE}={id}:{token}:{service}; Path=/; HttpOnly; SameSite=Lax");
     if relay_base.starts_with("https://") {
@@ -471,13 +566,20 @@ fn dashboard_entry(id: &str, token: &str, service: &str, relay_base: &str) -> Re
     response
         .headers_mut()
         .insert(header::LOCATION, HeaderValue::from_static("/"));
-    match HeaderValue::from_str(&cookie) {
-        Ok(value) => {
-            response.headers_mut().insert(header::SET_COOKIE, value);
-            response
+    let cookies = std::iter::once(cookie).chain(
+        SESSION_COOKIES
+            .iter()
+            .map(|name| format!("{name}=; Path=/; Max-Age=0")),
+    );
+    for value in cookies {
+        match HeaderValue::from_str(&value) {
+            Ok(value) => {
+                response.headers_mut().append(header::SET_COOKIE, value);
+            }
+            Err(_) => return not_found(),
         }
-        Err(_) => not_found(),
     }
+    response
 }
 
 fn not_found() -> Response {

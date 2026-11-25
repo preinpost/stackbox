@@ -1245,6 +1245,11 @@ export function CreateFromBucketDialog({
 export function ImportSnapshotDialog() {
   const client = useQueryClient();
   const buckets = useQuery(bucketsQuery()).data ?? [];
+  const hostsState = useQuery(hostsQuery());
+  const hosts = hostsState.data ?? [];
+  // Only warn once the host list has loaded, so the notice does not flicker.
+  const noLocalHost =
+    hostsState.isSuccess && !hosts.some((h) => h.kind === "local");
   const [mode, setMode] = useState<"file" | "bucket">("file");
   const [path, setPath] = useState("");
   const [bucketId, setBucketId] = useState("");
@@ -1426,6 +1431,13 @@ export function ImportSnapshotDialog() {
                 stackboxd 호스트로 내려받아 등록한 뒤, 내려받은 파일은 지웁니다.
               </div>
             )}
+            {noLocalHost && (
+              <div className="warning-notice">
+                가져오기는 코디네이터가 실행 중인 로컬 호스트에 스냅샷을 등록합니다.
+                원격 호스트에서 S3 아카이브를 실행하려면 '버킷에서 Stackbox
+                만들기'를 사용하거나, Hosts에서 로컬 호스트를 먼저 등록하세요.
+              </div>
+            )}
             {mutation.error && <ErrorNotice error={mutation.error} />}
           </div>
           <div className="modal-footer justify-end">
@@ -1435,7 +1447,7 @@ export function ImportSnapshotDialog() {
             <Button
               type="submit"
               variant="primary"
-              disabled={mutation.isPending || !source.trim()}
+              disabled={mutation.isPending || !source.trim() || noLocalHost}
             >
               {mutation.isPending ? (
                 <LoaderCircle size={16} className="animate-spin" />

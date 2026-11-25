@@ -13,6 +13,92 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+const localHost = {
+  id: "local",
+  kind: "local",
+  status: "ready",
+  connected: true,
+  inspection: { arch: "aarch64", os: "macos", mtty_available: true },
+  capacity: { memory_budget_mib: 16384, memory_reserved_mib: 0 },
+};
+
+const remoteHost = {
+  id: "node-01",
+  kind: "ssh",
+  status: "ready",
+  address: "10.0.0.21",
+  port: 22,
+  username: "dev",
+  fingerprint: "SHA256:bbb",
+  connected: false,
+  inspection: { arch: "x86_64", os: "linux", mtty_available: true },
+  capacity: { memory_budget_mib: 32768, memory_reserved_mib: 0 },
+};
+
+function importClient() {
+  return new QueryClient({
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+  });
+}
+
+test("ImportSnapshotDialog warns and disables submit when no local host is registered", async () => {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (path: string) => {
+      if (path.endsWith("/hosts")) return Response.json([remoteHost]);
+      if (path.endsWith("/buckets")) return Response.json([]);
+      return Response.json([]);
+    }),
+  );
+  render(
+    <QueryClientProvider client={importClient()}>
+      <ImportSnapshotDialog />
+    </QueryClientProvider>,
+  );
+  await userEvent.click(await screen.findByRole("button", { name: /가져오기/ }));
+  expect(await screen.findByText(/로컬 호스트에 스냅샷을 등록합니다/)).toBeTruthy();
+  await userEvent.type(
+    screen.getByPlaceholderText("/Users/me/stackbox-snapshots/dev-clean.msb"),
+    "/tmp/a.msb",
+  );
+  const submit = screen.getByRole("button", { name: /가져오기 시작/ });
+  expect((submit as HTMLButtonElement).disabled).toBe(true);
+});
+
+test("ImportSnapshotDialog has no warning and allows submit when a local host exists", async () => {
+  let submitted: unknown;
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (path: string, options?: RequestInit) => {
+      if (path.endsWith("/hosts")) return Response.json([localHost, remoteHost]);
+      if (path.endsWith("/buckets")) return Response.json([]);
+      if (options?.method === "POST") {
+        submitted = JSON.parse(String(options.body));
+        return Response.json({ id: "dev-clean", status: "importing" });
+      }
+      return Response.json([]);
+    }),
+  );
+  render(
+    <QueryClientProvider client={importClient()}>
+      <ImportSnapshotDialog />
+    </QueryClientProvider>,
+  );
+  await userEvent.click(await screen.findByRole("button", { name: /가져오기/ }));
+  await screen.findByPlaceholderText("/Users/me/stackbox-snapshots/dev-clean.msb");
+  expect(screen.queryByText(/로컬 호스트에 스냅샷을 등록합니다/)).toBeNull();
+  await userEvent.type(
+    screen.getByPlaceholderText("/Users/me/stackbox-snapshots/dev-clean.msb"),
+    "/tmp/dev-clean.msb",
+  );
+  const submit = screen.getByRole("button", { name: /가져오기 시작/ });
+  expect((submit as HTMLButtonElement).disabled).toBe(false);
+  await userEvent.click(submit);
+  await vi.waitFor(() =>
+    expect(submitted).toEqual({ path: "/tmp/dev-clean.msb" }),
+  );
+});
+
 test("lists bucket archives by what their metadata files say", async () => {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
@@ -25,6 +111,8 @@ test("lists bucket archives by what their metadata files say", async () => {
         return Response.json([
           { id: "minio", name: "stackbox", prefix: "snapshots/", region: "auto" },
         ]);
+      if (path.endsWith("/hosts"))
+        return Response.json([localHost]);
       if (path.endsWith("/buckets/minio/objects"))
         return Response.json([
           {

@@ -1823,14 +1823,26 @@ export interface components {
       rotate: boolean;
     };
     /**
+     * @description Where a stackbox's own relay exposure stands.
+     * @enum {string}
+     */
+    RelayExposureState: "off" | "starting" | "ready" | "error";
+    /**
      * @description A stackbox's service endpoints through the relay. The token is in the URLs only; no listing
      *     shows it.
      */
     RelayExposureStatus: {
       /** @description Whether the services answer through the relay now: exposed, with a relay address. */
       enabled: boolean;
-      /** @description The relay's base URL the services' URLs start with, when there is one. */
+      /** @description Why the tunnel failed, in the `Error` state. */
+      error?: string | null;
+      /**
+       * @description The stackbox's own relay base URL (`https://<slug>.trycloudflare.com`), once its tunnel
+       *     has one.
+       */
       relay_url?: string | null;
+      /** @description Where the exposure stands: off, starting its tunnel, ready, or failed. */
+      state?: components["schemas"]["RelayExposureState"];
       /** @description Each public service's URL through the relay, by service ID. */
       urls: {
         [key: string]: string;
@@ -4365,7 +4377,7 @@ export interface operations {
       };
     };
     responses: {
-      /** @description The stackbox's services are reachable through the relay; `rotate` makes a new token */
+      /** @description The stackbox's services are reachable through its own Cloudflare quick tunnel; `state` is `starting` until the tunnel has its address, then `ready`. `rotate` makes a new token without restarting the tunnel */
       200: {
         headers: {
           [name: string]: unknown;
@@ -4390,7 +4402,7 @@ export interface operations {
           "application/json": components["schemas"]["ErrorBody"];
         };
       };
-      /** @description Not deployed, a dial-in agent host, or no relay configured */
+      /** @description Not deployed or a job is running, or a dial-in agent host */
       409: {
         headers: {
           [name: string]: unknown;
@@ -4412,7 +4424,7 @@ export interface operations {
     };
     requestBody?: never;
     responses: {
-      /** @description The services are no longer reachable through the relay; old URLs answer 404 */
+      /** @description The stackbox's tunnel is stopped; old URLs answer nothing */
       200: {
         headers: {
           [name: string]: unknown;

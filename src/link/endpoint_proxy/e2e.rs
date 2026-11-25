@@ -688,3 +688,69 @@ async fn tunnel_upgrades_are_refused_for_bad_tokens_services_and_a_disabled_rela
     relay.endpoints.replace(None, HashMap::new());
     assert!(refused(tunnel_url(&relay_base, TOKEN, "mariadb")).await);
 }
+
+/// The status a WebSocket upgrade to `url` is refused with, or `None` when it is accepted.
+async fn upgrade_refused_with(url: String) -> Option<StatusCode> {
+    match tokio_tungstenite::connect_async(url).await {
+        Ok(_) => None,
+        Err(tokio_tungstenite::tungstenite::Error::Http(response)) => Some(response.status()),
+        Err(error) => panic!("unexpected upgrade error: {error}"),
+    }
+}
+
+#[tokio::test]
+async fn tcp_tunnels_are_capped_and_a_closed_one_frees_its_slot() {
+    use futures::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+
+    let base = upstream_block().await;
+    let mut relay = Relay::default();
+    relay.endpoints = Arc::new(EndpointProxy::with_tcp_limit(2));
+    let relay = Arc::new(relay);
+    let bind: SocketAddr = "127.0.0.1:0".parse().unwrap();
+    let (addr, _task) = relay::listen(relay.clone(), bind, None).await.unwrap();
+    let relay_base = format!("http://{addr}");
+    relay.endpoints.replace(
+        Some(relay_base.clone()),
+        HashMap::from([("sb".to_owned(), exposed(TOKEN, base))]),
+    );
+    let url = tunnel_url(&relay_base, TOKEN, "mariadb");
+
+    let (mut first, _) = tokio_tungstenite::connect_async(url.clone()).await.unwrap();
+    let (mut second, _) = tokio_tungstenite::connect_async(url.clone()).await.unwrap();
+    assert_eq!(
+        upgrade_refused_with(url.clone()).await,
+        Some(StatusCode::SERVICE_UNAVAILABLE)
+    );
+
+    // Both open tunnels still carry bytes while the third is refused.
+    for socket in [&mut first, &mut second] {
+        socket
+            .send(Message::Binary(b"ping".to_vec().into()))
+            .await
+            .unwrap();
+        let echoed = socket.next().await.unwrap().unwrap();
+        assert_eq!(echoed.into_data().as_ref(), b"ping");
+    }
+
+    // Closing one frees its slot; the relay releases it as its bridge ends.
+    first.close(None).await.unwrap();
+    let mut reopened = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Ok((socket, _)) = tokio_tungstenite::connect_async(url.clone()).await {
+                return socket;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("a closed tunnel frees its slot");
+    reopened
+        .send(Message::Binary(b"pong".to_vec().into()))
+        .await
+        .unwrap();
+    let echoed = reopened.next().await.unwrap().unwrap();
+    assert_eq!(echoed.into_data().as_ref(), b"pong");
+    drop(reopened);
+    drop(second);
+}

@@ -339,8 +339,10 @@ test("keeps the relay exposure in the endpoints response", async (t) => {
         credentials: { OS_PASSWORD: "x" },
         relay_exposure: {
           enabled: true,
-          relay_url: "https://relay.example",
-          urls: { horizon: "https://relay.example/x/sb/t/horizon" },
+          state: "ready",
+          relay_url: "https://sb1.trycloudflare.com",
+          urls: { horizon: "https://sb1.trycloudflare.com/x/sb/t/horizon" },
+          error: null,
           extra: "dropped",
         },
       }),
@@ -352,8 +354,39 @@ test("keeps the relay exposure in the endpoints response", async (t) => {
   const body = await response.json();
   assert.deepEqual(body.relay_exposure, {
     enabled: true,
-    relay_url: "https://relay.example",
-    urls: { horizon: "https://relay.example/x/sb/t/horizon" },
+    state: "ready",
+    relay_url: "https://sb1.trycloudflare.com",
+    urls: { horizon: "https://sb1.trycloudflare.com/x/sb/t/horizon" },
+    error: null,
+  });
+});
+test("passes a starting or failed tunnel's state and error through", async (t) => {
+  const address = await setup(t, (_req, res) => {
+    res.setHeader("content-type", "application/json");
+    res.end(
+      JSON.stringify({
+        services: {},
+        credentials: {},
+        relay_exposure: {
+          enabled: true,
+          state: "error",
+          relay_url: null,
+          urls: {},
+          error: "cloudflared update: no network",
+        },
+      }),
+    );
+  });
+  const response = await fetch(
+    `${address}/api/v1/stackboxes/4c4b1c0e-1f4a-4c40-9c39-2b5a3f7c0f11/endpoints`,
+  );
+  const body = await response.json();
+  assert.deepEqual(body.relay_exposure, {
+    enabled: true,
+    state: "error",
+    relay_url: null,
+    urls: {},
+    error: "cloudflared update: no network",
   });
 });
 test("forwards local host registration and service checks", async (t) => {

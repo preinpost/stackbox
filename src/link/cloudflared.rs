@@ -10,7 +10,7 @@
 use std::{
     path::{Path, PathBuf},
     pin::Pin,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, OnceLock},
     time::Duration,
 };
 
@@ -136,6 +136,14 @@ async fn release(pin: Option<&str>) -> Result<Release> {
     })
 }
 
+/// Serializes installs across every [`Installer`] in the process: each Stackbox runs its own
+/// tunnel, and they may start at once, while only one may download and swap the binary.
+static INSTALL_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+
+fn install_lock() -> &'static tokio::sync::Mutex<()> {
+    INSTALL_LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
 /// cloudflared binaries under `<state dir>/bin/`: `cloudflared-<version>`, the current one
 /// linked as `cloudflared`, and the one before it kept to go back to.
 pub struct Installer {
@@ -164,8 +172,9 @@ impl Installer {
         if let Some(path) = Self::unmanaged() {
             return Ok(path);
         }
+        let _guard = install_lock().lock().await;
         if self.installed().is_none() {
-            self.update().await?;
+            self.refresh().await?;
         }
         Ok(self.dir.join("cloudflared"))
     }
@@ -173,6 +182,11 @@ impl Installer {
     /// Returns the installed version and whether it changed.
     pub async fn update(&self) -> Result<(String, bool)> {
         ensure!(Self::unmanaged().is_none(), "STACKBOX_CLOUDFLARED is set");
+        let _guard = install_lock().lock().await;
+        self.refresh().await
+    }
+    /// [`Self::update`] under [`install_lock`], which the caller holds.
+    async fn refresh(&self) -> Result<(String, bool)> {
         let pin = std::env::var("STACKBOX_CLOUDFLARED_VERSION")
             .ok()
             .filter(|v| !v.is_empty());
@@ -324,18 +338,24 @@ fn quick_url(line: &str) -> Option<String> {
     (host.ends_with(".trycloudflare.com") && host != "api.trycloudflare.com").then_some(url)
 }
 
-/// A running tunnel to `origin`. Dropping it stops cloudflared.
+/// A running tunnel to `origin`. Dropping it stops cloudflared: the supervisor's child is
+/// `kill_on_drop`, and the task that owns it is aborted here.
 pub struct Tunnel {
     status: Arc<Mutex<TunnelStatus>>,
     restart: Arc<Notify>,
     task: tokio::task::JoinHandle<()>,
     updater: tokio::task::JoinHandle<()>,
+    /// This tunnel's record of its cloudflared, removed with the tunnel.
+    pid_file: PathBuf,
 }
 
 impl Drop for Tunnel {
     fn drop(&mut self) {
+        // Aborting the supervisor drops its child, which is `kill_on_drop`: cloudflared stops
+        // when the runtime drops the task, right after this.
         self.task.abort();
         self.updater.abort();
+        let _ = std::fs::remove_file(&self.pid_file);
     }
 }
 
@@ -347,10 +367,21 @@ impl Tunnel {
         origin: String,
         on_url: Arc<dyn Fn(String) + Send + Sync>,
     ) -> Self {
-        Self::spawn(state_dir, origin, on_url, DNS_SETTLE)
+        Self::start_with_log(state_dir, "cloudflared.log", origin, on_url)
+    }
+    /// As [`Self::start`], logging cloudflared's output to `<state dir>/<log_name>`. Tunnels that
+    /// run at once need their own names, so each one's log and pid record stay apart.
+    pub fn start_with_log(
+        state_dir: &Path,
+        log_name: &str,
+        origin: String,
+        on_url: Arc<dyn Fn(String) + Send + Sync>,
+    ) -> Self {
+        Self::spawn(state_dir, log_name, origin, on_url, DNS_SETTLE)
     }
     fn spawn(
         state_dir: &Path,
+        log_name: &str,
         origin: String,
         on_url: Arc<dyn Fn(String) + Send + Sync>,
         settle: Duration,
@@ -362,7 +393,9 @@ impl Tunnel {
             ..Default::default()
         }));
         let restart = Arc::new(Notify::new());
-        let log = state_dir.join("cloudflared.log");
+        let log = state_dir.join(log_name);
+        // Beside the log, so each tunnel's record is its own.
+        let pid_file = log.with_extension("pid");
         let task = tokio::spawn(supervise(
             installer.clone(),
             origin,
@@ -389,6 +422,7 @@ impl Tunnel {
             restart,
             task,
             updater,
+            pid_file,
         }
     }
     pub fn status(&self) -> TunnelStatus {
@@ -492,7 +526,8 @@ async fn supervise(
                     status.lock().unwrap().version = Some(version);
                 }
             }
-            let pid_file = log.with_file_name("cloudflared.pid");
+            // Beside the log, so each tunnel's record is its own.
+            let pid_file = log.with_extension("pid");
             reap(&pid_file, &binary).await;
             let mut command = tokio::process::Command::new(&binary);
             command.args(["tunnel", "--no-autoupdate", "--url", &origin]);
@@ -723,6 +758,47 @@ mod tests {
         std::os::unix::fs::symlink(name, bin.join("cloudflared")).unwrap();
     }
 
+    /// Tunnels that start together keep their own logs, and dropping one leaves the other's
+    /// log and address alone.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn concurrent_tunnels_log_to_their_own_files() {
+        let dir = tempfile::tempdir().unwrap();
+        fake_quick_tunnel(dir.path(), "https://sb-one-3333.trycloudflare.com");
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let mut tunnels = Vec::new();
+        for name in ["cloudflared-sb-a.log", "cloudflared-sb-b.log"] {
+            let tx = tx.clone();
+            tunnels.push(Tunnel::start_with_log(
+                dir.path(),
+                name,
+                "http://127.0.0.1:1".to_owned(),
+                Arc::new(move |url| {
+                    let _ = tx.send(url);
+                }),
+            ));
+        }
+        // Both announce the address; each keeps its own log and pid record.
+        for _ in 0..2 {
+            tokio::time::timeout(Duration::from_secs(20), rx.recv())
+                .await
+                .expect("no address announced")
+                .unwrap();
+        }
+        for name in ["cloudflared-sb-a.log", "cloudflared-sb-b.log"] {
+            let log = std::fs::read_to_string(dir.path().join(name)).unwrap();
+            assert!(log.contains("sb-one-3333"), "{name}: {log}");
+        }
+        assert!(dir.path().join("cloudflared-sb-a.pid").exists());
+        assert!(dir.path().join("cloudflared-sb-b.pid").exists());
+        // Dropping one tunnel stops its cloudflared and removes only its record.
+        tunnels.remove(0);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(!dir.path().join("cloudflared-sb-a.pid").exists());
+        assert!(dir.path().join("cloudflared-sb-b.pid").exists());
+        assert!(tunnels[0].status().connected);
+    }
+
     /// A tunnel dropped after its address was found but before the name settled must not
     /// announce that address later: the next tunnel's address is the first one heard.
     #[cfg(unix)]
@@ -740,6 +816,7 @@ mod tests {
         fake_quick_tunnel(old_dir.path(), "https://old-river-1111.trycloudflare.com");
         let old = Tunnel::spawn(
             old_dir.path(),
+            "cloudflared.log",
             "http://127.0.0.1:1".to_owned(),
             on_url(tx.clone()),
             settle,
@@ -758,6 +835,7 @@ mod tests {
         fake_quick_tunnel(new_dir.path(), "https://new-river-2222.trycloudflare.com");
         let _new = Tunnel::spawn(
             new_dir.path(),
+            "cloudflared.log",
             "http://127.0.0.1:1".to_owned(),
             on_url(tx.clone()),
             settle,

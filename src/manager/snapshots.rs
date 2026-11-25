@@ -1259,6 +1259,17 @@ impl StackboxManager {
             if state.snapshots.contains_key(&id) {
                 return Err(conflict(format!("snapshot '{id}' already exists")));
             }
+            // The archive is kept on this machine's agent; refuse now rather than leave a record
+            // that the background import can only fail.
+            if !state
+                .hosts
+                .values()
+                .any(|stored| stored.host.kind == crate::remote::HostKind::Local)
+            {
+                return Err(conflict(
+                    "register the local host under Hosts to keep snapshots on it",
+                ));
+            }
             let transfer = match &source {
                 Source::Bucket { bucket, key } => {
                     if !state.buckets.contains_key(bucket) {
@@ -1603,8 +1614,14 @@ impl StackboxManager {
             ))
         })?;
         let removed = async {
+            // A failed import or freeze may have left no disk at all: there is nothing on any host
+            // to ask about, so only the record goes.
+            let diskless = snapshot.reference.as_deref().unwrap_or_default().is_empty()
+                && snapshot.nodes.is_empty()
+                && snapshot.copies.is_empty();
             // A remote host that is gone takes the original with it; only the record is left.
             if forget
+                || diskless
                 || snapshot.host_id.is_some()
                     && self.read(|state| origin_host(state, &snapshot))?.is_none()
             {

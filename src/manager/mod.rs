@@ -9,6 +9,7 @@ mod snapshots;
 mod store;
 mod transfers;
 
+use crate::link::endpoint_proxy::{EndpointProxy, Exposed, exposure_urls, public_services};
 use crate::{
     kolla::{DeployEvent, EventSink},
     model::*,
@@ -114,6 +115,10 @@ struct Inner {
     relay_listener: tokio::sync::Mutex<RelayListener>,
     /// A quick tunnel's current address, which new stackboxes that span hosts get.
     tunnel_url: Mutex<Option<String>>,
+    /// Each exposed stackbox's own endpoint proxy and Cloudflare quick tunnel, by stackbox ID.
+    stackbox_tunnels: Mutex<std::collections::HashMap<String, StackboxTunnel>>,
+    /// Serializes starting a stackbox's tunnel, so two calls never run two for one stackbox.
+    exposure_gate: tokio::sync::Mutex<()>,
     /// What each host of a stackbox that spans hosts gets at create, secrets included, until
     /// its create job has handed it over. Only hashes are stored.
     spreads:
@@ -458,6 +463,8 @@ impl StackboxManager {
             relay_tls: std::sync::RwLock::new(relay_tls),
             relay_listener: Default::default(),
             tunnel_url: Default::default(),
+            stackbox_tunnels: Default::default(),
+            exposure_gate: tokio::sync::Mutex::new(()),
             spreads: Default::default(),
             options,
             create_gate: Semaphore::new(1),
@@ -669,9 +676,11 @@ impl StackboxManager {
         endpoints.relay_exposure = relay_exposure;
         Ok(endpoints)
     }
-    /// Expose a deployed stackbox's service endpoints through the relay, or rotate its token with
-    /// `rotate`. An exposed stackbox keeps its token otherwise.
-    pub fn set_relay_exposure(
+    /// Expose a deployed stackbox's service endpoints through its own relay address, or rotate its
+    /// token with `rotate`. The first exposure starts the stackbox's own Cloudflare quick tunnel,
+    /// which needs no shared relay; its address comes once Cloudflare gives it (see
+    /// [`RelayExposureState`]). An exposed stackbox keeps its token and tunnel otherwise.
+    pub async fn set_relay_exposure(
         &self,
         id: &str,
         request: RelayExposureRequest,
@@ -692,88 +701,198 @@ impl StackboxManager {
                 "relay endpoint access currently supports local and SSH hosts; dial-in agent hosts are not yet supported",
             ));
         }
-        if self.relay_url().is_none() {
-            return Err(conflict("configure the relay first"));
-        }
         self.update(|state| {
             if request.rotate || !state.relay_tokens.contains_key(id) {
                 state.relay_tokens.insert(id.to_owned(), new_relay_token()?);
             }
             Ok(())
         })?;
-        self.sync_endpoints();
+        self.ensure_stackbox_tunnel(&stackbox).await?;
         self.exposure_status(&stackbox)
     }
-    /// Stop serving a stackbox's endpoints through the relay: its token goes, and the URLs and
-    /// cookies handed out so far answer `404`.
+    /// Give an exposed stackbox its endpoint proxy table and its quick tunnel, or update the table
+    /// of the ones it has. A new token reaches a running proxy at once, without restarting
+    /// cloudflared.
+    async fn ensure_stackbox_tunnel(&self, stackbox: &StackboxRecord) -> Result<()> {
+        let _gate = self.0.exposure_gate.lock().await;
+        let token = self
+            .read(|state| state.relay_tokens.get(&stackbox.id).cloned())?
+            .context("the stackbox has no relay token")?;
+        let exposure = stackbox
+            .exposure
+            .as_ref()
+            .context("the stackbox is not deployed")?;
+        let exposed = Exposed {
+            token,
+            host: exposure.host.clone(),
+            port_base: exposure.port_base,
+            services: public_services(&stackbox_components(stackbox)),
+        };
+        if let Some(tunnel) = lock_unpoisoned(&self.0.stackbox_tunnels).get(&stackbox.id) {
+            tunnel.set_exposed(exposed);
+            return Ok(());
+        }
+        let fresh = self
+            .start_stackbox_tunnel(&stackbox.id, exposed.clone())
+            .await?;
+        lock_unpoisoned(&self.0.stackbox_tunnels).insert(stackbox.id.clone(), fresh);
+        Ok(())
+    }
+    /// Bind a stackbox's own listener on loopback and start its quick tunnel to it.
+    async fn start_stackbox_tunnel(&self, id: &str, exposed: Exposed) -> Result<StackboxTunnel> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .context("bind the stackbox's relay listener")?;
+        let addr = listener.local_addr()?;
+        let proxy = Arc::new(EndpointProxy::default());
+        let url = Arc::new(Mutex::new(None));
+        let exposed = Arc::new(Mutex::new(Some(exposed)));
+        publish(&proxy, id, &url, &exposed);
+        let app = crate::link::endpoint_proxy::router(proxy.clone());
+        let server = tokio::spawn(async move {
+            if let Err(error) = axum::serve(listener, app).await {
+                eprintln!("stackbox relay listener stopped: {error}");
+            }
+        });
+        let tunnel = self.spawn_quick_tunnel(id, addr, &proxy, &url, &exposed);
+        Ok(StackboxTunnel {
+            id: id.to_owned(),
+            proxy,
+            url,
+            exposed,
+            addr,
+            listener: server,
+            tunnel,
+        })
+    }
+    /// The quick tunnel that carries a stackbox's listener to the internet. Its address goes to
+    /// the proxy table once Cloudflare gives it.
+    #[cfg(not(test))]
+    fn spawn_quick_tunnel(
+        &self,
+        id: &str,
+        addr: std::net::SocketAddr,
+        proxy: &Arc<EndpointProxy>,
+        url: &Arc<Mutex<Option<String>>>,
+        exposed: &Arc<Mutex<Option<Exposed>>>,
+    ) -> Option<crate::link::cloudflared::Tunnel> {
+        let log_name = format!("cloudflared-sb-{id}.log");
+        let stackbox = id.to_owned();
+        let (proxy, url, exposed) = (proxy.clone(), url.clone(), exposed.clone());
+        let on_url: Arc<dyn Fn(String) + Send + Sync> = Arc::new(move |new_url: String| {
+            *lock_unpoisoned(&url) = Some(new_url);
+            publish(&proxy, &stackbox, &url, &exposed);
+        });
+        Some(crate::link::cloudflared::Tunnel::start_with_log(
+            &self.0.options.state_dir,
+            &log_name,
+            format!("http://{addr}"),
+            on_url,
+        ))
+    }
+    /// Tests run no cloudflared; they announce a stackbox's address with
+    /// [`Self::announce_test_tunnel`].
+    #[cfg(test)]
+    fn spawn_quick_tunnel(
+        &self,
+        _id: &str,
+        _addr: std::net::SocketAddr,
+        _proxy: &Arc<EndpointProxy>,
+        _url: &Arc<Mutex<Option<String>>>,
+        _exposed: &Arc<Mutex<Option<Exposed>>>,
+    ) -> Option<crate::link::cloudflared::Tunnel> {
+        None
+    }
+    /// Hand a stackbox's tunnel address to its proxy, as Cloudflare would once the tunnel is up.
+    #[cfg(test)]
+    pub(crate) fn announce_test_tunnel(&self, id: &str, url: &str) {
+        let tunnels = lock_unpoisoned(&self.0.stackbox_tunnels);
+        let tunnel = tunnels.get(id).expect("the stackbox has a tunnel");
+        *lock_unpoisoned(&tunnel.url) = Some(url.to_owned());
+        publish(&tunnel.proxy, id, &tunnel.url, &tunnel.exposed);
+    }
+    /// Give each stackbox that is deployed and exposed its tunnel again, after the coordinator
+    /// starts. Called by [`Self::start_relay`].
+    pub async fn restore_relay_exposures(&self) {
+        let Ok(stackboxes) = self.list() else { return };
+        for stackbox in stackboxes {
+            if stackbox.status != StackboxStatus::Ready
+                || stackbox.active_job.is_some()
+                || stackbox.exposure.is_none()
+            {
+                continue;
+            }
+            if !self
+                .read(|state| state.relay_tokens.contains_key(&stackbox.id))
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            if let Err(error) = self.ensure_stackbox_tunnel(&stackbox).await {
+                eprintln!("relay exposure of {}: {error:#}", stackbox.id);
+            }
+        }
+    }
+    /// Stop serving a stackbox's endpoints through the relay: its token goes, its tunnel stops,
+    /// and the URLs and cookies handed out so far answer nothing.
     pub fn remove_relay_exposure(&self, id: &str) -> Result<RelayExposureStatus> {
         self.get(id)?;
         self.update(|state| {
             state.relay_tokens.remove(id);
             Ok(())
         })?;
-        self.sync_endpoints();
+        drop_stackbox_tunnel(&self.0.stackbox_tunnels, id);
         Ok(RelayExposureStatus {
             enabled: false,
-            relay_url: self.relay_url(),
+            state: RelayExposureState::Off,
+            relay_url: None,
             urls: BTreeMap::new(),
+            error: None,
         })
     }
-    /// A stackbox's relay exposure as its API shows it: the URLs, when there is a token and a
-    /// relay address.
+    /// A stackbox's relay exposure as its API shows it: the URLs once its tunnel has an address,
+    /// `Starting` until then, and `Error` when the tunnel fails.
     fn exposure_status(&self, stackbox: &StackboxRecord) -> Result<RelayExposureStatus> {
-        let relay_url = self.relay_url();
-        let token = self.read(|state| state.relay_tokens.get(&stackbox.id).cloned())?;
-        let urls = match (&relay_url, &token) {
-            (Some(base), Some(token)) => crate::link::endpoint_proxy::exposure_urls(
-                base,
-                &stackbox.id,
-                token,
-                &stackbox_components(stackbox),
-            ),
-            _ => BTreeMap::new(),
+        let Some(token) = self.read(|state| state.relay_tokens.get(&stackbox.id).cloned())? else {
+            return Ok(RelayExposureStatus {
+                enabled: false,
+                state: RelayExposureState::Off,
+                relay_url: None,
+                urls: BTreeMap::new(),
+                error: None,
+            });
         };
-        Ok(RelayExposureStatus {
-            enabled: relay_url.is_some() && token.is_some(),
-            relay_url,
-            urls,
+        let tunnels = lock_unpoisoned(&self.0.stackbox_tunnels);
+        let tunnel = tunnels.get(&stackbox.id);
+        if let Some(url) = tunnel.and_then(|t| lock_unpoisoned(&t.url).clone()) {
+            let urls = exposure_urls(&url, &stackbox.id, &token, &stackbox_components(stackbox));
+            return Ok(RelayExposureStatus {
+                enabled: true,
+                state: RelayExposureState::Ready,
+                relay_url: Some(url),
+                urls,
+                error: None,
+            });
+        }
+        let error = tunnel
+            .and_then(|t| t.tunnel.as_ref())
+            .and_then(|t| t.status().error);
+        Ok(match error {
+            Some(error) => RelayExposureStatus {
+                enabled: true,
+                state: RelayExposureState::Error,
+                relay_url: None,
+                urls: BTreeMap::new(),
+                error: Some(error),
+            },
+            None => RelayExposureStatus {
+                enabled: true,
+                state: RelayExposureState::Starting,
+                relay_url: None,
+                urls: BTreeMap::new(),
+                error: None,
+            },
         })
-    }
-    /// Rebuild the relay's endpoint table from the saved state and the relay's current address:
-    /// each exposed stackbox, and the base URL its services are reached through. Called wherever
-    /// either changes.
-    pub fn sync_endpoints(&self) {
-        use crate::link::endpoint_proxy::{Exposed, public_services};
-        let base = self
-            .relay_url()
-            .map(|url| url.trim_end_matches('/').to_owned());
-        let exposed = match self.read(|state| {
-            state
-                .stackboxes
-                .values()
-                .filter(|s| s.status != StackboxStatus::Deleted)
-                .filter_map(|s| {
-                    let token = state.relay_tokens.get(&s.id)?;
-                    let exposure = s.exposure.as_ref()?;
-                    Some((
-                        s.id.clone(),
-                        Exposed {
-                            token: token.clone(),
-                            host: exposure.host.clone(),
-                            port_base: exposure.port_base,
-                            services: public_services(&stackbox_components(s)),
-                        },
-                    ))
-                })
-                .collect::<std::collections::HashMap<_, _>>()
-        }) {
-            Ok(exposed) => exposed,
-            Err(error) => {
-                eprintln!("relay: endpoints not synced: {error:#}");
-                return;
-            }
-        };
-        self.0.relay.endpoints.replace(base, exposed);
     }
     /// Set the faults of a multi-node stackbox VM's links (`node` is `control`, `compute-1`, ...),
     /// such as loss 1.0 to cut it off; `Impair::default()` heals it. It applies at once,
@@ -1335,13 +1454,13 @@ impl StackboxManager {
     /// Close a deleted stackbox's uplinks and drop their keys.
     fn forget_uplinks(&self, id: &str) -> Result<()> {
         self.0.relay.forget(id);
+        drop_stackbox_tunnel(&self.0.stackbox_tunnels, id);
         self.update(|state| {
             state.relay_keys.remove(id);
             state.pending_shares.remove(id);
             state.relay_tokens.remove(id);
             Ok(())
         })?;
-        self.sync_endpoints();
         Ok(())
     }
     /// Let the switches of a stackbox that spans hosts join its relay.
@@ -1516,6 +1635,8 @@ impl StackboxManager {
     /// Listen for the switches of stackboxes that span hosts, replacing an earlier listener. A
     /// failure is reported in [`Self::relay_status`] and leaves the rest of the daemon up.
     pub async fn start_relay(&self) {
+        // The stackboxes' own tunnels do not depend on the shared relay, so they come back first.
+        self.restore_relay_exposures().await;
         let mut listener = self.0.relay_listener.lock().await;
         if let Some(task) = listener.task.take() {
             task.abort();
@@ -1524,7 +1645,6 @@ impl StackboxManager {
         }
         listener.tunnel = None;
         *lock_unpoisoned(&self.0.tunnel_url) = None;
-        self.sync_endpoints();
         listener.addr = None;
         listener.error = None;
         listener.serving = true;
@@ -1559,7 +1679,6 @@ impl StackboxManager {
                         };
                         let manager = StackboxManager(inner);
                         *lock_unpoisoned(&manager.0.tunnel_url) = Some(url.clone());
-                        manager.sync_endpoints();
                         tokio::spawn(async move { manager.relink(&url).await });
                     });
                     listener.tunnel = Some(crate::link::cloudflared::Tunnel::start(
@@ -1657,7 +1776,6 @@ impl StackboxManager {
         if serving && !(running && current == settings) {
             self.start_relay().await;
         }
-        self.sync_endpoints();
         self.relay_status().await
     }
     fn read<T>(&self, f: impl FnOnce(&State) -> T) -> Result<T> {
@@ -3644,6 +3762,64 @@ fn uplink_key_aad(stackbox: &str, host: &str) -> String {
 }
 fn expansion_share_aad(stackbox: &str, host: &str) -> String {
     format!("stackbox-expansion-share:{stackbox}:{host}")
+}
+
+/// A stackbox's own relay exposure: the proxy serving it, its tunnel's address once Cloudflare
+/// gives one, and the cloudflared that carries it. Dropping it closes the listener and stops
+/// cloudflared, so a deleted or unexposed stackbox leaves nothing running.
+struct StackboxTunnel {
+    id: String,
+    /// Serves the stackbox's endpoints, and only them, behind the tunnel's address.
+    proxy: Arc<EndpointProxy>,
+    /// The tunnel's address, `https://<slug>.trycloudflare.com`, once Cloudflare gave it.
+    url: Arc<Mutex<Option<String>>>,
+    /// The stackbox's token, host, ports and services as the proxy serves them.
+    exposed: Arc<Mutex<Option<Exposed>>>,
+    /// The loopback listener cloudflared points at. Only the tests read it back.
+    #[cfg_attr(not(test), allow(dead_code))]
+    addr: std::net::SocketAddr,
+    listener: tokio::task::JoinHandle<()>,
+    /// `None` only in tests, which run no cloudflared.
+    tunnel: Option<crate::link::cloudflared::Tunnel>,
+}
+
+impl StackboxTunnel {
+    fn set_exposed(&self, exposed: Exposed) {
+        *lock_unpoisoned(&self.exposed) = Some(exposed);
+        publish(&self.proxy, &self.id, &self.url, &self.exposed);
+    }
+}
+
+impl Drop for StackboxTunnel {
+    fn drop(&mut self) {
+        // The cloudflared is stopped when `tunnel` drops after this.
+        self.listener.abort();
+    }
+}
+
+/// Hand a stackbox's proxy its current address and exposure.
+fn publish(
+    proxy: &EndpointProxy,
+    id: &str,
+    url: &Mutex<Option<String>>,
+    exposed: &Mutex<Option<Exposed>>,
+) {
+    let url = lock_unpoisoned(url).clone();
+    let stackboxes = lock_unpoisoned(exposed)
+        .clone()
+        .map(|exposed| (id.to_owned(), exposed))
+        .into_iter()
+        .collect();
+    proxy.replace(url, stackboxes);
+}
+
+/// Stop a stackbox's tunnel, if it has one. The drop happens after the lock is released.
+fn drop_stackbox_tunnel(
+    tunnels: &Mutex<std::collections::HashMap<String, StackboxTunnel>>,
+    id: &str,
+) {
+    let removed = lock_unpoisoned(tunnels).remove(id);
+    drop(removed);
 }
 
 /// Locks a value that a panicking holder may have poisoned. Both guarded values stay

@@ -20,13 +20,10 @@ use anyhow::{Result, anyhow, ensure};
 use axum::{
     Router,
     extract::{
-        Path, Query, Request, State,
+        Query, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
-    http::{
-        HeaderMap, StatusCode,
-        header::{AUTHORIZATION, CACHE_CONTROL, CONTENT_TYPE},
-    },
+    http::{HeaderMap, StatusCode, header::AUTHORIZATION},
     response::{IntoResponse, Response},
     routing::get,
 };
@@ -136,59 +133,25 @@ pub async fn listen(
 /// The relay's routes: the switches' WebSocket, and each exposed stackbox's service endpoints
 /// (see [`super::endpoint_proxy`]). Anything else is `404`.
 pub fn router(relay: Arc<Relay>) -> Router {
+    // The endpoint routes are the same as a stackbox proxy's; they answer from the relay's table.
+    let endpoints = super::endpoint_proxy::router(relay.endpoints.clone());
     Router::new()
         .route(super::RELAY_PATH, get(upgrade))
-        .route(
-            "/x/{stackbox}/{token}/tcp/client.mjs",
-            get(tcp_client_script),
-        )
-        .route("/x/{stackbox}/{token}/tcp/{service}", get(tcp_upgrade))
-        .fallback(endpoints)
+        .fallback_service(endpoints)
         .with_state(relay)
-}
-
-async fn endpoints(State(relay): State<Arc<Relay>>, request: Request) -> Response {
-    relay.endpoints.handle(request).await
-}
-
-/// The `node --input-type=module` script that opens a stackbox's MariaDB and AMQP ports locally.
-/// A wrong token, or a relay that is off, is a plain `404`.
-async fn tcp_client_script(
-    State(relay): State<Arc<Relay>>,
-    Path((stackbox, token)): Path<(String, String)>,
-) -> Response {
-    match relay.endpoints.client_script(&stackbox, &token) {
-        Some(script) => (
-            [
-                (CONTENT_TYPE, "text/javascript; charset=utf-8"),
-                (CACHE_CONTROL, "no-store"),
-            ],
-            script,
-        )
-            .into_response(),
-        None => StatusCode::NOT_FOUND.into_response(),
-    }
-}
-
-/// A stackbox's MariaDB or RabbitMQ AMQP port, as a WebSocket of binary frames. The token and the
-/// service are checked before the upgrade, so a wrong one is a plain `404`.
-async fn tcp_upgrade(
-    State(relay): State<Arc<Relay>>,
-    Path((stackbox, token, service)): Path<(String, String, String)>,
-    ws: WebSocketUpgrade,
-) -> Response {
-    let Some((host, port)) = relay.endpoints.resolve_tcp(&stackbox, &token, &service) else {
-        return StatusCode::NOT_FOUND.into_response();
-    };
-    let limit = super::MAX_MESSAGE + 256;
-    ws.max_message_size(limit)
-        .max_frame_size(limit)
-        .on_upgrade(move |socket| bridge(socket, host, port))
 }
 
 /// Copy bytes both ways between a WebSocket and `host:port` until either side ends. A `Ping` every
 /// [`PING_EVERY`] keeps a proxy in front from closing the quiet connection.
-async fn bridge(socket: WebSocket, host: String, port: u16) {
+/// `slot` is the tunnel's place under [`super::endpoint_proxy::MAX_TCP_TUNNELS`]; it is released
+/// when the bridge ends, however it ends.
+pub(crate) async fn bridge(
+    socket: WebSocket,
+    host: String,
+    port: u16,
+    slot: tokio::sync::OwnedSemaphorePermit,
+) {
+    let _slot = slot;
     let (mut sink, mut stream) = socket.split();
     let tcp = match TcpStream::connect((host.as_str(), port)).await {
         Ok(tcp) => tcp,
@@ -274,7 +237,7 @@ pub struct Relay {
     stackboxes: Mutex<HashMap<String, Stackbox>>,
     next: AtomicU64,
     /// The stackboxes' service endpoints the relay serves, kept current by the manager.
-    pub endpoints: super::endpoint_proxy::EndpointProxy,
+    pub endpoints: Arc<super::endpoint_proxy::EndpointProxy>,
 }
 
 /// An accepted uplink, from [`Relay::accept`] until [`Relay::serve`] ends.
