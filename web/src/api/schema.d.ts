@@ -1403,6 +1403,11 @@ export interface components {
       vm_boot_verified: boolean;
     };
     HostJob: {
+      /**
+       * @description A purge that removes every VM on the host, including other stackbox coordinators' VMs.
+       *     Without it, the purge removes only this coordinator's VMs.
+       */
+      all_vms?: boolean;
       /** Format: int64 */
       created_at: number;
       /** @description A purge that also deletes the snapshots this host keeps. */
@@ -3014,6 +3019,13 @@ export interface operations {
          *     The VMs are removed first; whatever cannot be removed is reported on the job.
          */
         remote_files: boolean;
+        /**
+         * @description With purge, delete every VM on the host, including the ones other stackbox coordinators
+         *     reserved there, instead of only this coordinator's. The shared files (the golden groups,
+         *     msb and `~/.local/share/stackbox`) go only with this; otherwise they stay while another
+         *     coordinator's VMs remain on the host.
+         */
+        all_vms: boolean;
       };
       cookie?: never;
     };

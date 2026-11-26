@@ -99,18 +99,20 @@ export function RemoteHostsPage() {
       kind,
       snapshots = false,
       remoteFiles = false,
+      allVms = false,
     }: {
       id: string;
       kind: "check" | "prepare" | "remove" | "purge";
       snapshots?: boolean;
       remoteFiles?: boolean;
+      allVms?: boolean;
     }) =>
       kind === "check"
         ? api.checkHost(id)
         : kind === "prepare"
           ? api.prepareHost(id)
           : kind === "purge"
-            ? api.purgeHost(id, snapshots, remoteFiles)
+            ? api.purgeHost(id, snapshots, remoteFiles, allVms)
             : api.unregisterHost(id),
     onSuccess: refresh,
   });
@@ -448,12 +450,13 @@ export function RemoteHostsPage() {
                   ).length ?? 0
                 }
                 coordinatorBuildId={buildId}
-                run={(purge, deleteSnapshots, removeFiles) =>
+                run={(purge, deleteSnapshots, removeFiles, allVms) =>
                   action.mutateAsync({
                     id: selected.id,
                     kind: purge ? "purge" : "remove",
                     snapshots: deleteSnapshots,
                     remoteFiles: removeFiles,
+                    allVms,
                   })
                 }
               />
@@ -1247,6 +1250,7 @@ function HostActionDialog({
     purge: boolean,
     deleteSnapshots: boolean,
     removeFiles: boolean,
+    allVms: boolean,
   ) => Promise<unknown>;
 }) {
   const [open, setOpen] = useState(false);
@@ -1261,12 +1265,16 @@ function HostActionDialog({
   const [deleteSnapshots, setDeleteSnapshots] = useState(false);
   // Off by default: the host's golden image and msb are reused by the next registration.
   const [removeFiles, setRemoveFiles] = useState(false);
+  // Off by default: other stackbox coordinators may share this host and still use their VMs.
+  const [allVms, setAllVms] = useState(false);
   const mismatch =
     !prepare && agentBuildMismatch(host.agent?.artifact, coordinatorBuildId);
   // A mismatched agent cannot clean up, so the disabled box also means records only.
   const purging = purge && !mismatch;
   // The files go only with the VMs: without a purge the host keeps everything it holds.
   const filesShown = purging && removeFiles;
+  // Only with the VMs too, and then the other coordinators' VMs go as well.
+  const allVmsShown = purging && allVms;
   return (
     <Dialog.Root
       open={open}
@@ -1377,6 +1385,32 @@ function HostActionDialog({
                     </small>
                   </span>
                 </label>
+                <label className="checkbox-row">
+                  <Checkbox.Root
+                    checked={allVmsShown}
+                    disabled={!purging}
+                    onCheckedChange={(checked) => setAllVms(checked === true)}
+                    className="checkbox"
+                  >
+                    <Checkbox.Indicator>
+                      <Check size={14} strokeWidth={3} />
+                    </Checkbox.Indicator>
+                  </Checkbox.Root>
+                  <span>
+                    다른 stackbox가 이 서버에 만든 VM도 삭제
+                    <small>
+                      {purging
+                        ? "이 coordinator가 예약하지 않은 VM까지 모두 지웁니다. 그 VM의 stackbox는 이 서버에서 동작하지 않게 되며, 되돌릴 수 없습니다."
+                        : "VM 삭제를 켜야 선택할 수 있습니다. 끄면 이 coordinator의 VM만 지웁니다."}
+                    </small>
+                  </span>
+                </label>
+                {allVmsShown && (
+                  <div className="warning-notice">
+                    다른 coordinator의 stackbox가 이 서버에서 쓰는 VM과 디스크가
+                    모두 삭제됩니다.
+                  </div>
+                )}
                 {snapshots > 0 && (
                   <label className="checkbox-row">
                     <Checkbox.Root
@@ -1425,11 +1459,17 @@ function HostActionDialog({
                     <small>
                       {!purging
                         ? "VM 삭제를 켜야 선택할 수 있습니다. 파일은 VM보다 나중에 지웁니다."
-                        : host.kind === "ssh"
-                          ? "골든 이미지 그룹, stackbox가 처음 설치한 msb(다른 샌드박스가 없을 때만), ~/.local/share/stackbox를 지웁니다. 직접 설치한 msb와 다른 파일은 남깁니다."
-                          : host.kind === "local"
-                            ? "골든 이미지 그룹만 지웁니다. 이 머신의 msb와 ~/.local/share/stackbox는 코디네이터가 쓰므로 남깁니다."
-                            : "골든 이미지 그룹만 지웁니다. msb와 ~/.local/share/stackbox는 SSH가 없어 호스트에서 직접 지워야 합니다."}
+                        : `${
+                            host.kind === "ssh"
+                              ? "골든 이미지 그룹, stackbox가 처음 설치한 msb(다른 샌드박스가 없을 때만), ~/.local/share/stackbox를 지웁니다. 직접 설치한 msb와 다른 파일은 남깁니다."
+                              : host.kind === "local"
+                                ? "골든 이미지 그룹만 지웁니다. 이 머신의 msb와 ~/.local/share/stackbox는 코디네이터가 쓰므로 남깁니다."
+                                : "골든 이미지 그룹만 지웁니다. msb와 ~/.local/share/stackbox는 SSH가 없어 호스트에서 직접 지워야 합니다."
+                          }${
+                            allVms
+                              ? ""
+                              : " 다른 stackbox의 VM이 이 서버에 남아 있으면 이 파일들은 지우지 않습니다. 다른 stackbox의 VM도 지울 때만 지웁니다."
+                          }`}
                     </small>
                   </span>
                 </label>
@@ -1460,6 +1500,7 @@ function HostActionDialog({
                     !prepare && purging,
                     !prepare && purging && deleteSnapshots,
                     !prepare && filesShown,
+                    !prepare && allVmsShown,
                   );
                   setOpen(false);
                 } catch (e) {

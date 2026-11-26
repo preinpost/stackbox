@@ -347,10 +347,16 @@ export const api = {
     request<{ id: string }>(`/hosts/${encode(id)}`, { method: "DELETE" }),
   /** Delete this coordinator's stackboxes and leftover VMs on the host, then unregister it.
    * `snapshots` also deletes the snapshots whose original the host keeps. `remoteFiles` also
-   * removes what stackbox left on the host outside its VMs; the job lists what stays. */
-  purgeHost: (id: string, snapshots = false, remoteFiles = false) =>
+   * removes what stackbox left on the host outside its VMs; the job lists what stays. `allVms`
+   * also deletes the VMs other stackbox coordinators reserved on the host. */
+  purgeHost: (
+    id: string,
+    snapshots = false,
+    remoteFiles = false,
+    allVms = false,
+  ) =>
     request<HostJob>(
-      `/hosts/${encode(id)}?purge=true${snapshots ? "&snapshots=true" : ""}${remoteFiles ? "&remote_files=true" : ""}`,
+      `/hosts/${encode(id)}?purge=true${snapshots ? "&snapshots=true" : ""}${remoteFiles ? "&remote_files=true" : ""}${allVms ? "&all_vms=true" : ""}`,
       { method: "DELETE" },
     ),
   /** Where stackboxes that span hosts join; `null` turns it off. */

@@ -138,6 +138,85 @@ test("without the remote-files box the delete URL is unchanged", async () => {
   client.clear();
 });
 
+test("the other stackboxes' VMs box is off by default and only selectable while the VMs are removed", async () => {
+  const deletes: string[] = [];
+  stubApi(deletes, []);
+  const client = renderPage();
+  const { user } = await openRemoveDialog();
+  const others = screen.getByRole("checkbox", {
+    name: /다른 stackbox가 이 서버에 만든 VM도 삭제/,
+  });
+  expect(others.getAttribute("aria-checked")).toBe("false");
+  expect(others.hasAttribute("data-disabled")).toBe(false);
+  // Turning the VM removal off disables it too.
+  await user.click(screen.getByRole("checkbox", { name: /VM·디스크도 삭제/ }));
+  expect(
+    screen
+      .getByRole("checkbox", { name: /다른 stackbox가 이 서버에 만든 VM도 삭제/ })
+      .hasAttribute("data-disabled"),
+  ).toBe(true);
+  expect(screen.queryByText(/다른 coordinator의 stackbox가 이 서버에서/)).toBeNull();
+  client.clear();
+});
+
+test("checking the other stackboxes' VMs box sends all_vms with the purge", async () => {
+  const deletes: string[] = [];
+  stubApi(deletes, []);
+  const client = renderPage();
+  const { user, dialog } = await openRemoveDialog();
+  await user.click(
+    screen.getByRole("checkbox", { name: /다른 stackbox가 이 서버에 만든 VM도 삭제/ }),
+  );
+  expect(
+    screen
+      .getByRole("checkbox", { name: /다른 stackbox가 이 서버에 만든 VM도 삭제/ })
+      .getAttribute("aria-checked"),
+  ).toBe("true");
+  expect(dialog.textContent).toContain("다른 coordinator의 stackbox가 이 서버에서 쓰는 VM");
+  await user.click(
+    [...dialog.querySelectorAll("button")].find(
+      (b) => b.textContent === "등록 해제",
+    ) as HTMLElement,
+  );
+  await waitFor(() =>
+    expect(deletes).toEqual(["/api/v1/hosts/local?purge=true&all_vms=true"]),
+  );
+  client.clear();
+});
+
+test("a purge that kept other coordinators' VMs names the shared files it kept and why", () => {
+  const job = {
+    id: "job-11",
+    host_id: "dev-01",
+    kind: "purge",
+    status: "succeeded",
+    created_at: 1_700_000_000,
+    events: [
+      { at: 1_700_000_001, message: "Removed 1 reserved VM(s)" },
+      {
+        at: 1_700_000_002,
+        message: "Kept 1 VM reservation(s) of other stackbox coordinators on the host",
+      },
+      {
+        at: 1_700_000_003,
+        message:
+          "Left on the host: golden snapshot groups, msb and ~/.local/share/stackbox (kept: 1 VM reservation(s) of other stackbox coordinators still use this host)",
+      },
+      { at: 1_700_000_004, message: "Host removed" },
+    ],
+    error: null,
+  } as unknown as HostJob;
+  const { container } = render(<HostJobHistory job={job} />);
+  const notice = container.querySelector(".host-job-leftovers") as HTMLElement;
+  expect(
+    within(notice).getAllByRole("listitem").map((li) => li.textContent),
+  ).toEqual([
+    "golden snapshot groups, msb and ~/.local/share/stackbox (kept: 1 VM reservation(s) of other stackbox coordinators still use this host)",
+  ]);
+  // The directory is shared, so no by-hand command is offered for it.
+  expect(notice.querySelector("code")).toBeNull();
+});
+
 test("a purge that left items behind opens its history and names each one with the command to remove it", () => {
   const job = {
     id: "job-9",
