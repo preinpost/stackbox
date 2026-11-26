@@ -3601,14 +3601,12 @@ mod tests {
             assert!(!images_published_for("riscv64", &info), "{release} riscv64");
             assert!(!images_published_for("", &info), "{release} empty");
         }
-        for release in ["2026.2", "2026.1", "2025.1"] {
+        for release in ["2026.2", "2026.1", "2025.2", "2025.1"] {
             assert!(
                 images_published_for("aarch64", &releases::info(release)),
                 "{release} aarch64"
             );
         }
-        // 2025.2's Rocky 10 aarch64 build fails from kolla's sources, so its images are amd64 only.
-        assert!(!images_published_for("aarch64", &releases::info("2025.2")));
         assert!(!images_published_for("aarch64", &releases::info("2024.2")));
         assert!(!images_published_for("aarch64", &releases::info("2024.1")));
     }

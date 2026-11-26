@@ -49,10 +49,11 @@ const ARM64_FROM: &str = "2026.2";
 /// Releases whose Rocky aarch64 Kolla images the stackbox builds itself and publishes on
 /// [`EOL_REGISTRY`]/[`EOL_NAMESPACE`] as `<service>:<release>-rocky-<major>-aarch64`: the `arch=arm64`
 /// run of `.github/workflows/eol-images.yml` in `github.com/preinpost/kolla`. Their amd64 images stay
-/// on quay. 2025.2 is not here: its Rocky 10 aarch64 build fails from kolla's own sources (a missing
-/// `pkg_resources` and a duplicated Rocky 10 centos-ceph-squid repo in nova, glance, and horizon), so
-/// it is amd64 only. A release whose aarch64 build fails comes out of this list.
-const OWN_ARM64: &[&str] = &["2025.1", "2026.1"];
+/// on quay. 2025.2 is built from preinpost/kolla's 2025.2-only template override (`.github/kolla/
+/// template-override.j2`), which pins pbr to 7.0.3 and drops the pip==24.0 pin; without it the build
+/// fails from kolla's own sources (pbr 7.0.1 imports `pkg_resources`). A release whose aarch64 build
+/// fails comes out of this list.
+const OWN_ARM64: &[&str] = &["2025.1", "2025.2", "2026.1"];
 
 /// Whether `release` is inside the supported range, or this host opted into older series.
 pub fn supported(release: &str) -> bool {
@@ -1094,15 +1095,15 @@ mod tests {
 
     #[test]
     fn arches_follow_the_images_the_stackbox_would_pull() {
-        // 2026.2 is quay's Rocky aarch64 set; 2025.1 and 2026.1 are the stackbox's own aarch64 builds.
-        for release in ["2025.1", "2026.1", "2026.2"] {
+        // 2026.2 is quay's Rocky aarch64 set; 2025.1, 2025.2 and 2026.1 are the stackbox's own aarch64 builds.
+        for release in ["2025.1", "2025.2", "2026.1", "2026.2"] {
             assert_eq!(arches(release), ["x86_64", "aarch64"], "{release}");
             assert!(available_on(release, "x86_64"), "{release}");
             assert!(available_on(release, "aarch64"), "{release}");
             assert!(!available_on(release, "riscv64"), "{release}");
         }
         // Their aarch64 images come from the stackbox's registry; 2026.2's from quay's default.
-        for release in ["2025.1", "2026.1"] {
+        for release in ["2025.1", "2025.2", "2026.1"] {
             let info = info(release);
             assert!(info.arm64, "{release}");
             assert_eq!(
@@ -1119,13 +1120,6 @@ mod tests {
         }
         assert_eq!(info("2026.2").own_origin("aarch64"), None);
         assert_eq!(info("2026.2").arm64_images, None);
-        // 2025.2's Rocky 10 aarch64 build fails from kolla's sources, so it is amd64 only and an
-        // aarch64 host is refused.
-        assert_eq!(arches("2025.2"), ["x86_64"]);
-        assert!(!info("2025.2").arm64, "2025.2");
-        assert_eq!(info("2025.2").own_origin("aarch64"), None);
-        assert!(!available_on("2025.2", "aarch64"));
-        assert!(available_on("2025.2", "x86_64"));
         assert_eq!(
             arches(super::super::OPENSTACK_RELEASE),
             ["x86_64", "aarch64"]
