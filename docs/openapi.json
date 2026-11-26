@@ -2,11 +2,12 @@
   "openapi": "3.1.0",
   "info": {
     "title": "stackbox",
-    "description": "",
+    "description": "Deploy and manage multi-node OpenStack environments on microsandbox VMs with Kolla",
     "license": {
-      "name": ""
+      "name": "Apache-2.0",
+      "identifier": "Apache-2.0"
     },
-    "version": "0.1.14"
+    "version": "0.1.20"
   },
   "paths": {
     "/api/v1/agent-hosts": {
