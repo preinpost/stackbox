@@ -38,9 +38,14 @@ const BUILD_STOP_TIMEOUT: Duration = Duration::from_secs(60);
 /// One build at a time per process; stackboxes created together wait for the first one.
 static BUILD: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-/// `stackbox-golden-<os>:<recipe hash>`. A stackbox VM's disks have the sizes of the golden VM's,
-/// so they are part of the recipe.
+/// `stackbox-golden-<os>-<recipe hash>:<recipe hash>`. A stackbox VM's disks have the sizes of the
+/// golden VM's, so they are part of the recipe.
 pub fn reference(os: &GuestOs, spec: &NodeSpec) -> String {
+    let recipe = recipe_hash(os, spec);
+    format!("{}:{recipe}", group(os, &recipe))
+}
+
+fn recipe_hash(os: &GuestOs, spec: &NodeSpec) -> String {
     let mut hash = Sha256::new();
     for part in [
         RECIPE_VERSION,
@@ -53,12 +58,14 @@ pub fn reference(os: &GuestOs, spec: &NodeSpec) -> String {
         hash.update([0]);
     }
     let digest = hash.finalize();
-    let name: String = digest[..6].iter().map(|b| format!("{b:02x}")).collect();
-    format!("{}:{name}", group(os))
+    digest[..6].iter().map(|b| format!("{b:02x}")).collect()
 }
 
-fn group(os: &GuestOs) -> String {
-    format!("stackbox-golden-{}", os.id)
+/// One msb group per recipe. msb binds a group to the sandbox that first captured into it, and
+/// each golden build boots a VM with a new sandbox id, so a group shared across recipes rejects
+/// the next recipe's capture.
+fn group(os: &GuestOs, recipe: &str) -> String {
+    format!("stackbox-golden-{}-{recipe}", os.id)
 }
 
 /// The golden image new all-in-one stackboxes on this host start from.
@@ -91,8 +98,27 @@ pub async fn ensure(os: &GuestOs, spec: &NodeSpec) -> Result<String> {
     Ok(reference)
 }
 
+/// Explain a capture failure. A group bound to another sandbox instance is left by an earlier
+/// golden build on this host; stackbox cannot clear it, so the message says so instead of
+/// suggesting a plain retry. The msb error stays as the cause.
+fn capture_failure(error: MicrosandboxError, reference: &str) -> anyhow::Error {
+    let bound = matches!(
+        &error,
+        MicrosandboxError::InvalidConfig(message)
+            if message.contains("bound to another sandbox instance")
+    );
+    let error = anyhow::Error::new(error);
+    if bound {
+        error.context(format!(
+            "capture the golden snapshot {reference}: its msb snapshot group is bound to an earlier golden build on this host, so rebuilding does not clear it; remove that group in msb before building this recipe again"
+        ))
+    } else {
+        error.context("capture the golden snapshot")
+    }
+}
+
 async fn build(os: &GuestOs, spec: &NodeSpec, reference: &str) -> Result<()> {
-    let name = format!("{}-build", group(os));
+    let name = format!("stackbox-golden-{}-build", os.id);
     // A build interrupted earlier leaves its VM behind.
     if let Ok(stale) = Sandbox::get(&name).await {
         destroy_node(&stale).await?;
@@ -128,7 +154,7 @@ async fn build(os: &GuestOs, spec: &NodeSpec, reference: &str) -> Result<()> {
             .label("stackbox.golden.base", os.base_image)
             .create()
             .await
-            .context("capture the golden snapshot")?;
+            .map_err(|error| capture_failure(error, reference))?;
         Ok::<_, anyhow::Error>(())
     }
     .await;
@@ -146,11 +172,54 @@ async fn build(os: &GuestOs, spec: &NodeSpec, reference: &str) -> Result<()> {
 mod tests {
     use super::*;
 
+    fn group_of(reference: &str) -> &str {
+        reference.split_once(':').unwrap().0
+    }
+
+    #[test]
+    fn each_recipe_gets_its_own_group() {
+        // msb binds a group to the sandbox that first captured into it, and a rebuilt golden VM
+        // has a new sandbox id, so a changed recipe must not reuse the previous recipe's group.
+        let base = reference(&ROCKY10, &ALL_IN_ONE);
+        let other_setup = GuestOs {
+            setup: "dnf install -y vim",
+            ..ROCKY10
+        };
+        assert_ne!(
+            group_of(&base),
+            group_of(&reference(&other_setup, &ALL_IN_ONE))
+        );
+        let smaller = NodeSpec {
+            container_disk_mib: Some(1024),
+            ..ALL_IN_ONE
+        };
+        assert_ne!(group_of(&base), group_of(&reference(&ROCKY10, &smaller)));
+        // Same recipe, same group: the cache lookup still finds the snapshot.
+        assert_eq!(group_of(&base), group_of(&reference(&ROCKY10, &ALL_IN_ONE)));
+    }
+
+    #[test]
+    fn a_group_bound_to_an_earlier_build_is_explained() {
+        let golden = reference(&ROCKY10, &ALL_IN_ONE);
+        let msb = MicrosandboxError::InvalidConfig(
+            "snapshot group is bound to another sandbox instance (recorded name 'stackbox-golden-rocky10-build'); create a new group for 'stackbox-golden-rocky10-build'".into(),
+        );
+        let text = format!("{:#}", capture_failure(msb, &golden));
+        assert!(text.contains(&golden), "{text}");
+        assert!(text.contains("earlier golden build"), "{text}");
+        // The msb message stays as the cause.
+        assert!(text.contains("bound to another sandbox instance"), "{text}");
+
+        let other = MicrosandboxError::InvalidConfig("disk full".into());
+        let text = format!("{:#}", capture_failure(other, &golden));
+        assert!(text.contains("disk full"), "{text}");
+        assert!(!text.contains("earlier golden build"), "{text}");
+    }
+
     #[test]
     fn recipe_changes_rename_the_golden_image() {
         let base = reference(&ROCKY10, &ALL_IN_ONE);
-        assert!(base.starts_with("stackbox-golden-rocky10:"), "{base}");
-        assert_eq!(base.len(), "stackbox-golden-rocky10:".len() + 12);
+        assert!(base.starts_with("stackbox-golden-rocky10-"), "{base}");
         assert_eq!(base, current());
         let other_setup = GuestOs {
             setup: "dnf install -y vim",

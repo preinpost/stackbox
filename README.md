@@ -73,7 +73,7 @@ stackbox settle demo                         # VM 재시작 뒤 배포 없이 �
 ## Golden image
 
 모든 stackbox VM은 호스트의 golden image에서 시작합니다. golden image는 msb 디스크 스냅샷
-`stackbox-golden-<os>:<레시피 해시>`입니다. Docker도 호스트에 미리 준비할 것도 없습니다.
+`stackbox-golden-<os>-<레시피 해시>:<레시피 해시>`입니다(레시피마다 msb 그룹이 따로 생깁니다). Docker도 호스트에 미리 준비할 것도 없습니다.
 
 - 호스트에 그 스냅샷이 없으면 첫 stackbox를 만들 때 msb가 빌드합니다. 배포판 공식 OCI 이미지
   (`rockylinux/rockylinux:10`)로 VM을 띄워 `guest/os/<os>.sh`를 실행하고, VM을 멈춘 뒤 디스크(root와
