@@ -484,10 +484,14 @@ impl server::Handler for Handler {
                         .push(format!("deploy-compute:{stackbox_id}:{index}"));
                     Reply::Done
                 }
-                Operation::Purge => {
+                // The fake host holds only this coordinator's VMs, so both scopes remove them all.
+                Operation::Purge | Operation::PurgeOwn => {
                     let removed = self.observed.rpc_stackboxes.lock().unwrap().len();
                     self.observed.rpc_stackboxes.lock().unwrap().clear();
-                    Reply::Purged { stackboxes: removed }
+                    Reply::Purged {
+                        stackboxes: removed,
+                        kept_for_others: 0,
+                    }
                 }
                 Operation::RemoveGolden => {
                     self.observed

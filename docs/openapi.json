@@ -859,6 +859,15 @@
             "schema": {
               "type": "boolean"
             }
+          },
+          {
+            "name": "all_vms",
+            "in": "path",
+            "description": "With purge, delete every VM on the host, including the ones other stackbox coordinators\nreserved there, instead of only this coordinator's. The shared files (the golden groups,\nmsb and `~/.local/share/stackbox`) go only with this; otherwise they stay while another\ncoordinator's VMs remain on the host.",
+            "required": true,
+            "schema": {
+              "type": "boolean"
+            }
           }
         ],
         "responses": {
@@ -4347,6 +4356,10 @@
           "created_at"
         ],
         "properties": {
+          "all_vms": {
+            "type": "boolean",
+            "description": "A purge that removes every VM on the host, including other stackbox coordinators' VMs.\nWithout it, the purge removes only this coordinator's VMs."
+          },
           "created_at": {
             "type": "integer",
             "format": "int64",

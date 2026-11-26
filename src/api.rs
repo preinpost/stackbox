@@ -523,6 +523,12 @@ struct UnregisterQuery {
     /// The VMs are removed first; whatever cannot be removed is reported on the job.
     #[serde(default)]
     remote_files: bool,
+    /// With purge, delete every VM on the host, including the ones other stackbox coordinators
+    /// reserved there, instead of only this coordinator's. The shared files (the golden groups,
+    /// msb and `~/.local/share/stackbox`) go only with this; otherwise they stay while another
+    /// coordinator's VMs remain on the host.
+    #[serde(default)]
+    all_vms: bool,
 }
 /// Checks the query flags that only mean something together with `purge`.
 fn unregister_flags(query: &UnregisterQuery) -> Result<(), ApiError> {
@@ -536,6 +542,12 @@ fn unregister_flags(query: &UnregisterQuery) -> Result<(), ApiError> {
         return Err(ApiError(
             StatusCode::BAD_REQUEST,
             "remote_files=true needs purge=true".into(),
+        ));
+    }
+    if query.all_vms && !query.purge {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "all_vms=true needs purge=true".into(),
         ));
     }
     Ok(())
@@ -552,6 +564,7 @@ async fn unregister_host(
             &id,
             query.snapshots,
             query.remote_files,
+            query.all_vms,
         )?));
     }
     app.manager.unregister_host(&id)?;
@@ -1400,7 +1413,20 @@ mod unregister_query_tests {
             purge,
             snapshots,
             remote_files,
+            all_vms: false,
         }
+    }
+
+    #[test]
+    fn all_vms_needs_a_purge() {
+        let all = |purge| UnregisterQuery {
+            all_vms: true,
+            ..query(purge, false, false)
+        };
+        let error = unregister_flags(&all(false)).unwrap_err();
+        assert_eq!(error.0, StatusCode::BAD_REQUEST);
+        assert!(error.1.contains("all_vms=true needs purge=true"));
+        assert!(unregister_flags(&all(true)).is_ok());
     }
 
     #[test]

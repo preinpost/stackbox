@@ -675,6 +675,10 @@ pub struct HostJob {
     /// installed it, and the stackbox directory.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub remote_files: bool,
+    /// A purge that removes every VM on the host, including other stackbox coordinators' VMs.
+    /// Without it, the purge removes only this coordinator's VMs.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub all_vms: bool,
     /// The PCI device a `PciBind` or `PciUnbind` job works on, as `DDDD:BB:DD.F`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pci_bdf: Option<String>,

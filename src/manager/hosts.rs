@@ -440,20 +440,20 @@ impl StackboxManager {
         })
     }
     pub fn start_host_job(&self, id: &str, kind: HostJobKind) -> Result<HostJob> {
-        self.start_job(id, kind, false, false, None)
+        self.start_job(id, kind, false, false, false, None)
     }
     /// Binds PCI device `bdf` of host `id` to `vfio-pci` through the host's helper. Refused with a
     /// conflict while a stackbox holds the device, and with a bad request when the host reports
     /// it protected or has no helper installed. The job's inspection replaces the host's.
     pub fn bind_host_pci(&self, id: &str, bdf: &str) -> Result<HostJob> {
         let bdf = normalize_pci_request(bdf)?;
-        self.start_job(id, HostJobKind::PciBind, false, false, Some(bdf))
+        self.start_job(id, HostJobKind::PciBind, false, false, false, Some(bdf))
     }
     /// Gives PCI device `bdf` of host `id` back to its host driver, under the same checks as a bind
     /// except the protection: a device the helper holds as vfio-pci can always go back.
     pub fn unbind_host_pci(&self, id: &str, bdf: &str) -> Result<HostJob> {
         let bdf = normalize_pci_request(bdf)?;
-        self.start_job(id, HostJobKind::PciUnbind, false, false, Some(bdf))
+        self.start_job(id, HostJobKind::PciUnbind, false, false, false, Some(bdf))
     }
     /// Reinstalls the agent on every idle SSH host that runs another build's agent, when this
     /// build's artifact for the host is loaded. The daemon runs it at startup, so rebuilding
@@ -505,13 +505,24 @@ impl StackboxManager {
     /// way, and originals left without the flag stay recorded until the host returns.
     /// `remote_files` also removes what stackbox put on the host outside its VMs (the golden
     /// groups, msb when stackbox installed it, and the stackbox directory); see `remove_host_files`.
+    /// Without `all_vms` the purge removes only the VMs this coordinator reserved on the host, and
+    /// the shared files stay while another coordinator's VMs remain there. With it, the purge
+    /// removes every VM on the host, whichever coordinator reserved it.
     pub fn start_purge(
         &self,
         id: &str,
         delete_snapshots: bool,
         remote_files: bool,
+        all_vms: bool,
     ) -> Result<HostJob> {
-        self.start_job(id, HostJobKind::Purge, delete_snapshots, remote_files, None)
+        self.start_job(
+            id,
+            HostJobKind::Purge,
+            delete_snapshots,
+            remote_files,
+            all_vms,
+            None,
+        )
     }
     fn start_job(
         &self,
@@ -519,6 +530,7 @@ impl StackboxManager {
         kind: HostJobKind,
         delete_snapshots: bool,
         remote_files: bool,
+        all_vms: bool,
         pci_bdf: Option<String>,
     ) -> Result<HostJob> {
         let job = self.update(|state| {
@@ -559,6 +571,7 @@ impl StackboxManager {
                 finished_at: None,
                 delete_snapshots,
                 remote_files,
+                all_vms,
                 pci_bdf,
             };
             host.active_job = Some(job.id.clone());
@@ -673,17 +686,26 @@ impl StackboxManager {
 
         self.host_event(
             &job.id,
-            "Removing VM reservations the agent still holds for this coordinator",
+            if job.all_vms {
+                "Removing every VM reservation the agent holds, including other stackbox coordinators'"
+            } else {
+                "Removing VM reservations the agent still holds for this coordinator"
+            },
         )?;
         let link = self
             .host_link(&self.stored_host(&host_id)?)
             .context("host has no installed agent to clean up with")?;
+        let operation = if job.all_vms {
+            Operation::Purge
+        } else {
+            Operation::PurgeOwn
+        };
         let reply = link
             .call(
                 Request {
                     version: VERSION,
                     coordinator_id: self.coordinator_id()?,
-                    operation: Operation::Purge,
+                    operation,
                 },
                 None,
             )
@@ -693,13 +715,27 @@ impl StackboxManager {
                     "the host's agent could not run the cleanup ({error:#}); install the current agent from Hosts and remove the host again"
                 )
             })?;
-        let purged = match reply {
-            Reply::Purged { stackboxes } => stackboxes,
+        let (purged, kept_for_others) = match reply {
+            Reply::Purged {
+                stackboxes,
+                kept_for_others,
+            } => (stackboxes, kept_for_others),
             _ => anyhow::bail!("unexpected remote purge response"),
         };
         self.host_event(&job.id, &format!("Removed {purged} reserved VM(s)"))?;
+        if kept_for_others > 0 {
+            self.host_event(
+                &job.id,
+                &format!(
+                    "Kept {kept_for_others} VM reservation(s) of other stackbox coordinators on the host"
+                ),
+            )?;
+        }
         if job.remote_files {
-            self.remove_host_files(job, &stored).await?;
+            // The shared files only go when every VM on the host went with this purge.
+            let shared = job.all_vms && kept_for_others == 0;
+            self.remove_host_files(job, &stored, shared, kept_for_others)
+                .await?;
         }
         self.host_event(&job.id, "Unregistering the host")?;
         let mut finished = self.host_job(&job.id)?;
@@ -1311,12 +1347,49 @@ impl StackboxManager {
             Ok(())
         })
     }
-    /// Removes what stackbox left on the host once its VMs are gone: the golden snapshot groups
-    /// (through the agent, under the golden build lock), then over SSH msb when stackbox installed
-    /// it on an empty host, and the `~/.local/share/stackbox` directory. Each step that fails or
-    /// is out of reach is recorded on the job with what to remove by hand, and never stops the
-    /// unregistration: the VMs are already gone, and the coordinator must forget the host.
-    async fn remove_host_files(&self, job: &HostJob, stored: &StoredHost) -> Result<()> {
+    /// Removes what stackbox left on the host once its VMs are gone. The shared files (the golden
+    /// snapshot groups, msb and `~/.local/share/stackbox`) go only when `shared`: every VM on the host
+    /// went with this purge. Otherwise another coordinator's VMs may still use them, so they stay,
+    /// and the job names them as left. When `shared`, the golden groups go through the agent, under the
+    /// golden build lock, then over SSH msb and the directory; each step that fails or is out of reach
+    /// is recorded on the job with what to remove by hand. Nothing here stops the unregistration: the
+    /// VMs are already gone, and the coordinator must forget the host.
+    async fn remove_host_files(
+        &self,
+        job: &HostJob,
+        stored: &StoredHost,
+        shared: bool,
+        kept_for_others: usize,
+    ) -> Result<()> {
+        let (left, by_hand) = if shared {
+            let left = self.remove_shared_files(job, stored).await?;
+            let by_hand = if stored.host.kind == HostKind::Ssh {
+                ". To remove the directory by hand, run on the host: rm -rf ~/.local/share/stackbox"
+            } else {
+                ""
+            };
+            (left, by_hand)
+        } else {
+            let reason = if kept_for_others > 0 {
+                format!(
+                    "golden snapshot groups, msb and ~/.local/share/stackbox (kept: {kept_for_others} VM reservation(s) of other stackbox coordinators still use this host)"
+                )
+            } else {
+                "golden snapshot groups, msb and ~/.local/share/stackbox (kept: other stackboxes' VMs were not asked to go; choose to delete all VMs on the host to remove them)".into()
+            };
+            (vec![reason], "")
+        };
+        if !left.is_empty() {
+            self.host_event(
+                &job.id,
+                &format!("Left on the host: {}{by_hand}", left.join(LEFT_SEPARATOR)),
+            )?;
+        }
+        Ok(())
+    }
+
+    /// The shared files' removal, step by step: see `remove_host_files`.
+    async fn remove_shared_files(&self, job: &HostJob, stored: &StoredHost) -> Result<Vec<String>> {
         let mut left: Vec<String> = Vec::new();
         match self.host_link(stored) {
             Ok(link) => {
@@ -1378,18 +1451,7 @@ impl StackboxManager {
                 "the host's msb and ~/.local/share/stackbox (a dial-in host has no SSH for the cleanup; remove them on the host)".into(),
             ),
         }
-        if !left.is_empty() {
-            let by_hand = if stored.host.kind == HostKind::Ssh {
-                ". To remove the directory by hand, run on the host: rm -rf ~/.local/share/stackbox"
-            } else {
-                ""
-            };
-            self.host_event(
-                &job.id,
-                &format!("Left on the host: {}{by_hand}", left.join(LEFT_SEPARATOR)),
-            )?;
-        }
-        Ok(())
+        Ok(left)
     }
     /// Opens an SSH session with the host's pinned key and stored credentials.
     async fn ssh_session(&self, stored: &StoredHost) -> Result<Session> {

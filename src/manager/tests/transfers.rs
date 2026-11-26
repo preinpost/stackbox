@@ -842,7 +842,7 @@ async fn purging_a_remote_host_keeps_its_snapshots_unless_asked_and_forgets_copi
         .await
         .unwrap();
 
-    let purge = manager.start_purge("edge", false, false).unwrap();
+    let purge = manager.start_purge("edge", false, false, false).unwrap();
     let finished = host_done(&manager, &purge.id).await;
     assert_eq!(
         finished.status,
@@ -921,7 +921,7 @@ async fn purging_a_remote_host_with_its_snapshots_deletes_only_the_ones_frozen_t
         .await
         .unwrap();
 
-    let purge = manager.start_purge("edge", true, false).unwrap();
+    let purge = manager.start_purge("edge", true, false, false).unwrap();
     assert!(purge.delete_snapshots);
     let finished = host_done(&manager, &purge.id).await;
     assert_eq!(

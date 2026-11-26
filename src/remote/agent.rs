@@ -220,12 +220,20 @@ impl Agent {
             pci_helper: crate::remote::pci::sudo_command(),
         }
     }
-    /// Destroys every stackbox VM this host's agent created, whatever coordinator reserved it,
-    /// and forgets them. Used when the coordinator removes the host.
-    async fn purge(&self, request: &Request) -> Result<Reply> {
+    /// Destroys the stackbox VMs this host's agent holds and forgets them: every coordinator's
+    /// when `coordinator` is `None` (`Purge`), otherwise only that coordinator's (`PurgeOwn`).
+    /// Used when the coordinator removes the host. Runs under the create lock, so a
+    /// reservation cannot appear mid-purge. A retry finds what is already gone and succeeds.
+    async fn purge(&self, coordinator: Option<&str>) -> Result<Reply> {
         let reserved: Vec<String> = {
             let registry = LockedRegistry::open(&self.dir)?;
-            registry.state.stackboxes.keys().cloned().collect()
+            registry
+                .state
+                .stackboxes
+                .iter()
+                .filter(|(_, r)| coordinator.is_none_or(|c| r.coordinator == c))
+                .map(|(id, _)| id.clone())
+                .collect()
         };
         let mut purged = 0;
         let mut failed = Vec::new();
@@ -245,15 +253,26 @@ impl Agent {
                 registry.state.stackboxes.remove(id);
             }
         }
+        // Counted after the removal: what other coordinators still hold on the host.
+        let kept_for_others = coordinator.map_or(0, |c| {
+            registry
+                .state
+                .stackboxes
+                .values()
+                .filter(|r| !r.deleted && r.coordinator != c)
+                .count()
+        });
         registry.save()?;
-        let _ = request;
         ensure!(
             failed.is_empty(),
             "failed to remove {} reserved stackbox(s): {}",
             failed.len(),
             failed.join("; ")
         );
-        Ok(Reply::Purged { stackboxes: purged })
+        Ok(Reply::Purged {
+            stackboxes: purged,
+            kept_for_others,
+        })
     }
 
     /// Reserve capacity and public ports for a new stackbox on this host. A replay of the same
@@ -841,10 +860,15 @@ impl Agent {
             return Ok(Reply::Done);
         }
         // A host-wide cleanup has no stackbox id, so it runs before the per-stackbox scope below.
-        if matches!(request.operation, Operation::Purge) {
-            // Serialize with creates so a reservation cannot appear mid-purge.
+        if matches!(request.operation, Operation::Purge | Operation::PurgeOwn) {
+            // Serialize with creates so a reservation cannot appear mid-purge. A purge that
+            // finds another one running fails here rather than waiting, and nothing is deleted.
             let _create_lock = lock(&self.dir, "create.lock")?;
-            return self.purge(&request).await;
+            let scope = match request.operation {
+                Operation::PurgeOwn => Some(request.coordinator_id.as_str()),
+                _ => None,
+            };
+            return self.purge(scope).await;
         }
         if matches!(request.operation, Operation::RemoveGolden) {
             // Under the golden build lock, so a build in progress on this host finishes first.
@@ -2438,7 +2462,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn purge_removes_every_reserved_stackbox_and_forgets_them() {
+    async fn purge_all_removes_every_reserved_stackbox_and_forgets_them() {
         let dir = tempfile::tempdir().unwrap();
         let backend = Arc::new(Fake::default());
         let agent = Agent {
@@ -2472,7 +2496,7 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            matches!(reply, Reply::Purged { stackboxes: 2 }),
+            matches!(reply, Reply::Purged { stackboxes: 2, .. }),
             "{reply:?}"
         );
         assert!(backend.stackboxes.lock().unwrap().is_empty());
@@ -2489,7 +2513,168 @@ mod tests {
                 .execute(request(&owner, Operation::Purge), emit)
                 .await
                 .unwrap(),
-            Reply::Purged { stackboxes: 0 }
+            Reply::Purged { stackboxes: 0, .. }
+        ));
+    }
+
+    /// An agent over `dir` whose backend holds the VMs of every coordinator it serves.
+    fn agent_over(dir: &std::path::Path, backend: Arc<Fake>) -> Agent {
+        Agent {
+            dir: dir.to_path_buf(),
+            backend,
+            limits: Limits {
+                memory_budget_mib: 40_000,
+                available_mib: 64_000,
+                virtualization: true,
+                probe_ports: true,
+            },
+            runner: Runner::Inline,
+            pci_helper: crate::remote::pci::sudo_command(),
+        }
+    }
+
+    #[tokio::test]
+    async fn own_purge_removes_only_this_coordinators_reservations() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = Arc::new(Fake::default());
+        let agent = agent_over(dir.path(), backend.clone());
+        let owner = uuid::Uuid::new_v4().to_string();
+        let other = uuid::Uuid::new_v4().to_string();
+        let emit: Emitter = Arc::new(|_| Ok(()));
+        for (who, id, base) in [(&owner, "one", 15000), (&other, "two", 15010)] {
+            agent
+                .execute(
+                    request(who, create(id, &uuid::Uuid::new_v4().to_string(), base)),
+                    emit.clone(),
+                )
+                .await
+                .unwrap();
+        }
+        let reply = agent
+            .execute(request(&owner, Operation::PurgeOwn), emit.clone())
+            .await
+            .unwrap();
+        assert!(
+            matches!(
+                reply,
+                Reply::Purged {
+                    stackboxes: 1,
+                    kept_for_others: 1
+                }
+            ),
+            "{reply:?}"
+        );
+        // The other coordinator's VM and its reservation stay, and it still sees its own.
+        assert_eq!(
+            backend
+                .stackboxes
+                .lock()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            ["two"]
+        );
+        assert!(matches!(
+            agent
+                .execute(request(&other, Operation::Scan), emit.clone())
+                .await
+                .unwrap(),
+            Reply::Inventory { stackboxes } if stackboxes.keys().map(String::as_str).collect::<Vec<_>>() == ["two"]
+        ));
+        // A retry after a lost reply finds nothing of its own left and succeeds.
+        let retry = agent
+            .execute(request(&owner, Operation::PurgeOwn), emit)
+            .await
+            .unwrap();
+        assert!(
+            matches!(
+                retry,
+                Reply::Purged {
+                    stackboxes: 0,
+                    kept_for_others: 1
+                }
+            ),
+            "{retry:?}"
+        );
+        assert_eq!(backend.stackboxes.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn own_purge_keeps_a_reservation_whose_vm_cannot_be_deleted() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = Arc::new(Fake::default());
+        let agent = agent_over(dir.path(), backend.clone());
+        let owner = uuid::Uuid::new_v4().to_string();
+        let emit: Emitter = Arc::new(|_| Ok(()));
+        agent
+            .execute(
+                request(
+                    &owner,
+                    create("one", &uuid::Uuid::new_v4().to_string(), 15000),
+                ),
+                emit.clone(),
+            )
+            .await
+            .unwrap();
+        backend.fail_delete.store(true, Ordering::SeqCst);
+        let error = agent
+            .execute(request(&owner, Operation::PurgeOwn), emit.clone())
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("failed to remove 1"),
+            "{error:#}"
+        );
+        // The reservation stays, so the coordinator's retry still knows what to clean up.
+        backend.fail_delete.store(false, Ordering::SeqCst);
+        assert!(matches!(
+            agent
+                .execute(request(&owner, Operation::PurgeOwn), emit)
+                .await
+                .unwrap(),
+            Reply::Purged {
+                stackboxes: 1,
+                kept_for_others: 0
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn own_purge_refuses_to_run_while_another_create_holds_the_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = Arc::new(Fake::default());
+        let agent = agent_over(dir.path(), backend.clone());
+        let owner = uuid::Uuid::new_v4().to_string();
+        let emit: Emitter = Arc::new(|_| Ok(()));
+        agent
+            .execute(
+                request(
+                    &owner,
+                    create("one", &uuid::Uuid::new_v4().to_string(), 15000),
+                ),
+                emit.clone(),
+            )
+            .await
+            .unwrap();
+        // A second coordinator's purge (or a create) holds the lock: this one deletes nothing.
+        let held = lock(dir.path(), "create.lock").unwrap();
+        let error = agent
+            .execute(request(&owner, Operation::PurgeOwn), emit.clone())
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("already running"), "{error:#}");
+        assert_eq!(backend.stackboxes.lock().unwrap().len(), 1);
+        drop(held);
+        assert!(matches!(
+            agent
+                .execute(request(&owner, Operation::PurgeOwn), emit)
+                .await
+                .unwrap(),
+            Reply::Purged {
+                stackboxes: 1,
+                kept_for_others: 0
+            }
         ));
     }
 

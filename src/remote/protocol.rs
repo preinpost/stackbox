@@ -229,9 +229,13 @@ pub enum Operation {
     VerifyVm,
     /// Install the coordinator's msb release, upgrading an older one; a newer one fails.
     InstallMsb,
-    /// Destroy every VM this coordinator reserved on the host, then forget them.
-    /// The coordinator runs this only when removing the host.
+    /// Destroy every VM on the host, whichever coordinator reserved it, then forget them.
+    /// The coordinator sends this only when removing the host with `all_vms`.
     Purge,
+    /// Destroy only the VMs this coordinator reserved on the host, then forget them. Other
+    /// coordinators' reservations stay, and the reply counts them. An older agent does not
+    /// know this operation and refuses it, so the removal fails rather than deleting others' VMs.
+    PurgeOwn,
     /// Delete every golden snapshot group this host holds for stackboxes, under the golden build
     /// lock so a build in progress finishes first. Sent before the host's files are removed.
     RemoveGolden,
@@ -334,7 +338,7 @@ impl Operation {
             Self::Create { .. } => 1800,
             Self::Delete { .. } => 180,
             // A host can hold several stackboxes, each destroyed VM by VM.
-            Self::Purge => 1800,
+            Self::Purge | Self::PurgeOwn => 1800,
             // Each group is a snapshot set of a golden VM; a build that holds the lock finishes first.
             Self::RemoveGolden => 1800,
             Self::Shell { .. } => 12 * 3600,
@@ -533,6 +537,9 @@ pub enum Reply {
     Purged {
         /// Stackboxes whose VMs were destroyed, including ones already deleted from the registry.
         stackboxes: usize,
+        /// Stackboxes of other coordinators still reserved on the host after a `PurgeOwn`.
+        #[serde(default, skip_serializing_if = "is_zero")]
+        kept_for_others: usize,
     },
     GoldenRemoved {
         /// Golden snapshot groups deleted from the host.
@@ -598,6 +605,10 @@ impl std::fmt::Display for AgentError {
 }
 impl std::error::Error for AgentError {}
 
+fn is_zero(count: &usize) -> bool {
+    *count == 0
+}
+
 /// Hand a progress frame of a one-shot request to `sink`. Returns the outcome once the
 /// agent reports one; a frame the operation cannot produce is a protocol error.
 pub fn deliver(
@@ -657,7 +668,7 @@ mod tests {
             Frame::Step { ref step } if step.contains("nova")
         ));
         let purged: Reply = serde_json::from_str(r#"{"result":"purged","stackboxes":3}"#).unwrap();
-        assert!(matches!(purged, Reply::Purged { stackboxes: 3 }));
+        assert!(matches!(purged, Reply::Purged { stackboxes: 3, .. }));
     }
 
     #[test]

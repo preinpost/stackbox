@@ -25,6 +25,8 @@ pub(crate) struct Fake {
     pub(crate) fail_scan: AtomicBool,
     /// Make the golden cleanup fail, as an msb that cannot list its snapshot groups does.
     pub(crate) fail_golden: AtomicBool,
+    /// Make a VM's deletion fail, as an msb that refuses to stop it does.
+    pub(crate) fail_delete: AtomicBool,
     /// How many golden cleanups completed.
     pub(crate) golden_removals: std::sync::atomic::AtomicU32,
     pub(crate) stackboxes: Mutex<BTreeMap<String, Vec<StackboxNode>>>,
@@ -334,6 +336,9 @@ impl Backend for Fake {
     }
     fn delete(&self, id: String) -> BoxFuture<'_, Result<()>> {
         Box::pin(async move {
+            if self.fail_delete.load(Ordering::SeqCst) {
+                bail!("msb refused to remove the VM");
+            }
             self.stackboxes.lock().unwrap().remove(&id);
             Ok(())
         })
@@ -2050,6 +2055,7 @@ async fn remote_host_restart_recovers_interrupted_jobs_and_missing_key_never_rep
                     finished_at: None,
                     delete_snapshots: false,
                     remote_files: false,
+                    all_vms: false,
                     pci_bdf: None,
                 },
             );
@@ -3959,7 +3965,7 @@ async fn purging_the_local_host_can_also_delete_its_snapshots() {
         .unwrap();
     assert_eq!(done(&manager, &freeze).await.status, JobStatus::Succeeded);
 
-    let purge = manager.start_purge("local", true, false).unwrap();
+    let purge = manager.start_purge("local", true, false, false).unwrap();
     assert!(purge.delete_snapshots);
     let finished = host_done(&manager, &purge.id).await;
     assert_eq!(
@@ -9389,7 +9395,7 @@ async fn unregistering_with_remote_files_removes_golden_groups_and_keeps_this_ma
     let dir = tempfile::tempdir().unwrap();
     let backend = Arc::new(Fake::default());
     let manager = open_with(options(dir.path()), backend.clone()).await;
-    let purge = manager.start_purge("local", false, true).unwrap();
+    let purge = manager.start_purge("local", false, true, true).unwrap();
     assert!(purge.remote_files);
     let finished = host_done(&manager, &purge.id).await;
     assert_eq!(
@@ -9429,7 +9435,7 @@ async fn a_failed_file_cleanup_still_unregisters_and_names_what_is_left() {
         .fail_golden
         .store(true, std::sync::atomic::Ordering::SeqCst);
     let manager = open_with(options(dir.path()), backend.clone()).await;
-    let purge = manager.start_purge("local", false, true).unwrap();
+    let purge = manager.start_purge("local", false, true, true).unwrap();
     let finished = host_done(&manager, &purge.id).await;
     // The VMs were removed, so the host is forgotten even though the cleanup failed.
     assert_eq!(
@@ -9455,12 +9461,148 @@ async fn a_failed_file_cleanup_still_unregisters_and_names_what_is_left() {
     assert_eq!(messages.last().map(String::as_str), Some("Host removed"));
 }
 
+/// Reserves stackbox `id` on the local host's agent for another coordinator, as a second stackboxd
+/// that registered the same host would.
+async fn reserve_for_other_coordinator(state_dir: &std::path::Path, backend: Arc<Fake>, id: &str) {
+    let agent = crate::remote::agent::Agent::in_process(state_dir.join("agent"), backend);
+    let emit: crate::remote::agent::Emitter = Arc::new(|_| Ok(()));
+    let request = crate::remote::protocol::Request {
+        version: crate::remote::protocol::VERSION,
+        coordinator_id: uuid::Uuid::new_v4().to_string(),
+        operation: crate::remote::protocol::Operation::Create {
+            stackbox_id: id.into(),
+            generation: uuid::Uuid::new_v4().to_string(),
+            plan: crate::model::layout(&crate::model::PlanRequest::default()).unwrap(),
+            exposure: crate::model::Exposure {
+                host: "other.example".into(),
+                bind: "0.0.0.0".parse().unwrap(),
+                port_base: 15100,
+            },
+            share: None,
+            source: None,
+        },
+    };
+    agent.execute(request, emit).await.unwrap();
+}
+
+#[tokio::test]
+async fn a_purge_keeps_other_coordinators_vms_and_the_shared_files_by_default() {
+    let dir = tempfile::tempdir().unwrap();
+    let backend = Arc::new(Fake::default());
+    let manager = open_with(options(dir.path()), backend.clone()).await;
+    reserve_for_other_coordinator(dir.path(), backend.clone(), "theirs").await;
+    let purge = manager.start_purge("local", false, true, false).unwrap();
+    assert!(!purge.all_vms);
+    let finished = host_done(&manager, &purge.id).await;
+    assert_eq!(
+        finished.status,
+        JobStatus::Succeeded,
+        "{:?}",
+        finished.error
+    );
+    // Only this coordinator's VMs go: the other coordinator's VM is still on the host.
+    assert!(backend.stackboxes.lock().unwrap().contains_key("theirs"));
+    // The shared files stay, so the other coordinator's VMs keep their golden groups and msb.
+    assert_eq!(
+        backend
+            .golden_removals
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
+    let messages = purge_messages(&finished);
+    assert!(
+        messages
+            .iter()
+            .any(|m| m == "Kept 1 VM reservation(s) of other stackbox coordinators on the host"),
+        "{messages:?}"
+    );
+    let left = messages
+        .iter()
+        .find(|m| m.starts_with("Left on the host:"))
+        .unwrap_or_else(|| panic!("{messages:?}"));
+    assert!(left.contains("golden snapshot groups"), "{left}");
+    assert!(
+        left.contains("1 VM reservation(s) of other stackbox coordinators still use this host"),
+        "{left}"
+    );
+    // The host is still forgotten: its own VMs are gone.
+    assert!(manager.host("local").is_err());
+}
+
+#[tokio::test]
+async fn a_purge_without_other_coordinators_still_keeps_the_shared_files_unless_all_vms() {
+    let dir = tempfile::tempdir().unwrap();
+    let backend = Arc::new(Fake::default());
+    let manager = open_with(options(dir.path()), backend.clone()).await;
+    let purge = manager.start_purge("local", false, true, false).unwrap();
+    let finished = host_done(&manager, &purge.id).await;
+    assert_eq!(
+        finished.status,
+        JobStatus::Succeeded,
+        "{:?}",
+        finished.error
+    );
+    assert_eq!(
+        backend
+            .golden_removals
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
+    let messages = purge_messages(&finished);
+    assert!(
+        !messages.iter().any(|m| m.starts_with("Kept ")),
+        "{messages:?}"
+    );
+    let left = messages
+        .iter()
+        .find(|m| m.starts_with("Left on the host:"))
+        .unwrap_or_else(|| panic!("{messages:?}"));
+    assert!(left.contains("choose to delete all VMs"), "{left}");
+    // The manual command would delete a directory other coordinators may use, so none is offered.
+    assert!(!left.contains("rm -rf"), "{left}");
+}
+
+#[tokio::test]
+async fn all_vms_removes_other_coordinators_vms_and_then_the_shared_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let backend = Arc::new(Fake::default());
+    let manager = open_with(options(dir.path()), backend.clone()).await;
+    reserve_for_other_coordinator(dir.path(), backend.clone(), "theirs").await;
+    let purge = manager.start_purge("local", false, true, true).unwrap();
+    assert!(purge.all_vms);
+    let finished = host_done(&manager, &purge.id).await;
+    assert_eq!(
+        finished.status,
+        JobStatus::Succeeded,
+        "{:?}",
+        finished.error
+    );
+    assert!(backend.stackboxes.lock().unwrap().is_empty());
+    assert_eq!(
+        backend
+            .golden_removals
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+    let messages = purge_messages(&finished);
+    assert!(
+        messages
+            .iter()
+            .any(|m| m == "Removed 1 golden snapshot group(s)"),
+        "{messages:?}"
+    );
+    assert!(
+        !messages.iter().any(|m| m.starts_with("Kept ")),
+        "{messages:?}"
+    );
+}
+
 #[tokio::test]
 async fn a_purge_without_remote_files_leaves_the_golden_groups_alone() {
     let dir = tempfile::tempdir().unwrap();
     let backend = Arc::new(Fake::default());
     let manager = open_with(options(dir.path()), backend.clone()).await;
-    let purge = manager.start_purge("local", false, false).unwrap();
+    let purge = manager.start_purge("local", false, false, false).unwrap();
     assert!(!purge.remote_files);
     let finished = host_done(&manager, &purge.id).await;
     assert_eq!(
