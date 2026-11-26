@@ -6215,6 +6215,126 @@ async fn a_stackbox_spans_hosts_with_its_computes_placed_elsewhere() {
             .contains(&"prepare:mn".to_string())
     );
     assert_eq!(*backend.spanning.lock().unwrap(), [vec![2u8]]);
+    // A compute host of another architecture keeps the whole stackbox out of one snapshot.
+    let foreign = if std::env::consts::ARCH == "aarch64" {
+        "x86_64"
+    } else {
+        "aarch64"
+    };
+    manager
+        .update(|state| {
+            let host = &mut state.hosts.get_mut("edge").unwrap().host;
+            host.inspection.as_mut().unwrap().arch = foreign.into();
+            Ok(())
+        })
+        .unwrap();
+    let refused = manager
+        .freeze(
+            "mn",
+            SnapshotRequest {
+                id: "mixed".into(),
+                note: None,
+                node: None,
+            },
+        )
+        .unwrap_err();
+    assert!(refused.is::<Conflict>(), "{refused:#}");
+    assert!(
+        refused
+            .to_string()
+            .contains(&format!("host 'edge' is {foreign}")),
+        "{refused:#}"
+    );
+    assert!(manager.snapshot("mixed").is_err());
+    manager
+        .update(|state| {
+            let host = &mut state.hosts.get_mut("edge").unwrap().host;
+            host.inspection.as_mut().unwrap().arch = std::env::consts::ARCH.into();
+            Ok(())
+        })
+        .unwrap();
+    // Until edge is checked its architecture is unknown: neither a whole-stackbox freeze nor a
+    // compute placed there may go ahead.
+    let inspection = manager
+        .update(|state| Ok(state.hosts.get_mut("edge").unwrap().host.inspection.take()))
+        .unwrap();
+    let unchecked = manager
+        .freeze(
+            "mn",
+            SnapshotRequest {
+                id: "unchecked".into(),
+                note: None,
+                node: None,
+            },
+        )
+        .unwrap_err();
+    assert!(unchecked.is::<Conflict>(), "{unchecked:#}");
+    assert!(
+        unchecked
+            .to_string()
+            .contains("host 'edge' has not been checked yet"),
+        "{unchecked:#}"
+    );
+    assert!(manager.snapshot("unchecked").is_err());
+    let placed = manager
+        .add_compute(
+            "mn",
+            AddComputeRequest {
+                host_id: Some("edge".into()),
+                ..AddComputeRequest::default()
+            },
+        )
+        .unwrap_err();
+    assert!(placed.is::<Conflict>(), "{placed:#}");
+    assert!(
+        placed
+            .to_string()
+            .contains("host 'edge' has not been checked yet"),
+        "{placed:#}"
+    );
+    manager
+        .update(|state| {
+            state.hosts.get_mut("edge").unwrap().host.inspection = inspection;
+            Ok(())
+        })
+        .unwrap();
+    // With edge checked as another architecture, a compute there is still placed: the release
+    // publishes its images (OPENSTACK_RELEASE is 2026.2, which has aarch64 as well as x86_64).
+    manager
+        .update(|state| {
+            let host = &mut state.hosts.get_mut("edge").unwrap().host;
+            host.inspection.as_mut().unwrap().arch = foreign.into();
+            Ok(())
+        })
+        .unwrap();
+    let placed = manager.add_compute(
+        "mn",
+        AddComputeRequest {
+            host_id: Some("edge".into()),
+            ..AddComputeRequest::default()
+        },
+    );
+    if let Err(error) = &placed {
+        assert!(
+            !error.to_string().contains("publishes Kolla images"),
+            "{error:#}"
+        );
+    }
+    let placed = placed.unwrap();
+    assert!(
+        !done(&manager, &placed)
+            .await
+            .error
+            .unwrap_or_default()
+            .contains("CPU architecture")
+    );
+    manager
+        .update(|state| {
+            let host = &mut state.hosts.get_mut("edge").unwrap().host;
+            host.inspection.as_mut().unwrap().arch = std::env::consts::ARCH.into();
+            Ok(())
+        })
+        .unwrap();
 
     let cut = crate::link::Impair {
         delay_ms: 0,

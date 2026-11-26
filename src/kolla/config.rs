@@ -103,12 +103,15 @@ pub fn globals(
     multinode: bool,
     release: &crate::kolla::releases::ReleaseInfo,
 ) -> String {
-    // Only the releases whose Rocky images are published for aarch64 carry the suffix; the
-    // series the stackbox builds itself and the older maintained ones are amd64 only on Rocky.
-    let tag_suffix = if arch == "aarch64" && release.arm64 {
-        "-aarch64"
+    let source = image_source(arch, release);
+    // globals.yml is passed as extra vars, which beat inventory host variables, so a literal
+    // suffix or registry would make every VM pull the control VM's images. A multi-node stackbox's
+    // computes may run on hosts of another architecture: each of these reads the host's own
+    // `stackbox_*` inventory variable, falling back to the control VM's value.
+    let tag_suffix_line = if multinode {
+        per_host_line("openstack_tag_suffix", "stackbox_tag_suffix", source.suffix)
     } else {
-        ""
+        format!("openstack_tag_suffix: \"{}\"", source.suffix)
     };
     // Kolla's images are tagged with the series name on the legacy releases and with the
     // year.release name from 2023.1 on.
@@ -117,13 +120,31 @@ pub fn globals(
     // The tag's default registry carries no end-of-life images. A series the stackbox builds and
     // publishes itself names its own registry and namespace; the image tag then follows its
     // base distro (`zed-rocky-9`) rather than the tag's default.
-    let images = match &release.images {
-        Some(images) => format!(
-            "# Kolla images the stackbox built and published for this series.\ndocker_registry: \"{registry}\"\ndocker_namespace: \"{namespace}\"\n",
-            registry = images.registry,
-            namespace = images.namespace,
+    // A series whose images the stackbox builds names its registry in every mode. A maintained
+    // series reads each host's registry in a multi-node stackbox, where the control VM's architecture
+    // may not be the compute's; a single VM takes the aarch64 build of an arm64 series, if any.
+    let images = match (&release.images, multinode) {
+        (None, true) => format!(
+            "{}\n{}\n",
+            per_host_line(
+                "docker_registry",
+                "stackbox_docker_registry",
+                &source.registry
+            ),
+            per_host_line(
+                "docker_namespace",
+                "stackbox_docker_namespace",
+                &source.namespace
+            ),
         ),
-        None => String::new(),
+        _ => match release.own_origin(arch) {
+            Some(origin) => format!(
+                "# Kolla images the stackbox built and published for this series.\ndocker_registry: \"{registry}\"\ndocker_namespace: \"{namespace}\"\n",
+                registry = origin.registry,
+                namespace = origin.namespace,
+            ),
+            None => String::new(),
+        },
     };
     let enabled = ["placement", "horizon", "neutron", "nova"]
         .iter()
@@ -239,7 +260,7 @@ pub fn globals(
         r#"---
 kolla_base_distro: "{distro}"
 {images}openstack_release: "{image_tag}"
-openstack_tag_suffix: "{tag_suffix}"
+{tag_suffix_line}
 kolla_internal_vip_address: "{vip}"
 network_interface: "{interface}"
 api_interface: "{interface}"
@@ -532,14 +553,140 @@ pub fn skyline_override(components: &[String]) -> Option<&'static str> {
         .then_some(SKYLINE_OVERRIDE)
 }
 
+/// The Kolla image tag suffix and registry of a VM of `arch`: the suffix is `-aarch64` where the
+/// release publishes aarch64 images; the registry is the one [`ReleaseInfo::own_origin`] names,
+/// kolla-ansible's default otherwise.
+pub fn image_source(arch: &str, release: &crate::kolla::releases::ReleaseInfo) -> ImageSource {
+    let origin = release
+        .own_origin(arch)
+        .unwrap_or_else(|| crate::kolla::releases::Origin {
+            registry: crate::kolla::releases::KOLLA_REGISTRY.into(),
+            namespace: crate::kolla::releases::KOLLA_NAMESPACE.into(),
+        });
+    ImageSource {
+        suffix: tag_suffix(arch, release),
+        registry: origin.registry,
+        namespace: origin.namespace,
+    }
+}
+
+/// Where one VM pulls its Kolla images from: the tag suffix and the registry path.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ImageSource {
+    /// `-aarch64` or empty, appended to the image tag.
+    pub suffix: &'static str,
+    /// The registry, `ghcr.io` or `quay.io`.
+    pub registry: String,
+    /// Below-the-registry name, `preinpost/kolla` or `openstack.kolla`.
+    pub namespace: String,
+}
+
+/// The Kolla image tag suffix of a VM of `arch`. Only the releases whose Rocky images are
+/// published for aarch64 carry it; the amd64-only series the stackbox builds itself and the older
+/// maintained ones have none.
+pub fn tag_suffix(arch: &str, release: &crate::kolla::releases::ReleaseInfo) -> &'static str {
+    if arch.trim() == "aarch64" && release.arm64 {
+        "-aarch64"
+    } else {
+        ""
+    }
+}
+
+/// One `globals.yml` line whose value is the host's own inventory variable `var`, falling back
+/// to `control` (the control VM's value) on a host that names none. Ansible templates extra vars
+/// per host, so the line reads the variable of the host it runs on.
+fn per_host_line(key: &str, var: &str, control: &str) -> String {
+    format!("{key}: \"{{{{ {var} | default('{control}') }}}}\"")
+}
+
+/// Rewrites the `globals.yml` lines that pin one image source for every host, as stackboxes
+/// deployed before computes could differ in architecture wrote them, into the per-host form:
+/// `openstack_tag_suffix`, `docker_registry`, `docker_namespace`. A registry or namespace the
+/// file does not name is added with kolla-ansible's default, which is what it pulled from before.
+/// Leaves the file alone when it already reads each host's values.
+pub fn per_host_images(globals: &str) -> Option<String> {
+    // (key in globals.yml, the inventory variable that overrides it, the control VM's default)
+    let keys = [
+        ("openstack_tag_suffix", "stackbox_tag_suffix", None),
+        (
+            "docker_registry",
+            "stackbox_docker_registry",
+            Some(crate::kolla::releases::KOLLA_REGISTRY),
+        ),
+        (
+            "docker_namespace",
+            "stackbox_docker_namespace",
+            Some(crate::kolla::releases::KOLLA_NAMESPACE),
+        ),
+    ];
+    let present = |key: &str| {
+        globals
+            .lines()
+            .any(|line| line.starts_with(&format!("{key}:")))
+    };
+    let missing: Vec<String> = keys
+        .iter()
+        .filter_map(|(key, var, default)| {
+            let default = (*default)?;
+            (!present(key)).then(|| per_host_line(key, var, default))
+        })
+        .collect();
+    let mut changed = false;
+    let mut out = String::with_capacity(globals.len() + 128);
+    for line in globals.split_inclusive('\n') {
+        let body = line.trim_end_matches('\n');
+        let rewritten = keys.iter().find_map(|(key, var, _)| {
+            let value = body
+                .strip_prefix(&format!("{key}: \""))?
+                .strip_suffix('"')?;
+            // A value that already reads a variable is the per-host form.
+            (!value.contains(['{', '"', '\''])).then(|| per_host_line(key, var, value))
+        });
+        match rewritten {
+            Some(line_text) => {
+                out.push_str(&line_text);
+                out.push_str(&line[body.len()..]);
+                changed = true;
+            }
+            None => out.push_str(line),
+        }
+        // The registry lines join the file after the release, where kolla-ansible reads them.
+        if body.starts_with("openstack_release:") && !missing.is_empty() {
+            for extra in &missing {
+                out.push_str(extra);
+                out.push('\n');
+            }
+            changed = true;
+        }
+    }
+    changed.then_some(out)
+}
+
 /// Kolla's multinode inventory with the groups that place services filled in: the control
 /// VM runs the control plane, network node and Kolla itself; Nova runs on the computes.
-pub fn multinode_inventory(template: &str, control: &str, computes: &[Compute]) -> Result<String> {
+/// `sources` holds the image source (tag suffix and registry) of each compute, by hostname,
+/// whose architecture may differ from the control VM's; a compute missing from it uses the
+/// control VM's.
+pub fn multinode_inventory(
+    template: &str,
+    control: &str,
+    computes: &[Compute],
+    sources: &std::collections::BTreeMap<String, ImageSource>,
+) -> Result<String> {
     let compute_hosts: Vec<String> = computes
         .iter()
         .map(|c| {
+            let suffix = sources
+                .get(&c.hostname)
+                .map(|source| {
+                    format!(
+                        " stackbox_tag_suffix=\"{}\" stackbox_docker_registry=\"{}\" stackbox_docker_namespace=\"{}\"",
+                        source.suffix, source.registry, source.namespace
+                    )
+                })
+                .unwrap_or_default();
             format!(
-                "{} ansible_host={} neutron_external_interface=stackbox1 neutron_bridge_name=br-tenant",
+                "{} ansible_host={} neutron_external_interface=stackbox1 neutron_bridge_name=br-tenant{suffix}",
                 c.hostname, c.address
             )
         })
@@ -680,6 +827,10 @@ mod tests {
         assert!(globals.contains("enable_neutron_provider_networks: true\n"));
         // Extra vars would override the inventory's per-host bridges.
         assert!(!globals.contains("neutron_external_interface"));
+        // ...and its per-host image suffix: each host reads its own, the control VM's by default.
+        assert!(globals.contains(
+            "openstack_tag_suffix: \"{{ stackbox_tag_suffix | default('-aarch64') }}\"\n"
+        ));
         let single = globals_single(&selected);
         assert!(single.contains("neutron_external_interface: \"stackbox-ext\"\n"));
         assert!(!single.contains("tunnel_interface"));
@@ -689,8 +840,14 @@ mod tests {
 
         // The head of Kolla's inventory/multinode, which the rewrite keys on.
         let template = "# These initial groups are the only groups required to be modified.\n[control]\n# These hostname must be resolvable from your deployment host\ncontrol01\ncontrol02\ncontrol03\n\n# The above can also be specified as follows:\n#control[01:03]     ansible_user=kolla\n\n[network]\nnetwork01\nnetwork02\n\n[compute]\ncompute01\n\n[monitoring]\nmonitoring01\n\n[storage]\nstorage01\n\n[deployment]\nlocalhost       ansible_connection=local\n\n[baremetal:children]\ncontrol\n";
-        let inventory =
-            multinode_inventory(template, "stackbox-control", &topology_computes()).unwrap();
+        let no_suffixes = std::collections::BTreeMap::new();
+        let inventory = multinode_inventory(
+            template,
+            "stackbox-control",
+            &topology_computes(),
+            &no_suffixes,
+        )
+        .unwrap();
         assert!(inventory.contains("[control]\nstackbox-control ansible_connection=local neutron_external_interface=stackbox1,stackbox-ext neutron_bridge_name=br-tenant,br-ex\n\n"));
         assert!(inventory.contains("[network]\nstackbox-control\n\n"));
         assert!(inventory.contains("[compute]\nstackbox-compute-1 ansible_host=10.254.0.11 neutron_external_interface=stackbox1 neutron_bridge_name=br-tenant\n\n"));
@@ -705,8 +862,10 @@ mod tests {
         ] {
             assert!(!inventory.contains(&format!("\n{gone}\n")), "{gone}");
         }
-        assert!(multinode_inventory("[control]\nx\n", "stackbox-control", &[]).is_err());
-        let alone = multinode_inventory(template, "stackbox-control", &[]).unwrap();
+        assert!(
+            multinode_inventory("[control]\nx\n", "stackbox-control", &[], &no_suffixes).is_err()
+        );
+        let alone = multinode_inventory(template, "stackbox-control", &[], &no_suffixes).unwrap();
         assert!(alone.contains("[compute]\n\n[monitoring]\nstackbox-control\n"));
     }
 
@@ -771,6 +930,205 @@ mod tests {
             hostname: "stackbox-compute-1".into(),
             address: "10.254.0.11".into(),
         }]
+    }
+
+    #[test]
+    fn computes_of_another_architecture_pull_their_own_images() {
+        let current = crate::kolla::releases::info(OPENSTACK_RELEASE);
+        assert!(current.arm64);
+        assert_eq!(tag_suffix("aarch64", &current), "-aarch64");
+        assert_eq!(tag_suffix("aarch64\n", &current), "-aarch64");
+        assert_eq!(tag_suffix("x86_64", &current), "");
+        let amd64_only = crate::kolla::releases::info("2024.2");
+        assert_eq!(tag_suffix("aarch64", &amd64_only), "");
+
+        let template = "[control]\ncontrol01\n\n[network]\nnetwork01\n\n[compute]\ncompute01\n\n[monitoring]\nmonitoring01\n\n[storage]\nstorage01\n";
+        let mut computes = topology_computes();
+        computes.push(Compute {
+            name: "demo-compute-2".into(),
+            hostname: "stackbox-compute-2".into(),
+            address: "10.254.0.12".into(),
+        });
+        let sources = std::collections::BTreeMap::from([
+            (
+                "stackbox-compute-1".to_owned(),
+                image_source("x86_64", &current),
+            ),
+            (
+                "stackbox-compute-2".to_owned(),
+                image_source("aarch64", &current),
+            ),
+        ]);
+        let inventory =
+            multinode_inventory(template, "stackbox-control", &computes, &sources).unwrap();
+        assert!(inventory.contains("stackbox-compute-1 ansible_host=10.254.0.11 neutron_external_interface=stackbox1 neutron_bridge_name=br-tenant stackbox_tag_suffix=\"\" stackbox_docker_registry=\"quay.io\" stackbox_docker_namespace=\"openstack.kolla\"\n"));
+        assert!(inventory.contains("stackbox-compute-2 ansible_host=10.254.0.12 neutron_external_interface=stackbox1 neutron_bridge_name=br-tenant stackbox_tag_suffix=\"-aarch64\" stackbox_docker_registry=\"quay.io\" stackbox_docker_namespace=\"openstack.kolla\"\n"));
+        // The control VM keeps the globals' default.
+        assert!(inventory.contains("[control]\nstackbox-control ansible_connection=local neutron_external_interface=stackbox1,stackbox-ext neutron_bridge_name=br-tenant,br-ex\n"));
+
+        // A stackbox deployed before this pinned one suffix for every host in globals.yml.
+        let old = "---\nopenstack_release: \"2026.2\"\nopenstack_tag_suffix: \"-aarch64\"\nnetwork_interface: \"stackbox0\"\n";
+        // The registry and namespace were never written for quay's default, so the rewrite adds
+        // them with that default.
+        let rewritten = per_host_images(old).unwrap();
+        assert_eq!(
+            rewritten,
+            "---\nopenstack_release: \"2026.2\"\ndocker_registry: \"{{ stackbox_docker_registry | default('quay.io') }}\"\ndocker_namespace: \"{{ stackbox_docker_namespace | default('openstack.kolla') }}\"\nopenstack_tag_suffix: \"{{ stackbox_tag_suffix | default('-aarch64') }}\"\nnetwork_interface: \"stackbox0\"\n"
+        );
+        assert_eq!(per_host_images(&rewritten), None);
+        assert!(
+            per_host_images("openstack_tag_suffix: \"\"").unwrap()
+                == "openstack_tag_suffix: \"{{ stackbox_tag_suffix | default('') }}\""
+        );
+        assert_eq!(per_host_images("kolla_base_distro: \"rocky\"\n"), None);
+
+        // A stackbox on a registry of its own (2026.1's aarch64 build on ghcr, single VM) gives
+        // each computes the same per-host form, the control VM's registry by default.
+        let ghcr = "---\nopenstack_release: \"2026.1\"\ndocker_registry: \"ghcr.io\"\ndocker_namespace: \"preinpost/kolla\"\nopenstack_tag_suffix: \"-aarch64\"\n";
+        assert_eq!(
+            per_host_images(ghcr).unwrap(),
+            "---\nopenstack_release: \"2026.1\"\ndocker_registry: \"{{ stackbox_docker_registry | default('ghcr.io') }}\"\ndocker_namespace: \"{{ stackbox_docker_namespace | default('preinpost/kolla') }}\"\nopenstack_tag_suffix: \"{{ stackbox_tag_suffix | default('-aarch64') }}\"\n"
+        );
+    }
+
+    #[test]
+    fn the_2026_1_aarch64_images_come_from_the_stackbox_registry() {
+        // (a) All-in-one aarch64 2026.1: ghcr registry and the `-aarch64` suffix.
+        let release = crate::kolla::releases::info("2026.1");
+        assert!(release.arm64);
+        let selected = ["keystone", "glance", "placement", "neutron", "nova"].map(String::from);
+        let single = globals(
+            "10.0.0.2",
+            "stackbox0",
+            "aarch64",
+            false,
+            &selected,
+            false,
+            &release,
+        );
+        assert!(
+            single.contains("docker_registry: \"ghcr.io\"\n"),
+            "{single}"
+        );
+        assert!(
+            single.contains("docker_namespace: \"preinpost/kolla\"\n"),
+            "{single}"
+        );
+        assert!(
+            single.contains("openstack_tag_suffix: \"-aarch64\"\n"),
+            "{single}"
+        );
+        assert!(single.contains("openstack_release: \"2026.1\"\n"));
+        // The amd64 all-in-one 2026.1 keeps quay's default: no registry line at all.
+        let amd64 = globals(
+            "10.0.0.2",
+            "stackbox0",
+            "x86_64",
+            false,
+            &selected,
+            false,
+            &release,
+        );
+        assert!(!amd64.contains("docker_registry"), "{amd64}");
+        assert!(amd64.contains("openstack_tag_suffix: \"\"\n"));
+        // The stackbox's own 2026.1 release keeps quay for 2026.2.
+        let v2026_2 = crate::kolla::releases::info("2026.2");
+        let quay = globals(
+            "10.0.0.2",
+            "stackbox0",
+            "aarch64",
+            false,
+            &selected,
+            false,
+            &v2026_2,
+        );
+        assert!(!quay.contains("docker_registry"), "{quay}");
+
+        // (b) Multi-node, x86 control and aarch64 compute: the control's default is quay, and the
+        // compute's inventory line names ghcr.
+        let multi = globals(
+            "10.0.0.2",
+            "stackbox0",
+            "x86_64",
+            false,
+            &selected,
+            true,
+            &release,
+        );
+        assert!(
+            multi.contains(
+                "docker_registry: \"{{ stackbox_docker_registry | default('quay.io') }}\"\n"
+            ),
+            "{multi}"
+        );
+        assert!(multi.contains("docker_namespace: \"{{ stackbox_docker_namespace | default('openstack.kolla') }}\"\n"), "{multi}");
+        assert!(
+            multi.contains("openstack_tag_suffix: \"{{ stackbox_tag_suffix | default('') }}\"\n"),
+            "{multi}"
+        );
+        let template = "[control]\ncontrol01\n\n[network]\nnetwork01\n\n[compute]\ncompute01\n\n[monitoring]\nmonitoring01\n\n[storage]\nstorage01\n";
+        let compute = Compute {
+            name: "demo-compute-1".into(),
+            hostname: "stackbox-compute-1".into(),
+            address: "10.254.0.11".into(),
+        };
+        let sources = std::collections::BTreeMap::from([(
+            "stackbox-compute-1".to_owned(),
+            image_source("aarch64", &release),
+        )]);
+        let inventory = multinode_inventory(
+            template,
+            "stackbox-control",
+            std::slice::from_ref(&compute),
+            &sources,
+        )
+        .unwrap();
+        assert!(inventory.contains("stackbox-compute-1 ansible_host=10.254.0.11 neutron_external_interface=stackbox1 neutron_bridge_name=br-tenant stackbox_tag_suffix=\"-aarch64\" stackbox_docker_registry=\"ghcr.io\" stackbox_docker_namespace=\"preinpost/kolla\"\n"), "{inventory}");
+
+        // (c) Multi-node, aarch64 control and x86 compute: the control's default is ghcr, and the
+        // x86 compute reads quay's registry and no suffix from its own line.
+        let multi_arm = globals(
+            "10.0.0.2",
+            "stackbox0",
+            "aarch64",
+            false,
+            &selected,
+            true,
+            &release,
+        );
+        assert!(
+            multi_arm.contains(
+                "docker_registry: \"{{ stackbox_docker_registry | default('ghcr.io') }}\"\n"
+            ),
+            "{multi_arm}"
+        );
+        assert!(multi_arm.contains("docker_namespace: \"{{ stackbox_docker_namespace | default('preinpost/kolla') }}\"\n"), "{multi_arm}");
+        assert!(
+            multi_arm.contains(
+                "openstack_tag_suffix: \"{{ stackbox_tag_suffix | default('-aarch64') }}\"\n"
+            ),
+            "{multi_arm}"
+        );
+        let x86 = std::collections::BTreeMap::from([(
+            "stackbox-compute-1".to_owned(),
+            image_source("x86_64", &release),
+        )]);
+        let inventory =
+            multinode_inventory(template, "stackbox-control", &[compute], &x86).unwrap();
+        assert!(inventory.contains("stackbox_tag_suffix=\"\" stackbox_docker_registry=\"quay.io\" stackbox_docker_namespace=\"openstack.kolla\"\n"), "{inventory}");
+
+        // (d) 2026.2 aarch64 stays on quay; (e) 2024.2 keeps no aarch64 suffix or registry (the
+        // manager refuses an aarch64 host for it through `available_on`).
+        assert_eq!(
+            image_source("aarch64", &v2026_2),
+            ImageSource {
+                suffix: "-aarch64",
+                registry: "quay.io".into(),
+                namespace: "openstack.kolla".into(),
+            }
+        );
+        let amd64_only = crate::kolla::releases::info("2024.2");
+        assert_eq!(image_source("aarch64", &amd64_only).suffix, "");
     }
 
     #[test]

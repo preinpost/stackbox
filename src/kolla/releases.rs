@@ -28,15 +28,31 @@ pub const EOL_REGISTRY: &str = "ghcr.io";
 /// `STACKBOX_EOL_NAMESPACE`.
 pub const EOL_NAMESPACE: &str = "preinpost/kolla";
 
+/// kolla-ansible's own default registry, which a VM pulls from when the stackbox names none. Source:
+/// `docker_registry` and `docker_namespace` in `ansible/group_vars/all/common.yml` at
+/// `stable/2026.1` (lines 28–29), and in `ansible/group_vars/all.yml` at `unmaintained/2025.1`
+/// (lines 106–107).
+pub const KOLLA_REGISTRY: &str = "quay.io";
+/// kolla-ansible's own default namespace, see [`KOLLA_REGISTRY`].
+pub const KOLLA_NAMESPACE: &str = "openstack.kolla";
+
 /// The oldest OpenStack release this coordinator supports: Caracal, 2024.1. Older series keep
 /// their install code (see [`LEGACY`]) but are neither offered nor accepted unless this host
 /// sets `STACKBOX_ALLOW_UNSUPPORTED_RELEASES=1`.
 pub const MIN_SUPPORTED_RELEASE: &str = "2024.1";
 
-/// The first release whose Kolla images quay publishes for aarch64 on the base the stackbox uses.
-/// 2025.1–2026.1 have aarch64 images for Debian/Ubuntu only; 2026.2 is the first Rocky 10
-/// `-aarch64` set. The stackbox does not switch its base distro, so earlier releases run on amd64.
+/// The first release whose Rocky Kolla images quay publishes for aarch64: 2026.2, the first Rocky 10
+/// `-aarch64` set. Quay carries 2025.1–2026.1 aarch64 images for Debian/Ubuntu only, so the stackbox
+/// builds those itself (see [`OWN_ARM64`]). The stackbox does not switch its base distro for arm64.
 const ARM64_FROM: &str = "2026.2";
+
+/// Releases whose Rocky aarch64 Kolla images the stackbox builds itself and publishes on
+/// [`EOL_REGISTRY`]/[`EOL_NAMESPACE`] as `<service>:<release>-rocky-<major>-aarch64`: the `arch=arm64`
+/// run of `.github/workflows/eol-images.yml` in `github.com/preinpost/kolla`. Their amd64 images stay
+/// on quay. 2025.2 is not here: its Rocky 10 aarch64 build fails from kolla's own sources (a missing
+/// `pkg_resources` and a duplicated Rocky 10 centos-ceph-squid repo in nova, glance, and horizon), so
+/// it is amd64 only. A release whose aarch64 build fails comes out of this list.
+const OWN_ARM64: &[&str] = &["2025.1", "2026.1"];
 
 /// Whether `release` is inside the supported range, or this host opted into older series.
 pub fn supported(release: &str) -> bool {
@@ -382,6 +398,15 @@ pub struct Images {
     pub python: String,
 }
 
+/// A registry and the namespace below it that a VM's Kolla images are pulled from.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Origin {
+    /// The registry, `ghcr.io` or `quay.io`.
+    pub registry: String,
+    /// Below-the-registry name, `preinpost/kolla` or `openstack.kolla`.
+    pub namespace: String,
+}
+
 /// What installing one release takes: which kolla-ansible ref, which Python, which images.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ReleaseInfo {
@@ -413,9 +438,27 @@ pub struct ReleaseInfo {
     pub eol: bool,
     /// Its images are published for aarch64.
     pub arm64: bool,
+    /// Where the aarch64 images come from when they are not on kolla-ansible's default registry:
+    /// the stackbox's own build for 2025.1–2026.1 (`ghcr.io/preinpost/kolla`). `None` keeps the
+    /// default, which carries 2026.2's aarch64 images and the amd64 ones.
+    pub arm64_images: Option<Origin>,
 }
 
 impl ReleaseInfo {
+    /// The registry and namespace a VM of `arch` pulls this release's images from, when the
+    /// stackbox names one: its own build (`images`), or the aarch64 build of an arm64 release.
+    /// `None` keeps kolla-ansible's default ([`KOLLA_REGISTRY`]/[`KOLLA_NAMESPACE`]).
+    pub fn own_origin(&self, arch: &str) -> Option<Origin> {
+        match &self.images {
+            Some(images) => Some(Origin {
+                registry: images.registry.clone(),
+                namespace: images.namespace.clone(),
+            }),
+            None if arch.trim() == "aarch64" => self.arm64_images.clone(),
+            None => None,
+        }
+    }
+
     /// Base distro of its images: the stackbox's own build, or the tag's default (`ubuntu` for the
     /// legacy series, `rocky` for a maintained branch).
     pub fn base_distro(&self) -> &str {
@@ -471,6 +514,7 @@ pub fn info(release: &str) -> ReleaseInfo {
             collection: entry.collection.into(),
             eol: true,
             arm64: false,
+            arm64_images: None,
         },
         None => match built(release) {
             Some(entry) => ReleaseInfo {
@@ -492,6 +536,7 @@ pub fn info(release: &str) -> ReleaseInfo {
                 collection: entry.collection.into(),
                 eol: false,
                 arm64: false,
+                arm64_images: None,
             },
             None => ReleaseInfo {
                 release: release.into(),
@@ -508,6 +553,10 @@ pub fn info(release: &str) -> ReleaseInfo {
                 collection: String::new(),
                 eol: false,
                 arm64: published_for_arm64(release),
+                arm64_images: own_arm64(release).then(|| Origin {
+                    registry: eol_registry(),
+                    namespace: eol_namespace(),
+                }),
             },
         },
     }
@@ -603,11 +652,16 @@ fn remembered(release: &str) -> Option<String> {
     TEST_REFERENCES.lock().ok()?.as_ref()?.get(release).cloned()
 }
 
-/// Whether the stackbox's Rocky-based Kolla images of `release` are published for aarch64. The
-/// stackbox does not switch its base distro for arm64: 2025.1–2026.1 publish aarch64 only on
-/// Debian/Ubuntu, and the series the stackbox builds itself (zed, 2024.1, 2024.2) are amd64 only.
+/// Whether the stackbox's Rocky-based Kolla images of `release` are published for aarch64: quay's
+/// from [`ARM64_FROM`] on, the stackbox's own build for [`OWN_ARM64`]. The series the stackbox
+/// builds itself before that (zed, 2024.1, 2024.2) are amd64 only.
 fn published_for_arm64(release: &str) -> bool {
-    year_release(release) && release >= ARM64_FROM
+    own_arm64(release) || (year_release(release) && release >= ARM64_FROM)
+}
+
+/// Whether the stackbox builds `release`'s aarch64 images itself, from [`OWN_ARM64`].
+fn own_arm64(release: &str) -> bool {
+    OWN_ARM64.contains(&release)
 }
 
 /// Whether a host of `arch` can run `release`: its images must be published for that arch.
@@ -1040,14 +1094,45 @@ mod tests {
 
     #[test]
     fn arches_follow_the_images_the_stackbox_would_pull() {
-        // The current release is published for Rocky's aarch64 dataset; nothing older is.
+        // 2026.2 is quay's Rocky aarch64 set; 2025.1 and 2026.1 are the stackbox's own aarch64 builds.
+        for release in ["2025.1", "2026.1", "2026.2"] {
+            assert_eq!(arches(release), ["x86_64", "aarch64"], "{release}");
+            assert!(available_on(release, "x86_64"), "{release}");
+            assert!(available_on(release, "aarch64"), "{release}");
+            assert!(!available_on(release, "riscv64"), "{release}");
+        }
+        // Their aarch64 images come from the stackbox's registry; 2026.2's from quay's default.
+        for release in ["2025.1", "2026.1"] {
+            let info = info(release);
+            assert!(info.arm64, "{release}");
+            assert_eq!(
+                info.own_origin("aarch64"),
+                Some(Origin {
+                    registry: eol_registry(),
+                    namespace: eol_namespace()
+                }),
+                "{release}"
+            );
+            assert_eq!(info.own_origin("x86_64"), None, "{release}");
+            // Their amd64 images stay on quay, the default.
+            assert!(info.images.is_none(), "{release}");
+        }
+        assert_eq!(info("2026.2").own_origin("aarch64"), None);
+        assert_eq!(info("2026.2").arm64_images, None);
+        // 2025.2's Rocky 10 aarch64 build fails from kolla's sources, so it is amd64 only and an
+        // aarch64 host is refused.
+        assert_eq!(arches("2025.2"), ["x86_64"]);
+        assert!(!info("2025.2").arm64, "2025.2");
+        assert_eq!(info("2025.2").own_origin("aarch64"), None);
+        assert!(!available_on("2025.2", "aarch64"));
+        assert!(available_on("2025.2", "x86_64"));
         assert_eq!(
             arches(super::super::OPENSTACK_RELEASE),
             ["x86_64", "aarch64"]
         );
-        for release in [
-            "2024.1", "2024.2", "2025.1", "2025.2", "2026.1", "2022.2", "2020.1",
-        ] {
+        // The series before 2025.1 keep amd64 only, and the stackbox's own 2024.x and zed builds
+        // are on ghcr for amd64 alone.
+        for release in ["2024.1", "2024.2", "2022.2", "2022.1", "2021.1", "2020.1"] {
             assert_eq!(arches(release), ["x86_64"], "{release}");
             assert!(available_on(release, "x86_64"), "{release}");
             assert!(!available_on(release, "aarch64"), "{release}");

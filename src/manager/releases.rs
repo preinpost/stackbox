@@ -688,30 +688,75 @@ impl StackboxManager {
                 (None, None) => (None, String::new()),
             },
         };
-        let computes: Vec<PlannedNode> = (1..=request.computes)
-            .map(|index| {
-                let node = format!("compute-{index}");
-                let host = request.host_of(index).unwrap_or_else(|| control_host.clone());
-                match &pick {
-                    Some(pick) => match template_on_host(state, &host) {
-                        Ok(()) => pick.planned(node, host, why.clone()),
-                        Err(reason) => clean(
-                            node,
-                            host,
-                            format!("{} cannot boot it: {reason}", pick.describe()),
-                        ),
-                    },
-                    None => clean(
+        // A compute host of another architecture than the control VM's boots that
+        // architecture's compute templates only; each VM pulls its own architecture's images.
+        let mut foreign: BTreeMap<String, (Option<Pick>, String, usize)> = BTreeMap::new();
+        let mut computes: Vec<PlannedNode> = Vec::new();
+        for index in 1..=request.computes {
+            let node = format!("compute-{index}");
+            let host = request
+                .host_of(index)
+                .unwrap_or_else(|| control_host.clone());
+            let host_arch = super::transfers::host_arch(state, &host).filter(|other| other != arch);
+            let (pick, why, other_services) = match &host_arch {
+                None => (pick.as_ref(), why.clone(), found.other_services),
+                Some(other) => {
+                    if !foreign.contains_key(other) {
+                        let found = self.found(
+                            state,
+                            other,
+                            release,
+                            TemplateRole::Compute,
+                            Some(&components),
+                            buckets,
+                        );
+                        let entry = match (found.local.first(), found.bucket.first()) {
+                            (Some(snapshot), _) => (
+                                Some(Pick::Local(Box::new(snapshot.clone()))),
+                                newest(found.local.len(), "compute", release, "kept here"),
+                                found.other_services,
+                            ),
+                            (None, Some((bucket, metadata))) => (
+                                Some(bucket_pick(bucket, metadata, &mut taken)?),
+                                newest(
+                                    found.bucket.len(),
+                                    "compute",
+                                    release,
+                                    "in buckets, none kept here",
+                                ),
+                                found.other_services,
+                            ),
+                            (None, None) => (None, String::new(), found.other_services),
+                        };
+                        foreign.insert(other.clone(), entry);
+                    }
+                    let (pick, why, other_services) = &foreign[other];
+                    (pick.as_ref(), why.clone(), *other_services)
+                }
+            };
+            computes.push(match pick {
+                Some(pick) => match template_on_host(state, &host) {
+                    Ok(()) => pick.planned(node, host, why),
+                    Err(reason) => clean(
                         node,
                         host,
-                        format!(
-                            "no compute template of OpenStack {release} with the control template's services{}",
-                            mismatch(found.other_services, "compute")
-                        ),
+                        format!("{} cannot boot it: {reason}", pick.describe()),
                     ),
-                }
-            })
-            .collect();
+                },
+                None => clean(
+                    node,
+                    host,
+                    format!(
+                        "no compute template of OpenStack {release}{} with the control template's services{}",
+                        host_arch
+                            .as_deref()
+                            .map(|other| format!(" for {other}"))
+                            .unwrap_or_default(),
+                        mismatch(other_services, "compute")
+                    ),
+                ),
+            });
+        }
         if request.compute.is_some() && computes.iter().any(|node| node.source != NodeSource::Clean)
         {
             notes.push(
@@ -787,12 +832,14 @@ impl StackboxManager {
         })
     }
 
-    /// CPU architecture the stackbox runs on: its control VM's host's, which every compute host
-    /// must share since Kolla images cannot mix architectures. A remote host not checked yet
-    /// is taken to match this coordinator.
+    /// CPU architecture the stackbox runs on: its control VM's host's. A compute host may be of
+    /// another architecture, since each VM pulls its own architecture's Kolla images, as long
+    /// as the release publishes images for it. A remote host not checked yet is taken to
+    /// match this coordinator.
     fn plan_arch(&self, state: &State, request: &ReleaseCreateRequest) -> Result<String> {
         let control_host = request.host_id.as_deref().context("no control host")?;
         let arch = super::transfers::host_arch(state, control_host).unwrap_or_else(current_arch);
+        let release = request.release.trim();
         for host in request
             .compute_hosts
             .iter()
@@ -800,9 +847,11 @@ impl StackboxManager {
         {
             if let Some(other) = super::transfers::host_arch(state, host)
                 && other != arch
+                && !crate::kolla::releases::available_on(release, &other)
             {
                 return Err(conflict(format!(
-                    "host '{host}' is {other} but the control VM's host '{control_host}' is {arch}; Kolla images cannot mix CPU architectures"
+                    "host '{host}' is {other}, but OpenStack {release} publishes Kolla images only for {}; place the compute on another host",
+                    crate::kolla::releases::arches(release).join("/")
                 )));
             }
         }

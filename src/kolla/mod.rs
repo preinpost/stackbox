@@ -377,7 +377,8 @@ pub async fn deploy_compute(
         step(&sink, "control VM에서 새 compute로 SSH 키 배포")?;
         distribute_ssh_key(&control, &computes).await?;
         step(&sink, "Kolla multinode inventory 갱신")?;
-        write_inventory(&control, &topology).await?;
+        let sources = compute_image_sources(&control, &computes, &release).await?;
+        write_inventory(&control, &topology, &sources).await?;
         let host = new_spec.hostname();
         if from_template {
             sink(DeployEvent::Phase(Phase::Deploy))?;
@@ -524,7 +525,7 @@ pub async fn forget_computes(
             computes: Vec::new(),
             multinode: true,
         };
-        write_inventory(&control, &topology).await?;
+        write_inventory(&control, &topology, &BTreeMap::new()).await?;
         step(&sink, "원본 stackbox의 compute 등록 정리")?;
         stream(
             &control,
@@ -615,8 +616,14 @@ done
 }
 
 /// Rewrite only Kolla's multinode inventory and Ansible concurrency, leaving passwords and
-/// globals alone so an expansion cannot disturb the running control plane.
-async fn write_inventory(deployer: &Sandbox, topology: &Topology) -> Result<()> {
+/// globals alone so an expansion cannot disturb the running control plane. The one globals
+/// change is a stackbox deployed before computes could differ in architecture: its pinned
+/// image tag suffix and registry become the per-host ones the inventory's `sources` feed.
+async fn write_inventory(
+    deployer: &Sandbox,
+    topology: &Topology,
+    sources: &BTreeMap<String, config::ImageSource>,
+) -> Result<()> {
     let template = deployer
         .fs()
         .read_to_string(&format!(
@@ -627,8 +634,15 @@ async fn write_inventory(deployer: &Sandbox, topology: &Topology) -> Result<()> 
         &template,
         &stackbox::hostname(stackbox::Role::Control, None),
         &topology.computes,
+        sources,
     )?;
     let fs = deployer.fs();
+    let globals_path = format!("{CONFIG_DIR}/globals.yml");
+    if let Ok(globals) = fs.read_to_string(&globals_path).await
+        && let Some(rewritten) = config::per_host_images(&globals)
+    {
+        fs.write(&globals_path, rewritten).await?;
+    }
     fs.write(INVENTORY, inventory).await?;
     run(deployer, "mkdir -p /etc/kolla/callback_plugins").await?;
     fs.write(
@@ -903,6 +917,10 @@ async fn deploy_phases(
                     1
                 };
                 let mut script = verify_script(components, hosts, release, gpu);
+                // A compute on a host of another architecture boots the other Cirros.
+                if let Some(arch) = instance_arch(deployer, computes).await? {
+                    script = format!("instance_arch={arch}\n{script}");
+                }
                 if !pci_devices.is_empty() {
                     step(
                         sink,
@@ -1717,10 +1735,12 @@ async fn configure(
         .await?;
     let inventory = if multinode {
         let peers: Vec<Compute> = computes.iter().map(|(c, _)| c.clone()).collect();
+        let sources = compute_image_sources(deployer, computes, &releases::info(release)).await?;
         config::multinode_inventory(
             &template,
             &stackbox::hostname(stackbox::Role::Control, None),
             &peers,
+            &sources,
         )?
     } else {
         template
@@ -2305,6 +2325,83 @@ fn ssh_target(compute: &Compute) -> Result<&str> {
     Ok(hostname)
 }
 
+/// The Kolla image source (tag suffix and registry) of each compute, by hostname, from the
+/// architecture the compute reports. A compute on another host may differ from the control VM;
+/// it is refused when the release publishes no images for its architecture. Needs the control
+/// VM's SSH key on the computes it reaches over SSH.
+async fn compute_image_sources(
+    deployer: &Sandbox,
+    computes: &[(Compute, Option<Sandbox>)],
+    release: &releases::ReleaseInfo,
+) -> Result<BTreeMap<String, config::ImageSource>> {
+    let mut sources = BTreeMap::new();
+    for (compute, sandbox) in computes {
+        let arch = match sandbox {
+            Some(sandbox) => run(sandbox, "uname -m").await?,
+            None => {
+                run(
+                    deployer,
+                    &format!(
+                        "ssh -o BatchMode=yes -o ConnectTimeout=10 {} 'uname -m'",
+                        ssh_target(compute)?
+                    ),
+                )
+                .await?
+            }
+        };
+        let arch = arch.trim();
+        anyhow::ensure!(
+            images_published_for(arch, release),
+            "{} is {arch}, but OpenStack {} publishes no Kolla images for {arch}",
+            compute.hostname,
+            release.release
+        );
+        sources.insert(
+            compute.hostname.clone(),
+            config::image_source(arch, release),
+        );
+    }
+    Ok(sources)
+}
+
+/// The architecture compute-1 reports, which the verification instance boots on; `None` for
+/// an all-in-one VM, which runs it itself. A compute on another host answers over SSH. Only a
+/// plain machine name reaches the script.
+async fn instance_arch(
+    deployer: &Sandbox,
+    computes: &[(Compute, Option<Sandbox>)],
+) -> Result<Option<String>> {
+    let arch = match computes.first() {
+        None => return Ok(None),
+        Some((_, Some(sandbox))) => run(sandbox, "uname -m").await?,
+        Some((compute, None)) => {
+            run(
+                deployer,
+                &format!(
+                    "ssh -o BatchMode=yes -o ConnectTimeout=10 {} 'uname -m'",
+                    ssh_target(compute)?
+                ),
+            )
+            .await?
+        }
+    };
+    let arch = arch.trim();
+    anyhow::ensure!(
+        !arch.is_empty() && arch.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_'),
+        "unexpected compute architecture '{arch}'"
+    );
+    Ok(Some(arch.to_owned()))
+}
+
+/// Whether `release`'s Kolla images exist for a VM of `arch`, as `uname -m` names it.
+fn images_published_for(arch: &str, release: &releases::ReleaseInfo) -> bool {
+    match arch {
+        "x86_64" => true,
+        "aarch64" => release.arm64,
+        _ => false,
+    }
+}
+
 /// Let Kolla on the control VM reach every compute as root over the management link.
 async fn distribute_ssh_key(
     deployer: &Sandbox,
@@ -2795,9 +2892,13 @@ step "Cirros 인스턴스 생성과 라우터 경유 ping 검증"
 sg=$($os security group list --project "$($os token issue -f value -c project_id)" -f value -c ID -c Name | awk '$2 == "default" {print $1}')
 $os security group rule create --ingress --protocol icmp --ethertype IPv4 "$sg" >/dev/null 2>&1 || true
 $os security group rule create --ingress --protocol tcp --dst-port 22 --ethertype IPv4 "$sg" >/dev/null 2>&1 || true
-arch=$(uname -m)
+# The instance runs on a compute, whose architecture may differ from this control VM's:
+# the deploy names compute-1's as instance_arch. Glance's hw_architecture keeps the instance
+# off computes of another one.
+arch=${instance_arch:-$(uname -m)}
 case "$arch" in
   aarch64|arm64)
+    arch=aarch64
     image_url=https://download.cirros-cloud.net/0.6.3/cirros-0.6.3-aarch64-disk.img
     image_props='--property hw_firmware_type=uefi --property hw_machine_type=virt'
     ;;
@@ -2806,6 +2907,7 @@ case "$arch" in
     image_props=''
     ;;
 esac
+image_props="$image_props --property hw_architecture=$arch"
 image_name=cirros-stackbox
 if ! $os image show "$image_name" >/dev/null 2>&1; then
   curl -fsSL -o "$work/cirros.img" "$image_url"
@@ -3489,6 +3591,27 @@ mod tests {
     use super::*;
     use std::io::Write;
     use std::process::{Command, Stdio};
+
+    #[test]
+    fn images_published_for_follows_the_arch_each_release_publishes() {
+        for release in ["2026.2", "2026.1", "2025.2", "2025.1", "2024.2", "2024.1"] {
+            let info = releases::info(release);
+            assert!(images_published_for("x86_64", &info), "{release} x86_64");
+            assert!(!images_published_for("arm64", &info), "{release} arm64");
+            assert!(!images_published_for("riscv64", &info), "{release} riscv64");
+            assert!(!images_published_for("", &info), "{release} empty");
+        }
+        for release in ["2026.2", "2026.1", "2025.1"] {
+            assert!(
+                images_published_for("aarch64", &releases::info(release)),
+                "{release} aarch64"
+            );
+        }
+        // 2025.2's Rocky 10 aarch64 build fails from kolla's sources, so its images are amd64 only.
+        assert!(!images_published_for("aarch64", &releases::info("2025.2")));
+        assert!(!images_published_for("aarch64", &releases::info("2024.2")));
+        assert!(!images_published_for("aarch64", &releases::info("2024.1")));
+    }
 
     /// Runs the removal the stackbox sends for `nova.conf` through a real shell, so the test sees
     /// what the guest's shell does with a managed file, an operator's file and no file.
@@ -4302,6 +4425,9 @@ mod tests {
         assert!(verify.contains("ip netns exec \"qrouter-$router_id\""));
         assert!(verify.contains("nova-compute is not up"));
         assert!(verify.contains("cirros-0.6.3-aarch64-disk.img"));
+        // The instance follows compute-1's architecture, which may differ from the control VM's.
+        assert!(verify.contains("arch=${instance_arch:-$(uname -m)}"));
+        assert!(verify.contains("--property hw_architecture=$arch"));
         for script in [
             install_script(&releases::info(OPENSTACK_RELEASE)),
             verify_script(&components, 1, OPENSTACK_RELEASE, None),
@@ -4357,10 +4483,17 @@ mod tests {
             address: "10.254.0.11".into(),
         };
         assert!(check(
-            &config::multinode_inventory(template, "stackbox-control", &[]).unwrap()
+            &config::multinode_inventory(template, "stackbox-control", &[], &BTreeMap::new())
+                .unwrap()
         ));
         assert!(!check(
-            &config::multinode_inventory(template, "stackbox-control", &[compute]).unwrap()
+            &config::multinode_inventory(
+                template,
+                "stackbox-control",
+                &[compute],
+                &BTreeMap::new()
+            )
+            .unwrap()
         ));
         assert!(!check("[control]\nlocalhost\n\n[compute]\nlocalhost\n"));
         assert!(settle_script(None, &components).contains("no compute VM yet"));

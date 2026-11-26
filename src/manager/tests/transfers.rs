@@ -982,13 +982,26 @@ async fn a_release_plan_follows_the_architecture_of_the_control_vms_host() {
         error.to_string().contains("host 'edge' is aarch64"),
         "{error:#}"
     );
-    // Its computes share the control VM's architecture.
+    // Its computes may run on another architecture when the release publishes images for it:
+    // each VM pulls its own architecture's.
     let mut mixed = request("local", crate::kolla::OPENSTACK_RELEASE);
     mixed.compute_hosts = vec!["edge".into()];
     set_arch(&manager, "edge", &foreign_arch());
-    let error = manager.preview_release(&mixed).await.unwrap_err();
+    let plan = manager.preview_release(&mixed).await.unwrap();
+    assert_eq!(plan.arch, current_arch());
+    assert_eq!(plan.computes.len(), 1);
+    assert_eq!(plan.computes[0].host_id, "edge");
+    // A release published for amd64 only cannot place a compute on an aarch64 host.
+    let mut amd64_only = request("local", "2024.1");
+    amd64_only.compute_hosts = vec!["edge".into()];
+    set_arch(&manager, "local", "x86_64");
+    set_arch(&manager, "edge", "aarch64");
+    let error = manager.preview_release(&amd64_only).await.unwrap_err();
+    assert!(error.is::<Conflict>(), "{error:#}");
     assert!(
-        error.to_string().contains("cannot mix CPU architectures"),
+        error.to_string().contains(
+            "host 'edge' is aarch64, but OpenStack 2024.1 publishes Kolla images only for x86_64"
+        ),
         "{error:#}"
     );
 }

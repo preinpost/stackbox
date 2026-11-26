@@ -524,6 +524,17 @@ impl StackboxManager {
                 .clone()
                 .ok_or_else(|| conflict("stackboxes imported from older versions cannot be frozen"))?;
             let arch = host_arch(state, &host_id);
+            let share_arches: Vec<(String, Option<String>)> = state
+                .stackboxes
+                .get(stackbox_id)
+                .map(|stackbox| {
+                    stackbox
+                        .shares
+                        .iter()
+                        .map(|share| (share.host_id.clone(), host_arch(state, &share.host_id)))
+                        .collect()
+                })
+                .unwrap_or_default();
             let stackbox = state
                 .stackboxes
                 .get_mut(stackbox_id)
@@ -603,6 +614,22 @@ impl StackboxManager {
                 if stackbox.host_of(node) != Some(host_id.as_str()) {
                     return Err(conflict(format!(
                         "{node} runs on another host than the stackbox's; only VMs on host '{host_id}' can be frozen"
+                    )));
+                }
+            }
+            // A snapshot records one architecture, the host's whose VMs it captures. A stackbox
+            // whose computes run on hosts of another architecture could not boot the whole of it
+            // anywhere; its VMs are frozen one at a time as templates of their own host instead.
+            if request.node.is_none() {
+                let foreign = share_arches.iter().find_map(|(share, other)| match other {
+                    None => Some(format!(
+                        "host '{share}' has not been checked yet, so its CPU architecture is unknown; check it from Hosts first"
+                    )),
+                    Some(other) => (*other != arch).then(|| format!("host '{share}' is {other}")),
+                });
+                if let Some(foreign) = foreign {
+                    return Err(conflict(format!(
+                        "this stackbox's computes run on hosts of another architecture than host '{host_id}' ({arch}): {foreign}; a snapshot holds one architecture, so freeze its control VM or a compute as a template instead"
                     )));
                 }
             }

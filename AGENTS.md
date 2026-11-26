@@ -24,7 +24,9 @@ EOL 시리즈를 opt-in으로 켜면 그 태그의 기본값(`ubuntu`)과 그 �
 
 | 릴리스 | kolla-ansible ref | 이미지 | arch |
 |---|---|---|---|
-| 2025.1 이상 | `stable/<rel>` 또는 `unmaintained/<rel>` | `quay.io/openstack.kolla/<svc>:<rel>-rocky-<major>[-aarch64]` | amd64, 2026.2만 arm64 |
+| 2026.2 이상 | `stable/<rel>` 또는 `unmaintained/<rel>` | amd64·aarch64: `quay.io/openstack.kolla/<svc>:<rel>-rocky-<major>[-aarch64]` | amd64, arm64 |
+| 2025.2 | `stable/2025.2` 또는 `unmaintained/2025.2` | amd64: `quay.io/openstack.kolla/<svc>:2025.2-rocky-10`; aarch64 미지원(자체 빌드가 kolla 소스 문제로 실패) | amd64 |
+| 2025.1, 2026.1 | `stable/<rel>` 또는 `unmaintained/<rel>` | amd64: `quay.io/openstack.kolla/<svc>:<rel>-rocky-<major>`; aarch64: `ghcr.io/preinpost/kolla/<svc>:<rel>-rocky-<major>-aarch64` (자체 빌드) | amd64, arm64 |
 | 2024.1 | `unmaintained/2024.1` | `ghcr.io/preinpost/kolla/<svc>:2024.1-rocky-9` | amd64 |
 | 2024.2 | `2024.2-eol` (브랜치 삭제됨) | `ghcr.io/preinpost/kolla/<svc>:2024.2-rocky-9` | amd64 |
 | 2022.2(zed) | `15.6.0` | `ghcr.io/preinpost/kolla/<svc>:zed-rocky-9` (opt-in) | amd64 |
@@ -42,8 +44,19 @@ EOL 시리즈를 opt-in으로 켜면 그 태그의 기본값(`ubuntu`)과 그 �
   모듈을 로드할 수 없으므로 모든 릴리스의 globals에 `neutron_modules_default: []`가 들어가고,
   2025.1 이전 릴리스에는 호스트 OS precheck·SELinux 호환 값도 들어갑니다. 2025.1의 Kolla 이미지는
   Rocky 9(Python 3.9)이고, 2025.2부터 Rocky 10(Python 3.12)입니다.
-- `arches`와 `ReleaseInfo.arm64`는 실제로 게시된 이미지를 따라야 합니다. stackbox는 arm64용으로
-  배포판을 바꾸지 않으므로 2026.2 이전 릴리스는 amd64 전용입니다.
+- 2025.1·2026.1의 aarch64 이미지는 quay가 Debian/Ubuntu 기반으로만 제공하므로, stackbox가 Rocky 기반
+  aarch64 이미지를 직접 빌드해 `ghcr.io/preinpost/kolla`에 `<rel>-rocky-<major>-aarch64` 태그로 올립니다
+  (`github.com/preinpost/kolla`의 `eol-images` workflow, `arch=arm64`). 이 목록은
+  `src/kolla/releases.rs`의 `OWN_ARM64` 상수 하나이며, 빌드가 실패한 릴리스는 거기서 뺍니다.
+  그 릴리스의 `ReleaseInfo.arm64_images`가 ghcr registry·namespace를 가리키고, amd64 이미지는 quay에 그대로 둡니다.
+- 노드마다 이미지 출처가 다를 수 있습니다. 각 VM의 `uname -m`으로 suffix·registry·namespace를 고르고
+  (`src/kolla/config.rs`의 `image_source`), 혼합 아키텍처 multinode는 다음 원리로 동작합니다. globals.yml은
+  kolla-ansible의 extra vars라 호스트별 값을 직접 가질 수 없으므로 `openstack_tag_suffix`·`docker_registry`·
+  `docker_namespace`를 `{{ stackbox_tag_suffix | default(control값) }}` 같은 Jinja로 쓰고, 인벤토리의 compute 줄이
+  `stackbox_tag_suffix`·`stackbox_docker_registry`·`stackbox_docker_namespace` 호스트 변수로 노드별 값을 싣습니다.
+  각 노드는 자기 변수를 읽고 값이 없으면 control 값을 씁니다. 기존 globals.yml은 compute 추가 시 `per_host_images`가 같은 형태로 바꿉니다.
+- `arches`와 `ReleaseInfo.arm64`는 실제로 게시된 이미지를 따릅니다. 2026.2는 quay의 Rocky aarch64,
+  2025.1·2026.1은 자체 빌드, 2025.2와 2024.x·zed는 amd64 전용입니다. stackbox는 arm64용으로 배포판을 바꾸지 않습니다.
 
 ## 개발
 

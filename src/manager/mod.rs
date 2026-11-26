@@ -2362,26 +2362,33 @@ impl StackboxManager {
                 .host_id
                 .clone()
                 .ok_or_else(|| conflict("stackbox has no primary host"))?;
+            // Each VM pulls Kolla images of its own architecture, so a compute may run on a host
+            // of another architecture than the control VM's, as long as the stackbox's release
+            // publishes images for it.
+            match transfers::host_arch(state, &target_host) {
+                Some(target) => {
+                    let release = plan
+                        .release
+                        .as_deref()
+                        .unwrap_or(crate::kolla::OPENSTACK_RELEASE);
+                    if !crate::kolla::releases::available_on(release, &target) {
+                        return Err(conflict(format!(
+                            "host '{target_host}' is {target}, but OpenStack {release} publishes Kolla images only for {}; add the compute on another host",
+                            crate::kolla::releases::arches(release).join("/")
+                        )));
+                    }
+                }
+                None if target_host != primary => {
+                    return Err(conflict(format!(
+                        "host '{target_host}' has not been checked yet, so its CPU architecture is unknown; check it from Hosts first"
+                    )));
+                }
+                None => {}
+            }
             let (budget, _, _, _) = self.admit_host(state, &target_host, true)?;
             if let Some(snapshot) = &request.from_snapshot {
                 // A host other than the local one gets a copy when the expansion starts.
                 transfers::copyable(snapshots::compute_template(state, snapshot, stackbox, &target_host)?)?;
-            }
-            if target_host != primary {
-                let arch = |host: &str| {
-                    state
-                        .hosts
-                        .get(host)
-                        .and_then(|host| host.host.inspection.as_ref())
-                        .map(|inspection| inspection.arch.clone())
-                };
-                if let (Some(control), Some(target)) = (arch(&primary), arch(&target_host))
-                    && control != target
-                {
-                    return Err(conflict(format!(
-                        "host '{target_host}' is {target} but the stackbox's control VM runs {control}; Kolla images cannot mix CPU architectures"
-                    )));
-                }
             }
             let reserved: u64 = state
                 .stackboxes
