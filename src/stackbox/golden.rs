@@ -3,10 +3,13 @@
 //! host the first time a stackbox needs it, so hosts need no Docker and a changed recipe
 //! simply produces a snapshot under a new name.
 
+use std::fs::{File, OpenOptions};
 use std::future::Future;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result, ensure};
+use fs2::FileExt;
 use microsandbox::snapshot::{Checkpoint, Snapshot, SnapshotReference};
 use microsandbox::{MicrosandboxError, NetworkPolicy, NetworkProfile, Sandbox};
 use sha2::{Digest, Sha256};
@@ -38,6 +41,40 @@ const RECIPE_VERSION: &str = "1";
 const BUILD_STOP_TIMEOUT: Duration = Duration::from_secs(60);
 /// One build at a time per process; stackboxes created together wait for the first one.
 static BUILD: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Held while one process builds or clears golden groups on this host. msb's group names and the
+/// fixed build VM name are shared by every process using the same msb home, so a lock inside one
+/// process cannot keep another stackbox (the daemon, a CLI run) from removing a group that is
+/// being filled.
+/// The file stays open, and so locked, until this guard drops.
+struct BuildLock {
+    _file: File,
+}
+
+/// Per OS, not per recipe: the build VM name `stackbox-golden-<os>-build` is shared by all recipes.
+fn build_lock_path(os: &GuestOs) -> Result<PathBuf> {
+    let home = microsandbox::config::config()
+        .context("resolve the msb home for the golden build lock")?
+        .home();
+    Ok(home.join(format!("stackbox-golden-{}.lock", os.id)))
+}
+
+/// Block until this process holds the lock. Blocking: call it from a blocking task.
+fn acquire_build_lock(path: &Path) -> Result<BuildLock> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
+    }
+    let file = OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(path)
+        .with_context(|| format!("open {}", path.display()))?;
+    file.lock_exclusive()
+        .with_context(|| format!("lock {}", path.display()))?;
+    Ok(BuildLock { _file: file })
+}
 
 /// `stackbox-golden-<os>-<recipe hash>:<recipe hash>`. A stackbox VM's disks have the sizes of the
 /// golden VM's, so they are part of the recipe.
@@ -85,22 +122,54 @@ pub async fn available(reference: &str) -> Result<bool> {
 /// The golden snapshot for `spec` on `os`, built first if this host has none.
 pub async fn ensure(os: &GuestOs, spec: &NodeSpec) -> Result<String> {
     let reference = reference(os, spec);
-    if available(&reference).await? {
-        return Ok(reference);
+    ensure_with(
+        &reference,
+        || available(&reference),
+        || async {
+            // The in-process mutex first, so only one task per process blocks in the file lock.
+            let build = BUILD.lock().await;
+            let path = build_lock_path(os)?;
+            let file = tokio::task::spawn_blocking(move || acquire_build_lock(&path))
+                .await
+                .context("join the golden build lock task")??;
+            Ok((build, file))
+        },
+        || async {
+            let (group, _) = reference
+                .split_once(':')
+                .context("golden reference has no group")?;
+            clear_leftover_group(group).await;
+            eprintln!("building golden image {reference} from {}", os.base_image);
+            build(os, spec, &reference)
+                .await
+                .with_context(|| format!("build golden image {reference}"))
+        },
+    )
+    .await
+}
+
+/// The check, lock, re-check, build sequence of `ensure`. The re-check after the lock finds an
+/// image another process built while this one waited.
+async fn ensure_with<G, Check, Lock, Build>(
+    reference: &str,
+    mut available: impl FnMut() -> Check,
+    lock: impl FnOnce() -> Lock,
+    build: impl FnOnce() -> Build,
+) -> Result<String>
+where
+    Check: Future<Output = Result<bool>>,
+    Lock: Future<Output = Result<G>>,
+    Build: Future<Output = Result<()>>,
+{
+    if available().await? {
+        return Ok(reference.to_owned());
     }
-    let _build = BUILD.lock().await;
-    if available(&reference).await? {
-        return Ok(reference);
+    let _lock = lock().await?;
+    if available().await? {
+        return Ok(reference.to_owned());
     }
-    let (group, _) = reference
-        .split_once(':')
-        .context("golden reference has no group")?;
-    clear_leftover_group(group).await;
-    eprintln!("building golden image {reference} from {}", os.base_image);
-    build(os, spec, &reference)
-        .await
-        .with_context(|| format!("build golden image {reference}"))?;
-    Ok(reference)
+    build().await?;
+    Ok(reference.to_owned())
 }
 
 /// What stackbox needs from msb's snapshot groups. The cleanup decision is written against this
@@ -138,14 +207,18 @@ impl SnapshotGroups for MsbGroups {
             .remove()
             .await
             .with_context(|| format!("remove snapshot group {group}"))?;
-        // Checked on the lookup; a snapshot appearing since would be deleted here.
-        ensure!(
-            removed.removed.is_empty(),
-            "snapshot group {group} held {} snapshot(s) when removed",
-            removed.removed.len()
-        );
-        Ok(())
+        check_removed(group, removed.removed.len())
     }
+}
+
+/// `remove` deletes every member it reports, so a non-zero count means msb has already deleted
+/// those snapshots. The error reports that; it cannot undo it.
+fn check_removed(group: &str, removed: usize) -> Result<()> {
+    ensure!(
+        removed == 0,
+        "snapshot group {group} held {removed} snapshot(s) when removed; msb already deleted them"
+    );
+    Ok(())
 }
 
 #[derive(Debug, PartialEq)]
@@ -172,9 +245,9 @@ impl Cleanup {
             Cleanup::LookupFailed(error) => {
                 format!("left snapshot group {group} alone: lookup failed: {error}")
             }
-            Cleanup::RemoveFailed(error) => {
-                format!("could not remove empty snapshot group {group}: {error}")
-            }
+            Cleanup::RemoveFailed(error) => format!(
+                "could not remove empty snapshot group {group}: {error}; a writer may still hold it, and the next build retries the removal"
+            ),
         })
     }
 }
@@ -451,7 +524,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_successful_cleanup_keeps_the_capture_error() {
+    async fn a_successful_cleanup_still_returns_the_capture_error() {
         let groups = FakeGroups::new(Ok(Some(0)), Ok(()));
         let error = fail_capture(
             &groups,
@@ -460,8 +533,109 @@ mod tests {
             "g:h",
         )
         .await;
-        assert!(format!("{error:#}").contains("disk full"));
+        let text = format!("{error:#}");
+        assert!(text.contains("disk full"), "{text}");
+        assert!(text.contains("capture the golden snapshot"), "{text}");
         assert_eq!(groups.removals(), 1);
+    }
+
+    #[test]
+    fn a_failed_cleanup_says_the_next_build_retries() {
+        let line = Cleanup::RemoveFailed("active writer".into())
+            .log_line("g")
+            .unwrap();
+        assert!(line.contains("the next build retries"), "{line}");
+    }
+
+    #[test]
+    fn a_removal_that_deleted_members_says_so() {
+        let text = format!("{:#}", check_removed("g", 2).unwrap_err());
+        assert!(text.contains("2 snapshot(s)"), "{text}");
+        assert!(text.contains("deleted"), "{text}");
+        assert!(check_removed("g", 0).is_ok());
+    }
+
+    #[test]
+    fn the_build_lock_serializes_holders() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("golden.lock");
+        let first = acquire_build_lock(&path).unwrap();
+        let released = Arc::new(AtomicBool::new(false));
+        let waiter = {
+            let path = path.clone();
+            let released = released.clone();
+            std::thread::spawn(move || {
+                let _second = acquire_build_lock(&path).unwrap();
+                assert!(
+                    released.load(Ordering::SeqCst),
+                    "second holder entered while the first still held the lock"
+                );
+            })
+        };
+        std::thread::sleep(Duration::from_millis(200));
+        released.store(true, Ordering::SeqCst);
+        drop(first);
+        waiter.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_cached_image_skips_the_lock() {
+        let locks = std::cell::Cell::new(0);
+        let built = ensure_with(
+            "g:h",
+            || async { anyhow::Ok(true) },
+            || async {
+                locks.set(locks.get() + 1);
+                anyhow::Ok(())
+            },
+            || async { panic!("nothing to build") },
+        )
+        .await
+        .unwrap();
+        assert_eq!(built, "g:h");
+        assert_eq!(locks.get(), 0);
+    }
+
+    #[tokio::test]
+    async fn an_image_built_while_waiting_is_reused() {
+        // Another stackbox process finished the same recipe while this one waited for the lock.
+        let answers = std::cell::RefCell::new(vec![false, true]);
+        let built = std::cell::Cell::new(false);
+        let reference = ensure_with(
+            "g:h",
+            || async { anyhow::Ok(answers.borrow_mut().remove(0)) },
+            || async { anyhow::Ok(()) },
+            || async {
+                built.set(true);
+                anyhow::Ok(())
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(reference, "g:h");
+        assert!(!built.get(), "a second build of the same recipe started");
+    }
+
+    #[tokio::test]
+    async fn a_missing_image_is_built_under_the_lock() {
+        let events = std::cell::RefCell::new(Vec::new());
+        ensure_with(
+            "g:h",
+            || async { anyhow::Ok(false) },
+            || async {
+                events.borrow_mut().push("lock");
+                anyhow::Ok(())
+            },
+            || async {
+                events.borrow_mut().push("build");
+                anyhow::Ok(())
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(*events.borrow(), ["lock", "build"]);
     }
 
     #[test]

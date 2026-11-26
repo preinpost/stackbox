@@ -358,7 +358,7 @@ task dev        # stackbox·Linux stackbox-agent(Docker 필요)·포털을 빌�
 
 - `task dev`의 agent 빌드가 `dist/agent/aarch64/stackbox-agent`를 만든다. macOS coordinator는 시작할 때 이것을
   multinode 게스트용으로 넘기므로, agent를 다시 빌드했으면 coordinator도 다시 띄운다.
-- golden image는 예전 `stackbox-golden:rocky10`이 아니라 msb 스냅샷 `stackbox-golden-rocky10:<해시>`를 쓴다. 첫 stackbox를
+- golden image는 예전 `stackbox-golden:rocky10`이 아니라 msb 스냅샷 `stackbox-golden-rocky10-<해시>:<해시>`를 쓴다. 첫 stackbox를
   만들 때 자동으로 빌드되고(약 35초), `task golden`으로 미리 만들 수 있다. 예전 이미지로 만든 stackbox는 그대로 동작한다.
 - 메모리: control 1 + compute 1은 약 9.5 GiB, compute 2는 약 12.5 GiB다. 24 GiB 머신의 기본 예약 한도(80%,
   약 19 GiB)에서는 다른 stackbox를 끄고 만드는 편이 안전하다.
