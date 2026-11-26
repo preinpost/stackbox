@@ -177,8 +177,10 @@ async fn output(program: &str, args: &[&str]) -> Option<String> {
     }
 }
 
-/// The same facts a remote host's inspection reports, read on this machine.
-pub async fn inspect() -> HostInspection {
+/// The same facts a remote host's inspection reports, read on this machine. The caller supplies
+/// the virtualization check: an agent reports the limits it was built with, so an in-process test
+/// agent on a host without /dev/kvm can still be prepared.
+pub async fn inspect(kvm_available: bool) -> HostInspection {
     let home = std::env::var_os("HOME").unwrap_or_default();
     let (total, available, disk) = tokio::task::spawn_blocking(move || {
         let system = sysinfo::System::new_all();
@@ -233,7 +235,7 @@ pub async fn inspect() -> HostInspection {
         compatible: os != "unsupported" && arch != "unsupported",
         os: os.into(),
         arch: arch.into(),
-        kvm_available: hypervisor_available(),
+        kvm_available,
         sudo_available: false,
         memory_total_mib: total,
         memory_available_mib: available,

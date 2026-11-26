@@ -1,5 +1,6 @@
 //! One SSH request per process; no listener and no SSH credentials on the target.
 use super::{
+    HostInspection,
     job::Job,
     protocol::{Frame, MAX_FRAME, Operation, Reply, Request, TerminalFrame, VERSION},
 };
@@ -191,6 +192,9 @@ pub struct Agent {
     /// The command a PCI bind or unbind runs before the helper's verb and device: the real
     /// `sudo -n` helper, or a stand-in in tests.
     pci_helper: Vec<String>,
+    /// A test agent answers the host probes a real machine runs (msb, the verification VM) from
+    /// the host it declares, so it installs nothing and boots nothing. Set only by `in_process`.
+    declared_host: bool,
 }
 impl Agent {
     /// An agent that runs inside the coordinator's process, for tests. Its deploys run as
@@ -208,7 +212,19 @@ impl Agent {
             },
             runner: Runner::Inline,
             pci_helper: crate::remote::pci::sudo_command(),
+            declared_host: true,
         }
+    }
+    /// This host's inspection. The virtualization check is the limit this agent was built with:
+    /// the real /dev/kvm probe for a local agent, and whatever a test agent declares. A declared
+    /// host also reports the msb this build runs, so preparation has nothing to install.
+    async fn inspect_host(&self) -> HostInspection {
+        let mut inspection = crate::remote::host::inspect(self.limits.virtualization).await;
+        if self.declared_host {
+            inspection.msb_version = Some(super::MSB_VERSION.into());
+            inspection.msb_compatible = true;
+        }
+        inspection
     }
     pub fn local() -> Self {
         let dir = local_dir();
@@ -218,6 +234,7 @@ impl Agent {
             limits: Limits::system(),
             runner: Runner::Detached,
             pci_helper: crate::remote::pci::sudo_command(),
+            declared_host: false,
         }
     }
     /// Destroys the stackbox VMs this host's agent holds and forgets them: every coordinator's
@@ -830,26 +847,34 @@ impl Agent {
             let bdf = crate::model::normalize_pci_bdf(bdf)?;
             crate::remote::host::run_pci_helper(&self.pci_helper, verb, &bdf).await?;
             return Ok(Reply::Inspection {
-                inspection: Box::new(crate::remote::host::inspect().await),
+                inspection: Box::new(self.inspect_host().await),
             });
         }
         // Host-wide checks have no stackbox id either.
         if matches!(request.operation, Operation::Inspect) {
             return Ok(Reply::Inspection {
-                inspection: Box::new(crate::remote::host::inspect().await),
+                inspection: Box::new(self.inspect_host().await),
             });
         }
         if matches!(request.operation, Operation::VerifyVm) {
-            let gpu = crate::remote::host::smoke(&uuid::Uuid::new_v4().to_string()).await?;
+            // A declared host boots no VM; its verification reports a kernel without the GPU stack.
+            let gpu = if self.declared_host {
+                super::GpuKernel::default()
+            } else {
+                crate::remote::host::smoke(&uuid::Uuid::new_v4().to_string()).await?
+            };
             // The coordinator stores the inspection it gets here, so the boot's GPU probe
             // survives this one-request process. A plain `Done` would leave the host looking
             // unverified until something else happened to inspect it in the same process.
-            let mut inspection = crate::remote::host::inspect().await;
+            let mut inspection = self.inspect_host().await;
             inspection.mtty_available = gpu.mtty_available();
             inspection.gpu_kernel = Some(gpu);
             return Ok(Reply::Inspection {
                 inspection: Box::new(inspection),
             });
+        }
+        if matches!(request.operation, Operation::InstallMsb) && self.declared_host {
+            return Ok(Reply::Done);
         }
         if matches!(request.operation, Operation::InstallMsb) {
             // Stands in for flock(1), which macOS lacks; Linux installs also take it in the script.
@@ -1527,6 +1552,7 @@ async fn work(dir: &Path, backend: Arc<dyn Backend>) -> Result<()> {
         },
         runner: Runner::Inline,
         pci_helper: crate::remote::pci::sudo_command(),
+        declared_host: false,
     }
     .run_job(&job)
     .await
@@ -1679,6 +1705,7 @@ mod tests {
             },
             runner: Runner::Inline,
             pci_helper: crate::remote::pci::sudo_command(),
+            declared_host: false,
         };
         let other = uuid::Uuid::new_v4().to_string();
         let generation = uuid::Uuid::new_v4().to_string();
@@ -1855,6 +1882,7 @@ mod tests {
             },
             runner: Runner::Inline,
             pci_helper: crate::remote::pci::sudo_command(),
+            declared_host: false,
         };
         let owner = uuid::Uuid::new_v4().to_string();
         let other = uuid::Uuid::new_v4().to_string();
@@ -2017,6 +2045,7 @@ mod tests {
             },
             runner: Runner::Inline,
             pci_helper: crate::remote::pci::sudo_command(),
+            declared_host: false,
         };
         let owner = uuid::Uuid::new_v4().to_string();
         let generation = uuid::Uuid::new_v4().to_string();
@@ -2109,6 +2138,7 @@ mod tests {
             },
             runner: Runner::Inline,
             pci_helper: crate::remote::pci::sudo_command(),
+            declared_host: false,
         };
         let owner = uuid::Uuid::new_v4().to_string();
         let generation = uuid::Uuid::new_v4().to_string();
@@ -2513,6 +2543,7 @@ mod tests {
             },
             runner: Runner::Inline,
             pci_helper: crate::remote::pci::sudo_command(),
+            declared_host: false,
         };
         let owner = uuid::Uuid::new_v4().to_string();
         let other = uuid::Uuid::new_v4().to_string();
@@ -2567,6 +2598,7 @@ mod tests {
             },
             runner: Runner::Inline,
             pci_helper: crate::remote::pci::sudo_command(),
+            declared_host: false,
         }
     }
 
@@ -2824,6 +2856,7 @@ mod tests {
             },
             runner: Runner::Inline,
             pci_helper: crate::remote::pci::sudo_command(),
+            declared_host: false,
         };
         let owner = uuid::Uuid::new_v4().to_string();
         let generation = uuid::Uuid::new_v4().to_string();
@@ -2922,6 +2955,7 @@ mod tests {
             },
             runner: Runner::Inline,
             pci_helper: crate::remote::pci::sudo_command(),
+            declared_host: false,
         });
         let owner = uuid::Uuid::new_v4().to_string();
         let generation = uuid::Uuid::new_v4().to_string();
