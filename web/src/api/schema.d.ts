@@ -322,6 +322,26 @@ export interface paths {
     patch?: never;
     trace?: never;
   };
+  "/api/v1/hosts/{id}/pci/helper-remove": {
+    parameters: {
+      query?: never;
+      header?: never;
+      path?: never;
+      cookie?: never;
+    };
+    /**
+     * The self-contained script that removes the stackbox-vfio-bind helper and its sudoers rule from
+     *     the host, for the portal to copy and the operator to run there. Nothing runs it automatically.
+     */
+    get: operations["host_pci_helper_remove"];
+    put?: never;
+    post?: never;
+    delete?: never;
+    options?: never;
+    head?: never;
+    patch?: never;
+    trace?: never;
+  };
   "/api/v1/hosts/{id}/pci/unbind": {
     parameters: {
       query?: never;
@@ -1396,6 +1416,11 @@ export interface components {
       kind: components["schemas"]["HostJobKind"];
       /** @description The PCI device a `PciBind` or `PciUnbind` job works on, as `DDDD:BB:DD.F`. */
       pci_bdf?: string | null;
+      /**
+       * @description A purge that also removes stackbox's files from the host: golden groups, msb when stackbox
+       *     installed it, and the stackbox directory.
+       */
+      remote_files?: boolean;
       status: components["schemas"]["JobStatus"];
     };
     HostJobEvent: {
@@ -1690,6 +1715,20 @@ export interface components {
     PciHelperInstall: {
       helper_path: string;
       /** @description A self-contained shell script; paste it into a root-capable shell on the host. */
+      script: string;
+      sudoers_path: string;
+    };
+    /**
+     * @description The script that takes the helper back off a host, as the portal copies it. Run it only when
+     *     nothing needs the helper any more: the agent's sudo rule goes first, so it cannot outlive the
+     *     helper it runs.
+     */
+    PciHelperRemove: {
+      helper_path: string;
+      /**
+       * @description A self-contained shell script; paste it into a root-capable shell on the host. It is never
+       *     run automatically.
+       */
       script: string;
       sudoers_path: string;
     };
@@ -2969,6 +3008,12 @@ export interface operations {
          *     with their copies on other hosts. The local host also keeps imported snapshots.
          */
         snapshots: boolean;
+        /**
+         * @description With purge, also remove what stackbox put on the host outside its VMs: the golden snapshot
+         *     groups, msb when stackbox installed it on an empty host, and `~/.local/share/stackbox`.
+         *     The VMs are removed first; whatever cannot be removed is reported on the job.
+         */
+        remote_files: boolean;
       };
       cookie?: never;
     };
@@ -3142,6 +3187,35 @@ export interface operations {
         };
         content: {
           "application/json": components["schemas"]["ErrorBody"];
+        };
+      };
+      404: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["ErrorBody"];
+        };
+      };
+    };
+  };
+  host_pci_helper_remove: {
+    parameters: {
+      query?: never;
+      header?: never;
+      path: {
+        id: string;
+      };
+      cookie?: never;
+    };
+    requestBody?: never;
+    responses: {
+      200: {
+        headers: {
+          [name: string]: unknown;
+        };
+        content: {
+          "application/json": components["schemas"]["PciHelperRemove"];
         };
       };
       404: {

@@ -35,6 +35,7 @@ export type HostInspection = Schema["HostInspection"];
 export type HostPciDevice = Schema["HostPciDevice"];
 export type HostPciCandidate = Schema["HostPciCandidate"];
 export type HostPciHelperInstall = Schema["PciHelperInstall"];
+export type HostPciHelperRemove = Schema["PciHelperRemove"];
 export type HostCapacity = Schema["HostCapacity"];
 export type HostJob = Schema["HostJob"];
 export type HostKey = Schema["HostKey"];
@@ -240,6 +241,10 @@ export const fetchHostPciHelperInstall = (hostId: string, user?: string) =>
     `/hosts/${encode(hostId)}/pci/helper-install${user ? `?user=${encode(user)}` : ""}`,
   );
 
+/** The script that removes the helper and its sudoers rule. It is only shown; nothing runs it. */
+export const fetchHostPciHelperRemove = (hostId: string) =>
+  request<HostPciHelperRemove>(`/hosts/${encode(hostId)}/pci/helper-remove`);
+
 function useHostPciMutation(
   run: (hostId: string, bdf: string) => Promise<HostJob>,
 ) {
@@ -341,10 +346,11 @@ export const api = {
   unregisterHost: (id: string) =>
     request<{ id: string }>(`/hosts/${encode(id)}`, { method: "DELETE" }),
   /** Delete this coordinator's stackboxes and leftover VMs on the host, then unregister it.
-   * `snapshots` also deletes the snapshots whose original the host keeps. */
-  purgeHost: (id: string, snapshots = false) =>
+   * `snapshots` also deletes the snapshots whose original the host keeps. `remoteFiles` also
+   * removes what stackbox left on the host outside its VMs; the job lists what stays. */
+  purgeHost: (id: string, snapshots = false, remoteFiles = false) =>
     request<HostJob>(
-      `/hosts/${encode(id)}?purge=true${snapshots ? "&snapshots=true" : ""}`,
+      `/hosts/${encode(id)}?purge=true${snapshots ? "&snapshots=true" : ""}${remoteFiles ? "&remote_files=true" : ""}`,
       { method: "DELETE" },
     ),
   /** Where stackboxes that span hosts join; `null` turns it off. */

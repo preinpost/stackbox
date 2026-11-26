@@ -29,6 +29,7 @@ import {
   hostJobsQuery,
   keys,
   hostQuery,
+  fetchHostPciHelperRemove,
   snapshotsQuery,
   type HostCapacity,
   type HostInspection as Inspection,
@@ -36,7 +37,8 @@ import {
   type HostPciDevice,
   type RemoteHost,
 } from "../api/client";
-import { PciCandidates } from "../components/host-pci";
+import { CopyCommandButton, PciCandidates } from "../components/host-pci";
+import { jobLeftovers } from "../components/host-leftovers";
 import { CreateStackboxDialog } from "../components/stackbox-actions";
 import {
   Button,
@@ -96,17 +98,19 @@ export function RemoteHostsPage() {
       id,
       kind,
       snapshots = false,
+      remoteFiles = false,
     }: {
       id: string;
       kind: "check" | "prepare" | "remove" | "purge";
       snapshots?: boolean;
+      remoteFiles?: boolean;
     }) =>
       kind === "check"
         ? api.checkHost(id)
         : kind === "prepare"
           ? api.prepareHost(id)
           : kind === "purge"
-            ? api.purgeHost(id, snapshots)
+            ? api.purgeHost(id, snapshots, remoteFiles)
             : api.unregisterHost(id),
     onSuccess: refresh,
   });
@@ -444,11 +448,12 @@ export function RemoteHostsPage() {
                   ).length ?? 0
                 }
                 coordinatorBuildId={buildId}
-                run={(purge, deleteSnapshots) =>
+                run={(purge, deleteSnapshots, removeFiles) =>
                   action.mutateAsync({
                     id: selected.id,
                     kind: purge ? "purge" : "remove",
                     snapshots: deleteSnapshots,
+                    remoteFiles: removeFiles,
                   })
                 }
               />
@@ -1120,6 +1125,7 @@ const HOST_JOB_KIND_LABELS: Partial<Record<HostJob["kind"], string>> = {
   prepare: "환경 준비",
   pci_bind: "PCI 바인딩",
   pci_unbind: "PCI 바인딩 해제",
+  purge: "등록 해제",
 };
 function hostJobKindLabel(kind: HostJob["kind"]) {
   return HOST_JOB_KIND_LABELS[kind] ?? "환경 준비";
@@ -1127,10 +1133,14 @@ function hostJobKindLabel(kind: HostJob["kind"]) {
 
 export function HostJobHistory({ job }: { job: HostJob }) {
   const kindLabel = hostJobKindLabel(job.kind);
+  // What a purge left on the host stays visible without opening the history.
+  const leftovers = jobLeftovers(job);
   return (
     <details
       className="host-job-history"
-      open={job.status === "running" || job.status === "queued"}
+      open={
+        job.status === "running" || job.status === "queued" || !!leftovers
+      }
     >
       <summary>
         <strong>{job.host_id}</strong>
@@ -1155,11 +1165,64 @@ export function HostJobHistory({ job }: { job: HostJob }) {
           ))}
         </ol>
       )}
+      {leftovers && (
+        <div className="warning-notice host-job-leftovers" role="status">
+          <p>
+            호스트에 남은 항목이 있습니다. 등록 해제는 끝났지만 아래 항목은 지워지지
+            않았거나 지웠는지 확인할 수 없습니다.
+          </p>
+          <ul>
+            {leftovers.items.map((item) => (
+              <li key={item}>{item}</li>
+            ))}
+          </ul>
+          {leftovers.byHand && (
+            <p>
+              직접 지우려면 호스트에서 실행하세요: <code>{leftovers.byHand}</code>
+            </p>
+          )}
+        </div>
+      )}
       {job.error && <p className="job-error">{job.error}</p>}
       {!job.events.length && (
         <p className="field-hint px-5 pb-4">실행 대기 중입니다.</p>
       )}
     </details>
+  );
+}
+
+/** The script that removes the PCI helper. Shown for the operator to run as root; never run here. */
+function RemoveHelperPanel({ host }: { host: RemoteHost }) {
+  const script = useQuery({
+    queryKey: ["host-pci-helper-remove", host.id],
+    queryFn: () => fetchHostPciHelperRemove(host.id),
+    staleTime: Infinity,
+    retry: false,
+  });
+  return (
+    <div className="remote-pci-helper">
+      <p className="field-hint">
+        PCI 헬퍼(stackbox-vfio-bind)와 sudoers 규칙을 이 호스트에 설치했다면, 호스트의 root
+        셸에서 아래 스크립트를 직접 실행하세요. 이 화면은 스크립트를 실행하지 않습니다. 등록 해제 후에는
+        이 주소를 조회할 수 없으니 먼저 복사해 두세요.
+      </p>
+      {script.isFetching && <Loading compact label="스크립트 준비 중" />}
+      {script.error && <ErrorNotice error={script.error} />}
+      {script.data && (
+        <>
+          <pre className="remote-pci-script" aria-label="헬퍼 제거 스크립트">
+            <code>{script.data.script}</code>
+          </pre>
+          <div className="remote-pci-helper-foot">
+            <span>
+              <code>{script.data.sudoers_path}</code>
+              <code>{script.data.helper_path}</code>
+            </span>
+            <CopyCommandButton label="스크립트 복사" value={script.data.script} />
+          </div>
+        </>
+      )}
+    </div>
   );
 }
 
@@ -1180,7 +1243,11 @@ function HostActionDialog({
    * host also imported and older ones. */
   snapshots?: number;
   coordinatorBuildId?: string;
-  run: (purge: boolean, deleteSnapshots: boolean) => Promise<unknown>;
+  run: (
+    purge: boolean,
+    deleteSnapshots: boolean,
+    removeFiles: boolean,
+  ) => Promise<unknown>;
 }) {
   const [open, setOpen] = useState(false);
   const [pending, setPending] = useState(false);
@@ -1192,10 +1259,14 @@ function HostActionDialog({
   const [purge, setPurge] = useState(true);
   // Off by default: a snapshot that was never exported cannot be recovered.
   const [deleteSnapshots, setDeleteSnapshots] = useState(false);
+  // Off by default: the host's golden image and msb are reused by the next registration.
+  const [removeFiles, setRemoveFiles] = useState(false);
   const mismatch =
     !prepare && agentBuildMismatch(host.agent?.artifact, coordinatorBuildId);
   // A mismatched agent cannot clean up, so the disabled box also means records only.
   const purging = purge && !mismatch;
+  // The files go only with the VMs: without a purge the host keeps everything it holds.
+  const filesShown = purging && removeFiles;
   return (
     <Dialog.Root
       open={open}
@@ -1334,6 +1405,35 @@ function HostActionDialog({
                     </span>
                   </label>
                 )}
+                <label className="checkbox-row">
+                  <Checkbox.Root
+                    checked={filesShown}
+                    disabled={!purging}
+                    onCheckedChange={(checked) =>
+                      setRemoveFiles(checked === true)
+                    }
+                    className="checkbox"
+                  >
+                    <Checkbox.Indicator>
+                      <Check size={14} strokeWidth={3} />
+                    </Checkbox.Indicator>
+                  </Checkbox.Root>
+                  <span>
+                    {host.kind === "ssh"
+                      ? "호스트에 남은 stackbox 파일도 제거"
+                      : "골든 이미지 그룹도 제거"}
+                    <small>
+                      {!purging
+                        ? "VM 삭제를 켜야 선택할 수 있습니다. 파일은 VM보다 나중에 지웁니다."
+                        : host.kind === "ssh"
+                          ? "골든 이미지 그룹, stackbox가 처음 설치한 msb(다른 샌드박스가 없을 때만), ~/.local/share/stackbox를 지웁니다. 직접 설치한 msb와 다른 파일은 남깁니다."
+                          : host.kind === "local"
+                            ? "골든 이미지 그룹만 지웁니다. 이 머신의 msb와 ~/.local/share/stackbox는 코디네이터가 쓰므로 남깁니다."
+                            : "골든 이미지 그룹만 지웁니다. msb와 ~/.local/share/stackbox는 SSH가 없어 호스트에서 직접 지워야 합니다."}
+                    </small>
+                  </span>
+                </label>
+                {filesShown && <RemoveHelperPanel host={host} />}
                 <p className="field-hint">
                   {purging
                     ? `stackbox가 만든 VM과 디스크만 지웁니다. ${local ? place : "이 서버"}에서 직접 만든 msb 샌드박스는 그대로 둡니다.`
@@ -1359,6 +1459,7 @@ function HostActionDialog({
                   await run(
                     !prepare && purging,
                     !prepare && purging && deleteSnapshots,
+                    !prepare && filesShown,
                   );
                   setOpen(false);
                 } catch (e) {

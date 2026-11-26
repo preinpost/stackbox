@@ -74,7 +74,7 @@ export function unbindCommand(bdf: string) {
 }
 
 /** Copies a command or script and says so for a moment. */
-function CopyCommandButton({
+export function CopyCommandButton({
   label,
   value,
   disabled,
