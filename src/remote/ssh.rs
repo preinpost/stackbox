@@ -1733,7 +1733,13 @@ mod cleanup_tests {
         marker(dir.path(), OWN_MARKER);
         let output = run_cleanup(dir.path(), "", false);
         assert!(output.contains("removed msb and libkrunfw"), "{output}");
-        assert!(output.contains("removed golden build lock"), "{output}");
+        // The golden build lock is a file other processes lock by name: it stays, even empty.
+        assert!(!output.contains("golden build lock"), "{output}");
+        assert!(
+            dir.path()
+                .join(".microsandbox/stackbox-golden-rocky10.lock")
+                .exists()
+        );
         assert!(!dir.path().join(".microsandbox/bin/msb").exists());
         assert!(
             !dir.path()
@@ -1808,6 +1814,63 @@ mod cleanup_tests {
         let again = run_cleanup(dir.path(), "", false);
         assert!(!again.contains("failed"), "{again}");
         assert!(again.contains("removed "), "{again}");
+    }
+
+    /// Runs the cleanup with `home` as `$HOME` (or unset) from `cwd`, and returns the exit status
+    /// and output without asserting either.
+    fn run_cleanup_with_home(cwd: &Path, home: Option<&str>) -> (bool, String) {
+        let script = cwd.join("cleanup.sh");
+        std::fs::write(&script, cleanup_script()).unwrap();
+        let mut command = Command::new("sh");
+        command
+            .arg(&script)
+            .current_dir(cwd)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("STUB_SANDBOXES", "");
+        match home {
+            Some(home) => command.env("HOME", home),
+            None => command.env_remove("HOME"),
+        };
+        let output = command.output().unwrap();
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        (output.status.success(), text)
+    }
+
+    #[test]
+    fn the_cleanup_refuses_a_home_it_cannot_scope() {
+        // A fixture the script must not touch, under each unsafe `$HOME`: unset, empty, the root,
+        // and a relative path that would resolve inside the working directory.
+        for home in [None, Some(""), Some("/"), Some("relative/home")] {
+            let dir = tempfile::tempdir().unwrap();
+            let state = dir.path().join("relative/home/.local/share/stackbox");
+            std::fs::create_dir_all(&state).unwrap();
+            std::fs::write(state.join("keep.txt"), "mine").unwrap();
+            let (ok, output) = run_cleanup_with_home(dir.path(), home);
+            assert!(!ok, "HOME {home:?} must stop the cleanup: {output}");
+            assert!(!output.contains("removed"), "HOME {home:?}: {output}");
+            assert!(state.join("keep.txt").exists(), "HOME {home:?} removed files");
+        }
+    }
+
+    #[test]
+    fn a_symlinked_state_directory_is_unlinked_and_its_target_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("elsewhere");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("keep.txt"), "mine").unwrap();
+        let share = dir.path().join(".local/share");
+        std::fs::create_dir_all(&share).unwrap();
+        std::os::unix::fs::symlink(&target, share.join("stackbox")).unwrap();
+        let output = run_cleanup(dir.path(), "", false);
+        assert!(output.contains("removed "), "{output}");
+        assert!(!output.contains("failed"), "{output}");
+        assert!(std::fs::symlink_metadata(share.join("stackbox")).is_err());
+        assert!(target.join("keep.txt").exists(), "the link's target was removed");
     }
 
     #[test]
