@@ -83,3 +83,57 @@ cd web && npx vitest run
   state dir(README "코드와 검증" 절의 `mktemp`)을 씁니다. `scripts/verify-openstack.py`는 내부에서
   `stackbox status`·`stackbox endpoints --json`을 호출하므로(`scripts/verify-openstack.py`) daemon 실행 중에는
   `--state-dir`만으로 안 되고, `--stackbox-binary`에 API를 중계하는 래퍼(두 하위 명령 지원)를 넘깁니다.
+
+## 릴리스 절차
+
+릴리스는 `.github/workflows/release.yml`이 main push로 만듭니다. 태그와 버전 커밋은 사람이 만들지 않습니다.
+게스트 커널(`libkrunfw.yml`)은 별도 주기로 빌드하므로 릴리스와 무관합니다.
+
+1. **dev에서 버전 범프.** `sh scripts/set-version.sh X.Y.Z`로 `Cargo.toml`, `Cargo.lock`,
+   `web/package.json`, `web/package-lock.json` 4개를 함께 바꾸고 한 커밋으로 남깁니다(예: `2776a00 Set the version to 0.1.19`).
+   커밋 메시지는 `Release v`로 시작하면 안 됩니다. 그 커밋이 main에 올라가면 gate가 건너뛰어져 아무것도 릴리스되지 않습니다.
+2. **로컬 사전 게이트.** CI와 같은 항목을 통과시킵니다.
+   ```bash
+   cargo fmt --check
+   cargo clippy --all-targets -- -D warnings
+   cargo test
+   (cd web && npx vitest run)
+   node --test web/server/*.test.mjs
+   npm --prefix web run build
+   sh scripts/build-agent.sh windows-x86_64   # src/remote 변경 시 특히 (std::os::unix 가드 누락으로 과거 실패)
+   ```
+3. **dev push.** `git push origin dev`로 `ci.yml`(같은 게이트)을 기다려 통과를 확인합니다.
+4. **main fast-forward push.** dev 커밋을 main에 fast-forward로만 올립니다(`git push origin dev:main`). force push는 금지입니다.
+   이 push가 `release.yml`을 트리거합니다.
+
+`release.yml`의 순서는 다음과 같습니다.
+
+- **gate**: head 커밋 메시지가 `Release v`로 시작하면 건너뜁니다(봇의 릴리스 커밋이 재귀로 트리거되지 않게 하는 조건).
+  그 외에는 CI와 같은 게이트를 실행합니다.
+- **prepare**: `Cargo.toml` 버전이 `v<버전>` 태그로 아직 없으면 그 버전을 그대로 씁니다(자동 증가 없음).
+  이미 태그되어 있으면 마지막 태그 이후 커밋의 `#major`/`[major]`, `#minor`/`[minor]` 표시를 보고 올리며, 표시가 없으면 patch를 올립니다.
+  결과 버전 태그가 이미 있으면 실패합니다. 그래서 범프 없이 main에 push하면 patch가 자동으로 올라갑니다.
+- **build**: linux-x86_64, linux-aarch64, macos-aarch64, windows-x86_64 4개 agent를 빌드하고 각 파일에 build id 스탬프가 하나씩 있는지 확인합니다.
+- **publish**: 4개 agent의 build id가 모두 같은지 확인하고 `manifest.json`을 만듭니다. 봇이 `Release v<버전>` 커밋과 `v<버전>` 태그를 만들고
+  main과 태그를 `--atomic`으로 함께 push한 뒤 GitHub Release를 게시합니다(자산 5개: agent 4개 + manifest.json).
+- **docker**: `ghcr.io/preinpost/stackbox`에 `v<버전>`, `latest`, `sha-<7자리>` 태그로 이미지를 푸시합니다.
+- **merge back**: `dev`에 `Merge v<버전> into dev` 머지 커밋을 push합니다. 다음 작업 전에 로컬 dev를 `git pull`로 맞춥니다.
+
+수동으로 실행하려면 Actions에서 `workflow_dispatch`(bump: patch/minor/major)를 쓸 수 있습니다. 실행 대상은 main의 현재 HEAD입니다.
+
+태그를 수동으로 만들지 마세요. 워크플로는 현재 버전의 태그를 보고 다음 버전을 정하므로, 손으로 만든 태그가 있으면 버전이 어긋나거나 원자적 push가 실패합니다.
+
+### 사후 검증
+
+```bash
+gh run list --workflow release.yml --limit 1   # 최신 run id 확인
+gh run view <run-id>                           # gate·prepare·build·publish·docker가 모두 success인지 확인
+gh run list --workflow ci.yml --limit 1        # dev push의 ci 확인
+gh release view v<버전>                         # 자산 5개: stackbox-agent-{플랫폼}[.exe] 4개 + manifest.json
+```
+
+- 자산 검증: 저장소 밖의 빈 디렉터리에 `curl -fsSLO https://github.com/preinpost/stackbox/releases/download/v<버전>/<파일>`로 받고,
+  `sha256sum`이 `manifest.json`의 `agents.<플랫폼>.sha256`과 같은지, `grep -aoE 'stackbox-agent-build:[0-9a-f]{16}'`가
+  manifest의 `build_id`를 포함하는지 확인합니다. 받은 파일은 실행하지 않습니다.
+- GHCR 검증: 익명 토큰을 받은 뒤 `https://ghcr.io/v2/preinpost/stackbox/manifests/v<버전>`를 요청해 200이 오는지 봅니다.
+  토큰 없이 처음 요청하면 401이 나오는 것이 정상입니다. 토큰 파일은 읽지 말고 `gh` 인증만 씁니다.
