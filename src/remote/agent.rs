@@ -221,10 +221,11 @@ impl Agent {
         }
     }
     /// Destroys the stackbox VMs this host's agent holds and forgets them: every coordinator's
-    /// when `coordinator` is `None` (`Purge`), otherwise only that coordinator's (`PurgeOwn`).
+    /// when `coordinator` is `None` (`Purge`, `PurgeAll`), otherwise only that coordinator's
+    /// (`PurgeOwn`). Returns the VMs destroyed and the other coordinators' reservations left.
     /// Used when the coordinator removes the host. Runs under the create lock, so a
     /// reservation cannot appear mid-purge. A retry finds what is already gone and succeeds.
-    async fn purge(&self, coordinator: Option<&str>) -> Result<Reply> {
+    async fn purge(&self, coordinator: Option<&str>) -> Result<(usize, usize)> {
         let reserved: Vec<String> = {
             let registry = LockedRegistry::open(&self.dir)?;
             registry
@@ -269,10 +270,7 @@ impl Agent {
             failed.len(),
             failed.join("; ")
         );
-        Ok(Reply::Purged {
-            stackboxes: purged,
-            kept_for_others: Some(kept_for_others),
-        })
+        Ok((purged, kept_for_others))
     }
 
     /// Reserve capacity and public ports for a new stackbox on this host. A replay of the same
@@ -860,17 +858,50 @@ impl Agent {
             return Ok(Reply::Done);
         }
         // A host-wide cleanup has no stackbox id, so it runs before the per-stackbox scope below.
-        if matches!(request.operation, Operation::Purge | Operation::PurgeOwn) {
+        if matches!(
+            request.operation,
+            Operation::Purge | Operation::PurgeAll | Operation::PurgeOwn
+        ) {
             // Serialize with creates so a reservation cannot appear mid-purge. A purge that
             // finds another one running fails here rather than waiting, and nothing is deleted.
             let _create_lock = lock(&self.dir, "create.lock")?;
-            let scope = match request.operation {
-                Operation::PurgeOwn => Some(request.coordinator_id.as_str()),
-                _ => None,
+            return match request.operation {
+                Operation::Purge => {
+                    let (stackboxes, _) = self.purge(None).await?;
+                    Ok(Reply::Purged { stackboxes })
+                }
+                Operation::PurgeAll => {
+                    let (stackboxes, kept_for_others) = self.purge(None).await?;
+                    Ok(Reply::ScopedPurged {
+                        stackboxes,
+                        kept_for_others,
+                    })
+                }
+                _ => {
+                    let (stackboxes, kept_for_others) =
+                        self.purge(Some(request.coordinator_id.as_str())).await?;
+                    Ok(Reply::ScopedPurged {
+                        stackboxes,
+                        kept_for_others,
+                    })
+                }
             };
-            return self.purge(scope).await;
         }
         if matches!(request.operation, Operation::RemoveGolden) {
+            // Lock order: create.lock, then the registry lock (taken inside `LockedRegistry::open`),
+            // then the golden build lock (taken by `remove_golden`, which waits for a build in
+            // progress). Every other lock here is taken without waiting, so none of them can
+            // hold up this order. A reservation is only made under create.lock, so a reservation
+            // cannot appear between the check and the removal.
+            let _create_lock = lock(&self.dir, "create.lock")?;
+            let held = {
+                let registry = LockedRegistry::open(&self.dir)?;
+                registry.state.stackboxes.values().filter(|r| !r.deleted).count()
+            };
+            ensure!(
+                held == 0,
+                "golden snapshot groups are in use: {held} stackbox reservation(s) on this host are held (another stackbox is using them); nothing was removed"
+            );
             // Under the golden build lock, so a build in progress on this host finishes first.
             let groups = self.backend.remove_golden().await?;
             return Ok(Reply::GoldenRemoved { groups });
@@ -2558,9 +2589,9 @@ mod tests {
         assert!(
             matches!(
                 reply,
-                Reply::Purged {
+                Reply::ScopedPurged {
                     stackboxes: 1,
-                    kept_for_others: Some(1)
+                    kept_for_others: 1
                 }
             ),
             "{reply:?}"
@@ -2591,9 +2622,9 @@ mod tests {
         assert!(
             matches!(
                 retry,
-                Reply::Purged {
+                Reply::ScopedPurged {
                     stackboxes: 0,
-                    kept_for_others: Some(1)
+                    kept_for_others: 1
                 }
             ),
             "{retry:?}"
@@ -2634,10 +2665,10 @@ mod tests {
                 .execute(request(&owner, Operation::PurgeOwn), emit)
                 .await
                 .unwrap(),
-            Reply::Purged {
-                stackboxes: 1,
-                kept_for_others: Some(0)
-            }
+            Reply::ScopedPurged {
+                    stackboxes: 1,
+                    kept_for_others: 0
+                }
         ));
     }
 
@@ -2672,10 +2703,10 @@ mod tests {
                 .execute(request(&owner, Operation::PurgeOwn), emit)
                 .await
                 .unwrap(),
-            Reply::Purged {
-                stackboxes: 1,
-                kept_for_others: Some(0)
-            }
+            Reply::ScopedPurged {
+                    stackboxes: 1,
+                    kept_for_others: 0
+                }
         ));
     }
 

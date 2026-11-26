@@ -733,7 +733,7 @@ impl StackboxManager {
             .host_link(&self.stored_host(&host_id)?)
             .context("host has no installed agent to clean up with")?;
         let operation = if job.all_vms {
-            Operation::Purge
+            Operation::PurgeAll
         } else {
             Operation::PurgeOwn
         };
@@ -753,10 +753,12 @@ impl StackboxManager {
                 )
             })?;
         let (purged, kept_for_others) = match reply {
-            Reply::Purged {
+            Reply::ScopedPurged {
                 stackboxes,
                 kept_for_others,
-            } => (stackboxes, kept_for_others),
+            } => (stackboxes, Some(kept_for_others)),
+            // An agent that answers the older shape does not report the count.
+            Reply::Purged { stackboxes } => (stackboxes, None),
             _ => anyhow::bail!("unexpected remote purge response"),
         };
         self.host_event(&job.id, &format!("Removed {purged} reserved VM(s)"))?;
@@ -1454,7 +1456,7 @@ impl StackboxManager {
                         "golden snapshot groups (the agent gave an unexpected reply; check the host's msb snapshot groups named stackbox-golden-*)".into(),
                     ),
                     Err(error) => left.push(format!(
-                        "golden snapshot groups ({error:#}); check the host's msb snapshot groups named stackbox-golden-*"
+                        "golden snapshot groups (kept: another stackbox is using the host, or an operation is running; {error:#}); check the host's msb snapshot groups named stackbox-golden-*"
                     )),
                 }
             }

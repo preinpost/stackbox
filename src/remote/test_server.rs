@@ -487,13 +487,19 @@ impl server::Handler for Handler {
                     Reply::Done
                 }
                 // The fake host holds only this coordinator's VMs, so both scopes remove them all.
-                Operation::Purge | Operation::PurgeOwn => {
+                Operation::Purge | Operation::PurgeAll | Operation::PurgeOwn => {
                     let removed = self.observed.rpc_stackboxes.lock().unwrap().len();
                     self.observed.rpc_stackboxes.lock().unwrap().clear();
-                    Reply::Purged {
-                        stackboxes: removed,
-                        kept_for_others: (!self.observed.purge_unreported.load(Ordering::SeqCst))
-                            .then_some(0),
+                    // `purge_unreported` makes the fake answer the older shape, which carries no count.
+                    if matches!(request.operation, Operation::Purge)
+                        || self.observed.purge_unreported.load(Ordering::SeqCst)
+                    {
+                        Reply::Purged { stackboxes: removed }
+                    } else {
+                        Reply::ScopedPurged {
+                            stackboxes: removed,
+                            kept_for_others: 0,
+                        }
                     }
                 }
                 Operation::RemoveGolden => {

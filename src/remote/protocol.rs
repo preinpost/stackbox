@@ -229,15 +229,21 @@ pub enum Operation {
     VerifyVm,
     /// Install the coordinator's msb release, upgrading an older one; a newer one fails.
     InstallMsb,
-    /// Destroy every VM on the host, whichever coordinator reserved it, then forget them.
-    /// The coordinator sends this only when removing the host with `all_vms`.
+    /// Destroy every VM on the host, whichever coordinator reserved it, then forget them. Sent by
+    /// coordinators that predate `PurgeAll`; the reply has no count of other coordinators, because
+    /// those older coordinators cannot read one (`Reply` denies unknown fields).
     Purge,
+    /// Destroy every VM on the host, whichever coordinator reserved it, then forget them. The
+    /// coordinator sends this when removing the host with `all_vms`; the reply counts the
+    /// reservations left afterwards, which is none on success.
+    PurgeAll,
     /// Destroy only the VMs this coordinator reserved on the host, then forget them. Other
     /// coordinators' reservations stay, and the reply counts them. An older agent does not
     /// know this operation and refuses it, so the removal fails rather than deleting others' VMs.
     PurgeOwn,
-    /// Delete every golden snapshot group this host holds for stackboxes, under the golden build
-    /// lock so a build in progress finishes first. Sent before the host's files are removed.
+    /// Delete every golden snapshot group this host holds for stackboxes. The agent refuses while
+    /// any reservation of any coordinator is held, and runs under the create lock, so no create can
+    /// reserve a stackbox that uses the groups mid-removal. Sent before the host's files are removed.
     RemoveGolden,
     /// Bind one PCI device to `vfio-pci` through the host's stackbox-vfio-bind helper, then
     /// reply with the host's fresh inspection.
@@ -338,7 +344,7 @@ impl Operation {
             Self::Create { .. } => 1800,
             Self::Delete { .. } => 180,
             // A host can hold several stackboxes, each destroyed VM by VM.
-            Self::Purge | Self::PurgeOwn => 1800,
+            Self::Purge | Self::PurgeAll | Self::PurgeOwn => 1800,
             // Each group is a snapshot set of a golden VM; a build that holds the lock finishes first.
             Self::RemoveGolden => 1800,
             Self::Shell { .. } => 12 * 3600,
@@ -534,13 +540,17 @@ pub enum Reply {
         private_key: String,
     },
     Done,
+    /// The answer to `Purge`. Its shape is the one older coordinators read: do not add fields.
     Purged {
         /// Stackboxes whose VMs were destroyed, including ones already deleted from the registry.
         stackboxes: usize,
-        /// Stackboxes of other coordinators still reserved on the host after a `PurgeOwn`. None when
-        /// the reply does not say (an agent that never reported it), so the caller keeps the shared files.
-        #[serde(default)]
-        kept_for_others: Option<usize>,
+    },
+    /// The answer to `PurgeAll` and `PurgeOwn`.
+    ScopedPurged {
+        /// Stackboxes whose VMs were destroyed, including ones already deleted from the registry.
+        stackboxes: usize,
+        /// Stackboxes of other coordinators still reserved on the host after the purge.
+        kept_for_others: usize,
     },
     GoldenRemoved {
         /// Golden snapshot groups deleted from the host.
@@ -665,23 +675,45 @@ mod tests {
             Frame::Step { ref step } if step.contains("nova")
         ));
         let purged: Reply = serde_json::from_str(r#"{"result":"purged","stackboxes":3}"#).unwrap();
-        assert!(matches!(
-            purged,
-            Reply::Purged {
-                stackboxes: 3,
-                kept_for_others: None
-            }
-        ));
-        let counted: Reply =
-            serde_json::from_str(r#"{"result":"purged","stackboxes":0,"kept_for_others":0}"#)
-                .unwrap();
+        assert!(matches!(purged, Reply::Purged { stackboxes: 3 }));
+        let counted: Reply = serde_json::from_str(
+            r#"{"result":"scoped_purged","stackboxes":0,"kept_for_others":2}"#,
+        )
+        .unwrap();
         assert!(matches!(
             counted,
-            Reply::Purged {
-                kept_for_others: Some(0),
-                ..
+            Reply::ScopedPurged {
+                stackboxes: 0,
+                kept_for_others: 2
             }
         ));
+        // An agent built before `PurgeAll` and `PurgeOwn` has these operations only. It refuses
+        // the newer names, so a newer coordinator's purge fails there without deleting anything.
+        #[derive(serde::Deserialize)]
+        #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
+        #[allow(dead_code)]
+        enum OldOperation {
+            Purge,
+            RemoveGolden,
+        }
+        assert!(serde_json::from_str::<OldOperation>(r#"{"operation":"purge"}"#).is_ok());
+        for name in ["purge_all", "purge_own"] {
+            assert!(
+                serde_json::from_str::<OldOperation>(&format!(r#"{{"operation":"{name}"}}"#))
+                    .is_err()
+            );
+        }
+        // Each purge operation's name, as the wire has it.
+        for (operation, name) in [
+            (Operation::Purge, "purge"),
+            (Operation::PurgeAll, "purge_all"),
+            (Operation::PurgeOwn, "purge_own"),
+        ] {
+            assert_eq!(
+                serde_json::to_string(&operation).unwrap(),
+                format!(r#"{{"operation":"{name}"}}"#)
+            );
+        }
     }
 
     #[test]
