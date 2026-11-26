@@ -81,8 +81,9 @@ export function RemoteHostsPage() {
   const ssh = selected?.kind === "ssh";
   const localRegistered = hosts.data?.some((h) => h.kind === "local");
   const stackboxCount = (hostId: string) =>
-    stackboxes.data?.filter((f) => f.status !== "deleted" && f.host_id === hostId)
-      .length ?? 0;
+    stackboxes.data?.filter(
+      (f) => f.status !== "deleted" && f.host_id === hostId,
+    ).length ?? 0;
   const refresh = async () => {
     await Promise.all([
       client.invalidateQueries({ queryKey: keys.hosts }),
@@ -109,12 +110,11 @@ export function RemoteHostsPage() {
             : api.unregisterHost(id),
     onSuccess: refresh,
   });
-  // Registering this machine checks it right away, like a new remote host.
+  // The registration starts this machine's preparation itself, like a new remote host's.
   const registerLocal = useMutation({
     mutationFn: async () => {
       const host = await api.registerLocalHost();
       setSelectedId(host.id);
-      await api.checkHost(host.id);
     },
     onSettled: refresh,
   });
@@ -176,13 +176,9 @@ export function RemoteHostsPage() {
                   onPending={setPending}
                   close={() => setOpen(false)}
                   onRegistered={async (host) => {
+                    // The registration already started the host's check and preparation.
                     setSelectedId(host.id);
                     setError(undefined);
-                    try {
-                      await api.checkHost(host.id);
-                    } catch (e) {
-                      setError(e);
-                    }
                     await refresh();
                   }}
                 />
@@ -386,7 +382,9 @@ export function RemoteHostsPage() {
                 host={selected}
                 stackboxes={stackboxCount(selected.id)}
                 coordinatorBuildId={buildId}
-                onCheck={() => action.mutate({ id: selected.id, kind: "check" })}
+                onCheck={() =>
+                  action.mutate({ id: selected.id, kind: "check" })
+                }
                 checkDisabled={!!selected.active_job || action.isPending}
               />
             ) : (
@@ -538,7 +536,9 @@ export function RegisterAgentHostDialog({
       }}
     >
       {card ? (
-        <Dialog.Trigger render={<button type="button" className="host-choice" />}>
+        <Dialog.Trigger
+          render={<button type="button" className="host-choice" />}
+        >
           <span className="host-choice-icon" aria-hidden>
             <RadioTower size={16} strokeWidth={1.7} />
           </span>
@@ -873,7 +873,9 @@ function HostInspection({
     {
       label: "Golden image",
       ready: i.golden_image_available,
-      pending: i.golden_image_available ? undefined : "첫 Stackbox 생성 때 빌드",
+      pending: i.golden_image_available
+        ? undefined
+        : "첫 Stackbox 생성 때 빌드",
     },
     { label: "VM 부팅·실행 검증", ready: i.vm_boot_verified },
   ];
@@ -1050,9 +1052,9 @@ function HostInspection({
           ))}
         </dl>
         <p className="field-hint">
-          stackbox 커널은 VFIO·mdev를 내장(built-in)으로 넣으므로 모듈을 적재하지
-          않습니다. 위 값은 검증 VM의 게스트 커널에서 읽은 내장 기능의 활성
-          상태입니다.
+          stackbox 커널은 VFIO·mdev를 내장(built-in)으로 넣으므로 모듈을
+          적재하지 않습니다. 위 값은 검증 VM의 게스트 커널에서 읽은 내장 기능의
+          활성 상태입니다.
         </p>
       </details>
       <dl className="build-compare">
@@ -1231,8 +1233,8 @@ function HostActionDialog({
                     msb {MSB_REQUIRED_VERSION} 설치, 낮은 버전이면 업그레이드
                   </li>
                   <li>
-                    stackbox 게스트 커널(VFIO · mdev · mtty 내장) 설치, 이 호스트에
-                    설치할 수 없으면 기본 커널로 진행
+                    stackbox 게스트 커널(VFIO · mdev · mtty 내장) 설치, 이
+                    호스트에 설치할 수 없으면 기본 커널로 진행
                   </li>
                   <li>가상화 확인</li>
                   <li>
@@ -1241,9 +1243,9 @@ function HostActionDialog({
                   </li>
                 </ol>
                 <p className="field-hint">
-                  golden image는 첫 Stackbox를 만들 때 msb가 Rocky Linux 10 이미지로
-                  빌드합니다. 패키지를 내려받느라 첫 생성이 몇 분 더 걸릴 수
-                  있습니다.
+                  golden image는 첫 Stackbox를 만들 때 msb가 Rocky Linux 10
+                  이미지로 빌드합니다. 패키지를 내려받느라 첫 생성이 몇 분 더
+                  걸릴 수 있습니다.
                 </p>
               </>
             ) : prepare ? (
@@ -1267,8 +1269,8 @@ function HostActionDialog({
                 </ol>
                 <p className="field-hint">
                   Linux, 동일 CPU 아키텍처, /dev/kvm 접근, 가용 메모리 768 MiB와
-                  디스크 8 GiB 이상이 필요합니다. golden image는 첫 Stackbox를 만들
-                  때 msb가 빌드하므로 Docker는 필요 없습니다.
+                  디스크 8 GiB 이상이 필요합니다. golden image는 첫 Stackbox를
+                  만들 때 msb가 빌드하므로 Docker는 필요 없습니다.
                 </p>
               </>
             ) : (
@@ -1720,8 +1722,8 @@ export function RegisterHostForm({
         <div className="modal-footer">
           <span className="field-hint">
             {host
-              ? "변경 후 SSH 점검을 시작합니다."
-              : "등록 후 SSH 점검을 시작합니다."}
+              ? "변경 후 점검과 환경 준비를 다시 실행합니다."
+              : "등록 후 점검과 환경 준비(msb·커널·에이전트 설치)를 시작합니다."}
           </span>
           <div className="flex gap-2">
             <Button

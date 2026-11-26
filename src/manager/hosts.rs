@@ -112,6 +112,40 @@ impl StackboxManager {
             Ok(result)
         })
     }
+    /// Registers an SSH host and starts its preparation job (check, msb, kernel, agent). The
+    /// registration stands even when that job cannot start; the host's "환경 준비" retries it.
+    pub fn register_and_prepare_host(&self, request: RegisterHost) -> Result<RemoteHost> {
+        let host = self.register_host(request)?;
+        Ok(self.prepare_after_registration(host))
+    }
+    /// Registers this machine and starts its preparation job, as `register_and_prepare_host` does.
+    pub fn register_and_prepare_local_host(
+        &self,
+        request: RegisterLocalHost,
+    ) -> Result<RemoteHost> {
+        let host = self.register_local_host(request)?;
+        Ok(self.prepare_after_registration(host))
+    }
+    /// Changes an SSH host's credentials and reruns its preparation; every step of it is
+    /// idempotent, so an unchanged install is skipped.
+    pub fn update_host_credentials_and_prepare(&self, request: RegisterHost) -> Result<RemoteHost> {
+        let host = self.update_host_credentials(request)?;
+        Ok(self.prepare_after_registration(host))
+    }
+    /// Starts the host's preparation and returns the host as the job now leaves it. A host with
+    /// an active job, or a stackbox operation on it, stays registered without a new job.
+    fn prepare_after_registration(&self, host: RemoteHost) -> RemoteHost {
+        match self.start_host_job(&host.id, HostJobKind::Prepare) {
+            Ok(_) => self.host(&host.id).unwrap_or(host),
+            Err(error) => {
+                eprintln!(
+                    "host '{}' is registered; its preparation did not start: {error:#}",
+                    host.id
+                );
+                host
+            }
+        }
+    }
     /// Register the machine this coordinator runs on. Its agent is this binary, so it needs
     /// no address, credential or installation; check and prepare it like any other host.
     pub fn register_local_host(&self, request: RegisterLocalHost) -> Result<RemoteHost> {

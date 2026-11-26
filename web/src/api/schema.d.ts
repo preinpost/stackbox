@@ -2781,6 +2781,7 @@ export interface operations {
       };
     };
     responses: {
+      /** @description The host; its active_job is the preparation job the registration started, unless another job already runs on it */
       201: {
         headers: {
           [name: string]: unknown;
@@ -3292,6 +3293,7 @@ export interface operations {
       };
     };
     responses: {
+      /** @description The host; its active_job is the preparation job the registration started */
       201: {
         headers: {
           [name: string]: unknown;

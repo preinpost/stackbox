@@ -15,6 +15,65 @@ afterEach(() => {
 });
 const fingerprint = `SHA256:${"A".repeat(43)}`;
 
+test("the SSH registration form says the registration starts the check and preparation, and posts no separate check", async () => {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+  });
+  const calls: string[] = [];
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (path: string, options?: RequestInit) => {
+      if (path.endsWith("/fingerprint"))
+        return Response.json({ fingerprint, algorithm: "ssh-ed25519" });
+      if (options?.method === "POST") calls.push(path);
+      return Response.json(
+        {
+          id: "target-01",
+          kind: "ssh",
+          address: "10.0.0.21",
+          port: 22,
+          status: "registered",
+          active_job: "prep",
+        },
+        { status: 201 },
+      );
+    }),
+  );
+  const onRegistered = vi.fn();
+  render(
+    <QueryClientProvider client={client}>
+      <Dialog.Root open>
+        <RegisterHostForm
+          close={vi.fn()}
+          onPending={vi.fn()}
+          onRegistered={onRegistered}
+        />
+      </Dialog.Root>
+    </QueryClientProvider>,
+  );
+  const user = userEvent.setup();
+  expect(
+    screen.getByText(
+      "등록 후 점검과 환경 준비(msb·커널·에이전트 설치)를 시작합니다.",
+    ),
+  ).toBeTruthy();
+  await user.type(screen.getByLabelText("서버 IP 또는 호스트명"), "10.0.0.21");
+  await user.type(screen.getByLabelText(/호스트 ID/), "target-01");
+  await user.type(screen.getByLabelText("SSH 사용자"), "ubuntu");
+  await user.click(screen.getByRole("radio", { name: "비밀번호" }));
+  await user.type(
+    screen.getByLabelText("SSH 비밀번호"),
+    "form-test-credential",
+  );
+  await user.click(screen.getByRole("button", { name: "서버 지문 조회" }));
+  await user.click(await screen.findByRole("checkbox"));
+  await user.click(screen.getByRole("button", { name: "호스트 등록" }));
+  await waitFor(() => expect(onRegistered).toHaveBeenCalledTimes(1));
+  expect(calls).toEqual(["/api/v1/hosts"]);
+  expect(onRegistered.mock.calls[0][0].active_job).toBe("prep");
+  client.clear();
+});
+
 test("requires explicit fingerprint verification, clears it on address changes and keeps credentials out of Query caches", async () => {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
@@ -85,7 +144,7 @@ test("requires explicit fingerprint verification, clears it on address changes a
   client.clear();
 });
 
-test("registers this machine as a host and checks it right away", async () => {
+test("registers this machine as a host; the registration starts its preparation", async () => {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
@@ -102,8 +161,6 @@ test("registers this machine as a host and checks it right away", async () => {
           { status: 201 },
         );
       }
-      if (path.endsWith("/hosts/local/check"))
-        return Response.json({ id: "job", host_id: "local", events: [] });
       if (path.endsWith("/hosts"))
         return Response.json(
           registered
@@ -133,9 +190,7 @@ test("registers this machine as a host and checks it right away", async () => {
   await user.click(
     screen.getAllByRole("button", { name: "로컬 호스트 등록" })[0],
   );
-  await waitFor(() =>
-    expect(calls).toEqual(["/api/v1/local-host", "/api/v1/hosts/local/check"]),
-  );
+  await waitFor(() => expect(calls).toEqual(["/api/v1/local-host"]));
   expect(await screen.findByText("LOCAL HOST")).toBeTruthy();
   expect(screen.queryByRole("button", { name: /인증 변경/ })).toBeNull();
   expect(screen.queryByRole("button", { name: "로컬 호스트 등록" })).toBeNull();

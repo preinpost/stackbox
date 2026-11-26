@@ -345,7 +345,7 @@ async fn test_connection(
         .map_err(bad)?;
     Ok(Json(crate::remote::ConnectionTest { identity }))
 }
-#[utoipa::path(post, path="/api/v1/hosts", request_body=RegisterHost, responses((status=201, body=RemoteHost), (status=400, body=ErrorBody), (status=409, body=ErrorBody)))]
+#[utoipa::path(post, path="/api/v1/hosts", request_body=RegisterHost, responses((status=201, description="The host; its active_job is the preparation job the registration started, unless another job already runs on it", body=RemoteHost), (status=400, body=ErrorBody), (status=409, body=ErrorBody)))]
 async fn register_host(
     State(app): State<App>,
     value: Result<Json<RegisterHost>, JsonRejection>,
@@ -364,7 +364,7 @@ async fn register_host(
             })?
             .map_err(bad)?;
     let manager = app.manager;
-    let host = tokio::task::spawn_blocking(move || manager.register_host(request))
+    let host = tokio::task::spawn_blocking(move || manager.register_and_prepare_host(request))
         .await
         .map_err(|_| {
             ApiError(
@@ -379,12 +379,12 @@ async fn register_host(
     )
         .into_response())
 }
-#[utoipa::path(post, path="/api/v1/local-host", request_body=RegisterLocalHost, responses((status=201, body=RemoteHost), (status=400, body=ErrorBody), (status=409, body=ErrorBody)))]
+#[utoipa::path(post, path="/api/v1/local-host", request_body=RegisterLocalHost, responses((status=201, description="The host; its active_job is the preparation job the registration started", body=RemoteHost), (status=400, body=ErrorBody), (status=409, body=ErrorBody)))]
 async fn register_local_host(
     State(app): State<App>,
     value: Result<Json<RegisterLocalHost>, JsonRejection>,
 ) -> Result<Response, ApiError> {
-    let host = app.manager.register_local_host(body(value)?)?;
+    let host = app.manager.register_and_prepare_local_host(body(value)?)?;
     Ok((
         StatusCode::CREATED,
         [(header::LOCATION, format!("/api/v1/hosts/{}", host.id))],
@@ -495,7 +495,7 @@ async fn update_host_credentials(
             .map_err(bad)?;
     let manager = app.manager;
     Ok(Json(
-        tokio::task::spawn_blocking(move || manager.update_host_credentials(request))
+        tokio::task::spawn_blocking(move || manager.update_host_credentials_and_prepare(request))
             .await
             .map_err(|_| {
                 ApiError(

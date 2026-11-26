@@ -600,7 +600,7 @@
         },
         "responses": {
           "201": {
-            "description": "",
+            "description": "The host; its active_job is the preparation job the registration started, unless another job already runs on it",
             "content": {
               "application/json": {
                 "schema": {
@@ -1275,7 +1275,7 @@
         },
         "responses": {
           "201": {
-            "description": "",
+            "description": "The host; its active_job is the preparation job the registration started",
             "content": {
               "application/json": {
                 "schema": {

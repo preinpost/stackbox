@@ -1236,6 +1236,15 @@ async fn http_remote_host_registration_validation_job_locations_and_unregistrati
     )
     .unwrap();
     assert!(!body.contains("fixture-password-only") && !body.contains("credentials"));
+    // The registration started the host's preparation; the rest of this test needs it finished.
+    let registered: crate::remote::RemoteHost = serde_json::from_str(&body).unwrap();
+    let prepared = registered
+        .active_job
+        .expect("the registration starts the preparation");
+    assert_eq!(
+        host_done(&manager, &prepared).await.status,
+        JobStatus::Succeeded
+    );
     let updated = app
         .clone()
         .oneshot(request("PUT", "/api/v1/hosts/remote", payload.clone()))
@@ -9242,5 +9251,112 @@ async fn an_empty_failed_snapshot_is_deleted_without_asking_its_unregistered_hos
     manager.unregister_host("local").unwrap();
     manager.delete_snapshot("ghost").await.unwrap();
     assert!(manager.snapshot("ghost").unwrap_err().is::<NotFound>());
+    settle(&manager).await;
+}
+
+/// Registering a host starts its preparation job, for this machine and an SSH host alike. A
+/// registration that is refused starts nothing, and a host with an active job keeps its new
+/// credentials without a second job.
+#[tokio::test]
+async fn registration_starts_the_host_preparation() {
+    use crate::manager::Conflict;
+    use crate::remote::{HostJobKind, RegisterLocalHost, test_server::Fixture};
+    let dir = tempfile::tempdir().unwrap();
+    let link = Arc::new(MsbLink::default());
+    *link.msb.lock().unwrap() = Some(crate::remote::MSB_VERSION.into());
+    let manager = StackboxManager::with_link(options(dir.path()), link.clone())
+        .await
+        .unwrap();
+
+    // This machine: the registration returns the job it started, and the job succeeds.
+    let local = manager
+        .register_and_prepare_local_host(RegisterLocalHost { id: "local".into() })
+        .unwrap();
+    let job_id = local
+        .active_job
+        .clone()
+        .expect("the registration starts the preparation");
+    assert!(matches!(
+        manager.host_job(&job_id).unwrap().kind,
+        HostJobKind::Prepare
+    ));
+    assert_eq!(
+        host_done(&manager, &job_id).await.status,
+        JobStatus::Succeeded
+    );
+    // Registering the same id again is refused and starts no job.
+    let jobs = manager.host_jobs().unwrap().len();
+    assert!(
+        manager
+            .register_and_prepare_local_host(RegisterLocalHost { id: "local".into() })
+            .unwrap_err()
+            .is::<Conflict>()
+    );
+    assert_eq!(manager.host_jobs().unwrap().len(), jobs);
+    settle(&manager).await;
+    drop(manager);
+
+    // An SSH host: the same rule, through the SSH registration path.
+    let fixture = Fixture::start().await;
+    let manager = open_with(options(dir.path()), Arc::new(Fake::default())).await;
+    let ssh = manager
+        .register_and_prepare_host(fixture.registration("target"))
+        .unwrap();
+    let job_id = ssh
+        .active_job
+        .clone()
+        .expect("the SSH registration starts the preparation");
+    assert!(matches!(
+        manager.host_job(&job_id).unwrap().kind,
+        HostJobKind::Prepare
+    ));
+    assert_eq!(
+        host_done(&manager, &job_id).await.status,
+        JobStatus::Succeeded
+    );
+
+    // A host whose job slot is taken keeps its registration and starts no second job. A
+    // credential change on it is refused as before, since the running job owns the host.
+    manager
+        .update(|state| {
+            state.hosts.get_mut("target").unwrap().host.active_job = Some("busy".into());
+            Ok(())
+        })
+        .unwrap();
+    let jobs = manager.host_jobs().unwrap().len();
+    assert!(
+        manager
+            .update_host_credentials_and_prepare(fixture.registration("target"))
+            .unwrap_err()
+            .is::<Conflict>()
+    );
+    assert_eq!(manager.host_jobs().unwrap().len(), jobs);
+    assert_eq!(
+        manager.host("target").unwrap().active_job.as_deref(),
+        Some("busy")
+    );
+    manager
+        .update(|state| {
+            state.hosts.get_mut("target").unwrap().host.active_job = None;
+            Ok(())
+        })
+        .unwrap();
+
+    // Without a job on it, a credential change reruns the preparation.
+    let changed = manager
+        .update_host_credentials_and_prepare(fixture.registration("target"))
+        .unwrap();
+    let job_id = changed
+        .active_job
+        .clone()
+        .expect("a credential change reruns the preparation");
+    assert!(matches!(
+        manager.host_job(&job_id).unwrap().kind,
+        HostJobKind::Prepare
+    ));
+    assert_eq!(
+        host_done(&manager, &job_id).await.status,
+        JobStatus::Succeeded
+    );
     settle(&manager).await;
 }
