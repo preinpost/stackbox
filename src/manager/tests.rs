@@ -9530,11 +9530,12 @@ async fn a_purge_keeps_other_coordinators_vms_and_the_shared_files_by_default() 
 }
 
 #[tokio::test]
-async fn a_purge_without_other_coordinators_still_keeps_the_shared_files_unless_all_vms() {
+async fn a_purge_without_other_coordinators_removes_the_shared_files_by_default() {
     let dir = tempfile::tempdir().unwrap();
     let backend = Arc::new(Fake::default());
     let manager = open_with(options(dir.path()), backend.clone()).await;
     let purge = manager.start_purge("local", false, true, false).unwrap();
+    assert!(!purge.all_vms);
     let finished = host_done(&manager, &purge.id).await;
     assert_eq!(
         finished.status,
@@ -9542,24 +9543,103 @@ async fn a_purge_without_other_coordinators_still_keeps_the_shared_files_unless_
         "{:?}",
         finished.error
     );
+    // Nobody else reserves the host, so its golden groups go without all_vms.
     assert_eq!(
         backend
             .golden_removals
             .load(std::sync::atomic::Ordering::SeqCst),
-        0
+        1
     );
     let messages = purge_messages(&finished);
     assert!(
+        messages
+            .iter()
+            .any(|m| m == "Removed 1 golden snapshot group(s)"),
+        "{messages:?}"
+    );
+    assert!(
         !messages.iter().any(|m| m.starts_with("Kept ")),
+        "{messages:?}"
+    );
+    // Only the coordinator's own machine keeps its msb and files, by name.
+    let left = messages
+        .iter()
+        .find(|m| m.starts_with("Left on the host:"))
+        .unwrap_or_else(|| panic!("{messages:?}"));
+    assert!(!left.contains("golden snapshot groups"), "{left}");
+    assert!(manager.host("local").is_err());
+}
+
+#[tokio::test]
+async fn a_purge_whose_reply_does_not_count_the_other_coordinators_keeps_the_shared_files() {
+    use crate::remote::{AgentArtifactInfo, HostJobKind, InstalledAgent, test_server::Fixture};
+    let fixture = Fixture::start().await;
+    let dir = tempfile::tempdir().unwrap();
+    let manager = open_with(options(dir.path()), Arc::new(Fake::default())).await;
+    manager
+        .register_host(fixture.registration("target"))
+        .unwrap();
+    let prep = manager
+        .start_host_job("target", HostJobKind::Prepare)
+        .unwrap();
+    assert_eq!(
+        host_done(&manager, &prep.id).await.status,
+        JobStatus::Succeeded
+    );
+    manager
+        .update(|state| {
+            state.hosts.get_mut("target").unwrap().host.agent = Some(InstalledAgent {
+                artifact: AgentArtifactInfo {
+                    sha256: "a".repeat(64),
+                    os: "linux".into(),
+                    arch: std::env::consts::ARCH.into(),
+                    protocol: 1,
+                    supports_single_vm: true,
+                    build_id: crate::BUILD_ID.into(),
+                },
+                verified_at: now(),
+            });
+            Ok(())
+        })
+        .unwrap();
+    // The agent's reply carries no count of other coordinators' VMs.
+    fixture
+        .observed
+        .purge_unreported
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let purge = manager.start_purge("target", false, true, false).unwrap();
+    let finished = host_done(&manager, &purge.id).await;
+    assert_eq!(
+        finished.status,
+        JobStatus::Succeeded,
+        "{:?}",
+        finished.error
+    );
+    assert!(
+        !fixture
+            .observed
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|call| call == "remove-golden"),
+        "{:?}",
+        fixture.observed.calls.lock().unwrap()
+    );
+    let messages = purge_messages(&finished);
+    assert!(
+        messages
+            .iter()
+            .any(|m| m.contains("did not report whether")),
         "{messages:?}"
     );
     let left = messages
         .iter()
         .find(|m| m.starts_with("Left on the host:"))
         .unwrap_or_else(|| panic!("{messages:?}"));
-    assert!(left.contains("choose to delete all VMs"), "{left}");
-    // The manual command would delete a directory other coordinators may use, so none is offered.
-    assert!(!left.contains("rm -rf"), "{left}");
+    assert!(left.contains("did not confirm"), "{left}");
+    assert!(manager.host("target").is_err());
+    settle(&manager).await;
 }
 
 #[tokio::test]

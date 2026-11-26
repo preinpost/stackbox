@@ -723,17 +723,23 @@ impl StackboxManager {
             _ => anyhow::bail!("unexpected remote purge response"),
         };
         self.host_event(&job.id, &format!("Removed {purged} reserved VM(s)"))?;
-        if kept_for_others > 0 {
-            self.host_event(
+        match kept_for_others {
+            Some(kept) if kept > 0 => self.host_event(
                 &job.id,
                 &format!(
-                    "Kept {kept_for_others} VM reservation(s) of other stackbox coordinators on the host"
+                    "Kept {kept} VM reservation(s) of other stackbox coordinators on the host"
                 ),
-            )?;
+            )?,
+            Some(_) => {}
+            None => self.host_event(
+                &job.id,
+                "The agent did not report whether other stackbox coordinators still use the host",
+            )?,
         }
         if job.remote_files {
-            // The shared files only go when every VM on the host went with this purge.
-            let shared = job.all_vms && kept_for_others == 0;
+            // The shared files go only when the agent confirms no other coordinator's VM is left on
+            // the host. An unknown count keeps them, as a check that cannot tell is not a clear.
+            let shared = kept_for_others == Some(0);
             self.remove_host_files(job, &stored, shared, kept_for_others)
                 .await?;
         }
@@ -1359,7 +1365,7 @@ impl StackboxManager {
         job: &HostJob,
         stored: &StoredHost,
         shared: bool,
-        kept_for_others: usize,
+        kept_for_others: Option<usize>,
     ) -> Result<()> {
         let (left, by_hand) = if shared {
             let left = self.remove_shared_files(job, stored).await?;
@@ -1370,12 +1376,11 @@ impl StackboxManager {
             };
             (left, by_hand)
         } else {
-            let reason = if kept_for_others > 0 {
-                format!(
-                    "golden snapshot groups, msb and ~/.local/share/stackbox (kept: {kept_for_others} VM reservation(s) of other stackbox coordinators still use this host)"
-                )
-            } else {
-                "golden snapshot groups, msb and ~/.local/share/stackbox (kept: other stackboxes' VMs were not asked to go; choose to delete all VMs on the host to remove them)".into()
+            let reason = match kept_for_others {
+                Some(kept) if kept > 0 => format!(
+                    "golden snapshot groups, msb and ~/.local/share/stackbox (kept: {kept} VM reservation(s) of other stackbox coordinators still use this host)"
+                ),
+                _ => "golden snapshot groups, msb and ~/.local/share/stackbox (kept: the agent did not confirm that no other stackbox coordinator still uses this host)".into(),
             };
             (vec![reason], "")
         };

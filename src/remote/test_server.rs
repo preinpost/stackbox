@@ -31,6 +31,8 @@ pub struct Observed {
     pub kernel: Mutex<Option<String>>,
     /// Why an installed kernel is not used, as the shell inspection would report it.
     pub kernel_reason: Mutex<Option<String>>,
+    /// Answer purges without the count of other coordinators' VMs, like an agent that never reported it.
+    pub purge_unreported: AtomicBool,
 }
 pub fn client_key() -> PrivateKey {
     PrivateKey::from(Ed25519Keypair::from_seed(&[19; 32]))
@@ -490,7 +492,8 @@ impl server::Handler for Handler {
                     self.observed.rpc_stackboxes.lock().unwrap().clear();
                     Reply::Purged {
                         stackboxes: removed,
-                        kept_for_others: 0,
+                        kept_for_others: (!self.observed.purge_unreported.load(Ordering::SeqCst))
+                            .then_some(0),
                     }
                 }
                 Operation::RemoveGolden => {

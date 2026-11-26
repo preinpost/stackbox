@@ -537,9 +537,10 @@ pub enum Reply {
     Purged {
         /// Stackboxes whose VMs were destroyed, including ones already deleted from the registry.
         stackboxes: usize,
-        /// Stackboxes of other coordinators still reserved on the host after a `PurgeOwn`.
-        #[serde(default, skip_serializing_if = "is_zero")]
-        kept_for_others: usize,
+        /// Stackboxes of other coordinators still reserved on the host after a `PurgeOwn`. None when
+        /// the reply does not say (an agent that never reported it), so the caller keeps the shared files.
+        #[serde(default)]
+        kept_for_others: Option<usize>,
     },
     GoldenRemoved {
         /// Golden snapshot groups deleted from the host.
@@ -605,10 +606,6 @@ impl std::fmt::Display for AgentError {
 }
 impl std::error::Error for AgentError {}
 
-fn is_zero(count: &usize) -> bool {
-    *count == 0
-}
-
 /// Hand a progress frame of a one-shot request to `sink`. Returns the outcome once the
 /// agent reports one; a frame the operation cannot produce is a protocol error.
 pub fn deliver(
@@ -668,7 +665,23 @@ mod tests {
             Frame::Step { ref step } if step.contains("nova")
         ));
         let purged: Reply = serde_json::from_str(r#"{"result":"purged","stackboxes":3}"#).unwrap();
-        assert!(matches!(purged, Reply::Purged { stackboxes: 3, .. }));
+        assert!(matches!(
+            purged,
+            Reply::Purged {
+                stackboxes: 3,
+                kept_for_others: None
+            }
+        ));
+        let counted: Reply =
+            serde_json::from_str(r#"{"result":"purged","stackboxes":0,"kept_for_others":0}"#)
+                .unwrap();
+        assert!(matches!(
+            counted,
+            Reply::Purged {
+                kept_for_others: Some(0),
+                ..
+            }
+        ));
     }
 
     #[test]

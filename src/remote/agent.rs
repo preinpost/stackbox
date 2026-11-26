@@ -271,7 +271,7 @@ impl Agent {
         );
         Ok(Reply::Purged {
             stackboxes: purged,
-            kept_for_others,
+            kept_for_others: Some(kept_for_others),
         })
     }
 
@@ -2559,7 +2559,7 @@ mod tests {
                 reply,
                 Reply::Purged {
                     stackboxes: 1,
-                    kept_for_others: 1
+                    kept_for_others: Some(1)
                 }
             ),
             "{reply:?}"
@@ -2592,7 +2592,7 @@ mod tests {
                 retry,
                 Reply::Purged {
                     stackboxes: 0,
-                    kept_for_others: 1
+                    kept_for_others: Some(1)
                 }
             ),
             "{retry:?}"
@@ -2635,7 +2635,7 @@ mod tests {
                 .unwrap(),
             Reply::Purged {
                 stackboxes: 1,
-                kept_for_others: 0
+                kept_for_others: Some(0)
             }
         ));
     }
@@ -2673,7 +2673,7 @@ mod tests {
                 .unwrap(),
             Reply::Purged {
                 stackboxes: 1,
-                kept_for_others: 0
+                kept_for_others: Some(0)
             }
         ));
     }
