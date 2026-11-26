@@ -120,9 +120,9 @@ async fn dial_in(manager: &StackboxManager, dir: &Path) -> DialIn {
     })
     .await
     .unwrap();
-    let check = manager
-        .start_host_job("edge", crate::remote::HostJobKind::Check)
-        .unwrap();
+    // The connection starts the host's preparation, which checks the host as the test needs.
+    wait_until(|| !prepare_jobs(manager, "edge").is_empty()).await;
+    let check = prepare_jobs(manager, "edge").remove(0);
     assert_eq!(
         host_done(manager, &check.id).await.status,
         JobStatus::Succeeded
@@ -1227,9 +1227,9 @@ async fn multi_node_snapshot_on_remote_host_exports_to_s3_and_imports_back() {
     })
     .await
     .unwrap();
-    let check2 = manager
-        .start_host_job("edge-2", crate::remote::HostJobKind::Check)
-        .unwrap();
+    // The connection starts the host's preparation, which checks the host as the test needs.
+    wait_until(|| !prepare_jobs(&manager, "edge-2").is_empty()).await;
+    let check2 = prepare_jobs(&manager, "edge-2").remove(0);
     assert_eq!(
         host_done(&manager, &check2.id).await.status,
         JobStatus::Succeeded

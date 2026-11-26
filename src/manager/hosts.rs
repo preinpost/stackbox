@@ -261,9 +261,12 @@ impl StackboxManager {
             .map(|stored| stored.host.id.clone())
             .ok_or_else(|| NotFound("agent token".into()).into())
     }
-    /// Hold a dial-in host's socket open for requests until the returned handle drops.
+    /// Hold a dial-in host's socket open for requests until the returned handle drops. The agent's
+    /// connection starts the host's preparation when the host is not ready yet.
     pub fn attach_agent(&self, host_id: &str) -> crate::remote::hub::Attached {
-        self.0.hub.attach(host_id)
+        let attached = self.0.hub.attach(host_id);
+        self.prepare_connected_agent(host_id);
+        attached
     }
     /// The host's agent: the installed artifact on a remote host, this binary locally,
     /// or the agent's own connection for a dial-in host.
@@ -440,20 +443,44 @@ impl StackboxManager {
         })
     }
     pub fn start_host_job(&self, id: &str, kind: HostJobKind) -> Result<HostJob> {
-        self.start_job(id, kind, false, false, false, None)
+        self.start_job(id, kind, JobScope::default(), None)
+    }
+    /// Starts a dial-in host's preparation when its agent connects, unless the host is ready or
+    /// already has a job: a ready host keeps its state, so a reconnect does not boot its test VM
+    /// again, and a connection that lands during a job adds none, so one job runs at a time. A
+    /// failed job leaves the host to the "환경 준비" button, as any other failure.
+    fn prepare_connected_agent(&self, host_id: &str) {
+        let Ok(stored) = self.stored_host(host_id) else {
+            return;
+        };
+        if stored.host.kind != HostKind::Agent || !self.0.hub.connected(host_id) {
+            return;
+        }
+        let scope = JobScope {
+            only_unready: true,
+            ..JobScope::default()
+        };
+        match self.start_job(host_id, HostJobKind::Prepare, scope, None) {
+            Ok(_) => {}
+            // The host is ready, or a job already runs on it.
+            Err(error) if error.is::<Conflict>() => {}
+            Err(error) => eprintln!(
+                "dial-in host '{host_id}' is connected; its preparation did not start: {error:#}"
+            ),
+        }
     }
     /// Binds PCI device `bdf` of host `id` to `vfio-pci` through the host's helper. Refused with a
     /// conflict while a stackbox holds the device, and with a bad request when the host reports
     /// it protected or has no helper installed. The job's inspection replaces the host's.
     pub fn bind_host_pci(&self, id: &str, bdf: &str) -> Result<HostJob> {
         let bdf = normalize_pci_request(bdf)?;
-        self.start_job(id, HostJobKind::PciBind, false, false, false, Some(bdf))
+        self.start_job(id, HostJobKind::PciBind, JobScope::default(), Some(bdf))
     }
     /// Gives PCI device `bdf` of host `id` back to its host driver, under the same checks as a bind
     /// except the protection: a device the helper holds as vfio-pci can always go back.
     pub fn unbind_host_pci(&self, id: &str, bdf: &str) -> Result<HostJob> {
         let bdf = normalize_pci_request(bdf)?;
-        self.start_job(id, HostJobKind::PciUnbind, false, false, false, Some(bdf))
+        self.start_job(id, HostJobKind::PciUnbind, JobScope::default(), Some(bdf))
     }
     /// Reinstalls the agent on every idle SSH host that runs another build's agent, when this
     /// build's artifact for the host is loaded. The daemon runs it at startup, so rebuilding
@@ -518,9 +545,12 @@ impl StackboxManager {
         self.start_job(
             id,
             HostJobKind::Purge,
-            delete_snapshots,
-            remote_files,
-            all_vms,
+            JobScope {
+                delete_snapshots,
+                remote_files,
+                all_vms,
+                only_unready: false,
+            },
             None,
         )
     }
@@ -528,11 +558,15 @@ impl StackboxManager {
         &self,
         id: &str,
         kind: HostJobKind,
-        delete_snapshots: bool,
-        remote_files: bool,
-        all_vms: bool,
+        scope: JobScope,
         pci_bdf: Option<String>,
     ) -> Result<HostJob> {
+        let JobScope {
+            delete_snapshots,
+            remote_files,
+            all_vms,
+            only_unready,
+        } = scope;
         let job = self.update(|state| {
             if !self.is_accepting() {
                 return Err(conflict("daemon is draining"));
@@ -552,6 +586,9 @@ impl StackboxManager {
                 .get_mut(id)
                 .ok_or_else(|| NotFound(format!("host '{id}'")))?
                 .host;
+            if only_unready && matches!(host.status, HostStatus::Ready) {
+                return Err(conflict("host is already ready"));
+            }
             if host.active_job.is_some() {
                 return Err(conflict("host already has an active job"));
             }
@@ -1522,6 +1559,16 @@ impl StackboxManager {
             Ok(())
         })
     }
+}
+
+/// What a host job does beyond its kind. `only_unready` refuses the job, as a conflict, when the
+/// host is already ready.
+#[derive(Clone, Copy, Default)]
+struct JobScope {
+    delete_snapshots: bool,
+    remote_files: bool,
+    all_vms: bool,
+    only_unready: bool,
 }
 
 /// Normalizes a PCI address from a request; a malformed one is a bad request.

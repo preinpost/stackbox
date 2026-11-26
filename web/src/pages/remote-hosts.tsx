@@ -583,7 +583,9 @@ export function RegisterAgentHostDialog({
                 있는 stackboxd 주소(예: <code>https://stackbox.example</code>)를
                 넣으세요. 호스트에는 같은 빌드의 <code>stackbox</code>
                 (Linux 서버는 <code>stackbox-agent connect</code>)이 필요합니다.
-                연결되면 이 호스트를 점검하고 환경 준비를 실행하세요.
+                호스트의 에이전트가 연결되면 환경 준비를 자동으로 시작합니다. 이미
+                준비된 호스트는 다시 시작하지 않으며, 실패하면 호스트 목록의
+                &lsquo;환경 준비&rsquo; 버튼으로 다시 시도하세요.
               </p>
               <div className="modal-footer justify-end">
                 <Dialog.Close render={<Button variant="primary" />}>

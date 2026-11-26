@@ -3888,6 +3888,174 @@ async fn purging_a_host_deletes_its_stackboxes_and_leftover_vms_then_unregisters
     settle(&manager).await;
 }
 
+/// Serves the API on a local port and registers dial-in host `id`. Returns the server, the URL
+/// its agent dials and the host's token.
+async fn serve_dial_in_host(
+    manager: &StackboxManager,
+    id: &str,
+) -> (tokio::task::JoinHandle<()>, String, String) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn({
+        let manager = manager.clone();
+        async move {
+            let _ = axum::serve(listener, api::router(manager, Some("api-token".into())))
+                .into_future()
+                .await;
+        }
+    });
+    let registered = manager
+        .register_agent_host(crate::remote::RegisterAgentHost { id: id.into() })
+        .unwrap();
+    let url = crate::remote::dial::connect_url(&format!("http://{address}")).unwrap();
+    (server, url, registered.token)
+}
+
+/// Dials the coordinator as an agent with its own fake runtime, and waits until host `id` shows it
+/// connected.
+async fn dial_in_agent(
+    manager: &StackboxManager,
+    dir: &std::path::Path,
+    url: &str,
+    token: &str,
+    id: &str,
+) -> tokio::task::JoinHandle<anyhow::Result<()>> {
+    let agent = Arc::new(crate::remote::agent::Agent::in_process(
+        dir.join(format!("{id}-agent")),
+        Arc::new(Fake::default()),
+    ));
+    let dialling = tokio::spawn({
+        let (url, token) = (url.to_owned(), token.to_owned());
+        async move { crate::remote::dial::serve(&url, &token, agent).await }
+    });
+    wait_until(|| manager.host(id).unwrap().connected).await;
+    dialling
+}
+
+/// Waits up to five seconds for `condition`.
+async fn wait_until(mut condition: impl FnMut() -> bool) {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !condition() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the condition came true in time");
+}
+
+/// The preparation jobs of host `id`.
+fn prepare_jobs(manager: &StackboxManager, id: &str) -> Vec<crate::remote::HostJob> {
+    manager
+        .host_jobs()
+        .unwrap()
+        .into_iter()
+        .filter(|job| job.host_id == id && matches!(job.kind, crate::remote::HostJobKind::Prepare))
+        .collect()
+}
+
+#[tokio::test]
+async fn a_dial_in_host_that_is_not_ready_starts_its_preparation_when_its_agent_connects() {
+    let dir = tempfile::tempdir().unwrap();
+    let manager = StackboxManager::with_backend(options(dir.path()), Arc::new(Fake::default()))
+        .await
+        .unwrap();
+    let (server, url, token) = serve_dial_in_host(&manager, "edge").await;
+    assert!(prepare_jobs(&manager, "edge").is_empty());
+    let dialling = dial_in_agent(&manager, dir.path(), &url, &token, "edge").await;
+    wait_until(|| !prepare_jobs(&manager, "edge").is_empty()).await;
+    let jobs = prepare_jobs(&manager, "edge");
+    assert_eq!(jobs.len(), 1, "{jobs:?}");
+    let finished = host_done(&manager, &jobs[0].id).await;
+    assert_eq!(
+        finished.status,
+        JobStatus::Succeeded,
+        "{:?}",
+        finished.error
+    );
+    dialling.abort();
+    server.abort();
+    settle(&manager).await;
+}
+
+#[tokio::test]
+async fn a_ready_dial_in_host_does_not_prepare_again_when_its_agent_reconnects() {
+    let dir = tempfile::tempdir().unwrap();
+    let manager = StackboxManager::with_backend(options(dir.path()), Arc::new(Fake::default()))
+        .await
+        .unwrap();
+    let (server, url, token) = serve_dial_in_host(&manager, "edge").await;
+    manager
+        .update(|state| {
+            state.hosts.get_mut("edge").unwrap().host.status = crate::remote::HostStatus::Ready;
+            Ok(())
+        })
+        .unwrap();
+    let first = dial_in_agent(&manager, dir.path(), &url, &token, "edge").await;
+    // Let the connection's decision land; nothing should start.
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert!(prepare_jobs(&manager, "edge").is_empty());
+    first.abort();
+    wait_until(|| !manager.host("edge").unwrap().connected).await;
+    let second = dial_in_agent(&manager, dir.path(), &url, &token, "edge").await;
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert!(prepare_jobs(&manager, "edge").is_empty());
+    assert!(matches!(
+        manager.host("edge").unwrap().status,
+        crate::remote::HostStatus::Ready
+    ));
+    second.abort();
+    server.abort();
+}
+
+#[tokio::test]
+async fn a_dial_in_host_with_a_job_running_gets_no_second_one_when_its_agent_connects() {
+    let dir = tempfile::tempdir().unwrap();
+    let manager = StackboxManager::with_backend(options(dir.path()), Arc::new(Fake::default()))
+        .await
+        .unwrap();
+    let (server, url, token) = serve_dial_in_host(&manager, "edge").await;
+    manager
+        .update(|state| {
+            let host = &mut state.hosts.get_mut("edge").unwrap().host;
+            host.status = crate::remote::HostStatus::Preparing;
+            host.active_job = Some("busy".into());
+            Ok(())
+        })
+        .unwrap();
+    let dialling = dial_in_agent(&manager, dir.path(), &url, &token, "edge").await;
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert!(prepare_jobs(&manager, "edge").is_empty());
+    assert_eq!(
+        manager.host("edge").unwrap().active_job.as_deref(),
+        Some("busy")
+    );
+    dialling.abort();
+    server.abort();
+}
+
+#[tokio::test]
+async fn a_burst_of_agent_connections_starts_one_preparation() {
+    let dir = tempfile::tempdir().unwrap();
+    let manager = StackboxManager::with_backend(options(dir.path()), Arc::new(Fake::default()))
+        .await
+        .unwrap();
+    manager
+        .register_agent_host(crate::remote::RegisterAgentHost { id: "edge".into() })
+        .unwrap();
+    // Each attach is one connection the hub accepts; the sockets stay open until the end.
+    let mut sockets = Vec::new();
+    for _ in 0..5 {
+        sockets.push(manager.attach_agent("edge"));
+    }
+    let jobs = prepare_jobs(&manager, "edge");
+    assert_eq!(jobs.len(), 1, "{jobs:?}");
+    // Dropping the sockets ends the job's only request, which then fails.
+    drop(sockets);
+    let finished = host_done(&manager, &jobs[0].id).await;
+    assert_eq!(finished.status, JobStatus::Failed);
+    assert_eq!(prepare_jobs(&manager, "edge").len(), 1);
+}
+
 #[tokio::test]
 async fn forgetting_removes_records_without_asking_the_host() {
     let dir = tempfile::tempdir().unwrap();
@@ -4321,11 +4489,10 @@ async fn a_dial_in_host_runs_stackboxes_and_shells_over_its_own_connection() {
     })
     .await
     .unwrap();
-    // A check asks the host's own agent; the coordinator inspects nothing itself.
-    let check = manager
-        .start_host_job("edge", crate::remote::HostJobKind::Check)
-        .unwrap();
-    let check = host_done(&manager, &check.id).await;
+    // The connection starts the host's preparation, which asks the host's own agent; the
+    // coordinator inspects nothing itself.
+    wait_until(|| !prepare_jobs(&manager, "edge").is_empty()).await;
+    let check = host_done(&manager, &prepare_jobs(&manager, "edge")[0].id).await;
     assert_eq!(check.status, JobStatus::Succeeded, "{:?}", check.error);
     assert!(manager.host("edge").unwrap().inspection.is_some());
     manager

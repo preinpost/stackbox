@@ -286,6 +286,12 @@ test("shows a dial-in host's token once, in the command to run on it", async () 
       "STACKBOX_AGENT_TOKEN=stackbox_secret-token stackbox agent connect <coordinator URL>",
     ),
   ).toBeTruthy();
+  // The dial-in host is prepared by the coordinator once its agent connects; no button is needed.
+  expect(
+    screen.getByText(
+      /호스트의 에이전트가 연결되면 환경 준비를 자동으로 시작합니다/,
+    ),
+  ).toBeTruthy();
   expect(onRegistered).toHaveBeenCalledWith("edge-01");
   await user.click(screen.getByRole("button", { name: "완료" }));
   await user.click(
