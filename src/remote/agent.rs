@@ -2679,6 +2679,98 @@ mod tests {
         ));
     }
 
+    /// The golden groups are shared by every stackbox on the host, so `RemoveGolden` deletes them
+    /// only when the agent itself finds no reservation: a coordinator's check before the call can
+    /// be overtaken by another coordinator's create.
+    #[tokio::test]
+    async fn remove_golden_is_refused_while_any_reservation_is_held() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = Arc::new(Fake::default());
+        let agent = agent_over(dir.path(), backend.clone());
+        let owner = uuid::Uuid::new_v4().to_string();
+        let other = uuid::Uuid::new_v4().to_string();
+        let emit: Emitter = Arc::new(|_| Ok(()));
+        agent
+            .execute(
+                request(&other, create("two", &uuid::Uuid::new_v4().to_string(), 15010)),
+                emit.clone(),
+            )
+            .await
+            .unwrap();
+        let error = agent
+            .execute(request(&owner, Operation::RemoveGolden), emit.clone())
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("in use"), "{error:#}");
+        assert_eq!(backend.golden_removals.load(Ordering::SeqCst), 0);
+        // With no reservation left on the host, the same request removes the groups.
+        agent
+            .execute(request(&owner, Operation::Purge), emit.clone())
+            .await
+            .unwrap();
+        assert!(matches!(
+            agent
+                .execute(request(&owner, Operation::RemoveGolden), emit)
+                .await
+                .unwrap(),
+            Reply::GoldenRemoved { groups: 1 }
+        ));
+        assert_eq!(backend.golden_removals.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn remove_golden_fails_safe_while_a_create_or_purge_holds_the_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = Arc::new(Fake::default());
+        let agent = agent_over(dir.path(), backend.clone());
+        let owner = uuid::Uuid::new_v4().to_string();
+        let emit: Emitter = Arc::new(|_| Ok(()));
+        let held = lock(dir.path(), "create.lock").unwrap();
+        let error = agent
+            .execute(request(&owner, Operation::RemoveGolden), emit.clone())
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("already running"), "{error:#}");
+        assert_eq!(backend.golden_removals.load(Ordering::SeqCst), 0);
+        drop(held);
+    }
+
+    /// What a coordinator built before `PurgeOwn` reads as a purge reply: `Reply` denies unknown
+    /// fields, so any extra field makes it refuse the reply after the VMs are already gone.
+    #[derive(serde::Deserialize)]
+    #[serde(tag = "result", rename_all = "snake_case", deny_unknown_fields)]
+    #[allow(dead_code)]
+    enum OldReply {
+        Purged { stackboxes: usize },
+    }
+
+    #[tokio::test]
+    async fn purge_replies_keep_the_shape_an_older_coordinator_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        let backend = Arc::new(Fake::default());
+        let agent = agent_over(dir.path(), backend.clone());
+        let owner = uuid::Uuid::new_v4().to_string();
+        let other = uuid::Uuid::new_v4().to_string();
+        let emit: Emitter = Arc::new(|_| Ok(()));
+        for (who, id, base) in [(&owner, "one", 15000), (&other, "two", 15010)] {
+            agent
+                .execute(
+                    request(who, create(id, &uuid::Uuid::new_v4().to_string(), base)),
+                    emit.clone(),
+                )
+                .await
+                .unwrap();
+        }
+        let reply = agent
+            .execute(request(&owner, Operation::Purge), emit)
+            .await
+            .unwrap();
+        let json = serde_json::to_string(&reply).unwrap();
+        assert_eq!(json, r#"{"result":"purged","stackboxes":2}"#);
+        let old: OldReply = serde_json::from_str(&json).unwrap();
+        assert!(matches!(old, OldReply::Purged { stackboxes: 2 }));
+    }
+
     #[tokio::test]
     async fn shell_relays_frames_for_the_owner_only_and_ends_at_eof() {
         let dir = tempfile::tempdir().unwrap();
