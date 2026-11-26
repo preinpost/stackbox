@@ -2473,7 +2473,7 @@ mod tests {
                 memory_budget_mib: 20_000,
                 available_mib: 32_000,
                 virtualization: true,
-                probe_ports: true,
+                probe_ports: false,
             },
             runner: Runner::Inline,
             pci_helper: crate::remote::pci::sudo_command(),
@@ -2517,7 +2517,8 @@ mod tests {
         ));
     }
 
-    /// An agent over `dir` whose backend holds the VMs of every coordinator it serves.
+    /// An agent over `dir` whose backend holds the VMs of every coordinator it serves. Its tests
+    /// run in parallel and share the fixed port bases below, so nothing here binds those ports.
     fn agent_over(dir: &std::path::Path, backend: Arc<Fake>) -> Agent {
         Agent {
             dir: dir.to_path_buf(),
@@ -2526,7 +2527,7 @@ mod tests {
                 memory_budget_mib: 40_000,
                 available_mib: 64_000,
                 virtualization: true,
-                probe_ports: true,
+                probe_ports: false,
             },
             runner: Runner::Inline,
             pci_helper: crate::remote::pci::sudo_command(),
