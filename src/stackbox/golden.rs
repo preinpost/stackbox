@@ -3,10 +3,11 @@
 //! host the first time a stackbox needs it, so hosts need no Docker and a changed recipe
 //! simply produces a snapshot under a new name.
 
+use std::future::Future;
 use std::time::Duration;
 
-use anyhow::{Context, Result};
-use microsandbox::snapshot::{Checkpoint, SnapshotReference};
+use anyhow::{Context, Result, ensure};
+use microsandbox::snapshot::{Checkpoint, Snapshot, SnapshotReference};
 use microsandbox::{MicrosandboxError, NetworkPolicy, NetworkProfile, Sandbox};
 use sha2::{Digest, Sha256};
 
@@ -91,11 +92,128 @@ pub async fn ensure(os: &GuestOs, spec: &NodeSpec) -> Result<String> {
     if available(&reference).await? {
         return Ok(reference);
     }
+    let (group, _) = reference
+        .split_once(':')
+        .context("golden reference has no group")?;
+    clear_leftover_group(group).await;
     eprintln!("building golden image {reference} from {}", os.base_image);
     build(os, spec, &reference)
         .await
         .with_context(|| format!("build golden image {reference}"))?;
     Ok(reference)
+}
+
+/// What stackbox needs from msb's snapshot groups. The cleanup decision is written against this
+/// trait so it can be tested without a runtime.
+trait SnapshotGroups {
+    /// The number of snapshots in `group`, or `None` when no such group exists.
+    fn member_count(&self, group: &str) -> impl Future<Output = Result<Option<u64>>> + Send;
+    /// Remove the whole group. msb refuses while a capture holds the group's writer lease.
+    fn remove(&self, group: &str) -> impl Future<Output = Result<()>> + Send;
+}
+
+/// msb's snapshot groups on this host.
+struct MsbGroups;
+
+impl SnapshotGroups for MsbGroups {
+    async fn member_count(&self, group: &str) -> Result<Option<u64>> {
+        match Snapshot::get(group).await {
+            Ok(snapshot) => {
+                let members = snapshot
+                    .checkpoints()
+                    .await
+                    .with_context(|| format!("list the snapshots of {group}"))?;
+                Ok(Some(members.len() as u64))
+            }
+            Err(MicrosandboxError::SnapshotNotFound(_)) => Ok(None),
+            Err(error) => Err(error).with_context(|| format!("look up snapshot group {group}")),
+        }
+    }
+
+    async fn remove(&self, group: &str) -> Result<()> {
+        let snapshot = Snapshot::get(group)
+            .await
+            .with_context(|| format!("look up snapshot group {group}"))?;
+        let removed = snapshot
+            .remove()
+            .await
+            .with_context(|| format!("remove snapshot group {group}"))?;
+        // Checked on the lookup; a snapshot appearing since would be deleted here.
+        ensure!(
+            removed.removed.is_empty(),
+            "snapshot group {group} held {} snapshot(s) when removed",
+            removed.removed.len()
+        );
+        Ok(())
+    }
+}
+
+#[derive(Debug, PartialEq)]
+enum Cleanup {
+    /// No group under that name.
+    Absent,
+    /// The group holds snapshots, so it stays.
+    Kept(u64),
+    Removed,
+    /// The group could not be read, so it stays: an unknown state is never removed.
+    LookupFailed(String),
+    RemoveFailed(String),
+}
+
+impl Cleanup {
+    /// The line to log, or `None` when there was nothing to do.
+    fn log_line(&self, group: &str) -> Option<String> {
+        Some(match self {
+            Cleanup::Absent => return None,
+            Cleanup::Kept(count) => {
+                format!("kept snapshot group {group}: it holds {count} snapshot(s)")
+            }
+            Cleanup::Removed => format!("removed empty snapshot group {group}"),
+            Cleanup::LookupFailed(error) => {
+                format!("left snapshot group {group} alone: lookup failed: {error}")
+            }
+            Cleanup::RemoveFailed(error) => {
+                format!("could not remove empty snapshot group {group}: {error}")
+            }
+        })
+    }
+}
+
+/// Remove `group` only when it exists and holds no snapshots. Any uncertainty keeps it.
+async fn clear_empty_group(groups: &impl SnapshotGroups, group: &str) -> Cleanup {
+    match groups.member_count(group).await {
+        Ok(None) => Cleanup::Absent,
+        Ok(Some(0)) => match groups.remove(group).await {
+            Ok(()) => Cleanup::Removed,
+            Err(error) => Cleanup::RemoveFailed(format!("{error:#}")),
+        },
+        Ok(Some(count)) => Cleanup::Kept(count),
+        Err(error) => Cleanup::LookupFailed(format!("{error:#}")),
+    }
+}
+
+/// The error for a failed capture into `group`. An empty group left behind is cleared first so
+/// the same recipe can be built again. The returned error is always the capture error; the
+/// cleanup outcome is only logged.
+async fn fail_capture(
+    groups: &impl SnapshotGroups,
+    group: &str,
+    error: MicrosandboxError,
+    reference: &str,
+) -> anyhow::Error {
+    let cleanup = clear_empty_group(groups, group).await;
+    if let Some(line) = cleanup.log_line(group) {
+        eprintln!("{line}");
+    }
+    capture_failure(error, reference)
+}
+
+/// An empty group from an earlier failed capture is bound to a sandbox that no longer exists, so
+/// the next capture into it is refused before it starts. Clear it before building.
+async fn clear_leftover_group(group: &str) {
+    if let Some(line) = clear_empty_group(&MsbGroups, group).await.log_line(group) {
+        eprintln!("{line}");
+    }
 }
 
 /// Explain a capture failure. A group bound to another sandbox instance is left by an earlier
@@ -147,14 +265,16 @@ async fn build(os: &GuestOs, spec: &NodeSpec, reference: &str) -> Result<()> {
         let (group, snapshot) = reference
             .split_once(':')
             .context("golden reference has no group")?;
-        Checkpoint::builder(snapshot)
+        let captured = Checkpoint::builder(snapshot)
             .group(group)
             .from_sandbox(&name)
             .label("stackbox.golden.os", os.id)
             .label("stackbox.golden.base", os.base_image)
             .create()
-            .await
-            .map_err(|error| capture_failure(error, reference))?;
+            .await;
+        if let Err(error) = captured {
+            return Err(fail_capture(&MsbGroups, group, error, reference).await);
+        }
         Ok::<_, anyhow::Error>(())
     }
     .await;
@@ -231,6 +351,130 @@ mod tests {
             ..ALL_IN_ONE
         };
         assert_ne!(reference(&ROCKY10, &smaller), base);
+    }
+
+    /// Scripted msb group state. Counters are atomics so the fake stays `Send + Sync`.
+    struct FakeGroups {
+        lookup: std::result::Result<Option<u64>, &'static str>,
+        remove: std::result::Result<(), &'static str>,
+        removals: std::sync::atomic::AtomicU32,
+    }
+
+    impl FakeGroups {
+        fn new(
+            lookup: std::result::Result<Option<u64>, &'static str>,
+            remove: std::result::Result<(), &'static str>,
+        ) -> Self {
+            Self {
+                lookup,
+                remove,
+                removals: std::sync::atomic::AtomicU32::new(0),
+            }
+        }
+
+        fn removals(&self) -> u32 {
+            self.removals.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    impl SnapshotGroups for FakeGroups {
+        async fn member_count(&self, _group: &str) -> Result<Option<u64>> {
+            self.lookup.map_err(anyhow::Error::msg)
+        }
+
+        async fn remove(&self, _group: &str) -> Result<()> {
+            self.removals
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.remove.map_err(anyhow::Error::msg)
+        }
+    }
+
+    #[tokio::test]
+    async fn an_empty_group_is_removed() {
+        let groups = FakeGroups::new(Ok(Some(0)), Ok(()));
+        assert_eq!(clear_empty_group(&groups, "g").await, Cleanup::Removed);
+        assert_eq!(groups.removals(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_group_with_snapshots_is_kept() {
+        let groups = FakeGroups::new(Ok(Some(2)), Ok(()));
+        assert_eq!(clear_empty_group(&groups, "g").await, Cleanup::Kept(2));
+        assert_eq!(groups.removals(), 0);
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_group_is_kept() {
+        // Fail safe: an uncertain lookup must never lead to a removal.
+        let groups = FakeGroups::new(Err("connection reset"), Ok(()));
+        let cleanup = clear_empty_group(&groups, "g").await;
+        assert!(
+            matches!(cleanup, Cleanup::LookupFailed(ref m) if m.contains("connection reset")),
+            "{cleanup:?}"
+        );
+        assert_eq!(groups.removals(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_missing_group_needs_nothing() {
+        let groups = FakeGroups::new(Ok(None), Ok(()));
+        assert_eq!(clear_empty_group(&groups, "g").await, Cleanup::Absent);
+        assert_eq!(groups.removals(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_failed_removal_is_reported() {
+        let groups = FakeGroups::new(Ok(Some(0)), Err("active writer"));
+        let cleanup = clear_empty_group(&groups, "g").await;
+        assert!(
+            matches!(cleanup, Cleanup::RemoveFailed(ref m) if m.contains("active writer")),
+            "{cleanup:?}"
+        );
+        assert_eq!(groups.removals(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_failed_cleanup_keeps_the_capture_error() {
+        let groups = FakeGroups::new(Ok(Some(0)), Err("active writer"));
+        let error = fail_capture(
+            &groups,
+            "g",
+            MicrosandboxError::InvalidConfig("disk full".into()),
+            "g:h",
+        )
+        .await;
+        let text = format!("{error:#}");
+        assert!(text.contains("disk full"), "{text}");
+        assert!(text.contains("capture the golden snapshot"), "{text}");
+        assert!(!text.contains("active writer"), "{text}");
+        assert_eq!(groups.removals(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_successful_cleanup_keeps_the_capture_error() {
+        let groups = FakeGroups::new(Ok(Some(0)), Ok(()));
+        let error = fail_capture(
+            &groups,
+            "g",
+            MicrosandboxError::InvalidConfig("disk full".into()),
+            "g:h",
+        )
+        .await;
+        assert!(format!("{error:#}").contains("disk full"));
+        assert_eq!(groups.removals(), 1);
+    }
+
+    #[test]
+    fn cleanup_outcomes_have_log_lines_only_when_something_happened() {
+        assert!(Cleanup::Absent.log_line("g").is_none());
+        assert!(Cleanup::Removed.log_line("g").unwrap().contains("removed"));
+        assert!(Cleanup::Kept(1).log_line("g").unwrap().contains("kept"));
+        assert!(
+            Cleanup::RemoveFailed("x".into())
+                .log_line("g")
+                .unwrap()
+                .contains("x")
+        );
     }
 
     #[test]
