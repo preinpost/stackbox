@@ -1456,7 +1456,7 @@ impl StackboxManager {
                         "golden snapshot groups (the agent gave an unexpected reply; check the host's msb snapshot groups named stackbox-golden-*)".into(),
                     ),
                     Err(error) => left.push(format!(
-                        "golden snapshot groups (kept: another stackbox is using the host, or an operation is running; {error:#}); check the host's msb snapshot groups named stackbox-golden-*"
+                        "golden snapshot groups (kept: {error:#}); check the host's msb snapshot groups named stackbox-golden-*"
                     )),
                 }
             }

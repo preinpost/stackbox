@@ -1898,6 +1898,99 @@ mod cleanup_tests {
     }
 
     #[test]
+    fn a_linked_local_directory_is_not_followed_into_the_state_directory() {
+        // `$HOME/.local` is a link: `rm -rf` through it would empty the directory it points to.
+        let dir = tempfile::tempdir().unwrap();
+        let elsewhere = dir.path().join("elsewhere");
+        std::fs::create_dir_all(elsewhere.join("share/stackbox")).unwrap();
+        std::fs::write(elsewhere.join("share/stackbox/keep.txt"), "mine").unwrap();
+        std::os::unix::fs::symlink(&elsewhere, dir.path().join(".local")).unwrap();
+        let output = run_cleanup(dir.path(), "", false);
+        assert!(
+            output.contains("skipped") && output.contains("path goes through a symbolic link"),
+            "{output}"
+        );
+        assert!(
+            elsewhere.join("share/stackbox/keep.txt").exists(),
+            "{output}"
+        );
+    }
+
+    #[test]
+    fn a_linked_share_directory_is_not_followed_into_the_state_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let elsewhere = dir.path().join("elsewhere");
+        std::fs::create_dir_all(elsewhere.join("stackbox")).unwrap();
+        std::fs::write(elsewhere.join("stackbox/keep.txt"), "mine").unwrap();
+        std::fs::create_dir_all(dir.path().join(".local")).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, dir.path().join(".local/share")).unwrap();
+        let output = run_cleanup(dir.path(), "", false);
+        assert!(
+            output.contains("path goes through a symbolic link"),
+            "{output}"
+        );
+        assert!(elsewhere.join("stackbox/keep.txt").exists(), "{output}");
+    }
+
+    #[test]
+    fn a_linked_msb_lib_directory_keeps_the_library_it_leads_to() {
+        let dir = tempfile::tempdir().unwrap();
+        host(dir.path());
+        marker(dir.path(), OWN_MARKER);
+        let lib = dir.path().join(".microsandbox/lib");
+        let elsewhere = dir.path().join("elsewhere-lib");
+        std::fs::rename(&lib, &elsewhere).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, &lib).unwrap();
+        let output = run_cleanup(dir.path(), "", false);
+        assert!(
+            output.contains("path goes through a symbolic link"),
+            "{output}"
+        );
+        assert!(elsewhere.join("libkrunfw.so.1.2.3").exists(), "{output}");
+        // msb itself is not behind a link, so it still goes.
+        assert!(
+            !dir.path().join(".microsandbox/bin/msb").exists(),
+            "{output}"
+        );
+    }
+
+    #[test]
+    fn a_linked_msb_bin_directory_is_neither_run_nor_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        host(dir.path());
+        marker(dir.path(), OWN_MARKER);
+        let bin = dir.path().join(".microsandbox/bin");
+        let elsewhere = dir.path().join("elsewhere-bin");
+        std::fs::rename(&bin, &elsewhere).unwrap();
+        std::os::unix::fs::symlink(&elsewhere, &bin).unwrap();
+        let output = run_cleanup(dir.path(), "", false);
+        assert!(
+            output.contains("path goes through a symbolic link"),
+            "{output}"
+        );
+        assert!(elsewhere.join("msb").exists(), "{output}");
+        assert!(
+            dir.path()
+                .join(".microsandbox/lib/libkrunfw.so.1.2.3")
+                .exists(),
+            "{output}"
+        );
+    }
+
+    #[test]
+    fn a_home_that_is_itself_a_link_is_used_as_is() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real-home");
+        host(&real);
+        marker(&real, OWN_MARKER);
+        let home = dir.path().join("home-link");
+        std::os::unix::fs::symlink(&real, &home).unwrap();
+        let output = run_cleanup(&home, "", false);
+        assert!(output.contains("removed msb and libkrunfw"), "{output}");
+        assert!(!real.join(".local/share/stackbox").exists(), "{output}");
+    }
+
+    #[test]
     fn the_cleanup_never_removes_the_whole_msb_home() {
         let script = cleanup_script();
         assert!(!script.contains(".microsandbox\""), "{script}");

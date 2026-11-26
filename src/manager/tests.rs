@@ -9625,6 +9625,8 @@ async fn a_failed_file_cleanup_still_unregisters_and_names_what_is_left() {
         .unwrap_or_else(|| panic!("{messages:?}"));
     assert!(left.contains("golden snapshot groups"), "{left}");
     assert!(left.contains("msb refused to list"), "{left}");
+    // The agent's error is the cause: a failing msb must not be blamed on another stackbox.
+    assert!(!left.contains("another stackbox"), "{left}");
     assert_eq!(messages.last().map(String::as_str), Some("Host removed"));
 }
 
