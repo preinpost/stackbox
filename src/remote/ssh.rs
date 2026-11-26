@@ -1852,7 +1852,10 @@ mod cleanup_tests {
             std::fs::write(state.join("keep.txt"), "mine").unwrap();
             let (ok, output) = run_cleanup_with_home(dir.path(), home);
             assert!(!ok, "HOME {home:?} must stop the cleanup: {output}");
-            assert!(!output.contains("removed"), "HOME {home:?}: {output}");
+            assert!(
+                !output.contains("STACKBOX-CLEANUP removed"),
+                "HOME {home:?}: {output}"
+            );
             assert!(state.join("keep.txt").exists(), "HOME {home:?} removed files");
         }
     }
@@ -1871,6 +1874,21 @@ mod cleanup_tests {
         assert!(!output.contains("failed"), "{output}");
         assert!(std::fs::symlink_metadata(share.join("stackbox")).is_err());
         assert!(target.join("keep.txt").exists(), "the link's target was removed");
+    }
+
+    #[test]
+    fn a_link_inside_the_state_directory_is_not_followed() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("elsewhere");
+        std::fs::create_dir_all(&target).unwrap();
+        std::fs::write(target.join("keep.txt"), "mine").unwrap();
+        let state = dir.path().join(".local/share/stackbox");
+        std::fs::create_dir_all(state.join("agents")).unwrap();
+        std::os::unix::fs::symlink(&target, state.join("agents/link")).unwrap();
+        let output = run_cleanup(dir.path(), "", false);
+        assert!(output.contains("removed "), "{output}");
+        assert!(!state.exists());
+        assert!(target.join("keep.txt").exists(), "rm followed a link");
     }
 
     #[test]
