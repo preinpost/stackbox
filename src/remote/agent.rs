@@ -896,7 +896,12 @@ impl Agent {
             let _create_lock = lock(&self.dir, "create.lock")?;
             let held = {
                 let registry = LockedRegistry::open(&self.dir)?;
-                registry.state.stackboxes.values().filter(|r| !r.deleted).count()
+                registry
+                    .state
+                    .stackboxes
+                    .values()
+                    .filter(|r| !r.deleted)
+                    .count()
             };
             ensure!(
                 held == 0,
@@ -2666,9 +2671,9 @@ mod tests {
                 .await
                 .unwrap(),
             Reply::ScopedPurged {
-                    stackboxes: 1,
-                    kept_for_others: 0
-                }
+                stackboxes: 1,
+                kept_for_others: 0
+            }
         ));
     }
 
@@ -2704,9 +2709,9 @@ mod tests {
                 .await
                 .unwrap(),
             Reply::ScopedPurged {
-                    stackboxes: 1,
-                    kept_for_others: 0
-                }
+                stackboxes: 1,
+                kept_for_others: 0
+            }
         ));
     }
 
@@ -2723,7 +2728,10 @@ mod tests {
         let emit: Emitter = Arc::new(|_| Ok(()));
         agent
             .execute(
-                request(&other, create("two", &uuid::Uuid::new_v4().to_string(), 15010)),
+                request(
+                    &other,
+                    create("two", &uuid::Uuid::new_v4().to_string(), 15010),
+                ),
                 emit.clone(),
             )
             .await

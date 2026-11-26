@@ -1856,7 +1856,10 @@ mod cleanup_tests {
                 !output.contains("STACKBOX-CLEANUP removed"),
                 "HOME {home:?}: {output}"
             );
-            assert!(state.join("keep.txt").exists(), "HOME {home:?} removed files");
+            assert!(
+                state.join("keep.txt").exists(),
+                "HOME {home:?} removed files"
+            );
         }
     }
 
@@ -1873,7 +1876,10 @@ mod cleanup_tests {
         assert!(output.contains("removed "), "{output}");
         assert!(!output.contains("failed"), "{output}");
         assert!(std::fs::symlink_metadata(share.join("stackbox")).is_err());
-        assert!(target.join("keep.txt").exists(), "the link's target was removed");
+        assert!(
+            target.join("keep.txt").exists(),
+            "the link's target was removed"
+        );
     }
 
     #[test]
