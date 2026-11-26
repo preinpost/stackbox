@@ -44,6 +44,8 @@ pub trait Backend: Send + Sync + 'static {
         sink: EventSink,
     ) -> BoxFuture<'_, Result<()>>;
     fn delete(&self, id: String) -> BoxFuture<'_, Result<()>>;
+    /// Delete the golden snapshot groups this host holds, under the golden build lock; the count.
+    fn remove_golden(&self) -> BoxFuture<'_, Result<usize>>;
     /// Create this host's part of a stackbox that spans hosts.
     fn create_share(
         &self,
@@ -474,6 +476,9 @@ impl Backend for MicrosandboxBackend {
             )
             .await
         })
+    }
+    fn remove_golden(&self) -> BoxFuture<'_, Result<usize>> {
+        Box::pin(crate::stackbox::golden::remove_all())
     }
     fn delete(&self, id: String) -> BoxFuture<'_, Result<()>> {
         Box::pin(async move {

@@ -106,6 +106,10 @@ pub fn router(manager: StackboxManager, token: Option<String>) -> Router {
             "/api/v1/hosts/{id}/pci/helper-install",
             get(host_pci_helper_install),
         )
+        .route(
+            "/api/v1/hosts/{id}/pci/helper-remove",
+            get(host_pci_helper_remove),
+        )
         .route("/api/v1/host-jobs", get(host_jobs))
         .route("/api/v1/host-jobs/{id}", get(host_job))
         .route("/api/v1/catalog", get(catalog_handler))
@@ -514,6 +518,27 @@ struct UnregisterQuery {
     /// with their copies on other hosts. The local host also keeps imported snapshots.
     #[serde(default)]
     snapshots: bool,
+    /// With purge, also remove what stackbox put on the host outside its VMs: the golden snapshot
+    /// groups, msb when stackbox installed it on an empty host, and `~/.local/share/stackbox`.
+    /// The VMs are removed first; whatever cannot be removed is reported on the job.
+    #[serde(default)]
+    remote_files: bool,
+}
+/// Checks the query flags that only mean something together with `purge`.
+fn unregister_flags(query: &UnregisterQuery) -> Result<(), ApiError> {
+    if query.snapshots && !query.purge {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "snapshots=true needs purge=true".into(),
+        ));
+    }
+    if query.remote_files && !query.purge {
+        return Err(ApiError(
+            StatusCode::BAD_REQUEST,
+            "remote_files=true needs purge=true".into(),
+        ));
+    }
+    Ok(())
 }
 #[utoipa::path(delete, path="/api/v1/hosts/{id}", params(("id"=String, Path), UnregisterQuery), responses((status=200, description="Unregistered; records and credentials only", body=RemovedHost), (status=202, description="purge=true: host job that deletes the stackboxes, their VMs, with snapshots=true the snapshots, and then the host", body=HostJob), (status=400, body=ErrorBody), (status=409, body=ErrorBody)))]
 async fn unregister_host(
@@ -521,16 +546,13 @@ async fn unregister_host(
     Path(id): Path<String>,
     Query(query): Query<UnregisterQuery>,
 ) -> Result<Response, ApiError> {
+    unregister_flags(&query)?;
     if query.purge {
-        return Ok(accepted_host(
-            app.manager.start_purge(&id, query.snapshots)?,
-        ));
-    }
-    if query.snapshots {
-        return Err(ApiError(
-            StatusCode::BAD_REQUEST,
-            "snapshots=true needs purge=true".into(),
-        ));
+        return Ok(accepted_host(app.manager.start_purge(
+            &id,
+            query.snapshots,
+            query.remote_files,
+        )?));
     }
     app.manager.unregister_host(&id)?;
     Ok(Json(RemovedHost { id }).into_response())
@@ -588,6 +610,15 @@ async fn host_pci_helper_install(
     Ok(Json(
         app.manager.pci_helper_install(&id, query.user.as_deref())?,
     ))
+}
+/// The self-contained script that removes the stackbox-vfio-bind helper and its sudoers rule from
+/// the host, for the portal to copy and the operator to run there. Nothing runs it automatically.
+#[utoipa::path(get, path="/api/v1/hosts/{id}/pci/helper-remove", params(("id"=String, Path)), responses((status=200, body=crate::remote::pci::PciHelperRemove), (status=404, body=ErrorBody)))]
+async fn host_pci_helper_remove(
+    State(app): State<App>,
+    Path(id): Path<String>,
+) -> Result<Json<crate::remote::pci::PciHelperRemove>, ApiError> {
+    Ok(Json(app.manager.pci_helper_remove(&id)?))
 }
 #[utoipa::path(post, path="/api/v1/hosts/{id}/prepare", params(("id"=String, Path)), responses((status=202, body=HostJob), (status=409, body=ErrorBody)))]
 async fn prepare_host(
@@ -1239,7 +1270,7 @@ async fn relay_shell(
 }
 
 #[derive(OpenApi)]
-#[openapi(paths(host, remote_hosts, remote_host, host_fingerprint, test_connection, register_host, register_local_host, register_agent_host, update_host_credentials, unregister_host, check_host, prepare_host, install_agent, bind_host_pci, unbind_host_pci, host_pci_helper_install, host_jobs, host_job, catalog_handler, plan_handler, list, detail, create, releases, release_plan, create_release, deploy, add_compute, instances, gpu_load, set_gpu_load, clear_gpu_load, gpu_guest_script, gpu_user_data, settle, delete, endpoints, set_relay_exposure, remove_relay_exposure, set_faults, logs, log_stream, freeze, snapshots, snapshot, delete_snapshot, delete_snapshot_copy, export_snapshot, import_snapshot, buckets, bucket, register_bucket, update_bucket, unregister_bucket, test_bucket, check_bucket, bucket_objects, rebuild_bucket_index, relay_status, set_relay, remove_relay, update_cloudflared, jobs, job), components(schemas(ErrorBody)), modifiers(&Security))]
+#[openapi(paths(host, remote_hosts, remote_host, host_fingerprint, test_connection, register_host, register_local_host, register_agent_host, update_host_credentials, unregister_host, check_host, prepare_host, install_agent, bind_host_pci, unbind_host_pci, host_pci_helper_install, host_pci_helper_remove, host_jobs, host_job, catalog_handler, plan_handler, list, detail, create, releases, release_plan, create_release, deploy, add_compute, instances, gpu_load, set_gpu_load, clear_gpu_load, gpu_guest_script, gpu_user_data, settle, delete, endpoints, set_relay_exposure, remove_relay_exposure, set_faults, logs, log_stream, freeze, snapshots, snapshot, delete_snapshot, delete_snapshot_copy, export_snapshot, import_snapshot, buckets, bucket, register_bucket, update_bucket, unregister_bucket, test_bucket, check_bucket, bucket_objects, rebuild_bucket_index, relay_status, set_relay, remove_relay, update_cloudflared, jobs, job), components(schemas(ErrorBody)), modifiers(&Security))]
 struct ApiDoc;
 struct Security;
 impl utoipa::Modify for Security {
@@ -1357,5 +1388,38 @@ mod tests {
                 .is_err()
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod unregister_query_tests {
+    use super::*;
+
+    fn query(purge: bool, snapshots: bool, remote_files: bool) -> UnregisterQuery {
+        UnregisterQuery {
+            purge,
+            snapshots,
+            remote_files,
+        }
+    }
+
+    #[test]
+    fn remote_files_needs_a_purge() {
+        let error = unregister_flags(&query(false, false, true)).unwrap_err();
+        assert_eq!(error.0, StatusCode::BAD_REQUEST);
+        assert!(error.1.contains("remote_files=true needs purge=true"));
+        // The same applies with snapshots, as before.
+        assert_eq!(
+            unregister_flags(&query(false, true, false)).unwrap_err().0,
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    #[test]
+    fn remote_files_is_accepted_with_a_purge_and_with_nothing_else() {
+        assert!(unregister_flags(&query(true, false, true)).is_ok());
+        assert!(unregister_flags(&query(true, true, true)).is_ok());
+        assert!(unregister_flags(&query(false, false, false)).is_ok());
+        assert!(unregister_flags(&query(true, false, false)).is_ok());
     }
 }

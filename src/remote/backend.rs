@@ -274,6 +274,14 @@ impl AgentBackend {
     }
 }
 impl Backend for AgentBackend {
+    fn remove_golden(&self) -> BoxFuture<'_, Result<usize>> {
+        Box::pin(async {
+            match self.call(Operation::RemoveGolden, None).await? {
+                Reply::GoldenRemoved { groups } => Ok(groups),
+                _ => bail!("unexpected stackbox-agent response"),
+            }
+        })
+    }
     fn scan(&self) -> BoxFuture<'_, Result<BTreeMap<String, Vec<StackboxNode>>>> {
         Box::pin(async {
             match self.call(Operation::Scan, None).await? {

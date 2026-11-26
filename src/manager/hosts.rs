@@ -8,6 +8,10 @@ use crate::remote::{
     ssh::Session,
 };
 
+/// Separates the items of a "Left on the host" event; the web portal splits on it too. Items
+/// may hold ";" and "(...)", so the separator is none of those.
+const LEFT_SEPARATOR: &str = " | ";
+
 impl StackboxManager {
     pub fn hosts(&self) -> Result<Vec<RemoteHost>> {
         let store = self
@@ -399,6 +403,16 @@ impl StackboxManager {
     }
     /// The self-contained script that installs the stackbox-vfio-bind helper on host `id` for
     /// `user`, the account the host's agent runs `sudo -n` as: an SSH host's login user by default.
+    /// The script that removes the stackbox-vfio-bind helper and its sudoers rule from host `id`.
+    /// It is only shown to the operator; nothing runs it on the host.
+    pub fn pci_helper_remove(&self, id: &str) -> Result<crate::remote::pci::PciHelperRemove> {
+        self.stored_host(id)?;
+        Ok(crate::remote::pci::PciHelperRemove {
+            script: crate::remote::pci::render_vfio_helper_remove_script(),
+            helper_path: crate::remote::pci::HELPER_PATH.into(),
+            sudoers_path: crate::remote::pci::SUDOERS_PATH.into(),
+        })
+    }
     pub fn pci_helper_install(
         &self,
         id: &str,
@@ -426,20 +440,20 @@ impl StackboxManager {
         })
     }
     pub fn start_host_job(&self, id: &str, kind: HostJobKind) -> Result<HostJob> {
-        self.start_job(id, kind, false, None)
+        self.start_job(id, kind, false, false, None)
     }
     /// Binds PCI device `bdf` of host `id` to `vfio-pci` through the host's helper. Refused with a
     /// conflict while a stackbox holds the device, and with a bad request when the host reports
     /// it protected or has no helper installed. The job's inspection replaces the host's.
     pub fn bind_host_pci(&self, id: &str, bdf: &str) -> Result<HostJob> {
         let bdf = normalize_pci_request(bdf)?;
-        self.start_job(id, HostJobKind::PciBind, false, Some(bdf))
+        self.start_job(id, HostJobKind::PciBind, false, false, Some(bdf))
     }
     /// Gives PCI device `bdf` of host `id` back to its host driver, under the same checks as a bind
     /// except the protection: a device the helper holds as vfio-pci can always go back.
     pub fn unbind_host_pci(&self, id: &str, bdf: &str) -> Result<HostJob> {
         let bdf = normalize_pci_request(bdf)?;
-        self.start_job(id, HostJobKind::PciUnbind, false, Some(bdf))
+        self.start_job(id, HostJobKind::PciUnbind, false, false, Some(bdf))
     }
     /// Reinstalls the agent on every idle SSH host that runs another build's agent, when this
     /// build's artifact for the host is loaded. The daemon runs it at startup, so rebuilding
@@ -489,14 +503,22 @@ impl StackboxManager {
     /// Purges the host; `delete_snapshots` also deletes the snapshots whose original it keeps,
     /// with their copies on other hosts. Copies of other snapshots on it are forgotten either
     /// way, and originals left without the flag stay recorded until the host returns.
-    pub fn start_purge(&self, id: &str, delete_snapshots: bool) -> Result<HostJob> {
-        self.start_job(id, HostJobKind::Purge, delete_snapshots, None)
+    /// `remote_files` also removes what stackbox put on the host outside its VMs (the golden
+    /// groups, msb when stackbox installed it, and the stackbox directory); see `remove_host_files`.
+    pub fn start_purge(
+        &self,
+        id: &str,
+        delete_snapshots: bool,
+        remote_files: bool,
+    ) -> Result<HostJob> {
+        self.start_job(id, HostJobKind::Purge, delete_snapshots, remote_files, None)
     }
     fn start_job(
         &self,
         id: &str,
         kind: HostJobKind,
         delete_snapshots: bool,
+        remote_files: bool,
         pci_bdf: Option<String>,
     ) -> Result<HostJob> {
         let job = self.update(|state| {
@@ -536,6 +558,7 @@ impl StackboxManager {
                 created_at: now(),
                 finished_at: None,
                 delete_snapshots,
+                remote_files,
                 pci_bdf,
             };
             host.active_job = Some(job.id.clone());
@@ -674,10 +697,11 @@ impl StackboxManager {
             Reply::Purged { stackboxes } => stackboxes,
             _ => anyhow::bail!("unexpected remote purge response"),
         };
-        self.host_event(
-            &job.id,
-            &format!("Removed {purged} reserved VM(s); unregistering the host"),
-        )?;
+        self.host_event(&job.id, &format!("Removed {purged} reserved VM(s)"))?;
+        if job.remote_files {
+            self.remove_host_files(job, &stored).await?;
+        }
+        self.host_event(&job.id, "Unregistering the host")?;
         let mut finished = self.host_job(&job.id)?;
         // This job is the host's active job, and unregistering refuses while one is set.
         let inspection = stored.host.inspection.clone();
@@ -1286,6 +1310,97 @@ impl StackboxManager {
                 .agent = Some(agent);
             Ok(())
         })
+    }
+    /// Removes what stackbox left on the host once its VMs are gone: the golden snapshot groups
+    /// (through the agent, under the golden build lock), then over SSH msb when stackbox installed
+    /// it on an empty host, and the `~/.local/share/stackbox` directory. Each step that fails or
+    /// is out of reach is recorded on the job with what to remove by hand, and never stops the
+    /// unregistration: the VMs are already gone, and the coordinator must forget the host.
+    async fn remove_host_files(&self, job: &HostJob, stored: &StoredHost) -> Result<()> {
+        let mut left: Vec<String> = Vec::new();
+        match self.host_link(stored) {
+            Ok(link) => {
+                let reply = link
+                    .call(
+                        Request {
+                            version: VERSION,
+                            coordinator_id: self.coordinator_id()?,
+                            operation: Operation::RemoveGolden,
+                        },
+                        None,
+                    )
+                    .await;
+                match reply {
+                    Ok(Reply::GoldenRemoved { groups }) => self.host_event(
+                        &job.id,
+                        &format!("Removed {groups} golden snapshot group(s)"),
+                    )?,
+                    Ok(_) => left.push(
+                        "golden snapshot groups (the agent gave an unexpected reply; check the host's msb snapshot groups named stackbox-golden-*)".into(),
+                    ),
+                    Err(error) => left.push(format!(
+                        "golden snapshot groups ({error:#}); check the host's msb snapshot groups named stackbox-golden-*"
+                    )),
+                }
+            }
+            Err(error) => left.push(format!("golden snapshot groups ({error:#})")),
+        }
+        match stored.host.kind {
+            HostKind::Ssh => {
+                self.host_event(&job.id, "Removing stackbox's files from the host")?;
+                match self.ssh_session(stored).await {
+                    Ok(ssh) => {
+                        let (outcome, problem) = ssh.remove_stackbox_files().await;
+                        for item in &outcome.removed {
+                            self.host_event(&job.id, &format!("Removed {item}"))?;
+                        }
+                        for item in &outcome.kept {
+                            left.push(format!("{item} (kept on purpose)"));
+                        }
+                        for item in &outcome.failed {
+                            left.push(format!("{item} (failed)"));
+                        }
+                        if let Some(problem) = problem {
+                            left.push(format!(
+                                "the rest of the host's files ({problem}); the cleanup may have run partly"
+                            ));
+                        }
+                    }
+                    Err(error) => left.push(format!(
+                        "the host's files (could not connect for the cleanup: {error:#})"
+                    )),
+                }
+            }
+            HostKind::Local => left.push(
+                "this machine's msb and ~/.local/share/stackbox (this coordinator's own host; kept on purpose)".into(),
+            ),
+            HostKind::Agent => left.push(
+                "the host's msb and ~/.local/share/stackbox (a dial-in host has no SSH for the cleanup; remove them on the host)".into(),
+            ),
+        }
+        if !left.is_empty() {
+            let by_hand = if stored.host.kind == HostKind::Ssh {
+                ". To remove the directory by hand, run on the host: rm -rf ~/.local/share/stackbox"
+            } else {
+                ""
+            };
+            self.host_event(
+                &job.id,
+                &format!("Left on the host: {}{by_hand}", left.join(LEFT_SEPARATOR)),
+            )?;
+        }
+        Ok(())
+    }
+    /// Opens an SSH session with the host's pinned key and stored credentials.
+    async fn ssh_session(&self, stored: &StoredHost) -> Result<Session> {
+        let credentials = self.0.vault.unseal(
+            stored
+                .credentials
+                .as_ref()
+                .context("remote host has no credentials")?,
+            &stored.aad(),
+        )?;
+        Session::connect(&stored.host, credentials).await
     }
     /// Records a failed purge. The host itself stays registered so the operator can retry.
     fn fail_purge_job(&self, id: &str, message: &str) -> Result<()> {

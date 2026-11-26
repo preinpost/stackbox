@@ -489,6 +489,14 @@ impl server::Handler for Handler {
                     self.observed.rpc_stackboxes.lock().unwrap().clear();
                     Reply::Purged { stackboxes: removed }
                 }
+                Operation::RemoveGolden => {
+                    self.observed
+                        .calls
+                        .lock()
+                        .unwrap()
+                        .push("remove-golden".into());
+                    Reply::GoldenRemoved { groups: 1 }
+                }
                 Operation::Shell { .. }
                 | Operation::VerifyVm
                 | Operation::InstallMsb

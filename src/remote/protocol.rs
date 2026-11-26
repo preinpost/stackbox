@@ -232,6 +232,9 @@ pub enum Operation {
     /// Destroy every VM this coordinator reserved on the host, then forget them.
     /// The coordinator runs this only when removing the host.
     Purge,
+    /// Delete every golden snapshot group this host holds for stackboxes, under the golden build
+    /// lock so a build in progress finishes first. Sent before the host's files are removed.
+    RemoveGolden,
     /// Bind one PCI device to `vfio-pci` through the host's stackbox-vfio-bind helper, then
     /// reply with the host's fresh inspection.
     PciBind {
@@ -332,6 +335,8 @@ impl Operation {
             Self::Delete { .. } => 180,
             // A host can hold several stackboxes, each destroyed VM by VM.
             Self::Purge => 1800,
+            // Each group is a snapshot set of a golden VM; a build that holds the lock finishes first.
+            Self::RemoveGolden => 1800,
             Self::Shell { .. } => 12 * 3600,
             Self::Settle { .. }
             | Self::ForgetComputes { .. }
@@ -528,6 +533,10 @@ pub enum Reply {
     Purged {
         /// Stackboxes whose VMs were destroyed, including ones already deleted from the registry.
         stackboxes: usize,
+    },
+    GoldenRemoved {
+        /// Golden snapshot groups deleted from the host.
+        groups: usize,
     },
 }
 

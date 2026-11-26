@@ -671,6 +671,10 @@ pub struct HostJob {
     /// A purge that also deletes the snapshots this host keeps.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub delete_snapshots: bool,
+    /// A purge that also removes stackbox's files from the host: golden groups, msb when stackbox
+    /// installed it, and the stackbox directory.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub remote_files: bool,
     /// The PCI device a `PciBind` or `PciUnbind` job works on, as `DDDD:BB:DD.F`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pci_bdf: Option<String>,

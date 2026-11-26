@@ -846,6 +846,11 @@ impl Agent {
             let _create_lock = lock(&self.dir, "create.lock")?;
             return self.purge(&request).await;
         }
+        if matches!(request.operation, Operation::RemoveGolden) {
+            // Under the golden build lock, so a build in progress on this host finishes first.
+            let groups = self.backend.remove_golden().await?;
+            return Ok(Reply::GoldenRemoved { groups });
+        }
         if matches!(
             request.operation,
             Operation::ExportSnapshot { .. }
@@ -2292,6 +2297,9 @@ mod tests {
     /// Holds a deploy until its job directory has a `release` file.
     struct Held(PathBuf);
     impl Backend for Held {
+        fn remove_golden(&self) -> futures::future::BoxFuture<'_, Result<usize>> {
+            Box::pin(async { bail!("not in this test") })
+        }
         fn scan(
             &self,
         ) -> futures::future::BoxFuture<

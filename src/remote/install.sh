@@ -24,6 +24,19 @@ if [ -d "$HOME/.microsandbox" ]; then
     chmod go-w "$HOME/.microsandbox"
 fi
 installed() { msb --version 2>/dev/null | awk '{ print $NF }'; }
+# Whether this host had an msb before this script ran. Only an msb installed fresh by stackbox is
+# recorded as ours, so unregistering with remote files removes it and never one the operator had.
+had_msb=yes
+command -v msb >/dev/null || had_msb=no
+record_install() {
+    [ "$had_msb" = no ] || return 0
+    marker="$HOME/.local/share/stackbox/msb-install.json"
+    [ -e "$marker" ] && return 0
+    mkdir -p "$HOME/.local/share/stackbox"
+    printf '{"installed_by":"stackbox","had_msb":false,"version":"%s","installed_at":"%s"}\n' \
+        "$want" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$marker.tmp"
+    mv "$marker.tmp" "$marker"
+}
 # STACKBOX_MSB_BIN names a custom msb build (a fork), installed as it is: no release is downloaded
 # and the release is never fetched over it. It must report the version this build expects.
 if [ -n "${STACKBOX_MSB_BIN:-}" ]; then
@@ -37,6 +50,7 @@ if [ -n "${STACKBOX_MSB_BIN:-}" ]; then
         echo "stackbox: STACKBOX_MSB_BIN reports msb '$(installed)', expected $want" >&2
         exit 1
     }
+    record_install
     exit 0
 fi
 # An older msb is upgraded in place, as msb's own installer does: running sandboxes keep the
@@ -85,3 +99,4 @@ else
     ln -sf "$library" "$lib/libkrunfw.dylib"
 fi
 [ "$(installed)" = "$want" ]
+record_install

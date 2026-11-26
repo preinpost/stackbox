@@ -537,6 +537,34 @@ impl Session {
     pub async fn inspect(&self) -> Result<HostInspection> {
         parse_inspection(&self.run(&inspect_script(), 45, "Host inspection").await?)
     }
+    /// Runs the cleanup script that removes stackbox's files from the host. It answers with its
+    /// `STACKBOX-CLEANUP` lines even when a step fails, so the output is returned with the reason
+    /// the run did not end cleanly, if it did not: the caller records what is left.
+    pub async fn remove_stackbox_files(&self) -> (CleanupOutcome, Option<String>) {
+        let seconds = 120;
+        let execution = tokio::time::timeout(
+            Duration::from_secs(seconds + 10),
+            self.execute(cleanup_script(), seconds),
+        )
+        .await;
+        let (output, problem) = match execution {
+            Err(_) => (String::new(), Some("the cleanup timed out".to_owned())),
+            Ok(Err(_)) => (
+                String::new(),
+                Some("the cleanup could not run over SSH".to_owned()),
+            ),
+            Ok(Ok(Execution { code, stdout, .. })) => (
+                String::from_utf8_lossy(&stdout).into_owned(),
+                match code {
+                    Some(0) => None,
+                    Some(124) => Some("the cleanup timed out on the host".to_owned()),
+                    _ => Some("the cleanup exited before it finished".to_owned()),
+                },
+            ),
+        };
+        let outcome = parse_cleanup_output(&output);
+        (outcome, problem)
+    }
     /// Install this build's stackbox kernel on the host, under `~/.local/share/stackbox/libkrunfw`.
     /// The library is verified before it is published and the manifest goes last, so an
     /// interrupted upload leaves the stock kernel in place rather than a half kernel.
@@ -617,6 +645,40 @@ impl Session {
             },
         ))
     }
+}
+
+/// What the cleanup script reports for each item it looked at.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct CleanupOutcome {
+    pub removed: Vec<String>,
+    /// Left in place on purpose, such as an msb the operator installed or one still running sandboxes.
+    pub kept: Vec<String>,
+    /// Should have been removed but was not.
+    pub failed: Vec<String>,
+}
+
+/// Reads the script's `STACKBOX-CLEANUP <status> <item>` lines. Other output is ignored.
+pub fn parse_cleanup_output(output: &str) -> CleanupOutcome {
+    let mut outcome = CleanupOutcome::default();
+    for line in output.lines() {
+        let Some(rest) = line.strip_prefix("STACKBOX-CLEANUP ") else {
+            continue;
+        };
+        let (status, item) = rest.split_once(' ').unwrap_or((rest, ""));
+        let item = item.to_owned();
+        match status {
+            "removed" => outcome.removed.push(item),
+            "kept" => outcome.kept.push(item),
+            "failed" => outcome.failed.push(item),
+            _ => {}
+        }
+    }
+    outcome
+}
+
+/// The script that removes stackbox's files from a host; see `cleanup.sh`.
+pub(crate) fn cleanup_script() -> &'static str {
+    include_str!("cleanup.sh")
 }
 
 /// Install msb and libkrunfw at [`super::MSB_VERSION`], or upgrade an older msb to it.
@@ -1582,5 +1644,236 @@ mod pci_inspection_tests {
         let older = parse_inspection(&base("")).unwrap();
         assert!(!older.pci_bind_helper_available && older.pci_candidates.is_empty());
         assert_eq!(older.pci_bind_helper_version, None);
+    }
+}
+
+#[cfg(all(test, unix))]
+mod cleanup_tests {
+    use super::*;
+    use std::path::Path;
+    use std::process::Command;
+
+    /// A fake msb: `--version` reports the expected release, `list -q` prints the names in
+    /// `$STUB_SANDBOXES` and fails when `$STUB_LIST_FAILS` is set.
+    const MSB_STUB: &str = "#!/bin/sh\n\
+        case \"$1\" in\n\
+        --version) echo \"msb 0.8.1\" ;;\n\
+        list) [ -z \"$STUB_LIST_FAILS\" ] || exit 1; [ -z \"$STUB_SANDBOXES\" ] || echo \"$STUB_SANDBOXES\" ;;\n\
+        esac\n";
+
+    fn write_executable(path: &Path, text: &str) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// A host home holding an msb and libkrunfw, with the stackbox state directory.
+    fn host(home: &Path) {
+        write_executable(&home.join(".microsandbox/bin/msb"), MSB_STUB);
+        std::fs::create_dir_all(home.join(".microsandbox/lib")).unwrap();
+        std::fs::write(home.join(".microsandbox/lib/libkrunfw.so.1.2.3"), "lib").unwrap();
+        std::fs::write(home.join(".microsandbox/stackbox-golden-rocky10.lock"), "").unwrap();
+        // The user's own file in the msb home must survive any cleanup.
+        std::fs::write(home.join(".microsandbox/keep-me.txt"), "mine").unwrap();
+        let state = home.join(".local/share/stackbox");
+        std::fs::create_dir_all(state.join("agents/abc")).unwrap();
+        std::fs::write(state.join("agents/abc/stackbox-agent"), "agent").unwrap();
+    }
+
+    fn marker(home: &Path, text: &str) {
+        let dir = home.join(".local/share/stackbox");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("msb-install.json"), text).unwrap();
+    }
+
+    /// Runs the cleanup under `home` with a fake msb and returns the script's output.
+    fn run_cleanup(home: &Path, sandboxes: &str, list_fails: bool) -> String {
+        let script = home.join("cleanup.sh");
+        std::fs::write(&script, cleanup_script()).unwrap();
+        let mut command = Command::new("sh");
+        command
+            .arg(&script)
+            .env_clear()
+            .env("HOME", home)
+            .env("PATH", "/usr/bin:/bin")
+            .env("STUB_SANDBOXES", sandboxes);
+        if list_fails {
+            command.env("STUB_LIST_FAILS", "1");
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    }
+
+    const OWN_MARKER: &str = "{\"installed_by\":\"stackbox\",\"had_msb\":false,\"version\":\"0.8.1\",\"installed_at\":\"2026-11-26T00:00:00Z\"}\n";
+
+    #[test]
+    fn cleanup_output_is_read_per_status_and_other_lines_are_ignored() {
+        let output = "noise\nSTACKBOX-CLEANUP removed msb and libkrunfw\nSTACKBOX-CLEANUP kept msb: sandboxes remain in its home\nSTACKBOX-CLEANUP failed golden build lock\n";
+        assert_eq!(
+            parse_cleanup_output(output),
+            CleanupOutcome {
+                removed: vec!["msb and libkrunfw".into()],
+                kept: vec!["msb: sandboxes remain in its home".into()],
+                failed: vec!["golden build lock".into()],
+            }
+        );
+        assert_eq!(parse_cleanup_output(""), CleanupOutcome::default());
+    }
+
+    #[test]
+    fn stackbox_installed_msb_on_an_empty_host_is_removed_with_the_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        host(dir.path());
+        marker(dir.path(), OWN_MARKER);
+        let output = run_cleanup(dir.path(), "", false);
+        assert!(output.contains("removed msb and libkrunfw"), "{output}");
+        assert!(output.contains("removed golden build lock"), "{output}");
+        assert!(!dir.path().join(".microsandbox/bin/msb").exists());
+        assert!(
+            !dir.path()
+                .join(".microsandbox/lib/libkrunfw.so.1.2.3")
+                .exists()
+        );
+        assert!(!dir.path().join(".local/share/stackbox").exists());
+        // The msb home itself and the user's own file in it are never removed.
+        assert!(dir.path().join(".microsandbox/keep-me.txt").exists());
+    }
+
+    #[test]
+    fn a_host_without_the_marker_keeps_its_msb() {
+        // Hosts installed before the marker existed, and msb the operator installed.
+        let dir = tempfile::tempdir().unwrap();
+        host(dir.path());
+        let output = run_cleanup(dir.path(), "", false);
+        assert!(
+            output.contains("kept msb: stackbox did not install it on this host"),
+            "{output}"
+        );
+        assert!(dir.path().join(".microsandbox/bin/msb").exists());
+        assert!(
+            dir.path()
+                .join(".microsandbox/lib/libkrunfw.so.1.2.3")
+                .exists()
+        );
+        assert!(!dir.path().join(".local/share/stackbox").exists());
+    }
+
+    #[test]
+    fn a_msb_that_existed_before_the_install_is_kept_even_with_a_marker() {
+        let dir = tempfile::tempdir().unwrap();
+        host(dir.path());
+        marker(
+            dir.path(),
+            "{\"installed_by\":\"stackbox\",\"had_msb\":true,\"version\":\"0.8.1\"}\n",
+        );
+        let output = run_cleanup(dir.path(), "", false);
+        assert!(output.contains("kept msb"), "{output}");
+        assert!(dir.path().join(".microsandbox/bin/msb").exists());
+    }
+
+    #[test]
+    fn msb_stays_when_its_sandboxes_cannot_be_listed_or_remain() {
+        for (sandboxes, fails, reason) in [
+            ("", true, "cannot list its sandboxes"),
+            ("someone-elses-vm", false, "sandboxes remain in its home"),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            host(dir.path());
+            marker(dir.path(), OWN_MARKER);
+            let output = run_cleanup(dir.path(), sandboxes, fails);
+            assert!(output.contains(reason), "{output}");
+            assert!(dir.path().join(".microsandbox/bin/msb").exists());
+            assert!(
+                dir.path()
+                    .join(".microsandbox/lib/libkrunfw.so.1.2.3")
+                    .exists()
+            );
+            // The stackbox directory still goes; only msb is kept.
+            assert!(!dir.path().join(".local/share/stackbox").exists());
+        }
+    }
+
+    #[test]
+    fn a_second_run_on_a_cleaned_host_succeeds_without_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        host(dir.path());
+        marker(dir.path(), OWN_MARKER);
+        run_cleanup(dir.path(), "", false);
+        let again = run_cleanup(dir.path(), "", false);
+        assert!(!again.contains("failed"), "{again}");
+        assert!(again.contains("removed "), "{again}");
+    }
+
+    #[test]
+    fn the_cleanup_never_removes_the_whole_msb_home() {
+        let script = cleanup_script();
+        assert!(!script.contains(".microsandbox\""), "{script}");
+        for line in script.lines() {
+            let words: Vec<&str> = line.split_whitespace().collect();
+            let recursive = words
+                .iter()
+                .any(|word| word.starts_with('-') && !word.starts_with("--") && word.contains('r'));
+            assert!(
+                !(words.contains(&"rm") && recursive && line.contains(".microsandbox")),
+                "recursive removal inside the msb home: {line}"
+            );
+        }
+    }
+
+    /// Runs install.sh with a stub msb through STACKBOX_MSB_BIN, so no release is downloaded.
+    fn install_stub(home: &Path, path: &str) {
+        let stub = home.join("stub-msb");
+        write_executable(&stub, MSB_STUB);
+        let script = home.join("install.sh");
+        std::fs::write(&script, install_script()).unwrap();
+        let output = Command::new("sh")
+            .arg(&script)
+            .env_clear()
+            .env("HOME", home)
+            .env("PATH", path)
+            .env("STACKBOX_MSB_BIN", &stub)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn install_records_an_msb_it_installed_fresh() {
+        let dir = tempfile::tempdir().unwrap();
+        install_stub(dir.path(), "/usr/bin:/bin");
+        let marker =
+            std::fs::read_to_string(dir.path().join(".local/share/stackbox/msb-install.json"))
+                .expect("marker written");
+        assert!(marker.contains("\"installed_by\":\"stackbox\""), "{marker}");
+        assert!(marker.contains("\"had_msb\":false"), "{marker}");
+        assert!(marker.contains(&format!("\"version\":\"{}\"", crate::remote::MSB_VERSION)));
+        // A second install keeps the first record.
+        install_stub(dir.path(), "/usr/bin:/bin");
+        let again =
+            std::fs::read_to_string(dir.path().join(".local/share/stackbox/msb-install.json"))
+                .unwrap();
+        assert_eq!(again, marker);
+    }
+
+    #[test]
+    fn install_does_not_claim_an_msb_the_host_already_had() {
+        let dir = tempfile::tempdir().unwrap();
+        write_executable(&dir.path().join(".microsandbox/bin/msb"), MSB_STUB);
+        install_stub(dir.path(), "/usr/bin:/bin");
+        assert!(
+            !dir.path()
+                .join(".local/share/stackbox/msb-install.json")
+                .exists()
+        );
     }
 }

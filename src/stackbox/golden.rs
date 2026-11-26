@@ -119,6 +119,57 @@ pub async fn available(reference: &str) -> Result<bool> {
     }
 }
 
+/// Every OS whose golden groups this build can create. Each has its own build lock.
+const KNOWN_OS: &[&GuestOs] = &[&ROCKY10];
+
+/// Deletes every golden group this host holds, for stackboxes being removed with their host. Each
+/// OS's build lock is held while its groups go, so a build in progress finishes first and no
+/// build starts mid-removal. A group that holds snapshots is removed too: they are golden images
+/// this stackbox made. Returns how many groups were removed.
+pub async fn remove_all() -> Result<usize> {
+    let _build = BUILD.lock().await;
+    let mut locks = Vec::new();
+    for os in KNOWN_OS {
+        let path = build_lock_path(os)?;
+        let lock = tokio::task::spawn_blocking(move || acquire_build_lock(&path))
+            .await
+            .context("join the golden build lock task")??;
+        locks.push(lock);
+    }
+    let names: Vec<String> = Snapshot::list()
+        .await
+        .context("list snapshot groups")?
+        .iter()
+        .map(|snapshot| snapshot.name().to_owned())
+        .collect();
+    let groups = golden_groups(&names);
+    let mut removed = 0;
+    for group in &groups {
+        let snapshot = Snapshot::get(group)
+            .await
+            .with_context(|| format!("look up snapshot group {group}"))?;
+        snapshot
+            .remove()
+            .await
+            .with_context(|| format!("remove snapshot group {group}"))?;
+        removed += 1;
+    }
+    drop(locks);
+    Ok(removed)
+}
+
+/// The golden groups among `names`, the host's snapshot group names.
+fn golden_groups(names: &[String]) -> Vec<&String> {
+    names
+        .iter()
+        .filter(|name| {
+            KNOWN_OS
+                .iter()
+                .any(|os| name.starts_with(&format!("stackbox-golden-{}-", os.id)))
+        })
+        .collect()
+}
+
 /// The golden snapshot for `spec` on `os`, built first if this host has none.
 pub async fn ensure(os: &GuestOs, spec: &NodeSpec) -> Result<String> {
     let reference = reference(os, spec);
@@ -553,6 +604,27 @@ mod tests {
         assert!(text.contains("2 snapshot(s)"), "{text}");
         assert!(text.contains("deleted"), "{text}");
         assert!(check_removed("g", 0).is_ok());
+    }
+
+    #[test]
+    fn only_golden_groups_are_removed_with_a_host() {
+        let names: Vec<String> = [
+            "stackbox-golden-rocky10-0123456789ab",
+            "stackbox-golden-rocky11-x",
+            "my-snapshots",
+            "stackbox-golden-rocky10-",
+        ]
+        .iter()
+        .map(|name| name.to_string())
+        .collect();
+        let groups = golden_groups(&names);
+        assert_eq!(
+            groups,
+            vec![
+                &"stackbox-golden-rocky10-0123456789ab".to_owned(),
+                &"stackbox-golden-rocky10-".to_owned(),
+            ]
+        );
     }
 
     #[test]

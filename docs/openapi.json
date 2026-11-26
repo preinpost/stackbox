@@ -850,6 +850,15 @@
             "schema": {
               "type": "boolean"
             }
+          },
+          {
+            "name": "remote_files",
+            "in": "path",
+            "description": "With purge, also remove what stackbox put on the host outside its VMs: the golden snapshot\ngroups, msb when stackbox installed it on an empty host, and `~/.local/share/stackbox`.\nThe VMs are removed first; whatever cannot be removed is reported on the job.",
+            "required": true,
+            "schema": {
+              "type": "boolean"
+            }
           }
         ],
         "responses": {
@@ -1076,6 +1085,45 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/hosts/{id}/pci/helper-remove": {
+      "get": {
+        "tags": [],
+        "summary": "The self-contained script that removes the stackbox-vfio-bind helper and its sudoers rule from\nthe host, for the portal to copy and the operator to run there. Nothing runs it automatically.",
+        "operationId": "host_pci_helper_remove",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PciHelperRemove"
                 }
               }
             }
@@ -4344,6 +4392,10 @@
             ],
             "description": "The PCI device a `PciBind` or `PciUnbind` job works on, as `DDDD:BB:DD.F`."
           },
+          "remote_files": {
+            "type": "boolean",
+            "description": "A purge that also removes stackbox's files from the host: golden groups, msb when stackbox\ninstalled it, and the stackbox directory."
+          },
           "status": {
             "$ref": "#/components/schemas/JobStatus"
           }
@@ -5031,6 +5083,27 @@
           "script": {
             "type": "string",
             "description": "A self-contained shell script; paste it into a root-capable shell on the host."
+          },
+          "sudoers_path": {
+            "type": "string"
+          }
+        }
+      },
+      "PciHelperRemove": {
+        "type": "object",
+        "description": "The script that takes the helper back off a host, as the portal copies it. Run it only when\nnothing needs the helper any more: the agent's sudo rule goes first, so it cannot outlive the\nhelper it runs.",
+        "required": [
+          "script",
+          "helper_path",
+          "sudoers_path"
+        ],
+        "properties": {
+          "helper_path": {
+            "type": "string"
+          },
+          "script": {
+            "type": "string",
+            "description": "A self-contained shell script; paste it into a root-capable shell on the host. It is never\nrun automatically."
           },
           "sudoers_path": {
             "type": "string"

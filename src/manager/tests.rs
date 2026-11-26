@@ -23,6 +23,10 @@ pub(crate) struct Fake {
     pub(crate) fail_create: AtomicBool,
     /// Make the inventory scan fail, as an unreachable host's scan does.
     pub(crate) fail_scan: AtomicBool,
+    /// Make the golden cleanup fail, as an msb that cannot list its snapshot groups does.
+    pub(crate) fail_golden: AtomicBool,
+    /// How many golden cleanups completed.
+    pub(crate) golden_removals: std::sync::atomic::AtomicU32,
     pub(crate) stackboxes: Mutex<BTreeMap<String, Vec<StackboxNode>>>,
     /// msb snapshot references and their labels.
     pub(crate) snapshots: Mutex<BTreeMap<String, BTreeMap<String, String>>>,
@@ -78,6 +82,16 @@ pub(crate) struct Fake {
     pub(crate) attached: Mutex<Vec<(String, Vec<String>, bool)>>,
 }
 impl Backend for Fake {
+    fn remove_golden(&self) -> BoxFuture<'_, Result<usize>> {
+        Box::pin(async move {
+            if self.fail_golden.load(std::sync::atomic::Ordering::SeqCst) {
+                bail!("msb refused to list the snapshot groups");
+            }
+            self.golden_removals
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(1)
+        })
+    }
     fn relink(&self, id: String, url: String) -> BoxFuture<'_, Result<()>> {
         Box::pin(async move {
             self.relinked.lock().unwrap().push((id, url));
@@ -2035,6 +2049,7 @@ async fn remote_host_restart_recovers_interrupted_jobs_and_missing_key_never_rep
                     created_at: now(),
                     finished_at: None,
                     delete_snapshots: false,
+                    remote_files: false,
                     pci_bdf: None,
                 },
             );
@@ -3944,7 +3959,7 @@ async fn purging_the_local_host_can_also_delete_its_snapshots() {
         .unwrap();
     assert_eq!(done(&manager, &freeze).await.status, JobStatus::Succeeded);
 
-    let purge = manager.start_purge("local", true).unwrap();
+    let purge = manager.start_purge("local", true, false).unwrap();
     assert!(purge.delete_snapshots);
     let finished = host_done(&manager, &purge.id).await;
     assert_eq!(
@@ -9359,4 +9374,112 @@ async fn registration_starts_the_host_preparation() {
         JobStatus::Succeeded
     );
     settle(&manager).await;
+}
+
+/// The purge's events, as their messages.
+fn purge_messages(job: &crate::remote::HostJob) -> Vec<String> {
+    job.events
+        .iter()
+        .map(|event| event.message.clone())
+        .collect()
+}
+
+#[tokio::test]
+async fn unregistering_with_remote_files_removes_golden_groups_and_keeps_this_machines_msb() {
+    let dir = tempfile::tempdir().unwrap();
+    let backend = Arc::new(Fake::default());
+    let manager = open_with(options(dir.path()), backend.clone()).await;
+    let purge = manager.start_purge("local", false, true).unwrap();
+    assert!(purge.remote_files);
+    let finished = host_done(&manager, &purge.id).await;
+    assert_eq!(
+        finished.status,
+        JobStatus::Succeeded,
+        "{:?}",
+        finished.error
+    );
+    assert_eq!(
+        backend
+            .golden_removals
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+    let messages = purge_messages(&finished);
+    assert!(
+        messages
+            .iter()
+            .any(|message| message == "Removed 1 golden snapshot group(s)"),
+        "{messages:?}"
+    );
+    // The local machine's msb and files are the coordinator's own: named, not removed.
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.contains("kept on purpose")),
+        "{messages:?}"
+    );
+    assert!(manager.host("local").is_err());
+}
+
+#[tokio::test]
+async fn a_failed_file_cleanup_still_unregisters_and_names_what_is_left() {
+    let dir = tempfile::tempdir().unwrap();
+    let backend = Arc::new(Fake::default());
+    backend
+        .fail_golden
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let manager = open_with(options(dir.path()), backend.clone()).await;
+    let purge = manager.start_purge("local", false, true).unwrap();
+    let finished = host_done(&manager, &purge.id).await;
+    // The VMs were removed, so the host is forgotten even though the cleanup failed.
+    assert_eq!(
+        finished.status,
+        JobStatus::Succeeded,
+        "{:?}",
+        finished.error
+    );
+    assert!(manager.host("local").is_err());
+    assert_eq!(
+        backend
+            .golden_removals
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
+    let messages = purge_messages(&finished);
+    let left = messages
+        .iter()
+        .find(|message| message.starts_with("Left on the host:"))
+        .unwrap_or_else(|| panic!("{messages:?}"));
+    assert!(left.contains("golden snapshot groups"), "{left}");
+    assert!(left.contains("msb refused to list"), "{left}");
+    assert_eq!(messages.last().map(String::as_str), Some("Host removed"));
+}
+
+#[tokio::test]
+async fn a_purge_without_remote_files_leaves_the_golden_groups_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let backend = Arc::new(Fake::default());
+    let manager = open_with(options(dir.path()), backend.clone()).await;
+    let purge = manager.start_purge("local", false, false).unwrap();
+    assert!(!purge.remote_files);
+    let finished = host_done(&manager, &purge.id).await;
+    assert_eq!(
+        finished.status,
+        JobStatus::Succeeded,
+        "{:?}",
+        finished.error
+    );
+    assert_eq!(
+        backend
+            .golden_removals
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0
+    );
+    assert!(
+        !purge_messages(&finished)
+            .iter()
+            .any(|message| message.contains("golden") || message.starts_with("Left on the host")),
+        "{:?}",
+        purge_messages(&finished)
+    );
 }

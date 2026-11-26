@@ -322,6 +322,33 @@ pub fn valid_agent_user(user: &str) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'_' | b'-'))
 }
 
+/// The script that removes the helper and its sudoers rule, written for the host's root shell.
+/// The sudoers drop-in is removed first, so the agent's sudo rule never outlives the helper.
+/// Devices still bound to `vfio-pci` keep that driver until a reboot or a manual rebind, so the
+/// script names them instead of rebinding; `vfio.conf` and the `kvm` group stay, since other
+/// things may use them.
+pub fn render_vfio_helper_remove_script() -> String {
+    let body = REMOVE
+        .replace("@SUDOERS_PATH@", SUDOERS_PATH)
+        .replace("@HELPER_PATH@", HELPER_PATH);
+    format!("sudo -v && sudo bash <<'STACKBOX_VFIO_EOF'\n{body}STACKBOX_VFIO_EOF\n")
+}
+
+/// The root-side body of [`render_vfio_helper_remove_script`], wrapped there for a paste; `@SUDOERS_PATH@` and
+/// `@HELPER_PATH@` are the constants above.
+const REMOVE: &str = r#"set -u
+rm -f '@SUDOERS_PATH@' && echo 'stackbox: removed @SUDOERS_PATH@' || echo 'stackbox: could not remove @SUDOERS_PATH@' >&2
+rm -f '@HELPER_PATH@' && echo 'stackbox: removed @HELPER_PATH@' || echo 'stackbox: could not remove @HELPER_PATH@' >&2
+bound=''
+for dev in /sys/bus/pci/drivers/vfio-pci/0000:*; do
+    [ -e "$dev" ] && bound="$bound ${dev##*/}"
+done
+if [ -n "$bound" ]; then
+    echo "stackbox: still bound to vfio-pci:$bound; they keep it until a reboot or a manual rebind to the host driver" >&2
+fi
+echo 'stackbox: /etc/stackbox/vfio.conf and the kvm group were kept; remove them by hand if nothing else uses them'
+"#;
+
 /// The self-contained script that installs the helper and its sudoers rule for `agent_user`, the
 /// user the coordinator's agent runs `sudo -n` as. Run it on the host with a paste. An invalid
 /// user yields a script that fails without changing the host.
@@ -348,6 +375,18 @@ pub fn render_vfio_helper_install_script(agent_user: &str) -> String {
 #[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
 pub struct PciHelperInstall {
     /// A self-contained shell script; paste it into a root-capable shell on the host.
+    pub script: String,
+    pub helper_path: String,
+    pub sudoers_path: String,
+}
+
+/// The script that takes the helper back off a host, as the portal copies it. Run it only when
+/// nothing needs the helper any more: the agent's sudo rule goes first, so it cannot outlive the
+/// helper it runs.
+#[derive(Clone, Debug, Serialize, Deserialize, ToSchema)]
+pub struct PciHelperRemove {
+    /// A self-contained shell script; paste it into a root-capable shell on the host. It is never
+    /// run automatically.
     pub script: String,
     pub helper_path: String,
     pub sudoers_path: String,
@@ -1317,5 +1356,39 @@ mod helper_shell_tests {
         }))
         .unwrap();
         assert!(!candidate.bindable && candidate.protected_reason.is_none());
+    }
+}
+
+#[cfg(test)]
+mod helper_remove_tests {
+    use super::*;
+
+    #[test]
+    fn the_sudo_rule_is_removed_before_the_helper_it_runs() {
+        let script = render_vfio_helper_remove_script();
+        let sudoers = script
+            .find(&format!("rm -f '{SUDOERS_PATH}'"))
+            .expect("sudoers removal");
+        let helper = script
+            .find(&format!("rm -f '{HELPER_PATH}'"))
+            .expect("helper removal");
+        assert!(sudoers < helper, "{script}");
+        assert!(script.starts_with("sudo -v && sudo bash <<'STACKBOX_VFIO_EOF'\n"));
+        assert!(script.ends_with("STACKBOX_VFIO_EOF\n"));
+        assert!(!script.contains("@HELPER_PATH@") && !script.contains("@SUDOERS_PATH@"));
+    }
+
+    #[test]
+    fn the_removal_names_what_it_keeps_and_never_rebinds_or_recurses() {
+        let script = render_vfio_helper_remove_script();
+        assert!(script.contains("/etc/stackbox/vfio.conf"), "{script}");
+        assert!(script.contains("kvm"), "{script}");
+        assert!(
+            script.contains("/sys/bus/pci/drivers/vfio-pci/"),
+            "{script}"
+        );
+        assert!(!script.contains("rm -rf"), "{script}");
+        assert!(!script.contains("driver_override"), "{script}");
+        assert!(!script.contains("usermod"), "{script}");
     }
 }
