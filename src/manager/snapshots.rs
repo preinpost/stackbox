@@ -515,34 +515,15 @@ impl StackboxManager {
                     request.id
                 )));
             }
-            // The stackbox's host keeps the snapshot; another host's VMs are not captured.
-            let host_id = state
-                .stackboxes
-                .get(stackbox_id)
-                .ok_or_else(|| NotFound(format!("stackbox '{stackbox_id}'")))?
-                .host_id
-                .clone()
-                .ok_or_else(|| conflict("stackboxes imported from older versions cannot be frozen"))?;
-            let arch = host_arch(state, &host_id);
             let stackbox = state
                 .stackboxes
                 .get_mut(stackbox_id)
                 .ok_or_else(|| NotFound(format!("stackbox '{stackbox_id}'")))?;
             ensure_idle(stackbox)?;
-            let stored = state
-                .hosts
-                .get(&host_id)
-                .ok_or_else(|| conflict(format!("the stackbox's host '{host_id}' is not registered")))?;
-            let local = stored.host.kind == crate::remote::HostKind::Local;
-            let arch = arch.ok_or_else(|| {
-                conflict(format!(
-                    "host '{host_id}' has not been checked yet; check it from Hosts first"
-                ))
-            })?;
-            let platform = match &stored.host.inspection {
-                Some(inspection) if !local => inspection.os.clone(),
-                _ => current_platform(),
-            };
+            let host_id = stackbox
+                .host_id
+                .clone()
+                .ok_or_else(|| conflict("stackboxes imported from older versions cannot be frozen"))?;
             if !matches!(
                 stackbox.status,
                 StackboxStatus::Created | StackboxStatus::Ready | StackboxStatus::Failed
@@ -600,11 +581,6 @@ impl StackboxManager {
                         "deploy the stackbox before freezing a compute template from it",
                     ));
                 }
-                if stackbox.host_of(node) != Some(host_id.as_str()) {
-                    return Err(conflict(format!(
-                        "{node} runs on another host than the stackbox's; only VMs on host '{host_id}' can be frozen"
-                    )));
-                }
             }
             // A whole-stackbox snapshot captures every VM into one snapshot on one host; a
             // stackbox whose computes span hosts cannot be frozen whole, so its VMs are frozen
@@ -627,22 +603,93 @@ impl StackboxManager {
             if !layout_matches || stackbox.nodes.iter().any(|node| node.status != "running") {
                 return Err(conflict("the stackbox's VMs must be running to freeze it"));
             }
-            // A remote stackbox keeps the agent it was created with. Move it to the host's current
+            let target_host = match request.node.as_deref() {
+                Some(node) if node != "control" => stackbox
+                    .host_of(node)
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| host_id.clone()),
+                _ => host_id.clone(),
+            };
+            let stored = state.hosts.get(&target_host).ok_or_else(|| {
+                conflict(format!(
+                    "the {} host '{target_host}' is not registered",
+                    if target_host == host_id {
+                        "stackbox's"
+                    } else {
+                        "compute's"
+                    }
+                ))
+            })?;
+            let local = stored.host.kind == crate::remote::HostKind::Local;
+            if stored.host.kind == crate::remote::HostKind::Agent
+                && !self.0.hub.connected(&target_host)
+            {
+                return Err(conflict(format!(
+                    "the agent of host '{target_host}' is not connected; run `stackbox agent connect` there"
+                )));
+            }
+            if stored
+                .host
+                .reachability
+                .as_ref()
+                .is_some_and(|r| !r.reachable)
+            {
+                return Err(conflict(format!(
+                    "host '{target_host}' is offline; check its connection before freezing"
+                )));
+            }
+            let arch = match (&stored.host.inspection, stored.host.kind) {
+                (Some(inspection), _) => inspection.arch.clone(),
+                (None, crate::remote::HostKind::Local) => current_arch(),
+                (None, _) => {
+                    return Err(conflict(format!(
+                        "host '{target_host}' has not been checked yet; check it from Hosts first"
+                    )));
+                }
+            };
+            let platform = match &stored.host.inspection {
+                Some(inspection) if !local => inspection.os.clone(),
+                _ => current_platform(),
+            };
+            // A remote VM keeps the agent its host created it with. Move it to the host's current
             // agent once that agent matches this coordinator, as a deploy does, so the freeze
             // and later transfers of the snapshot speak this coordinator's protocol.
             let mut repinned = None;
-            if let Some(agent) = &stored.host.agent
-                && stackbox.agent_sha256.as_deref() != Some(agent.artifact.sha256.as_str())
-            {
-                if agent.artifact.build_id != crate::BUILD_ID {
-                    return Err(conflict(format!(
-                        "the agent installed on {host_id} was built from {} but this coordinator is {}; reinstall it from Hosts first",
-                        agent.artifact.build_id,
-                        crate::BUILD_ID
-                    )));
+            let pinned_sha256 = if target_host == host_id {
+                stackbox.agent_sha256.as_deref()
+            } else {
+                stackbox
+                    .shares
+                    .iter()
+                    .find(|share| share.host_id == target_host)
+                    .and_then(|share| share.agent_sha256.as_deref())
+            };
+            if let Some(agent) = &stored.host.agent {
+                if pinned_sha256 != Some(agent.artifact.sha256.as_str()) {
+                    if agent.artifact.build_id != crate::BUILD_ID {
+                        return Err(conflict(format!(
+                            "the agent installed on {target_host} was built from {} but this coordinator is {}; reinstall it from Hosts first",
+                            agent.artifact.build_id,
+                            crate::BUILD_ID
+                        )));
+                    }
+                    repinned = Some(agent.artifact.sha256.clone());
+                    if target_host == host_id {
+                        stackbox.agent_sha256 = repinned.clone();
+                    } else if let Some(share) = stackbox
+                        .shares
+                        .iter_mut()
+                        .find(|share| share.host_id == target_host)
+                    {
+                        share.agent_sha256 = repinned.clone();
+                    }
                 }
-                repinned = Some(agent.artifact.sha256.clone());
-                stackbox.agent_sha256 = repinned.clone();
+            } else if stored.host.kind == crate::remote::HostKind::Ssh
+                && pinned_sha256.is_none()
+            {
+                return Err(conflict(format!(
+                    "install the Stackbox execution agent on host '{target_host}' first"
+                )));
             }
             let template = request.node.as_deref().map(|node| match node {
                 "control" => TemplateRole::Control,
@@ -653,7 +700,7 @@ impl StackboxManager {
                 status: SnapshotStatus::Creating,
                 arch,
                 platform: Some(platform),
-                host_id: (!local).then_some(host_id),
+                host_id: (!local).then_some(target_host.clone()),
                 source_stackbox: Some(stackbox_id.into()),
                 plan: match template {
                     // What a stackbox restored from it runs until it gains computes.
@@ -689,6 +736,7 @@ impl StackboxManager {
             };
             let mut job = super::new_job(stackbox_id, JobKind::Snapshot);
             job.snapshot_id = Some(request.id.clone());
+            job.target_host = Some(target_host);
             job.target_node = request.node.clone();
             // The stackbox says its VM is stopping, and remembers what to be once it restarts.
             stackbox.resume = Some(stackbox.status);
@@ -725,7 +773,10 @@ impl StackboxManager {
                 None => "stopping the VM to capture its disks\n".into(),
             },
         )?;
-        let backend = self.backend_for(&stackbox)?;
+        let backend = match job.target_node.as_deref() {
+            Some(node) => self.node_backend(&stackbox, node)?,
+            None => self.backend_for(&stackbox)?,
+        };
         // A compute template stopped one compute only; the control plane kept answering.
         let settle = snapshot.deployed && snapshot.template != Some(TemplateRole::Compute);
         let sink = self.event_sink(job, None);
@@ -751,6 +802,27 @@ impl StackboxManager {
         {
             Ok(frozen) => frozen,
             Err(error) => {
+                let target_host = job
+                    .target_host
+                    .as_deref()
+                    .or(snapshot.host_id.as_deref())
+                    .or(stackbox.host_id.as_deref())
+                    .unwrap_or("unknown");
+                let remote_group = job
+                    .target_node
+                    .as_deref()
+                    .filter(|_| snapshot.host_id.is_some())
+                    .map(|node| crate::stackbox::node_group(&id, node));
+                let error = match remote_group {
+                    Some(group) if !error.is::<crate::remote::protocol::AgentError>() => error
+                        .context(format!(
+                            "no response from host '{target_host}'; any partial snapshot group '{group}' on that host was left in place"
+                        )),
+                    Some(group) => error.context(format!(
+                        "host '{target_host}' failed to capture snapshot group '{group}'"
+                    )),
+                    None => error,
+                };
                 let message = format!("{error:#}");
                 self.update_snapshot(&id, |s| {
                     s.status = SnapshotStatus::Failed;

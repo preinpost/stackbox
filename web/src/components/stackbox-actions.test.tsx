@@ -1016,6 +1016,70 @@ test("freezes one compute VM of a deployed stackbox as a compute template", asyn
   cleanup();
 });
 
+test("freezes a compute VM on another host and disables whole-stackbox freeze", async () => {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+  });
+  const user = userEvent.setup();
+  const posted = stubStackboxApi("/stackboxes/grow/snapshots");
+  const base = grownStackbox();
+  const spanning: Stackbox = {
+    ...base,
+    plan: {
+      ...base.plan!,
+      computes: 2,
+      nodes: [
+        ...base.plan!.nodes,
+        { role: "compute", index: 2, cpus: 2, memory_mib: 3072, disk_mib: 10240 },
+      ],
+    },
+    nodes: [
+      ...base.nodes,
+      {
+        name: "grow-compute-2",
+        role: "compute",
+        index: 2,
+        status: "running",
+        memory_mib: 3072,
+      },
+    ],
+    shares: [
+      {
+        host_id: "edge",
+        nodes: ["compute-2"],
+        uplink_sha256: "b".repeat(64),
+      },
+    ],
+  };
+  render(
+    <QueryClientProvider client={client}>
+      <FreezeStackboxDialog stackbox={spanning} />
+    </QueryClientProvider>,
+  );
+  const trigger = screen.getByRole("button", { name: "얼리기" });
+  await waitFor(() =>
+    expect((trigger as HTMLButtonElement).disabled).toBe(false),
+  );
+  await user.click(trigger);
+  await user.click(await screen.findByRole("combobox", { name: "얼릴 대상" }));
+  const options = await screen.findAllByRole("option");
+  expect(options.map((option) => option.textContent)).toEqual([
+    "compute-1 (compute 템플릿)",
+    "compute-2 (compute 템플릿)",
+  ]);
+  await user.click(
+    screen.getByRole("option", { name: "compute-2 (compute 템플릿)" }),
+  );
+  await user.click(screen.getByRole("button", { name: "얼리기 시작" }));
+  await waitFor(() =>
+    expect(posted.body).toEqual({
+      id: "grow-compute-2-tpl",
+      node: "compute-2",
+    }),
+  );
+  cleanup();
+});
+
 test("freezes a stackbox on a remote host, which keeps the snapshot", async () => {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },

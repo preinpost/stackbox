@@ -80,7 +80,7 @@ fn group(snapshot_id: &str) -> String {
 
 /// The group of one VM's disk in a multi-node snapshot. msb binds a group to the first sandbox
 /// captured into it, so every VM needs its own.
-fn node_group(snapshot_id: &str, node: &str) -> String {
+pub fn node_group(snapshot_id: &str, node: &str) -> String {
     format!("{}-{node}", group(snapshot_id))
 }
 

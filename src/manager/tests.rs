@@ -100,6 +100,15 @@ impl Backend for Fake {
             Ok(())
         })
     }
+    fn prepare(
+        &self,
+        _id: String,
+        _components: Vec<String>,
+        _release: String,
+        _ssh_public_key: String,
+    ) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async { Ok(()) })
+    }
     fn create_share(
         &self,
         id: String,
@@ -6272,10 +6281,29 @@ async fn a_stackbox_spans_hosts_with_its_computes_placed_elsewhere() {
             Ok(())
         })
         .unwrap();
-    // Until edge is checked its architecture is unknown: a compute placed there may not go ahead.
+    // Until edge is checked its architecture is unknown: freezing its compute or placing a new
+    // compute there is refused before starting.
     let inspection = manager
         .update(|state| Ok(state.hosts.get_mut("edge").unwrap().host.inspection.take()))
         .unwrap();
+    let unchecked = manager
+        .freeze(
+            "mn",
+            SnapshotRequest {
+                id: "unchecked".into(),
+                note: None,
+                node: Some("compute-2".into()),
+            },
+        )
+        .unwrap_err();
+    assert!(unchecked.is::<Conflict>(), "{unchecked:#}");
+    assert!(
+        unchecked
+            .to_string()
+            .contains("host 'edge' has not been checked yet"),
+        "{unchecked:#}"
+    );
+    assert!(manager.snapshot("unchecked").is_err());
     let placed = manager
         .add_compute(
             "mn",
@@ -9993,4 +10021,547 @@ async fn a_purge_without_remote_files_leaves_the_golden_groups_alone() {
         "{:?}",
         purge_messages(&finished)
     );
+}
+
+/// Connect an in-process remote `Agent` to `manager`'s dial-in hub under `host_id` and register it.
+/// Dropping the returned `JoinHandle` aborts the pump; setting `drop_freeze` simulates a lost
+/// response on `Operation::Freeze`.
+fn attach_in_process_remote_agent(
+    manager: &StackboxManager,
+    host_id: &str,
+    agent_dir: &Path,
+    backend: Arc<Fake>,
+    arch: &str,
+    drop_freeze: Arc<AtomicBool>,
+) -> tokio::task::JoinHandle<()> {
+    use crate::remote::{
+        HostInspection, HostStatus, RegisterAgentHost,
+        agent::{Agent, Emitter},
+        dial::Envelope,
+        protocol::{Frame, Operation},
+    };
+    manager
+        .register_agent_host(RegisterAgentHost { id: host_id.into() })
+        .unwrap();
+    manager
+        .update(|state| {
+            let host = &mut state.hosts.get_mut(host_id).unwrap().host;
+            host.status = HostStatus::Ready;
+            host.inspection = Some(HostInspection {
+                os: "linux".into(),
+                arch: arch.into(),
+                compatible: true,
+                kvm_available: true,
+                sudo_available: true,
+                memory_total_mib: 65536,
+                memory_available_mib: 48000,
+                disk_available_mib: 200000,
+                msb_version: Some(crate::remote::MSB_VERSION.into()),
+                msb_compatible: true,
+                docker_available: true,
+                golden_image_available: true,
+                custom_kernel: None,
+                custom_kernel_reason: None,
+                mtty_available: false,
+                gpu_kernel: None,
+                pci_devices: Vec::new(),
+                msb_pci_capable: false,
+                pci_passthrough_available: false,
+                pci_candidates: Vec::new(),
+                pci_bind_helper_available: false,
+                pci_bind_helper_version: None,
+                vm_boot_verified: true,
+                checked_at: now(),
+            });
+            Ok(())
+        })
+        .unwrap();
+    let mut attached = manager.0.hub.attach(host_id);
+    let agent = Arc::new(Agent::in_process(agent_dir.to_path_buf(), backend));
+    tokio::spawn(async move {
+        let mut outgoing = std::mem::replace(
+            &mut attached.outgoing,
+            tokio::sync::mpsc::unbounded_channel().1,
+        );
+        let attached = Arc::new(attached);
+        while let Some(envelope) = outgoing.recv().await {
+            let Envelope::Open { session, request } = envelope else {
+                continue;
+            };
+            if drop_freeze.load(Ordering::SeqCst)
+                && matches!(request.operation, Operation::Freeze { .. })
+            {
+                break;
+            }
+            let agent = agent.clone();
+            let attached = attached.clone();
+            tokio::spawn(async move {
+                let emit_attached = attached.clone();
+                let emit: Emitter = Arc::new(move |frame| {
+                    emit_attached.deliver(session, frame);
+                    Ok(())
+                });
+                let frame = match agent.execute(*request, emit).await {
+                    Ok(result) => Frame::Result { result },
+                    Err(error) => Frame::Error {
+                        message: format!("{error:#}"),
+                    },
+                };
+                attached.deliver(session, frame);
+            });
+        }
+    })
+}
+
+#[tokio::test]
+async fn remote_compute_freeze_succeeds_records_remote_host_and_copies_to_other_hosts() {
+    use crate::link::relay::{RelaySettings, RelayTlsMode};
+    use crate::remote::{RegisterAgentHost, agent::Agent, dial};
+    let dir = tempfile::tempdir().unwrap();
+    let local_backend = Arc::new(Fake::default());
+    let mut opts = options(dir.path());
+    opts.memory_budget_mib = 64 * 1024;
+    let manager = open_with(opts, local_backend.clone()).await;
+    if !cfg!(target_os = "linux") {
+        *manager.0.guest_agent.write().unwrap() = Some(dir.path().join("stackbox-agent"));
+    }
+    manager
+        .set_relay(Some(RelaySettings {
+            url: "https://coordinator.example:10011".into(),
+            mode: RelayTlsMode::Private,
+            bind: Some("127.0.0.1:0".parse().unwrap()),
+        }))
+        .await
+        .unwrap();
+    manager.start_relay().await;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server =
+        tokio::spawn(axum::serve(listener, api::router(manager.clone(), None)).into_future());
+    let registered = manager
+        .register_agent_host(RegisterAgentHost { id: "edge".into() })
+        .unwrap();
+    let url = dial::connect_url(&format!("http://{address}")).unwrap();
+    let remote_backend = Arc::new(Fake::default());
+    let remote_agent = Arc::new(Agent::in_process(
+        dir.path().join("edge-agent"),
+        remote_backend.clone(),
+    ));
+    let dialling =
+        tokio::spawn(async move { dial::serve(&url, &registered.token, remote_agent).await });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !manager.host("edge").unwrap().connected {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let prep = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let jobs = manager.host_jobs().unwrap();
+            if let Some(job) = jobs.into_iter().find(|j| j.host_id == "edge") {
+                return job;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        host_done(&manager, &prep.id).await.status,
+        JobStatus::Succeeded
+    );
+    manager
+        .update(|state| {
+            let host = &mut state.hosts.get_mut("edge").unwrap().host;
+            host.status = crate::remote::HostStatus::Ready;
+            let inspection = host.inspection.as_mut().unwrap();
+            inspection.memory_total_mib = 65536;
+            inspection.os = "linux".into();
+            Ok(())
+        })
+        .unwrap();
+
+    // Create a stackbox on local, deploy, then add compute-2 on remote `edge`.
+    let created = manager
+        .create(CreateRequest {
+            computes: 1,
+            ..request("span")
+        })
+        .unwrap();
+    assert_eq!(done(&manager, &created).await.status, JobStatus::Succeeded);
+    let deployed = manager.deploy("span", DeployRequest::default()).unwrap();
+    assert_eq!(done(&manager, &deployed).await.status, JobStatus::Succeeded);
+    let expanded = manager
+        .add_compute(
+            "span",
+            AddComputeRequest {
+                pci_devices: Vec::new(),
+                host_id: Some("edge".into()),
+                from_snapshot: None,
+            },
+        )
+        .unwrap();
+    let finished = done(&manager, &expanded).await;
+    assert_eq!(
+        finished.status,
+        JobStatus::Succeeded,
+        "{:?}",
+        finished.error
+    );
+
+    // Freeze remote compute-2 as a compute template.
+    let freeze = manager
+        .freeze(
+            "span",
+            SnapshotRequest {
+                id: "edge-tpl".into(),
+                note: Some("from edge".into()),
+                node: Some("compute-2".into()),
+            },
+        )
+        .unwrap();
+    assert_eq!(freeze.target_host.as_deref(), Some("edge"));
+    assert_eq!(freeze.target_node.as_deref(), Some("compute-2"));
+
+    // Concurrent freeze on the same stackbox is rejected with 409 while freeze runs.
+    let concurrent = manager
+        .freeze(
+            "span",
+            SnapshotRequest {
+                id: "edge-tpl-2".into(),
+                note: None,
+                node: Some("compute-2".into()),
+            },
+        )
+        .unwrap_err();
+    assert!(concurrent.is::<Conflict>(), "{concurrent:#}");
+
+    let finished = done(&manager, &freeze).await;
+    assert_eq!(
+        finished.status,
+        JobStatus::Succeeded,
+        "{:?}",
+        finished.error
+    );
+    let snapshot = manager.snapshot("edge-tpl").unwrap();
+    assert_eq!(snapshot.status, SnapshotStatus::Ready);
+    assert_eq!(snapshot.host_id.as_deref(), Some("edge"));
+    assert_eq!(snapshot.template, Some(model::TemplateRole::Compute));
+    assert_eq!(snapshot.node.as_deref(), Some("compute-2"));
+    assert_eq!(snapshot.reference.as_deref(), Some("fake/edge-tpl"));
+    // Stored on remote backend, not local backend.
+    assert!(
+        remote_backend
+            .snapshots
+            .lock()
+            .unwrap()
+            .contains_key("fake/edge-tpl")
+    );
+    assert!(local_backend.snapshots.lock().unwrap().is_empty());
+    // Freezing compute-2 did not settle the control plane; stackbox remains Ready.
+    assert!(local_backend.settled.lock().unwrap().is_empty());
+    assert_eq!(manager.get("span").unwrap().status, StackboxStatus::Ready);
+
+    // Using `edge-tpl` on `local` streams a copy via `ensure_snapshot_on_host` and records it.
+    let on_local = manager
+        .add_compute(
+            "span",
+            AddComputeRequest {
+                pci_devices: Vec::new(),
+                host_id: None,
+                from_snapshot: Some("edge-tpl".into()),
+            },
+        )
+        .unwrap();
+    let finished = done(&manager, &on_local).await;
+    assert_eq!(
+        finished.status,
+        JobStatus::Succeeded,
+        "{:?}",
+        finished.error
+    );
+    assert_eq!(
+        local_backend.expanded_from.lock().unwrap().as_slice(),
+        &[Some("fake/imported/edge-tpl".to_owned())]
+    );
+    assert_eq!(
+        local_backend.reconfigured.lock().unwrap().as_slice(),
+        &[("span".into(), 3)]
+    );
+    let snapshot = manager.snapshot("edge-tpl").unwrap();
+    assert_eq!(snapshot.copies.len(), 1);
+    assert_eq!(snapshot.copies[0].host_id, "local");
+    assert_eq!(snapshot.copies[0].reference, "fake/imported/edge-tpl");
+    assert_eq!(snapshot.copies[0].via, model::CopySource::Stream);
+
+    dialling.abort();
+    server.abort();
+}
+
+#[tokio::test]
+async fn remote_compute_freeze_rejects_offline_and_unchecked_hosts() {
+    use crate::link::relay::{RelaySettings, RelayTlsMode};
+    use crate::remote::HostReachability;
+    let dir = tempfile::tempdir().unwrap();
+    let local_backend = Arc::new(Fake::default());
+    let mut opts = options(dir.path());
+    opts.memory_budget_mib = 64 * 1024;
+    let manager = open_with(opts, local_backend.clone()).await;
+    if !cfg!(target_os = "linux") {
+        *manager.0.guest_agent.write().unwrap() = Some(dir.path().join("stackbox-agent"));
+    }
+    manager
+        .set_relay(Some(RelaySettings {
+            url: "https://coordinator.example:10011".into(),
+            mode: RelayTlsMode::Private,
+            bind: Some("127.0.0.1:0".parse().unwrap()),
+        }))
+        .await
+        .unwrap();
+    manager.start_relay().await;
+
+    let remote_backend = Arc::new(Fake::default());
+    let remote_agent_dir = dir.path().join("remote-agent");
+    let pump = attach_in_process_remote_agent(
+        &manager,
+        "edge",
+        &remote_agent_dir,
+        remote_backend.clone(),
+        std::env::consts::ARCH,
+        Arc::new(AtomicBool::new(false)),
+    );
+
+    let created = manager
+        .create(CreateRequest {
+            computes: 1,
+            ..request("span")
+        })
+        .unwrap();
+    assert_eq!(done(&manager, &created).await.status, JobStatus::Succeeded);
+    let deployed = manager.deploy("span", DeployRequest::default()).unwrap();
+    assert_eq!(done(&manager, &deployed).await.status, JobStatus::Succeeded);
+    let expanded = manager
+        .add_compute(
+            "span",
+            AddComputeRequest {
+                pci_devices: Vec::new(),
+                host_id: Some("edge".into()),
+                from_snapshot: None,
+            },
+        )
+        .unwrap();
+    let finished = done(&manager, &expanded).await;
+    assert_eq!(
+        finished.status,
+        JobStatus::Succeeded,
+        "{:?}",
+        finished.error
+    );
+
+    // 1) Unknown architecture (inspection = None) -> 409 before starting.
+    let saved_inspection = manager
+        .update(|state| Ok(state.hosts.get_mut("edge").unwrap().host.inspection.take()))
+        .unwrap();
+    let err = manager
+        .freeze(
+            "span",
+            SnapshotRequest {
+                id: "edge-unchecked".into(),
+                note: None,
+                node: Some("compute-2".into()),
+            },
+        )
+        .unwrap_err();
+    assert!(err.is::<Conflict>(), "{err:#}");
+    assert!(
+        err.to_string().contains("has not been checked yet"),
+        "{err:#}"
+    );
+    assert!(manager.snapshot("edge-unchecked").is_err());
+    manager
+        .update(|state| {
+            state.hosts.get_mut("edge").unwrap().host.inspection = saved_inspection;
+            Ok(())
+        })
+        .unwrap();
+
+    // 2) Offline reachability -> 409 before starting.
+    manager
+        .update(|state| {
+            state.hosts.get_mut("edge").unwrap().host.reachability = Some(HostReachability {
+                reachable: false,
+                checked_at: now(),
+                last_ok_at: None,
+                error: Some("connection refused".into()),
+                consecutive_failures: 2,
+            });
+            Ok(())
+        })
+        .unwrap();
+    let err = manager
+        .freeze(
+            "span",
+            SnapshotRequest {
+                id: "edge-offline".into(),
+                note: None,
+                node: Some("compute-2".into()),
+            },
+        )
+        .unwrap_err();
+    assert!(err.is::<Conflict>(), "{err:#}");
+    assert!(err.to_string().contains("offline"), "{err:#}");
+    assert!(manager.snapshot("edge-offline").is_err());
+    manager
+        .update(|state| {
+            state.hosts.get_mut("edge").unwrap().host.reachability = None;
+            Ok(())
+        })
+        .unwrap();
+
+    // 3) Disconnected dial-in agent -> 409 before starting.
+    pump.abort();
+    let _ = pump.await;
+    drop(manager.0.hub.attach("edge"));
+    assert!(!manager.0.hub.connected("edge"));
+    let err = manager
+        .freeze(
+            "span",
+            SnapshotRequest {
+                id: "edge-disconnected".into(),
+                note: None,
+                node: Some("compute-2".into()),
+            },
+        )
+        .unwrap_err();
+    assert!(err.is::<Conflict>(), "{err:#}");
+    assert!(err.to_string().contains("is not connected"), "{err:#}");
+    assert!(manager.snapshot("edge-disconnected").is_err());
+}
+
+#[tokio::test]
+async fn remote_compute_freeze_failure_and_lost_response_recover_and_keep_group_name() {
+    use crate::link::relay::{RelaySettings, RelayTlsMode};
+    let dir = tempfile::tempdir().unwrap();
+    let local_backend = Arc::new(Fake::default());
+    let mut opts = options(dir.path());
+    opts.memory_budget_mib = 64 * 1024;
+    let manager = open_with(opts, local_backend.clone()).await;
+    if !cfg!(target_os = "linux") {
+        *manager.0.guest_agent.write().unwrap() = Some(dir.path().join("stackbox-agent"));
+    }
+    manager
+        .set_relay(Some(RelaySettings {
+            url: "https://coordinator.example:10011".into(),
+            mode: RelayTlsMode::Private,
+            bind: Some("127.0.0.1:0".parse().unwrap()),
+        }))
+        .await
+        .unwrap();
+    manager.start_relay().await;
+
+    let remote_backend = Arc::new(Fake::default());
+    let remote_agent_dir = dir.path().join("remote-agent");
+    let drop_freeze = Arc::new(AtomicBool::new(false));
+    let pump = attach_in_process_remote_agent(
+        &manager,
+        "edge",
+        &remote_agent_dir,
+        remote_backend.clone(),
+        std::env::consts::ARCH,
+        drop_freeze.clone(),
+    );
+
+    let created = manager
+        .create(CreateRequest {
+            computes: 1,
+            ..request("span")
+        })
+        .unwrap();
+    assert_eq!(done(&manager, &created).await.status, JobStatus::Succeeded);
+    let deployed = manager.deploy("span", DeployRequest::default()).unwrap();
+    assert_eq!(done(&manager, &deployed).await.status, JobStatus::Succeeded);
+    let expanded = manager
+        .add_compute(
+            "span",
+            AddComputeRequest {
+                pci_devices: Vec::new(),
+                host_id: Some("edge".into()),
+                from_snapshot: None,
+            },
+        )
+        .unwrap();
+    let finished = done(&manager, &expanded).await;
+    assert_eq!(
+        finished.status,
+        JobStatus::Succeeded,
+        "{:?}",
+        finished.error
+    );
+
+    // 1) Agent failure during freeze: job & snapshot fail, stackbox returns to Ready, VMs stay running.
+    remote_backend.fail.store(true, Ordering::SeqCst);
+    let failed_job = manager
+        .freeze(
+            "span",
+            SnapshotRequest {
+                id: "edge-fail".into(),
+                note: None,
+                node: Some("compute-2".into()),
+            },
+        )
+        .unwrap();
+    let finished = done(&manager, &failed_job).await;
+    assert_eq!(finished.status, JobStatus::Failed);
+    let err = finished.error.unwrap();
+    assert!(err.contains("intentional freeze failure"), "{err}");
+    assert!(
+        err.contains("stackbox-snap-edge-fail-compute-2"),
+        "error should name the snapshot group: {err}"
+    );
+    let snap = manager.snapshot("edge-fail").unwrap();
+    assert_eq!(snap.status, SnapshotStatus::Failed);
+    assert!(
+        snap.error
+            .as_deref()
+            .unwrap()
+            .contains("stackbox-snap-edge-fail-compute-2")
+    );
+    let sb = manager.get("span").unwrap();
+    assert_eq!(sb.status, StackboxStatus::Ready);
+    assert!(sb.nodes.iter().all(|n| n.status == "running"));
+    remote_backend.fail.store(false, Ordering::SeqCst);
+
+    // 2) Lost response from remote agent: job & snapshot fail, group name is reported, and
+    // no remote snapshot cleanup is triggered.
+    drop_freeze.store(true, Ordering::SeqCst);
+    let lost_job = manager
+        .freeze(
+            "span",
+            SnapshotRequest {
+                id: "edge-lost".into(),
+                note: None,
+                node: Some("compute-2".into()),
+            },
+        )
+        .unwrap();
+    let finished = done(&manager, &lost_job).await;
+    assert_eq!(finished.status, JobStatus::Failed);
+    let err = finished.error.unwrap();
+    assert!(
+        err.contains("stackbox-snap-edge-lost-compute-2"),
+        "lost-response error must name the snapshot group: {err}"
+    );
+    let snap = manager.snapshot("edge-lost").unwrap();
+    assert_eq!(snap.status, SnapshotStatus::Failed);
+    assert!(
+        snap.error
+            .as_deref()
+            .unwrap()
+            .contains("stackbox-snap-edge-lost-compute-2")
+    );
+    assert_eq!(manager.get("span").unwrap().status, StackboxStatus::Ready);
+
+    pump.abort();
 }

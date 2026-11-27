@@ -19,8 +19,8 @@ pub use node::{
 use node::{STACKBOX_LABEL, describe_node, destroy_node, settings};
 pub use snapshot::{
     FrozenSnapshot, ImportedSnapshot, NodeSnapshot, export_snapshot, freeze_compute,
-    freeze_control, freeze_stackbox, import_snapshot, remove_snapshot, restore_stackbox,
-    snapshot_labels,
+    freeze_control, freeze_stackbox, import_snapshot, node_group, remove_snapshot,
+    restore_stackbox, snapshot_labels,
 };
 pub use template::{
     ALL_IN_ONE, COMPUTE, CONTROL, MAX_COMPUTES, NodeSpec, Role, address, hostname, suffix,

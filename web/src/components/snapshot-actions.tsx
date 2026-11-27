@@ -83,19 +83,15 @@ function useDialog(pending: boolean, onOpen?: () => void) {
 }
 
 /** VMs of a deployed multi-node stackbox that can be frozen as templates: the control VM,
- * while every VM runs on the stackbox's own host, which keeps its snapshots, and the computes
- * there. */
+ * while every VM runs on the stackbox's own host, and every compute VM (local or on a share
+ * host, which keeps its own template snapshot). */
 export const templateNodes = (stackbox: Stackbox) =>
   stackbox.status === "ready" && isMultiNodeStackbox(stackbox)
     ? [
         ...(stackbox.shares?.length ? [] : ["control"]),
         ...(stackbox.plan?.nodes ?? [])
           .filter((spec) => spec.role === "compute" && spec.index)
-          .map((spec) => `compute-${spec.index}`)
-          .filter(
-            (suffix) =>
-              !stackbox.shares?.some((share) => share.nodes.includes(suffix)),
-          ),
+          .map((spec) => `compute-${spec.index}`),
       ]
     : [];
 const templateLabel = (node: string) =>
@@ -105,10 +101,11 @@ const templateLabel = (node: string) =>
 export const hasPciPassthrough = (stackbox: Stackbox) =>
   (stackbox.plan?.pci_devices?.length ?? 0) > 0;
 
-/** The stackbox's host keeps the snapshot, so the stackbox must be on a registered host. */
+/** Multi-host stackboxes can only freeze one compute template at a time (when ready). */
 export const canFreeze = (stackbox: Stackbox, hostIds: string[] = []) =>
   !hasPciPassthrough(stackbox) &&
   Boolean(stackbox.host_id && hostIds.includes(stackbox.host_id)) &&
+  (!stackbox.shares?.length || stackbox.status === "ready") &&
   !stackbox.active_job &&
   Boolean(stackbox.plan && stackbox.exposure) &&
   isDeployableStackbox(stackbox) &&
@@ -123,9 +120,10 @@ export function FreezeStackboxDialog({ stackbox }: { stackbox: Stackbox }) {
   const stackboxHost = hosts?.find((h) => h.id === stackbox.host_id);
   const local = stackboxHost?.kind === "local";
   const snapshots = useQuery(snapshotsQuery());
-  // A stackbox without computes yet is frozen as a control template only.
-  const whole = !awaitsCompute(stackbox);
-  const initialNode = whole ? "" : "control";
+  const templates = templateNodes(stackbox);
+  // A stackbox without computes yet or spanning hosts cannot be frozen whole.
+  const whole = !awaitsCompute(stackbox) && !stackbox.shares?.length;
+  const initialNode = whole ? "" : (templates[0] ?? "control");
   const [node, setNode] = useState(initialNode);
   const suggest = (node: string) =>
     node
@@ -134,7 +132,6 @@ export function FreezeStackboxDialog({ stackbox }: { stackbox: Stackbox }) {
   const suggested = suggest(initialNode);
   const [id, setId] = useState(suggested);
   const [note, setNote] = useState("");
-  const templates = templateNodes(stackbox);
   const pci = hasPciPassthrough(stackbox);
   const mutation = useMutation({
     mutationFn: () =>
