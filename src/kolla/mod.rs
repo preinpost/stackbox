@@ -337,28 +337,59 @@ pub async fn deploy_compute(
         )?;
         stackbox::update_identity(&control, control_spec, &plan.nodes).await?;
         let neutron = components.iter().any(|c| c == "neutron");
-        let mut computes: Vec<(Compute, Option<Sandbox>)> = Vec::new();
-        for compute in &topology.computes {
-            let suffix = compute
-                .hostname
-                .strip_prefix("stackbox-")
-                .context("compute hostname has no role prefix")?;
-            if !nodes.iter().any(|node| node == suffix) {
-                computes.push((compute.clone(), None));
-                continue;
-            }
-            let sandbox = stackbox::connect(&compute.name).await?;
-            if suffix == new_suffix && from_template {
-                step(&sink, format!("{new_suffix}의 템플릿 identity 초기화"))?;
-                stackbox::wait_until_booted(&sandbox).await?;
-                stackbox::update_identity(&sandbox, new_spec, &plan.nodes).await?;
-                run(&sandbox, &wipe_template_script(&new_spec.hostname())).await?;
-            } else if suffix == new_suffix {
-                step(&sink, format!("{new_suffix} prepare"))?;
-                prepare_host(&sandbox, neutron, &release, &sink).await?;
-            }
-            computes.push((compute.clone(), Some(sandbox)));
-        }
+        let computes = prepare_deploy_computes(
+            &topology.computes,
+            nodes,
+            &new_suffix,
+            from_template,
+            |compute, is_new| {
+                let release = &release;
+                let sink = &sink;
+                let nodes_spec = &plan.nodes;
+                let suffix = new_suffix.clone();
+                async move {
+                    let sandbox = stackbox::connect(&compute.name).await?;
+                    if is_new && from_template {
+                        step(sink, format!("{suffix}의 템플릿 identity 초기화"))?;
+                        stackbox::wait_until_booted(&sandbox).await?;
+                        stackbox::update_identity(&sandbox, new_spec, nodes_spec).await?;
+                        run(&sandbox, &wipe_template_script(&new_spec.hostname())).await?;
+                    } else if is_new {
+                        step(sink, format!("{suffix} prepare"))?;
+                        prepare_host(&sandbox, neutron, release, sink).await?;
+                    }
+                    Ok(sandbox)
+                }
+            },
+            |compute| {
+                let control = &control;
+                let sink = &sink;
+                let nodes_spec = &plan.nodes;
+                let suffix = new_suffix.clone();
+                async move {
+                    step(sink, format!("{suffix}의 템플릿 identity 초기화"))?;
+                    let key = run(
+                        control,
+                        "[ -f /root/.ssh/id_ed25519 ] || ssh-keygen -q -t ed25519 -N '' -f /root/.ssh/id_ed25519; cat /root/.ssh/id_ed25519.pub",
+                    )
+                    .await?;
+                    let script = remote_template_init_script(new_spec, nodes_spec, key.trim())?;
+                    let target = ssh_target(&compute)?;
+                    run(
+                        control,
+                        &format!(
+                            "ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 {target} 'bash -s' <<'STACKBOX_REMOTE_WIPE'\n{script}\nSTACKBOX_REMOTE_WIPE"
+                        ),
+                    )
+                    .await
+                    .map(drop)
+                    .with_context(|| {
+                        format!("initialize template compute {} over SSH", compute.hostname)
+                    })
+                }
+            },
+        )
+        .await?;
         for (_, sandbox) in computes.iter() {
             if let Some(sandbox) = sandbox {
                 sandboxes.push(sandbox.clone());
@@ -499,6 +530,72 @@ pub async fn deploy_compute(
         stackbox::detach(&sandbox).await;
     }
     result
+}
+
+async fn prepare_deploy_computes<F, Fut, G, GFut>(
+    topology_computes: &[Compute],
+    nodes: &[String],
+    new_suffix: &str,
+    from_template: bool,
+    mut init_local: F,
+    mut init_remote: G,
+) -> Result<Vec<(Compute, Option<Sandbox>)>>
+where
+    F: FnMut(Compute, bool) -> Fut,
+    Fut: std::future::Future<Output = Result<Sandbox>>,
+    G: FnMut(Compute) -> GFut,
+    GFut: std::future::Future<Output = Result<()>>,
+{
+    let mut computes: Vec<(Compute, Option<Sandbox>)> = Vec::new();
+    for compute in topology_computes {
+        let suffix = compute
+            .hostname
+            .strip_prefix("stackbox-")
+            .context("compute hostname has no role prefix")?;
+        if !nodes.iter().any(|node| node == suffix) {
+            if suffix == new_suffix && from_template {
+                init_remote(compute.clone()).await?;
+            }
+            computes.push((compute.clone(), None));
+            continue;
+        }
+        let sandbox = init_local(compute.clone(), suffix == new_suffix).await?;
+        computes.push((compute.clone(), Some(sandbox)));
+    }
+    Ok(computes)
+}
+
+/// Update identity and wipe template state on a compute VM on another host over SSH, keeping
+/// `ssh_public_key` authorized so the control VM can still reach it during reconfigure.
+fn remote_template_init_script(
+    spec: &stackbox::NodeSpec,
+    nodes: &[stackbox::NodeSpec],
+    ssh_public_key: &str,
+) -> Result<String> {
+    anyhow::ensure!(
+        ssh_public_key.starts_with("ssh-ed25519 ") && !ssh_public_key.contains(['\'', '\n']),
+        "unexpected SSH public key on the control VM"
+    );
+    let peers: Vec<(String, String)> = nodes
+        .iter()
+        .filter(|other| other.hostname() != spec.hostname())
+        .map(|other| (other.address(), other.hostname()))
+        .collect();
+    let identity = stackbox::identity_conf(spec, false, &peers);
+    let wipe = wipe_template_script(&spec.hostname());
+    Ok(format!(
+        r#"set -euo pipefail
+mkdir -p /etc/stackbox
+cat > {identity_path} <<'STACKBOX_IDENTITY'
+{identity}STACKBOX_IDENTITY
+systemctl restart stackbox-hostname
+{wipe}
+mkdir -p /root/.ssh && chmod 700 /root/.ssh
+f=/root/.ssh/authorized_keys
+touch "$f" && chmod 600 "$f"
+grep -xF '{ssh_public_key}' "$f" >/dev/null || {{ [ -s "$f" ] && [ -n "$(tail -c1 "$f")" ] && echo >> "$f"; echo '{ssh_public_key}' >> "$f"; }}"#,
+        identity_path = stackbox::IDENTITY_CONF,
+    ))
 }
 
 /// Make a stackbox restored from a control template forget the computes of the stackbox it was
@@ -5819,6 +5916,104 @@ for _ in $(seq 200); do printf '%s\n' "  <interface type='network'/>"; done
             String::from_utf8_lossy(&output.stderr).contains(
                 "libvirt domain instance-00000001 on stackbox-compute-1 has no PCI hostdev"
             ),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[tokio::test]
+    async fn remote_compute_from_template_is_wiped_and_reauthorized() {
+        let topology_computes = [
+            Compute {
+                name: "span-compute-1".into(),
+                hostname: "stackbox-compute-1".into(),
+                address: "10.254.0.11".into(),
+            },
+            Compute {
+                name: "span-compute-2".into(),
+                hostname: "stackbox-compute-2".into(),
+                address: "10.254.0.12".into(),
+            },
+        ];
+        // Primary host runs control + compute-1; compute-2 is on a remote share host.
+        let primary_nodes = vec!["control".into(), "compute-1".into()];
+        let remote_initialized = std::sync::Mutex::new(Vec::<String>::new());
+        // `Sandbox` has no dummy constructor in tests; returning an error on local connect is unused
+        // if we only assert remote initialization, or we can test remote-only / skip local connect.
+        // Here we include only the remote compute when local computes already ran, OR use a topology
+        // with just compute-2 to exercise `prepare_deploy_computes` without real sandboxes.
+        let remote_only = &topology_computes[1..];
+        let computes = prepare_deploy_computes(
+            remote_only,
+            &primary_nodes,
+            "compute-2",
+            true,
+            |_compute, _is_new| async { anyhow::bail!("local sandbox should not be connected") },
+            |compute| {
+                remote_initialized
+                    .lock()
+                    .unwrap()
+                    .push(compute.hostname.clone());
+                async { Ok(()) }
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(computes.len(), 1);
+        assert!(computes[0].1.is_none());
+        assert_eq!(
+            *remote_initialized.lock().unwrap(),
+            vec!["stackbox-compute-2".to_string()],
+            "remote compute booted from a template must run template initialization"
+        );
+    }
+
+    #[test]
+    fn remote_template_init_script_wipes_identity_and_keeps_control_ssh_key() {
+        let nodes = vec![
+            stackbox::NodeSpec {
+                index: None,
+                ..stackbox::CONTROL
+            },
+            stackbox::NodeSpec {
+                index: Some(1),
+                ..stackbox::COMPUTE
+            },
+            stackbox::NodeSpec {
+                index: Some(2),
+                ..stackbox::COMPUTE
+            },
+        ];
+        let key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestControlKey stackbox-kolla";
+        let script = remote_template_init_script(&nodes[2], &nodes, key).unwrap();
+        assert!(script.contains("STACKBOX_HOSTNAME=stackbox-compute-2"));
+        assert!(script.contains("STACKBOX_ADDRESS=10.254.0.12"));
+        assert!(script.contains("10.254.0.10=stackbox-control"));
+        assert!(script.contains("systemctl restart stackbox-hostname"));
+        assert!(script.contains("systemctl enable docker.service docker.socket"));
+        assert!(script.contains("systemctl start docker.service"));
+        // The wipe clears old template keys first, then re-authorizes this control VM's key.
+        let wipe_pos = script.find(": > /root/.ssh/authorized_keys").unwrap();
+        let auth_pos = script.find(key).unwrap();
+        assert!(wipe_pos < auth_pos, "{script}");
+        for reader in ["grep -q", "grep -m", "| head"] {
+            assert!(!script.contains(reader), "{reader} in:\n{script}");
+        }
+        let mut child = Command::new("bash")
+            .arg("-n")
+            .stdin(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(script.as_bytes())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );

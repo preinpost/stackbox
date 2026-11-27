@@ -13,10 +13,10 @@ use microsandbox::Sandbox;
 use crate::shell::run;
 pub use node::{
     GUEST_ADDRESS, GUEST_INTERFACE, IDENTITY_CONF, LEGACY_ALL_IN_ONE_SUFFIX, NodeSetup,
-    StackboxNode, connect, create_node, detach, install_guest_files, install_links, is_node_name,
-    node_name, wait_until_booted,
+    StackboxNode, connect, create_node, detach, identity_conf, install_guest_files, install_links,
+    is_node_name, node_name, wait_until_booted,
 };
-use node::{STACKBOX_LABEL, describe_node, destroy_node, identity_conf, settings};
+use node::{STACKBOX_LABEL, describe_node, destroy_node, settings};
 pub use snapshot::{
     FrozenSnapshot, ImportedSnapshot, NodeSnapshot, export_snapshot, freeze_compute,
     freeze_control, freeze_stackbox, import_snapshot, remove_snapshot, restore_stackbox,
