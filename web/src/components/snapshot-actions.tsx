@@ -170,9 +170,13 @@ export function FreezeStackboxDialog({ stackbox }: { stackbox: Stackbox }) {
             ? "PCI 패스스루 stackbox는 스냅샷을 지원하지 않습니다."
             : !stackboxHost
               ? "stackbox의 호스트가 등록되어 있지 않아 얼릴 수 없습니다."
-              : local
-                ? "VM을 스냅샷으로 얼려둡니다."
-                : `VM을 스냅샷으로 얼려 ${stackboxHost.id}에 둡니다.`
+              : stackbox.shares?.length
+                ? local
+                  ? "compute VM을 템플릿으로 얼립니다. 다른 호스트의 compute 스냅샷은 그 호스트에 저장됩니다."
+                  : `compute VM을 템플릿으로 얼립니다. ${stackboxHost.id}의 compute는 ${stackboxHost.id}에, 다른 호스트의 compute 스냅샷은 그 호스트에 저장됩니다.`
+                : local
+                  ? "VM을 스냅샷으로 얼려둡니다."
+                  : `VM을 스냅샷으로 얼려 ${stackboxHost.id}에 둡니다.`
         }
       >
         <Snowflake size={16} />

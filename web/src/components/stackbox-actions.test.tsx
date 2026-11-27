@@ -1060,6 +1060,9 @@ test("freezes a compute VM on another host and disables whole-stackbox freeze", 
   await waitFor(() =>
     expect((trigger as HTMLButtonElement).disabled).toBe(false),
   );
+  expect(trigger.getAttribute("title")).toBe(
+    "compute VM을 템플릿으로 얼립니다. 다른 호스트의 compute 스냅샷은 그 호스트에 저장됩니다.",
+  );
   await user.click(trigger);
   await user.click(await screen.findByRole("combobox", { name: "얼릴 대상" }));
   const options = await screen.findAllByRole("option");
@@ -1107,6 +1110,9 @@ test("freezes a stackbox on a remote host, which keeps the snapshot", async () =
   await waitFor(() =>
     expect((trigger as HTMLButtonElement).disabled).toBe(false),
   );
+  expect(trigger.getAttribute("title")).toBe(
+    "VM을 스냅샷으로 얼려 edge에 둡니다.",
+  );
   await user.click(trigger);
   expect(
     await screen.findByText(/x86_64 · Linux에서만 복원할 수 있습니다/),
@@ -1114,6 +1120,53 @@ test("freezes a stackbox on a remote host, which keeps the snapshot", async () =
   expect(screen.getByText(/원본은 edge에 두고/)).toBeTruthy();
   await user.click(screen.getByRole("button", { name: "얼리기 시작" }));
   await waitFor(() => expect(posted.body).toEqual({ id: "grow-clean" }));
+  cleanup();
+});
+
+test("shows primary and share host storage in freeze tooltip when a remote-host stackbox has shares", async () => {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+  });
+  stubStackboxApi("/stackboxes/grow/snapshots", [], [
+    {
+      id: "edge",
+      kind: "ssh",
+      address: "10.0.0.5",
+      status: "ready",
+      inspection: { arch: "x86_64", os: "linux", checked_at: 0 },
+    },
+    {
+      id: "edge-2",
+      kind: "ssh",
+      address: "10.0.0.6",
+      status: "ready",
+      inspection: { arch: "x86_64", os: "linux", checked_at: 0 },
+    },
+  ]);
+  const base = grownStackbox();
+  const spanningRemote: Stackbox = {
+    ...base,
+    host_id: "edge",
+    shares: [
+      {
+        host_id: "edge-2",
+        nodes: ["compute-2"],
+        uplink_sha256: "b".repeat(64),
+      },
+    ],
+  };
+  render(
+    <QueryClientProvider client={client}>
+      <FreezeStackboxDialog stackbox={spanningRemote} />
+    </QueryClientProvider>,
+  );
+  const trigger = screen.getByRole("button", { name: "얼리기" });
+  await waitFor(() =>
+    expect((trigger as HTMLButtonElement).disabled).toBe(false),
+  );
+  expect(trigger.getAttribute("title")).toBe(
+    "compute VM을 템플릿으로 얼립니다. edge의 compute는 edge에, 다른 호스트의 compute 스냅샷은 그 호스트에 저장됩니다.",
+  );
   cleanup();
 });
 
