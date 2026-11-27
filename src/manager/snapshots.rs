@@ -524,17 +524,6 @@ impl StackboxManager {
                 .clone()
                 .ok_or_else(|| conflict("stackboxes imported from older versions cannot be frozen"))?;
             let arch = host_arch(state, &host_id);
-            let share_arches: Vec<(String, Option<String>)> = state
-                .stackboxes
-                .get(stackbox_id)
-                .map(|stackbox| {
-                    stackbox
-                        .shares
-                        .iter()
-                        .map(|share| (share.host_id.clone(), host_arch(state, &share.host_id)))
-                        .collect()
-                })
-                .unwrap_or_default();
             let stackbox = state
                 .stackboxes
                 .get_mut(stackbox_id)
@@ -617,21 +606,13 @@ impl StackboxManager {
                     )));
                 }
             }
-            // A snapshot records one architecture, the host's whose VMs it captures. A stackbox
-            // whose computes run on hosts of another architecture could not boot the whole of it
-            // anywhere; its VMs are frozen one at a time as templates of their own host instead.
-            if request.node.is_none() {
-                let foreign = share_arches.iter().find_map(|(share, other)| match other {
-                    None => Some(format!(
-                        "host '{share}' has not been checked yet, so its CPU architecture is unknown; check it from Hosts first"
-                    )),
-                    Some(other) => (*other != arch).then(|| format!("host '{share}' is {other}")),
-                });
-                if let Some(foreign) = foreign {
-                    return Err(conflict(format!(
-                        "this stackbox's computes run on hosts of another architecture than host '{host_id}' ({arch}): {foreign}; a snapshot holds one architecture, so freeze its control VM or a compute as a template instead"
-                    )));
-                }
+            // A whole-stackbox snapshot captures every VM into one snapshot on one host; a
+            // stackbox whose computes span hosts cannot be frozen whole, so its VMs are frozen
+            // one at a time as templates of their own host instead.
+            if request.node.is_none() && !stackbox.shares.is_empty() {
+                return Err(conflict(
+                    "this stackbox has computes on other hosts, and freezing a multi-host stackbox whole is not supported; freeze its control VM or a compute one at a time as a template instead",
+                ));
             }
             if request.node.is_none() && plan.multinode() && plan.computes == 0 {
                 return Err(conflict(

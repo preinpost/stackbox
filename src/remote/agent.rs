@@ -1475,6 +1475,11 @@ impl Agent {
                         entry.runs(node),
                         "VM '{node}' of stackbox '{id}' runs on another host"
                     );
+                } else {
+                    ensure!(
+                        entry.share.is_none(),
+                        "stackbox '{id}' spans hosts; freeze its control VM or a compute one at a time as a template instead"
+                    );
                 }
                 Ok(Reply::Frozen {
                     snapshot: self

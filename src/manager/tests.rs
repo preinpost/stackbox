@@ -6215,7 +6215,26 @@ async fn a_stackbox_spans_hosts_with_its_computes_placed_elsewhere() {
             .contains(&"prepare:mn".to_string())
     );
     assert_eq!(*backend.spanning.lock().unwrap(), [vec![2u8]]);
-    // A compute host of another architecture keeps the whole stackbox out of one snapshot.
+    // A multi-host stackbox cannot be frozen as a whole snapshot even when all hosts share an architecture.
+    let whole = manager
+        .freeze(
+            "mn",
+            SnapshotRequest {
+                id: "whole-spanning".into(),
+                note: None,
+                node: None,
+            },
+        )
+        .unwrap_err();
+    assert!(whole.is::<Conflict>(), "{whole:#}");
+    let message = whole.to_string();
+    assert!(
+        message.contains("control") && message.contains("compute") && message.contains("template"),
+        "{message}"
+    );
+    assert!(manager.snapshot("whole-spanning").is_err());
+
+    // A compute host of another architecture is still refused for a whole-stackbox freeze.
     let foreign = if std::env::consts::ARCH == "aarch64" {
         "x86_64"
     } else {
@@ -6242,7 +6261,7 @@ async fn a_stackbox_spans_hosts_with_its_computes_placed_elsewhere() {
     assert!(
         refused
             .to_string()
-            .contains(&format!("host 'edge' is {foreign}")),
+            .contains("freezing a multi-host stackbox whole is not supported"),
         "{refused:#}"
     );
     assert!(manager.snapshot("mixed").is_err());
@@ -6253,29 +6272,10 @@ async fn a_stackbox_spans_hosts_with_its_computes_placed_elsewhere() {
             Ok(())
         })
         .unwrap();
-    // Until edge is checked its architecture is unknown: neither a whole-stackbox freeze nor a
-    // compute placed there may go ahead.
+    // Until edge is checked its architecture is unknown: a compute placed there may not go ahead.
     let inspection = manager
         .update(|state| Ok(state.hosts.get_mut("edge").unwrap().host.inspection.take()))
         .unwrap();
-    let unchecked = manager
-        .freeze(
-            "mn",
-            SnapshotRequest {
-                id: "unchecked".into(),
-                note: None,
-                node: None,
-            },
-        )
-        .unwrap_err();
-    assert!(unchecked.is::<Conflict>(), "{unchecked:#}");
-    assert!(
-        unchecked
-            .to_string()
-            .contains("host 'edge' has not been checked yet"),
-        "{unchecked:#}"
-    );
-    assert!(manager.snapshot("unchecked").is_err());
     let placed = manager
         .add_compute(
             "mn",
