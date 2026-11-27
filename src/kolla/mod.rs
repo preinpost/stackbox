@@ -353,7 +353,11 @@ pub async fn deploy_compute(
                         step(sink, format!("{suffix}의 템플릿 identity 초기화"))?;
                         stackbox::wait_until_booted(&sandbox).await?;
                         stackbox::update_identity(&sandbox, new_spec, nodes_spec).await?;
-                        run(&sandbox, &wipe_template_script(&new_spec.hostname())).await?;
+                        run(
+                            &sandbox,
+                            &wipe_template_script(&new_spec.hostname(), None)?,
+                        )
+                        .await?;
                     } else if is_new {
                         step(sink, format!("{suffix} prepare"))?;
                         prepare_host(&sandbox, neutron, release, sink).await?;
@@ -566,34 +570,27 @@ where
 }
 
 /// Update identity and wipe template state on a compute VM on another host over SSH, keeping
-/// `ssh_public_key` authorized so the control VM can still reach it during reconfigure.
+/// `ssh_public_key` authorized immediately after wiping `authorized_keys` so the control VM can
+/// still reach it even if Docker or OVS setup fails mid-way.
 fn remote_template_init_script(
     spec: &stackbox::NodeSpec,
     nodes: &[stackbox::NodeSpec],
     ssh_public_key: &str,
 ) -> Result<String> {
-    anyhow::ensure!(
-        ssh_public_key.starts_with("ssh-ed25519 ") && !ssh_public_key.contains(['\'', '\n']),
-        "unexpected SSH public key on the control VM"
-    );
     let peers: Vec<(String, String)> = nodes
         .iter()
         .filter(|other| other.hostname() != spec.hostname())
         .map(|other| (other.address(), other.hostname()))
         .collect();
     let identity = stackbox::identity_conf(spec, false, &peers);
-    let wipe = wipe_template_script(&spec.hostname());
+    let wipe = wipe_template_script(&spec.hostname(), Some(ssh_public_key))?;
     Ok(format!(
         r#"set -euo pipefail
 mkdir -p /etc/stackbox
 cat > {identity_path} <<'STACKBOX_IDENTITY'
 {identity}STACKBOX_IDENTITY
 systemctl restart stackbox-hostname
-{wipe}
-mkdir -p /root/.ssh && chmod 700 /root/.ssh
-f=/root/.ssh/authorized_keys
-touch "$f" && chmod 600 "$f"
-grep -xF '{ssh_public_key}' "$f" >/dev/null || {{ [ -s "$f" ] && [ -n "$(tail -c1 "$f")" ] && echo >> "$f"; echo '{ssh_public_key}' >> "$f"; }}"#,
+{wipe}"#,
         identity_path = stackbox::IDENTITY_CONF,
     ))
 }
@@ -760,11 +757,21 @@ async fn write_inventory(
 
 /// Make a compute booted from a compute template its own before its Docker starts: drop the
 /// source's Nova `compute_id`, instances, libvirt domains and SSH keys, and give it a new
-/// machine ID, which Kolla's libvirt host UUID follows on reconfigure. This runs once per
-/// VM, so a retried expansion keeps the identity Nova registered. Docker then starts the
-/// template's containers, and OVS takes the new hostname as its system-id.
-fn wipe_template_script(hostname: &str) -> String {
-    format!(
+/// machine ID, which Kolla's libvirt host UUID follows on reconfigure. When `ssh_public_key` is
+/// supplied (remote computes reached over SSH), re-authorize it immediately after wiping
+/// `authorized_keys` inside the one-shot marker block so a failure in Docker or OVS setup
+/// cannot lock out subsequent SSH retries. This runs once per VM, so a retried expansion keeps
+/// the identity Nova registered. Docker then starts the template's containers, and OVS takes
+/// the new hostname as its system-id.
+fn wipe_template_script(hostname: &str, ssh_public_key: Option<&str>) -> Result<String> {
+    let reauthorize = match ssh_public_key {
+        Some(key) => authorize_key_lines(key)?
+            .lines()
+            .map(|line| format!("\n  {line}"))
+            .collect::<String>(),
+        None => String::new(),
+    };
+    Ok(format!(
         r#"set -euo pipefail
 marker=/etc/stackbox/template-wiped
 if [ ! -e $marker ]; then
@@ -775,7 +782,7 @@ if [ ! -e $marker ]; then
   rm -f $volumes/nova_libvirt_qemu/_data/*.xml $volumes/nova_libvirt_qemu/_data/autostart/*.xml
   rm -f /etc/machine-id /var/lib/dbus/machine-id
   systemd-machine-id-setup
-  : > /root/.ssh/authorized_keys 2>/dev/null || true
+  : > /root/.ssh/authorized_keys 2>/dev/null || true{reauthorize}
   touch $marker
 fi
 systemctl enable docker.service docker.socket
@@ -797,7 +804,7 @@ if docker ps -a --format '{{{{.Names}}}}' | grep -x openvswitch_db >/dev/null; t
   for _ in $(seq 60); do docker exec openvswitch_db ovs-vsctl show >/dev/null 2>&1 && break; sleep 2; done
   docker exec openvswitch_db ovs-vsctl set Open_vSwitch . external_ids:system-id={hostname}
 fi"#
-    )
+    ))
 }
 
 /// Wait for OVS on the control VM to answer, then restart its OVS agent if it is not healthy.
@@ -2532,24 +2539,25 @@ async fn distribute_ssh_key(
     Ok(())
 }
 
-/// Let `key` in as root.
-async fn authorize_key(sandbox: &Sandbox, key: &str) -> Result<()> {
+/// Shell lines that append `key` to `/root/.ssh/authorized_keys` if not already present.
+/// An authorized_keys without a final newline would join the key to its last line.
+fn authorize_key_lines(key: &str) -> Result<String> {
     anyhow::ensure!(
         key.starts_with("ssh-ed25519 ") && !key.contains(['\'', '\n']),
-        "unexpected SSH public key"
+        "unexpected SSH public key on the control VM"
     );
-    // An authorized_keys without a final newline would join the key to its last line.
-    run(
-        sandbox,
-        &format!(
-            r#"set -e
-mkdir -p /root/.ssh && chmod 700 /root/.ssh
+    Ok(format!(
+        r#"mkdir -p /root/.ssh && chmod 700 /root/.ssh
 f=/root/.ssh/authorized_keys
 touch "$f" && chmod 600 "$f"
 grep -xF '{key}' "$f" >/dev/null || {{ [ -s "$f" ] && [ -n "$(tail -c1 "$f")" ] && echo >> "$f"; echo '{key}' >> "$f"; }}"#
-        ),
-    )
-    .await?;
+    ))
+}
+
+/// Let `key` in as root.
+async fn authorize_key(sandbox: &Sandbox, key: &str) -> Result<()> {
+    let lines = authorize_key_lines(key)?;
+    run(sandbox, &format!("set -e\n{lines}")).await?;
     Ok(())
 }
 
@@ -4382,7 +4390,7 @@ mod tests {
             RESTART_OVS_AGENT.to_owned(),
             verify_compute_script("stackbox-compute-1", true),
             // A compute booted from a template recreates the containers it inherited.
-            wipe_template_script("stackbox-compute-2"),
+            wipe_template_script("stackbox-compute-2", None).unwrap(),
             // Every end-of-life series installs from its last tag on its own Python, with the
             // libcrypt and Jinja2 fixes its interpreter and Ansible need.
             install_script(&releases::info("2022.2")),
@@ -4488,7 +4496,7 @@ mod tests {
 
         // A template's containers carry its hostname; the copy drops the ones that are not its
         // own, so Kolla's OVS agent registers under this VM and not the source one.
-        let wipe = wipe_template_script("stackbox-compute-2");
+        let wipe = wipe_template_script("stackbox-compute-2", None).unwrap();
         assert!(wipe.contains(r#"if [ -n "$h" ] && [ "$h" != "$me" ]"#));
         assert!(wipe.contains(r#"docker rm -f "$c""#));
         // The host's own OVS containers carry the stackbox's network state, not a copy's identity.
@@ -5992,10 +6000,20 @@ for _ in $(seq 200); do printf '%s\n' "  <interface type='network'/>"; done
         assert!(script.contains("systemctl restart stackbox-hostname"));
         assert!(script.contains("systemctl enable docker.service docker.socket"));
         assert!(script.contains("systemctl start docker.service"));
-        // The wipe clears old template keys first, then re-authorizes this control VM's key.
+        // The wipe clears old template keys first, then immediately re-authorizes this control
+        // VM's key inside the marker block before Docker or OVS runs.
         let wipe_pos = script.find(": > /root/.ssh/authorized_keys").unwrap();
         let auth_pos = script.find(key).unwrap();
-        assert!(wipe_pos < auth_pos, "{script}");
+        let marker_touch_pos = script.find("touch $marker").unwrap();
+        let docker_pos = script.find("systemctl enable docker.service").unwrap();
+        assert!(
+            wipe_pos < auth_pos && auth_pos < marker_touch_pos && marker_touch_pos < docker_pos,
+            "{script}"
+        );
+        // Local wipe path omits the SSH key until `distribute_ssh_key` runs over the guest agent.
+        let local_wipe = wipe_template_script("stackbox-compute-2", None).unwrap();
+        assert!(local_wipe.contains(": > /root/.ssh/authorized_keys"));
+        assert!(!local_wipe.contains("ssh-ed25519"));
         for reader in ["grep -q", "grep -m", "| head"] {
             assert!(!script.contains(reader), "{reader} in:\n{script}");
         }
@@ -6016,6 +6034,151 @@ for _ in $(seq 200); do printf '%s\n' "  <interface type='network'/>"; done
             output.status.success(),
             "{}",
             String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn remote_template_init_script_keeps_control_ssh_key_when_docker_fails_and_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let etc_stackbox = root.join("etc/stackbox");
+        let volumes = root.join("var/lib/docker/volumes");
+        let ssh_dir = root.join("root/.ssh");
+        let bin_dir = root.join("bin");
+        std::fs::create_dir_all(&etc_stackbox).unwrap();
+        std::fs::create_dir_all(volumes.join("nova_compute/_data/instances")).unwrap();
+        std::fs::create_dir_all(volumes.join("nova_libvirt_qemu/_data/autostart")).unwrap();
+        std::fs::create_dir_all(&ssh_dir).unwrap();
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        std::fs::create_dir_all(root.join("var/lib/dbus")).unwrap();
+
+        let machine_id = root.join("etc/machine-id");
+        let dbus_machine_id = root.join("var/lib/dbus/machine-id");
+        std::fs::write(&machine_id, "old-machine-id\n").unwrap();
+        std::fs::write(&dbus_machine_id, "old-machine-id\n").unwrap();
+        let auth_keys = ssh_dir.join("authorized_keys");
+        std::fs::write(&auth_keys, "ssh-ed25519 AAAAoldTemplateKey old-template").unwrap();
+
+        let machine_id_log = root.join("machine-id-setup.log");
+        let write_stub = |name: &str, body: &str| {
+            let p = bin_dir.join(name);
+            std::fs::write(&p, body).unwrap();
+            std::fs::set_permissions(&p, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+                .unwrap();
+        };
+        write_stub("systemctl", "#!/bin/bash\nexit 0\n");
+        write_stub(
+            "systemd-machine-id-setup",
+            &format!(
+                "#!/bin/bash\necho called >> '{}'\necho new-machine-id > '{}'\n",
+                machine_id_log.display(),
+                machine_id.display()
+            ),
+        );
+        write_stub("hostname", "#!/bin/bash\necho stackbox-compute-2\n");
+        write_stub(
+            "docker",
+            r#"#!/bin/bash
+case "$1" in
+  ps)
+    echo "nova_compute"
+    ;;
+  inspect)
+    echo "source-compute"
+    ;;
+  rm)
+    if [ "${FAKE_DOCKER_FAIL:-0}" = "1" ]; then
+      echo "docker rm failed" >&2
+      exit 1
+    fi
+    ;;
+esac
+exit 0
+"#,
+        );
+
+        let nodes = vec![
+            stackbox::NodeSpec {
+                index: None,
+                ..stackbox::CONTROL
+            },
+            stackbox::NodeSpec {
+                index: Some(1),
+                ..stackbox::COMPUTE
+            },
+            stackbox::NodeSpec {
+                index: Some(2),
+                ..stackbox::COMPUTE
+            },
+        ];
+        let key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestControlKey stackbox-kolla";
+        let script = remote_template_init_script(&nodes[2], &nodes, key)
+            .unwrap()
+            .replace("/etc/stackbox", etc_stackbox.to_str().unwrap())
+            .replace("/var/lib/docker/volumes", volumes.to_str().unwrap())
+            .replace("/etc/machine-id", machine_id.to_str().unwrap())
+            .replace(
+                "/var/lib/dbus/machine-id",
+                dbus_machine_id.to_str().unwrap(),
+            )
+            .replace("/root/.ssh", ssh_dir.to_str().unwrap());
+
+        let path = std::env::join_paths(std::iter::once(bin_dir).chain(std::env::split_paths(
+            &std::env::var_os("PATH").unwrap_or_default(),
+        )))
+        .unwrap();
+
+        // First run fails in Docker after wiping the template state: the control key must already
+        // be re-authorized and the old template key must be gone.
+        let failed = Command::new("bash")
+            .arg("-c")
+            .arg(&script)
+            .env("PATH", &path)
+            .env("FAKE_DOCKER_FAIL", "1")
+            .output()
+            .unwrap();
+        assert!(!failed.status.success(), "expected docker failure");
+        assert!(
+            String::from_utf8_lossy(&failed.stderr).contains("docker rm failed"),
+            "{}",
+            String::from_utf8_lossy(&failed.stderr)
+        );
+        let keys_after_failure = std::fs::read_to_string(&auth_keys).unwrap();
+        assert!(
+            !keys_after_failure.contains("oldTemplateKey"),
+            "{keys_after_failure}"
+        );
+        assert_eq!(keys_after_failure, format!("{key}\n"));
+        assert!(etc_stackbox.join("template-wiped").exists());
+        assert!(
+            std::fs::read_to_string(etc_stackbox.join("identity.conf"))
+                .unwrap()
+                .contains("STACKBOX_HOSTNAME=stackbox-compute-2")
+        );
+
+        // Retry with Docker healthy: marker prevents re-wipe and authorized_keys keeps the single key.
+        let retried = Command::new("bash")
+            .arg("-c")
+            .arg(&script)
+            .env("PATH", &path)
+            .env("FAKE_DOCKER_FAIL", "0")
+            .output()
+            .unwrap();
+        assert!(
+            retried.status.success(),
+            "{}",
+            String::from_utf8_lossy(&retried.stderr)
+        );
+        assert_eq!(
+            std::fs::read_to_string(&auth_keys).unwrap(),
+            format!("{key}\n")
+        );
+        assert_eq!(
+            std::fs::read_to_string(&machine_id_log)
+                .unwrap()
+                .lines()
+                .count(),
+            1
         );
     }
 }
