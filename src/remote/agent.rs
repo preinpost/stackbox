@@ -1478,7 +1478,7 @@ impl Agent {
                 } else {
                     ensure!(
                         entry.share.is_none(),
-                        "stackbox '{id}' spans hosts; freeze its control VM or a compute one at a time as a template instead"
+                        "stackbox '{id}' spans hosts; freeze a compute VM as a compute template instead"
                     );
                 }
                 Ok(Reply::Frozen {

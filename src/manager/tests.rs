@@ -6238,7 +6238,9 @@ async fn a_stackbox_spans_hosts_with_its_computes_placed_elsewhere() {
     assert!(whole.is::<Conflict>(), "{whole:#}");
     let message = whole.to_string();
     assert!(
-        message.contains("control") && message.contains("compute") && message.contains("template"),
+        !message.contains("control")
+            && message.contains("compute")
+            && message.contains("compute template"),
         "{message}"
     );
     assert!(manager.snapshot("whole-spanning").is_err());

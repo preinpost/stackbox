@@ -583,11 +583,11 @@ impl StackboxManager {
                 }
             }
             // A whole-stackbox snapshot captures every VM into one snapshot on one host; a
-            // stackbox whose computes span hosts cannot be frozen whole, so its VMs are frozen
-            // one at a time as templates of their own host instead.
+            // stackbox whose computes span hosts cannot be frozen whole, so its computes are
+            // frozen one at a time as compute templates on their own host instead.
             if request.node.is_none() && !stackbox.shares.is_empty() {
                 return Err(conflict(
-                    "this stackbox has computes on other hosts, and freezing a multi-host stackbox whole is not supported; freeze its control VM or a compute one at a time as a template instead",
+                    "this stackbox has computes on other hosts, and freezing a multi-host stackbox whole is not supported; freeze a compute VM as a compute template instead",
                 ));
             }
             if request.node.is_none() && plan.multinode() && plan.computes == 0 {
